@@ -1546,7 +1546,10 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
 3. Each role container runs `legion launcher --connect tcp://<advertise_host, or bind with none
    set>:<worker_stream_port> --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1
    of that role, starting and stopping the role's `legion worker-shim` (Oh My Pi) child on the
-   daemon's command, never a worker process of its own.
+   daemon's command, never a worker process of its own. Its log has one line for each connection
+   the daemon accepted, `launcher: connected to the daemon at <address> as launcher <id> (sandbox
+   <name>, role <role>, pod <uid>)`, and one for each connection that ended, `launcher: daemon
+   connection: <why>; reconnecting`, so a connected launcher reads apart from one still dialing.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (20Gi by default) and `storage_class`, labelled
@@ -2279,6 +2282,32 @@ own with no timeout, since one would end a watch. A launch the limiter holds bac
 and is charged no launch failure. A pod log read is the exception: it is bounded whole at 30 s,
 its wait on the limiter included, since client-go bounds a log stream per attempt and not across
 its retries.
+
+An API server under load answers some requests overloaded or failed instead of acting on them: API
+Priority and Fairness's 429, once client-go's own Retry-After retries ran out, and any 5xx, such as
+the 500 etcd's throttle reaches a client as (`rpc error: code = ResourceExhausted desc =
+etcdserver: throttle: too many requests`). Such an answer to one of a launch's requests refused
+nothing the launch did, so the runtime sends that request again after a jittered backoff (250 ms,
+doubling to 8 s) rather than failing the launch, and the launch goes on from that request once the
+server answers it. It does so for as long as the launch's own deadline for the request allows: the
+boot timeout from its first send, or the deadline of the launch step it belongs to when that comes
+first. Each throttled request logs `sandbox runtime: the API server answered a launch's request
+overloaded; sending it again after a backoff` once, naming it, and `… it had answered overloaded`
+once the server answers, with how many overloaded answers it waited out. No launch failure is
+charged while it waits. A request the server still answers overloaded at its deadline fails the
+launch with that answer, which says how often and how long it was waited out, and the failure is
+charged as any other is. The classification is `serverBusy` in
+`internal/runtime/sandbox/busy.go`: the client's own timeout, a connection that never reached the
+server, and every other 4xx are not the server answering overloaded. Only a launch's requests wait
+the server out; a sweep, a suspension or a hello's credential read fails on the answer and is
+tried again by its own caller.
+
+Under either runtime, a launch failure that is charged is spaced from the next try by the machine's
+launch backoff: 2 s after the first, doubling after each further one, each wait drawn between half
+its step and the whole of it. A launch the runtime refused is tried again after it, and so is a
+process that died or was retired at its registration deadline, so the three tries of
+`launch_failure_limit`'s default span three seconds at least, never the moment one fault lasts.
+The wait logs `supervise: waiting before the next launch` with its length.
 
 A role's launcher credential is read once however often its launcher says hello. The read is
 single-flight per Secret of a Sandbox and outlives the hello that began it: the hello waits for it

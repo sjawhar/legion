@@ -271,7 +271,8 @@ type built struct {
 }
 
 // fakeRuntime is a daemon whose runtime is rt — the fake, or a test's runtime built over it: the
-// real stream listener, store, and machines, with nothing launched for real.
+// real stream listener, store, and machines, with nothing launched for real, and the machines'
+// launch backoff short enough that a test spending a launch budget does not wait it out.
 func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
 		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
@@ -280,8 +281,9 @@ func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 			record.conns, record.address, record.apps, record.store = listener, address, apps, st
 			return rt, nil
 		},
-		clock:  stillClock{},
-		listen: heldListen,
+		clock:         stillClock{},
+		listen:        heldListen,
+		launchBackoff: time.Millisecond,
 	}
 }
 

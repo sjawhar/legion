@@ -338,6 +338,7 @@ func testTimeouts() Timeouts {
 		RPC:                   testRPC,
 		Probe:                 testProbe,
 		Stop:                  testStop,
+		LaunchBackoff:         testLaunchBackoff,
 	}
 }
 

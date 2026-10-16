@@ -910,20 +910,28 @@ func (o *outageTokens) Token(ctx context.Context, owner string) (string, error) 
 
 // A role starting into a running issue pod reads every launcher Secret of the pod to check the pod
 // is bound to it. A Secret that is gone, is not the Sandbox's, or binds another pod proves the pod
-// is not one this runtime bound, and the pod is replaced. A read that fails, such as a server error,
-// a throttled request or a timeout, proves nothing: that start fails with the error, and the pod
-// and the sibling already running in it are left as they are, so one API-server error during a
-// handoff never ends the roles already in the pod. The role's next start goes into the same pod.
+// is not one this runtime bound, and the pod is replaced. A read that fails, such as the client's
+// own timeout, proves nothing: that start fails with the error, and the pod and the sibling already
+// running in it are left as they are, so one failed read during a handoff never ends the roles
+// already in the pod; the role's next start goes into the same pod. A read the API server answers
+// overloaded is sent again (resend), so that start goes into the same pod at once.
 func TestOnlyAPodsUnboundLaunchersReplaceItNotAFailedRead(t *testing.T) {
 	for name, tc := range map[string]struct {
 		// unbind is what happens to the reviewer's launcher Secret before the reviewer starts, with
-		// fail armed to fail the next read of it.
+		// fail armed to have the next read of it fail with failure.
 		unbind   func(g *rig, secret string, fail *atomic.Bool)
+		failure  error
+		fails    bool
 		replaced bool
 	}{
-		"a read that fails with a server error": {
-			unbind:   func(_ *rig, _ string, fail *atomic.Bool) { fail.Store(true) },
-			replaced: false,
+		"a read the client gives up on": {
+			unbind:  func(_ *rig, _ string, fail *atomic.Bool) { fail.Store(true) },
+			failure: fmt.Errorf("the client gave up waiting for the answer: %w", context.DeadlineExceeded),
+			fails:   true,
+		},
+		"a read the server answers overloaded": {
+			unbind:  func(_ *rig, _ string, fail *atomic.Bool) { fail.Store(true) },
+			failure: apierrors.NewInternalError(errors.New("etcdserver: request timed out")),
 		},
 		"a Secret that is gone": {
 			unbind: func(g *rig, secret string, _ *atomic.Bool) {
@@ -954,17 +962,17 @@ func TestOnlyAPodsUnboundLaunchersReplaceItNotAFailedRead(t *testing.T) {
 			var fail atomic.Bool
 			g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 				if a.(k8stesting.GetAction).GetName() == reviewerSecret && fail.CompareAndSwap(true, false) {
-					return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+					return true, nil, tc.failure
 				}
 				return false, nil, nil
 			})
 			tc.unbind(g, reviewerSecret, &fail)
 
 			reviewer := testSpec(t, otherToken, claim.RoleReviewer, testTree)
-			if !tc.replaced {
+			if tc.fails {
 				g.launcher(reviewer.Claim)
 				err := failedLaunch(t, g, reviewer)
-				if err == nil || !strings.Contains(err.Error(), "read its pod's launcher bindings") || !strings.Contains(err.Error(), "etcdserver: request timed out") {
+				if err == nil || !strings.Contains(err.Error(), "read its pod's launcher bindings") || !strings.Contains(err.Error(), tc.failure.Error()) {
 					t.Fatalf("Spawn = %v, want the failed read of %s", err, reviewerSecret)
 				}
 				if pod := g.pod(sandboxName); pod == nil || string(pod.UID) != testerLoc.Sandbox.PodUID {
@@ -980,6 +988,9 @@ func TestOnlyAPodsUnboundLaunchersReplaceItNotAFailedRead(t *testing.T) {
 			reviewerLoc := g.spawn(reviewer)
 			if replaced := reviewerLoc.Sandbox.PodUID != testerLoc.Sandbox.PodUID; replaced != tc.replaced {
 				t.Fatalf("the reviewer's start replaced the pod: %t, want %t", replaced, tc.replaced)
+			}
+			if fail.Load() {
+				t.Fatalf("the reviewer's start never read %s, want its binding read", reviewerSecret)
 			}
 		})
 	}
@@ -1001,9 +1012,10 @@ func editSecret(g *rig, name string, edit func(*corev1.Secret)) {
 
 // A transient binding read after a live role's Machine let its previous locator go must not leave
 // that previous child outside both the Machine and the runtime: Machine retries the ordinary
-// Resume error until its launch-failure budget runs out, then persists the claim Failed. The child
-// it started at generation 1 must already be stopped by then; neither a failed claim nor the
-// runtime's forgotten watch may leave it acting.
+// Resume error (here the client's own timeout, which no API server answered) until its
+// launch-failure budget runs out, then persists the claim Failed. The child it started at
+// generation 1 must already be stopped by then; neither a failed claim nor the runtime's forgotten
+// watch may leave it acting.
 func TestAFailedLauncherBindingReadNeverLeavesASupervisedRoleChildRunning(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
@@ -1013,7 +1025,7 @@ func TestAFailedLauncherBindingReadNeverLeavesASupervisedRoleChildRunning(t *tes
 	secret := roleSecretName(first.Sandbox.Name, claim.RoleTester)
 	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		if a.(k8stesting.GetAction).GetName() == secret {
-			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+			return true, nil, fmt.Errorf("the client gave up waiting for the answer: %w", context.DeadlineExceeded)
 		}
 		return false, nil, nil
 	})
@@ -1334,8 +1346,9 @@ func TestASpecBuilderRefusalOnResumeNeverLeavesASupervisedRoleChildRunning(t *te
 
 // A claim that never registered is relaunched through Spawn, which hands the runtime no previous
 // locator. When that Spawn fails before its Start (here every read of the role's launcher Secret
-// fails), the Machine must stop the generation it let go, since the runtime cannot know it: retried
-// to Failed, no child of the role is left running and nothing is watched.
+// fails, on the client's own timeout), the Machine must stop the generation it let go, since the
+// runtime cannot know it: retried to Failed, no child of the role is left running and nothing is
+// watched.
 func TestASpawnRefusalForAnUnregisteredClaimNeverLeavesItsChildRunning(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
@@ -1357,7 +1370,7 @@ func TestASpawnRefusalForAnUnregisteredClaimNeverLeavesItsChildRunning(t *testin
 	secret := roleSecretName(first.Sandbox.Name, claim.RoleTester)
 	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		if a.(k8stesting.GetAction).GetName() == secret {
-			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+			return true, nil, fmt.Errorf("the client gave up waiting for the answer: %w", context.DeadlineExceeded)
 		}
 		return false, nil, nil
 	})
@@ -1611,7 +1624,7 @@ func restoredSandboxMachine(
 		Log:    slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
 		Timeouts: supervise.Timeouts{
-			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour,
+			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour, LaunchBackoff: time.Millisecond,
 		},
 		PluginContract: 24,
 	}, c)

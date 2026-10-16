@@ -72,7 +72,9 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // issue pod has its workspace's provisioning token minted, the controller's pod needs nothing. A
 // workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so
 // the tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox
-// this creates.
+// this creates. Every Kubernetes request of the launch is sent again while the API server answers
+// it overloaded, up to the launch's own deadline for it (launching, resend), so a server under load
+// slows the launch rather than failing it.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
 // not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
@@ -82,6 +84,7 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // already right; carrying the install onto a fresh pod would be installing over a pair already
 // current. l.spec.Plugins is cleared in that case before launcherCommand builds its argv.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	ctx = launching(ctx)
 	l, err := r.prepare(spec)
 	if err != nil {
 		return runtime.Locator{}, err

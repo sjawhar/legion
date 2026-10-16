@@ -423,7 +423,7 @@ func TestAStartedTurnResetsBothPromptBudgets(t *testing.T) {
 func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 	h := newBareHarness(t)
 	h.deps.Limits = Limits{LaunchFailures: 1, PromptFailures: 1, PromptRetires: 1}
-	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop}
+	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop, LaunchBackoff: testLaunchBackoff}
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}
@@ -450,6 +450,7 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 		"RPC":                   func(d *Deps) { d.Timeouts.RPC = 0 },
 		"Probe":                 func(d *Deps) { d.Timeouts.Probe = 0 },
 		"Stop":                  func(d *Deps) { d.Timeouts.Stop = 0 },
+		"LaunchBackoff":         func(d *Deps) { d.Timeouts.LaunchBackoff = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newBareHarness(t)

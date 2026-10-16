@@ -28,6 +28,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/backoff"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -256,6 +257,12 @@ type Timeouts struct {
 	// Stop is how long a suspension that arrives while the agent is in a turn waits for that turn
 	// to end before it stops the process anyway (worker_stop_timeout_seconds).
 	Stop time.Duration
+	// LaunchBackoff is the first wait before a launch is tried again after a charged launch
+	// failure, doubled for each failure charged since the claim was last ready, and jittered
+	// (backoff.Wait): a launch the runtime refused, and a process relaunched after its charge
+	// (relaunchAfterFailure) — one that died, or was retired at its registration deadline. The
+	// shipped daemon's is 2 s, so the tries of a three-failure budget span three seconds at least.
+	LaunchBackoff time.Duration
 }
 
 // Deps is what a machine is built from.
@@ -330,6 +337,7 @@ func (d Deps) check() error {
 		{"Timeouts.RPC", d.Timeouts.RPC},
 		{"Timeouts.Probe", d.Timeouts.Probe},
 		{"Timeouts.Stop", d.Timeouts.Stop},
+		{"Timeouts.LaunchBackoff", d.Timeouts.LaunchBackoff},
 	} {
 		if wait.value <= 0 {
 			return fmt.Errorf("supervise: %s must be positive, got %s", wait.name, wait.value)
@@ -830,16 +838,29 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // ran is gone — and a fresh spawn when it has none. A process the claim still records is let go
 // first, so it is the one waited out. The boot token's hash is persisted before the process
 // starts, so the shim's first hello resolves. A launch the runtime or the spec refuses is a launch
-// failure and is tried again at once, waiting out the same process, until the budget runs out;
-// only a start that succeeds forgets it. A launch that fails stops the process it let go
-// (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch) starts
-// nothing and is charged nothing, and so is one whose context ended under it — the daemon's stop.
+// failure and is tried again after the backoff (backOff), waiting out the same process, until the
+// budget runs out; only a start that succeeds forgets it. A launch that fails stops the process it
+// let go (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch)
+// starts nothing and is charged nothing, and so is one whose context ended under it — the daemon's
+// stop. A runtime waits out a cluster that answers a launch's requests overloaded inside the
+// launch's own deadline, so what reaches here failed the launch.
 func (m *Machine) launch(ctx context.Context) error {
+	return m.launchAfter(ctx, false)
+}
+
+// launchAfter is launch, whose first try waits the backoff when charged: the launch follows a
+// launch failure charged just before it (relaunchAfterFailure).
+func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
 	}
 	m.letGo()
 	for {
+		if charged {
+			if err := m.backOff(ctx); err != nil {
+				return err
+			}
+		}
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
@@ -871,7 +892,25 @@ func (m *Machine) launch(ctx context.Context) error {
 		if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
 			return errors.Join(err, m.fail(ctx, "launch failures ran out"))
 		}
+		charged = true
 	}
+}
+
+// backOff waits before a try that follows a charged launch failure: backoff.Wait from
+// Timeouts.LaunchBackoff for the failures charged since the claim was last ready, so the tries a
+// budget allows are spread over seconds rather than spent in the moment one fault lasts — a launch
+// the runtime refuses would otherwise be tried again at once, and a process that dies as it starts
+// be relaunched as soon as its death is seen. The wait holds the machine's decision, as a launch's
+// runtime call does. A wait the daemon's stop ends launches nothing: the claim is left as the
+// failure left it, for the next boot.
+func (m *Machine) backOff(ctx context.Context) error {
+	wait := backoff.Wait(m.deps.Timeouts.LaunchBackoff, m.claim.Budgets.LaunchFailures)
+	m.log.Info("supervise: waiting before the next launch", "after", wait, "launchFailures", m.claim.Budgets.LaunchFailures)
+	if err := backoff.Sleep(ctx, wait); err != nil {
+		m.log.Info("supervise: the wait before the next launch was cut short; its context ended", "error", err)
+		return err
+	}
+	return nil
 }
 
 func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
