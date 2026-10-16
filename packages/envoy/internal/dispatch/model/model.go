@@ -81,10 +81,13 @@ type Project struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// RepoProject assigns an external repository to a native Dispatch project.
+// RepoProject assigns an external repository to a native Dispatch project. Default marks the one
+// mapping of the project an issue with no repository of its own, and none on its parent chain,
+// resolves to; at most one mapping of a project is its default.
 type RepoProject struct {
 	Repo      string    `json:"repo"`
 	Project   string    `json:"project"`
+	Default   bool      `json:"default"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }

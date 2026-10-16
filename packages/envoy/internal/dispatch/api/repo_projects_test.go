@@ -1,14 +1,130 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type repoProjectResponse struct {
 	Repo    string `json:"repo"`
 	Project string `json:"project"`
+	Default bool   `json:"default"`
+}
+
+// projectEvents reads the payloads of the project's events of one type, oldest first.
+func projectEvents(t *testing.T, database *store.Store, project, eventType string) []map[string]any {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select payload from events where project_key = $1 and type = $2 order by id
+	`, project, eventType)
+	if err != nil {
+		t.Fatalf("read %s events of %s: %v", eventType, project, err)
+	}
+	defer rows.Close()
+	var payloads []map[string]any
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatalf("scan %s event: %v", eventType, err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode %s event: %v", eventType, err)
+		}
+		payloads = append(payloads, payload)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate %s events of %s: %v", eventType, project, err)
+	}
+	return payloads
+}
+
+// A project's default is set with the mapping and moves with one write: setting a second mapping
+// default demotes the first in the same transaction, and both rows' events say so. A mapping moved
+// to another project emits settings.repo_project.updated on the old project and the new one.
+func TestRepoProjectDefaultMovesAndEventsReachBothProjects(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	for _, project := range []map[string]string{{"key": "CORE", "name": "Core"}, {"key": "OTHER", "name": "Other"}} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", project, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	first := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE", "default": true}, "alice")
+	if first.Code != http.StatusOK || !decodeBody[repoProjectResponse](t, first).Default {
+		t.Fatalf("map acme/widgets as default: status=%d body=%s", first.Code, first.Body.String())
+	}
+	second := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/gadgets", map[string]any{"project": "CORE", "default": true}, "alice")
+	if second.Code != http.StatusOK {
+		t.Fatalf("map acme/gadgets as default: status=%d body=%s", second.Code, second.Body.String())
+	}
+	listed := decodeBody[[]repoProjectResponse](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/settings/repo-projects", nil, "alice"))
+	defaults := map[string]bool{}
+	for _, mapping := range listed {
+		defaults[mapping.Repo] = mapping.Default
+	}
+	if defaults["acme/widgets"] || !defaults["acme/gadgets"] {
+		t.Fatalf("defaults after the move = %v, want gadgets alone", defaults)
+	}
+	events := projectEvents(t, database, "CORE", "settings.repo_project.updated")
+	if len(events) != 3 { // widgets set, widgets demoted, gadgets set
+		t.Fatalf("CORE saw %d mapping events, want 3: %v", len(events), events)
+	}
+	if demoted := events[1]["mapping"].(map[string]any); demoted["repo"] != "acme/widgets" || demoted["default"] != false || events[1]["deleted"] != false {
+		t.Fatalf("second CORE event = %v, want acme/widgets demoted", events[1])
+	}
+	// A write that leaves default out keeps the mapping's default while its project is unchanged.
+	if kept := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/gadgets", map[string]any{"project": "CORE"}, "alice"); kept.Code != http.StatusOK || !decodeBody[repoProjectResponse](t, kept).Default {
+		t.Fatalf("re-map acme/gadgets without default: status=%d body=%s, want it still the default", kept.Code, kept.Body.String())
+	}
+	moved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/gadgets", map[string]any{"project": "OTHER"}, "alice")
+	if moved.Code != http.StatusOK || decodeBody[repoProjectResponse](t, moved).Default {
+		t.Fatalf("move acme/gadgets to OTHER: status=%d body=%s, want it moved and not OTHER's default", moved.Code, moved.Body.String())
+	}
+	if got := len(projectEvents(t, database, "OTHER", "settings.repo_project.updated")); got != 1 {
+		t.Fatalf("OTHER saw %d mapping events after the move, want 1", got)
+	}
+	core := projectEvents(t, database, "CORE", "settings.repo_project.updated")
+	if len(core) != 5 { // the three above, the re-map, and the leaving mapping
+		t.Fatalf("CORE saw %d mapping events after the move, want 5: %v", len(core), core)
+	}
+	if leaving := core[4]["mapping"].(map[string]any); leaving["repo"] != "acme/gadgets" || leaving["project"] != "CORE" || core[4]["deleted"] != true {
+		t.Fatalf("CORE's last event = %v, want acme/gadgets leaving CORE, deleted:true", core[4])
+	}
+}
+
+// A mapping an issue names is in use: its delete and its move are refused with 409 naming the count.
+func TestRepoProjectInUseIsNeitherDeletedNorMoved(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, project := range []map[string]string{{"key": "CORE", "name": "Core"}, {"key": "OTHER", "name": "Other"}} {
+		dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", project, "alice")
+	}
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE", "default": true}, "alice")
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "One", "repo": "acme/widgets"}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	for _, attempt := range []struct {
+		name   string
+		method string
+		body   any
+	}{
+		{"delete", http.MethodDelete, nil},
+		{"move", http.MethodPut, map[string]any{"project": "OTHER"}},
+	} {
+		response := dispatchRequest(t, handler, attempt.method, "/api/v1/settings/repo-projects/acme/widgets", attempt.body, "alice")
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "REPO_PROJECT_IN_USE") || !strings.Contains(response.Body.String(), "1 issue") {
+			t.Fatalf("%s a mapping in use: status=%d body=%s, want 409 REPO_PROJECT_IN_USE naming 1 issue", attempt.name, response.Code, response.Body.String())
+		}
+	}
+	// Re-mapping it to the project it already has is no move, so the issue does not refuse it.
+	if same := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE"}, "alice"); same.Code != http.StatusOK {
+		t.Fatalf("re-map a mapping in use to its own project: status=%d body=%s", same.Code, same.Body.String())
+	}
 }
 
 func TestRepoProjectSettingsUpsertListAndDelete(t *testing.T) {
