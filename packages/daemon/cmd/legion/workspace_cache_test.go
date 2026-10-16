@@ -107,7 +107,7 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := newIssueVolume(t).withRemote(t)
+			v := newIssueVolume(t).withRemote(t, "main")
 			v.setenv(t)
 			t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 			if tc.env != nil {
@@ -142,7 +142,7 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 // under its TMPDIR, answers /healthz ready at the remote's head, holds no token on the volume, and
 // exits 0 once stopped.
 func TestWorkspaceInitCacheServesTheRepositoryUntilStopped(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 	ctx, cancel := context.WithCancel(context.Background())

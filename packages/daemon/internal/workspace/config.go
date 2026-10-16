@@ -66,16 +66,20 @@ type Runner interface {
 }
 
 // Request contains the credential and identity of the repository to provision. Repo is the
-// configured GitHub owner/repository name, for example "sjawhar/legion-smoke".
+// configured GitHub owner/repository name, for example "sjawhar/legion-smoke". DefaultBranch is
+// the repository's default branch as GitHub names it, a branch name used verbatim
+// (release/v7.1): the base an issue with no branch starts at, and the branch a pod's feed brings
+// beside the issue's own.
 type Request struct {
 	StateDir         string
 	Repo             ghrepo.Repository
 	Issue            string
+	DefaultBranch    string
 	CredentialHelper string
 	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
 	Source Source
 	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
-	// issue's workspace at main (createWorkspace).
+	// issue's workspace at the default branch (createWorkspace).
 	Log func(line string)
 }
 
@@ -83,12 +87,14 @@ type Request struct {
 // <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the clone the workspace is a jj
 // workspace of, <state>/repos/github.com/<owner>/<repo> — under tmux the one every issue workspace
 // of the repository shares, under Kubernetes the issue pod's own on its own volume. Repo is the
-// repository.
+// repository, and DefaultBranch its default branch, which Provision sets from its request (Location
+// leaves it empty: no path depends on it).
 type Workspace struct {
-	Dir      string
-	Bookmark string
-	Clone    string
-	Repo     ghrepo.Repository
+	Dir           string
+	Bookmark      string
+	Clone         string
+	Repo          ghrepo.Repository
+	DefaultBranch string
 }
 
 // In a pod, the one process that holds the provisioning token, Fetch, runs in a container that

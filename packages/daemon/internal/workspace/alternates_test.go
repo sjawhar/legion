@@ -14,6 +14,7 @@ import (
 // into the feed is visible to jj. No pack is copied into the clone's own store.
 func TestJJWorksOnACloneWhoseObjectsAreAnAlternate(t *testing.T) {
 	remote := seedRemote(t, t.TempDir(), "release/v7.1")
+	pushRemoteBranch(t, remote, "release/v7.1", "history.txt")
 	feed := filepath.Join(t.TempDir(), "feed", "acme", "widgets.git")
 	runSetup(t, t.TempDir(), "git", "clone", "--bare", "--quiet", remote, feed)
 	clone := filepath.Join(t.TempDir(), "repos", "github.com", "acme", "widgets")
@@ -71,7 +72,8 @@ func TestJJWorksOnACloneWhoseObjectsAreAnAlternate(t *testing.T) {
 
 // assertHistoryOnlyInFeed fails unless the git directory gitDir holds no pack of its own and none
 // of the objects reachable in the bare feed as a loose object: the clone reads its history through
-// objects/info/alternates and copied nothing.
+// objects/info/alternates and copied nothing. The empty tree is passed over: jj writes it into
+// every store it opens, for its own working-copy commits.
 func assertHistoryOnlyInFeed(t *testing.T, gitDir, feed string) {
 	t.Helper()
 	counts := map[string]string{}
@@ -88,6 +90,9 @@ func assertHistoryOnlyInFeed(t *testing.T, gitDir, feed string) {
 		t.Fatal("the feed holds no history to compare the clone's store with")
 	}
 	for _, object := range history {
+		if object == emptyTree {
+			continue
+		}
 		if _, err := os.Stat(filepath.Join(gitDir, "objects", object[:2], object[2:])); err == nil {
 			t.Fatalf("the clone's own store holds %s, an object of the feed's history", object)
 		} else if !os.IsNotExist(err) {
@@ -96,20 +101,5 @@ func assertHistoryOnlyInFeed(t *testing.T, gitDir, feed string) {
 	}
 }
 
-// seedRemote is a bare remote at <root>/remote.git whose default branch is defaultBranch, holding
-// one commit on it.
-func seedRemote(t *testing.T, root, defaultBranch string) string {
-	t.Helper()
-	remote := filepath.Join(root, "remote.git")
-	runSetup(t, root, "git", "init", "--bare", "--quiet", "--initial-branch="+defaultBranch, remote)
-	seed := filepath.Join(root, "seed")
-	runSetup(t, root, "jj", "git", "init", "--colocate", seed)
-	if err := os.WriteFile(filepath.Join(seed, "README"), []byte("seed\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runSetup(t, seed, "jj", "commit", "-m", "seed")
-	runSetup(t, seed, "jj", "bookmark", "set", defaultBranch, "-r", "@-")
-	runSetup(t, seed, "jj", "git", "remote", "add", "origin", remote)
-	runSetup(t, seed, "jj", "git", "push", "--remote", "origin", "--bookmark", defaultBranch)
-	return remote
-}
+// emptyTree is git's id of the tree with no entry.
+const emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
