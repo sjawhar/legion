@@ -54,12 +54,6 @@ func newDefaultBranches(tokens appauth.Tokens, githubAPI string, ttl time.Durati
 	}
 }
 
-// Of is repo's default branch: the one read within ttl, or GitHub's answer now.
-func (d *defaultBranches) Of(ctx context.Context, repo ghrepo.Repository) (string, error) {
-	named, err := d.Named(ctx, repo)
-	return named.DefaultBranch, err
-}
-
 // Named is repo as GitHub names it, with its default branch: the read made within ttl, or GitHub's
 // answer now.
 func (d *defaultBranches) Named(ctx context.Context, repo ghrepo.Repository) (ghbranch.Repository, error) {
