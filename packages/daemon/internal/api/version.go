@@ -165,4 +165,19 @@ package api
 // controller locator (api.ControllerLocator), always emitted, 0 meaning no contract recorded; the
 // stale-caller refusals (409 naming both contracts). A 23 plugin's strict reader refuses a state
 // whose views carry the field, so the boot gate and legion probe-image refuse the mixed pair.
-const DaemonAPIVersion = 24
+//
+// 25: LEGION-636 -- `source` on a deployment row of `api.State.capabilities`, "configuration"
+// (what legion.yaml alone decides) or "boot" (what boot measured), always emitted there; absent on
+// every other row. `installed` leaves the status set: no row has awaited a pod launch since
+// LEGION-629 turned extension discovery on in the pod's launch, so no daemon has emitted it since,
+// and the field that rendered it (capabilities.Capability.Awaits) is gone. The probe's OK line
+// gains a third `model-fallback` mark, `unread`, when the probe could not read `retry.modelFallback`.
+// A 24 plugin's strict reader refuses a state whose deployment rows carry `source`, so the boot
+// gate and `legion probe-image` refuse the mixed pair.
+//
+// 26: LEGION-694 -- api.State gains `heldOutboxRows`, every due lifecycle outbox row held behind its
+// issue's running lifecycle row (record.Store.HeldRows), each with its id, kind, issue, how long it
+// has waited and the row it waits on. Never null, so a plugin built before it refuses the state, and
+// the bump is why the two never meet. (25 was taken by LEGION-636 while this branch was open, so
+// this branch renumbered from 25 to 26, as the collision note says.)
+const DaemonAPIVersion = 26

@@ -45,6 +45,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 26 (LEGION-694): `legion state` carries `heldOutboxRows`, every due lifecycle
+  outbox row the daemon holds behind its issue's running lifecycle row — its id, kind, issue, how
+  long it has waited since it came due and the row it waits on — never null, and the plain
+  `legion state` names the held rows on one line beside the pending Dispatch status writes. (25
+  was taken by LEGION-636 while this branch was open, so the branch renumbered to 26.) Install
+  this release with a `legion` built from the same commit.
 - The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
   human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
   whole change since the version they approved, Dispatch carries their approval to the new version,

@@ -129,6 +129,15 @@
     }
   },
   "pendingStatusWrites": [],
+  "heldOutboxRows": [
+    {
+      "id": 802,
+      "kind": "supervise",
+      "issue": "LEGION-208",
+      "waitedSeconds": 150,
+      "waitsOn": 801
+    }
+  ],
   "strandedClaims": [
     {
       "issue": "LEGION-210",

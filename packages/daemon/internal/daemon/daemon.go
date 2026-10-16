@@ -1640,7 +1640,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
-	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports())
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), time.Now().UTC())
 	if err != nil {
 		return api.State{}, err
 	}
