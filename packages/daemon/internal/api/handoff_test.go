@@ -1262,37 +1262,47 @@ func TestHandoffCompleteReadyRefusesAFileListGitHubTruncated(t *testing.T) {
 	}
 }
 
-// A disarm row decides by state when it runs, so one still unfinished when a new READY is accepted
-// would keep a stale arm that still stands at the new READY head, or disable the new READY's own
-// arm. READY is refused while the issue has an unfinished auto_merge_disable row, with a code the
-// merger completes again on, and is accepted once the row has finished. Another issue's unfinished
-// row refuses nothing.
-func TestHandoffCompleteReadyWaitsForTheIssuesUnfinishedDisarm(t *testing.T) {
+// A disarm row and the READY merge row a new READY queues each decide by GitHub and then the record
+// when they run, in whichever order the outbox runs them: a disarm still unfinished when a new READY
+// is accepted keeps any arm at the new READY head, and the READY merge submits nothing while an arm
+// stands. READY therefore does not wait for it.
+func TestHandoffCompleteReadyDoesNotWaitForAnUnfinishedDisarm(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts, merger := newReadyHarness(t, github)
-	for _, issue := range []string{"LEGION-208", "LEGION-209"} {
-		row, err := record.NewOutboxRow(issue, record.AutoMergeDisable{Number: 42}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
-			t.Fatalf("queue the disarm of %s: %v", issue, err)
-		}
+	row, err := record.NewOutboxRow("LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_DISARM_PENDING:") || !strings.Contains(body, "#42") {
-		t.Fatalf("READY with the issue's disarm unfinished = %d %q", code, body)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
-	}
-	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(context.Background(), "delete from outbox where kind = 'auto_merge_disable' and issue = 'LEGION-208'")
-		return err
-	}); err != nil {
-		t.Fatalf("finish the issue's disarm: %v", err)
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
+		t.Fatalf("queue the disarm: %v", err)
 	}
 	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
-		t.Fatalf("READY once the issue's disarm finished, with another issue's still unfinished = %d %q", code, body)
+		t.Fatalf("READY with the issue's disarm unfinished = %d %q, want it published", code, body)
+	}
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want the one READY", got)
+	}
+}
+
+// A by-hand READY never leaves an arm from an earlier ordinary READY standing. A push that starts
+// touching a by_hand path queues its disarm before the merger reaches READY again; while that
+// durable disarm has not finished, the by-hand READY waits rather than accepting a head GitHub
+// could still merge automatically.
+func TestHandoffCompleteReadyByHandWaitsForAnUnfinishedDisarm(t *testing.T) {
+	github := byHandGitHub(t, `[{"filename":"migrations/versions/0002_by_hand.py"}]`)
+	h, facts, merger := newReadyHarness(t, github)
+	row, err := record.NewOutboxRow("LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
+		t.Fatalf("queue the disarm: %v", err)
+	}
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_DISARM_PENDING:") {
+		t.Fatalf("by-hand READY with the issue's disarm unfinished = %d %q, want it held", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none until the disarm finishes", got)
 	}
 }
 
@@ -1311,10 +1321,11 @@ func ready(t *testing.T, h *harness, merger liveClaim) (code int, body string) {
 	return recorder.Code, failure.Code + ": " + failure.Error
 }
 
-// A merger's READY names a head a human merges, which GitHub merges only once every check the base
-// branch requires has succeeded there. A head whose push skipped CI when it should not have reports
-// none of them, so the completion refuses READY naming the head and the check, and nothing reaches
-// the workflow; a required check still running, or one that failed, is refused the same way.
+// A merger's READY names the head the daemon will submit, and GitHub merges it only once every check
+// the base branch requires has succeeded there. A required check still running is no reason to
+// refuse READY: the daemon's submission waits on GitHub for it. A head whose push skipped CI when it
+// should not have reports none of them and never will, and a failed check is a finding, so either
+// is refused naming the head and the check, and nothing reaches the workflow.
 //
 // A pull request that conflicts with its base (mergeable_state "dirty") can neither merge nor get a
 // pull_request run, so READY refuses it by name, whatever its checks' standing: a conflicting head
@@ -1322,7 +1333,7 @@ func ready(t *testing.T, h *harness, merger liveClaim) (code int, body string) {
 // with no result. Every other head is published or refused by its checks alone, whatever its
 // mergeable_state, and a head whose mergeability GitHub has not computed yet ("unknown") is judged
 // by its checks.
-func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testing.T) {
+func TestHandoffCompleteReadyAcceptsAHeadWhoseRequiredChecksArePending(t *testing.T) {
 	const (
 		ciGreen      = `{"id":1,"name":"ci","status":"completed","conclusion":"success"}`
 		ciSkipped    = `{"id":1,"name":"ci","status":"completed","conclusion":"skipped"}`
@@ -1343,7 +1354,8 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 		{"a head whose mergeability GitHub has not computed", "", "", "unknown", notGreen + `head c0de00000000 of pull request #42 has no result for the required check "ci"` + skippedPush},
 		{"a head of a conflicting pull request", "", "", "dirty", conflict},
 		{"a conflicting pull request missing one required check", ciGreen, "", "dirty", conflict},
-		{"a required check still running", ciRunning, legacyGreen, "blocked", notGreen + `the required check "ci" is still running on head c0de00000000`},
+		{"a required check still running", ciRunning, legacyGreen, "blocked", ""},
+		{"a required check still running while GitHub computes mergeability", ciRunning, legacyGreen, "unknown", ""},
 		{"a required check still running on a conflicting pull request", ciRunning, legacyGreen, "dirty", conflict},
 		{"a required status that failed", ciGreen, legacyFailed, "blocked", notGreen + `the required check "legacy" ended failure on head c0de00000000`},
 		{"a required status that failed on a conflicting pull request", ciGreen, legacyFailed, "dirty", conflict},
@@ -1374,19 +1386,19 @@ func TestHandoffCompleteReadyRefusesAHeadWithoutItsRequiredChecksGreen(t *testin
 	}
 }
 
-// A READY refused for its checks records nothing, so the same READY once the checks are green is
-// applied, not answered already received: the merger waits for CI and completes again.
+// A READY refused for its checks records nothing, so the same READY once a rerun turns them green
+// is applied, not answered already received.
 func TestHandoffCompleteReadyRefusedForItsChecksIsAppliedOnceTheyAreGreen(t *testing.T) {
 	github := newHandoffGitHub(t)
 	github.set(func(g *handoffGitHub) {
-		g.checkRuns = `[{"id":1,"name":"ci","status":"in_progress","conclusion":null}]`
+		g.checkRuns = `[{"id":1,"name":"ci","status":"completed","conclusion":"failure"}]`
 	})
 	h, facts, merger := newReadyHarness(t, github)
 	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_CHECKS_NOT_GREEN: ") {
-		t.Fatalf("READY while ci runs = %d %q", code, body)
+		t.Fatalf("READY while ci failed = %d %q", code, body)
 	}
 	github.set(func(g *handoffGitHub) {
-		g.checkRuns = `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`
+		g.checkRuns = `[{"id":2,"name":"ci","status":"completed","conclusion":"success"}]`
 	})
 	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
 		t.Fatalf("READY once ci passed = %d %q; want it published", code, body)
@@ -1474,8 +1486,9 @@ func TestHandoffCompleteReadyRefusesAHeadThatStillCarriesTheIssuesHandoffs(t *te
 // that workflow's run for the pull request's head. The rule shapes are a live repository's: a
 // workflows rule for its review workflow, a required_status_checks rule for one aggregator check,
 // a pull_request rule requiring no approval, and a branch protection requiring nothing. With the
-// required check green, READY waits on the review workflow's latest pull_request run on the head:
-// refused while it failed, still runs, or never ran, and published once it succeeded. A workflow
+// required check green, READY reads the review workflow's latest pull_request run on the head:
+// refused while it failed or never ran, and published while it still runs or once it succeeded,
+// since the daemon's submission waits on GitHub for a running workflow. A workflow
 // another repository defines (an organization ruleset can require one) never matches a run here,
 // whatever the head ran, so READY is refused naming that repository rather than a skipped push.
 func TestHandoffCompleteReadyJudgesARequiredWorkflowByItsRunOnTheHead(t *testing.T) {
@@ -1497,7 +1510,7 @@ func TestHandoffCompleteReadyJudgesARequiredWorkflowByItsRunOnTheHead(t *testing
 		refusal string
 	}{
 		{"while the required workflow failed", []string{reviewRun(7, "completed", `"failure"`)}, 4242, `the required workflow ".github/workflows/claude-pr-review.yml" ended failure on head c0de00000000`},
-		{"while the required workflow still runs", []string{reviewRun(7, "in_progress", "null")}, 4242, `the required workflow ".github/workflows/claude-pr-review.yml" is still running on head c0de00000000`},
+		{"while the required workflow still runs", []string{reviewRun(7, "in_progress", "null")}, 4242, ""},
 		{"while the head has no run of the required workflow", nil, 4242, `head c0de00000000 of pull request #42 has no run of the required workflow ".github/workflows/claude-pr-review.yml": its push may have skipped CI`},
 		{"while another repository defines the required workflow", []string{fmt.Sprintf(review, 7, "completed", `"success"`, 5151)}, 5151,
 			`the required workflow ".github/workflows/claude-pr-review.yml" is defined in repository 4242, not in pull request #42's own (5151)`},

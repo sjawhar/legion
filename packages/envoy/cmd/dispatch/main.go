@@ -1,5 +1,5 @@
-// Command dispatch serves the Dispatch dashboard and API, signs people in with Google Workspace
-// through the sign-in pool, and reads GitHub for the web app as the GitHub App.
+// Command dispatch serves the Dispatch dashboard and API, signs people in through a Cognito
+// sign-in pool or with Google directly, and reads GitHub for the web app as the GitHub App.
 package main
 
 import (
@@ -65,12 +65,14 @@ type bootConfig struct {
 	EnvoyURL       string
 	GitHubAPIBase  string
 	IdentityHeader string
-	// SignInIssuer, SignInClientID, SignInClientSecret and SignInGroup configure Google sign-in
-	// through the sign-in pool (DISPATCH_SIGNIN_*): all four or none; empty means no sign-in.
+	// SignInIssuer, SignInClientID and SignInClientSecret, with exactly one of SignInGroup and
+	// SignInDomain, configure Google sign-in (DISPATCH_SIGNIN_*): through a Cognito sign-in pool
+	// for a group, or with Google directly for a Workspace domain; empty means no sign-in.
 	SignInIssuer       string
 	SignInClientID     string
 	SignInClientSecret string
 	SignInGroup        string
+	SignInDomain       string
 	NATSDisabled       bool
 	TestHooksEnabled   bool
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
@@ -151,7 +153,7 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in pool; cookies are valid on this process only", "origin", serverURL)
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; cookies are valid on this process only", "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -240,7 +242,7 @@ func main() {
 		os.Exit(1)
 	}
 	if signIn != nil {
-		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
+		signInRule(boot).BootLog(boot.SignInIssuer, boot.SignInClientID)
 	}
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
@@ -513,6 +515,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
 		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
 		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		SignInDomain:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_DOMAIN")),
 		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
@@ -632,7 +635,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
 	}
 	if boot.SignInIssuer != "" {
-		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in pool, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in issuer, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)
@@ -801,7 +804,7 @@ func bootTask(ctx context.Context, timeout time.Duration, failed, done string, t
 // configuration, with every setting the router takes from boot filled in. The settings tests build
 // the router through it, so dropping any hand-off here fails a case.
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
-	built.SignInGroup = boot.SignInGroup
+	built.SignInRule = signInRule(boot)
 	built.AgentTokens = boot.AgentTokens
 	built.DefaultProject = boot.DefaultProject
 	built.InsecureCookie = boot.InsecureCookie

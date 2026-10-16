@@ -1,8 +1,8 @@
 // Package routes assembles the Dispatch HTTP server routes.
 //
-// Authenticated people use a signed cookie issued when they sign in with Google Workspace through
-// the sign-in pool. Test and local harnesses can inject header identity. The web app's GitHub reads
-// go to GitHub as the GitHub App.
+// Authenticated people use a signed cookie issued when they sign in through a Cognito sign-in
+// pool or with Google directly. Test and local harnesses can inject header identity. The web
+// app's GitHub reads go to GitHub as the GitHub App.
 package routes
 
 import (
@@ -58,11 +58,12 @@ type AppContext struct {
 	Store          *store.Store
 	DefaultProject string
 	ServerURL      string
-	// SignIn is the sign-in pool's authorization code flow and SignInGroup the group a person
-	// must be in to sign in; a nil SignIn is a test/local header-identity or dev sign-in server,
-	// whose /auth/start and /auth/callback answer 503.
-	SignIn      *oidc.CodeFlow
-	SignInGroup string
+	// SignIn is the sign-in issuer's authorization code flow and SignInRule who it admits: the
+	// members of a Cognito pool's group, or the people of a Google Workspace domain. A nil SignIn
+	// is a test/local header-identity or dev sign-in server, whose /auth/start and /auth/callback
+	// answer 503.
+	SignIn     *oidc.CodeFlow
+	SignInRule identity.SignInRule
 	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
 	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
 	InsecureCookie bool
@@ -84,7 +85,7 @@ type AppContextOptions struct {
 	People         auth.PeopleStore
 	Identity       identity.Identity
 	SignIn         *oidc.CodeFlow
-	SignInGroup    string
+	SignInRule     identity.SignInRule
 	Store          *store.Store
 	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
@@ -112,7 +113,7 @@ type AppContextOptions struct {
 	Files            files.Store
 	TestHooksEnabled bool
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
-	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
+	// named with no sign-in issuer exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
 	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
 	DevSignIn bool
@@ -126,8 +127,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.People == nil {
 		return nil, fmt.Errorf("BuildAppContext: People store required")
 	}
-	if opts.SignIn != nil && opts.SignInGroup == "" {
-		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInGroup")
+	if opts.SignIn != nil && opts.SignInRule == nil {
+		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInRule")
 	}
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
@@ -178,7 +179,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
 		SignIn:         opts.SignIn,
-		SignInGroup:    opts.SignInGroup,
+		SignInRule:     opts.SignInRule,
 		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
@@ -266,10 +267,12 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
 }
 
-// authCallback completes a sign-in the sign-in pool redirected back: it exchanges the code for
-// the person's ID token, names them by the email their Google Workspace username carries, and
-// signs in only a member of SignInGroup, keeping the pool's refresh token to confirm that
-// membership hourly.
+// authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
+// person's ID token and signs in only a person SignInRule admits (SignInRule.Person), keeping the
+// issuer's refresh token to confirm that hourly. Under a group the person is named by the email
+// their pool username carries; under a domain, by the email of a Google account of the domain,
+// and the account's subject is recorded with the sign-in, which ends the address's sessions when
+// another account held it (auth.PeopleStore.SignInSubject).
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -297,18 +300,19 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
-	email, err := identity.Person(session.Claims, r.ctx.SignInGroup)
+	email, err := r.ctx.SignInRule.Person(session.Claims)
 	if err != nil {
-		slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
+		slog.Warn("dispatch: sign-in refused", append(r.ctx.SignInRule.RefusalLogFields(session.Claims), "reason", err)...)
 		writeSignInRefusedPage(w, email, err)
 		return
 	}
-	if err := r.ctx.People.SignIn(req.Context(), email, session.RefreshToken, time.Now()); err != nil {
+	subject := r.ctx.SignInRule.Subject(session.Claims)
+	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken, time.Now()); err != nil {
 		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
 	}
-	if !r.issueSession(w, req, email) {
+	if !r.issueSession(w, req, email, subject) {
 		return
 	}
 	http.Redirect(w, req, pending.next, http.StatusFound)
@@ -316,8 +320,16 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 
 // issueSession ensures the person's session generation and sets the session cookie a sign-in
 // issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
-// both mint through it, so a local dev sign-in carries exactly the cookie a pool sign-in does.
-func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email string) bool {
+// both mint through it, so a local dev sign-in carries exactly the cookie an issuer sign-in does.
+//
+// subject is the account a sign-in under SignInRule just recorded, empty for a rule that records
+// none. After the generation is read, SignInRule.ConfirmCookie confirms the address's row still
+// names subject: another account's sign-in that commits before that read has already ended the
+// address's sessions and taken the address, and one that commits after it advances the
+// generation past the one the cookie carries. So a cookie is issued only when the read generation
+// predates any such sign-in; otherwise the answer is 409 and no cookie. A nil SignInRule (no
+// sign-in issuer configured at all) has nothing to confirm.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, subject string) bool {
 	generation := int64(0)
 	if r.ctx.Sessions != nil {
 		var err error
@@ -325,6 +337,18 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email st
 		if err != nil {
 			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
+		}
+	}
+	if r.ctx.SignInRule != nil {
+		if err := r.ctx.SignInRule.ConfirmCookie(req.Context(), r.ctx.People, email, subject); err != nil {
+			if errors.Is(err, identity.ErrSignInSuperseded) {
+				slog.Warn("dispatch: sign-in superseded: another Google account signed in to the address before its cookie", "email", email)
+				writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
+				return false
+			}
+			slog.Error("dispatch: read the account the sign-in recorded failed", "email", email, "error", err)
+			writeError(w, http.StatusInternalServerError, "record sign-in")
 			return false
 		}
 	}
@@ -377,7 +401,7 @@ func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) 
 }
 
 func signInUnconfigured(w http.ResponseWriter) {
-	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, DISPATCH_SIGNIN_GROUP)", "SIGNIN_UNCONFIGURED")
+	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)", "SIGNIN_UNCONFIGURED")
 }
 
 // ───── static ───────────────────────────────────────────────────────────────
@@ -721,12 +745,21 @@ func writeCodeError(w http.ResponseWriter, status int, message, code string) {
 }
 
 // writeSignInRefusedPage answers the sign-in callback, a top-level browser navigation back from
-// the sign-in pool where JSON would be unreadable, for a person the pool vouched for but Dispatch
-// does not admit: one outside the group, named by email, or a sign-in that names nobody by email.
+// the issuer where JSON would be unreadable, for a person the issuer vouched for but Dispatch does
+// not admit, with the reason: one outside the group or the domain, or whose email Google has not
+// verified, each named by email; a Google sign-in that carries no email; or a sign-in that names
+// nobody by email.
 func writeSignInRefusedPage(w http.ResponseWriter, email string, reason error) {
-	message := "This sign-in does not name a person by a Google Workspace email. Sign in with your Google Workspace account."
-	if errors.Is(reason, identity.ErrNotMember) {
+	message := "This sign-in does not name a person by email. Sign in again, or with a different account."
+	switch {
+	case errors.Is(reason, identity.ErrNotMember):
 		message = html.EscapeString(email) + " is not in the group that may use Dispatch. Ask an administrator to add you, then sign in again."
+	case errors.Is(reason, identity.ErrNotInDomain):
+		message = html.EscapeString(email) + " is not in the domain that may use Dispatch. Sign in with your Google Workspace account."
+	case errors.Is(reason, identity.ErrEmailNotVerified):
+		message = html.EscapeString(email) + ": email not verified. Google has not verified this account's email address, so Dispatch cannot name you by it."
+	case errors.Is(reason, identity.ErrNoEmail):
+		message = "No email: this sign-in carries no email address Dispatch can name you by. Sign in with your Google Workspace account."
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
