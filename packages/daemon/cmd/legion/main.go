@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -469,12 +470,7 @@ func heldSummary(held []api.HeldOutboxRow) string {
 	if len(held) == 0 {
 		return "held lifecycle rows: none"
 	}
-	longest := held[0]
-	for _, row := range held[1:] {
-		if row.WaitedSeconds > longest.WaitedSeconds {
-			longest = row
-		}
-	}
+	longest := slices.MaxFunc(held, func(a, b api.HeldOutboxRow) int { return cmp.Compare(a.WaitedSeconds, b.WaitedSeconds) })
 	return fmt.Sprintf("held lifecycle rows: %d; the longest waiting, %s row %d of %s, has waited %s behind row %d",
 		len(held), longest.Kind, longest.ID, longest.Issue, time.Duration(longest.WaitedSeconds)*time.Second, longest.WaitsOn)
 }

@@ -88,9 +88,7 @@ func TestOutboxRetryBacksOffFailedEffect(t *testing.T) {
 func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	// The clock is held at a microsecond, the precision the rows' next_at is stored at, so the wait
-	// a lane arms for the later row is exactly the hour the test fires.
-	clock := &heldClock{at: time.Now().UTC().Truncate(time.Microsecond)}
+	clock := microClock()
 	now := clock.Now()
 	// Three issues: one issue's status rows run one at a time by design, so each row is on a lane
 	// of its own and none waits for another.
@@ -103,17 +101,8 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	}
 
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
-	restarted := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: clock.Now, clock: clock, log: quietLogger()}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		restarted.Run(ctx)
-		close(done)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
+	restarted := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
+	runLanes(t, restarted, clock)
 
 	testwait.Eventually(t, "the due row and the lapsed lease's row ran on the boot sweep", func() bool {
 		return client.count() == 2 && outboxRows(t, pool) == 1
@@ -125,9 +114,7 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 
 	// The sweep's tick before the hour wakes the later row's lane, which finds nothing due and arms
 	// its wait again; the row stays.
-	if fired := clock.fire(outboxLease); fired != 1 {
-		t.Fatalf("sweep timers fired = %d, want the one Run armed", fired)
-	}
+	fireSweep(t, clock)
 	testwait.Eventually(t, "the sweep ran and the later row's lane looked again", func() bool {
 		live, total := clock.armed(time.Hour)
 		_, sweeps := clock.armed(outboxLease)
@@ -498,40 +485,10 @@ func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, er
 func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := &flakyOutboxStore{Store: record.NewStore(), claimFailures: 1, finishFailures: 1}
-	clock := &heldClock{at: time.Now().UTC().Truncate(time.Microsecond)}
+	clock := microClock()
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: clock.Now, clock: clock, log: quietLogger()}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		runner.Run(ctx)
-		close(done)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
-	// sweep fires the sweep timer Run armed and waits for Run to arm the next, which it does once
-	// the sweep has woken every lane with a row.
-	sweep := func() {
-		t.Helper()
-		if fired := clock.fire(outboxLease); fired != 1 {
-			t.Fatalf("sweep timers fired = %d, want the one Run armed", fired)
-		}
-		testwait.Eventually(t, "the sweep ran and the next was armed", func() bool {
-			live, _ := clock.armed(outboxLease)
-			return live == 1
-		})
-	}
-	lanes := func() int {
-		runner.mu.Lock()
-		defer runner.mu.Unlock()
-		return len(runner.lanes)
-	}
-	testwait.Eventually(t, "Run armed its sweep", func() bool {
-		live, _ := clock.armed(outboxLease)
-		return live == 1
-	})
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
+	runLanes(t, runner, clock)
 
 	// This outbox has no workflow writing through projectRecords, so the test wakes the lane the
 	// way the committed write would.
@@ -543,19 +500,19 @@ func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 		t.Fatalf("status writes after the failed claim = %d, want none", got)
 	}
 
-	sweep()
+	fireSweep(t, clock)
 	testwait.Eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
 
 	// Under the lease the failed finish left, the row is no one's to run: the sweep before the
 	// lapse wakes its lane, which finds nothing due and exits.
-	sweep()
-	testwait.Eventually(t, "the lane exited with the row under its lapsed run's lease", func() bool { return lanes() == 0 })
+	fireSweep(t, clock)
+	testwait.Eventually(t, "the lane exited with the row under its lapsed run's lease", func() bool { return liveLanes(runner) == 0 })
 	if got, remaining := client.count(), outboxRows(t, pool); got != 1 || remaining != 1 {
 		t.Fatalf("before the lease lapsed: writes = %d with %d rows left, want one and the leased row", got, remaining)
 	}
 
 	clock.advance(outboxLease + time.Second)
-	sweep()
+	fireSweep(t, clock)
 	testwait.Eventually(t, "the row finished after its lease lapsed", func() bool { return outboxRows(t, pool) == 0 })
 	if got := client.count(); got != 2 {
 		t.Fatalf("status writes = %d, want the first run and the one after the lease lapsed", got)

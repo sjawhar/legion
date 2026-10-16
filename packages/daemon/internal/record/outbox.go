@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -56,10 +57,8 @@ var laneKinds = map[OutboxLane][]OutboxKind{
 // LaneOf is the lane that runs kind.
 func LaneOf(kind OutboxKind) OutboxLane {
 	for lane, kinds := range laneKinds {
-		for _, k := range kinds {
-			if k == kind {
-				return lane
-			}
+		if slices.Contains(kinds, kind) {
+			return lane
 		}
 	}
 	return ""
@@ -67,11 +66,7 @@ func LaneOf(kind OutboxKind) OutboxLane {
 
 // LaneKinds is the kinds lane runs, in a fixed order; nil for a lane that is not one.
 func LaneKinds(lane OutboxLane) []OutboxKind {
-	kinds := laneKinds[lane]
-	if kinds == nil {
-		return nil
-	}
-	return append([]OutboxKind(nil), kinds...)
+	return slices.Clone(laneKinds[lane])
 }
 
 // LaneKey names one lane of one issue.

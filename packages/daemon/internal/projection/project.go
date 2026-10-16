@@ -46,7 +46,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	if err != nil {
 		return api.State{}, err
 	}
-	held, err := s.HeldRows(ctx, tx, project, now)
+	held, err := s.HeldRows(ctx, tx, project, "", now)
 	if err != nil {
 		return api.State{}, err
 	}

@@ -415,8 +415,8 @@ type Store interface {
 	// HeldRows is every due, unleased lifecycle row of project held at now behind a lifecycle row
 	// of its issue under a live lease — the oldest such; for a start fenced by its issue_branch
 	// row, that row while it runs — by next_at then id. A start behind a branch row no one is
-	// running is not listed.
-	HeldRows(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]HeldRow, error)
+	// running is not listed. Issue "" is every issue of project.
+	HeldRows(ctx context.Context, tx pgx.Tx, project, issue string, now time.Time) ([]HeldRow, error)
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)

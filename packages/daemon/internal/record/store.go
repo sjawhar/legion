@@ -578,10 +578,14 @@ const outboxLaneFree = `not (outbox.kind = any($5::text[]) and exists (select 1 
 // lifecycle row of its issue running.
 const outboxClaimable = outboxUnleasedDue + ` and ` + outboxInOrder + ` and ` + outboxLaneFree
 
+// lifecycleKindNames is the lifecycle lane's kinds as the outbox stores them, the $5 every
+// statement embedding the predicates takes and the lane UnfinishedLanes sorts rows into.
+var lifecycleKindNames = kindNames(laneKinds[LaneLifecycle])
+
 // outboxDueArgs is the parameters of a statement that embeds the predicates: now, the ordering
 // rules' kinds and the lifecycle lane's kinds first, then the statement's own.
 func outboxDueArgs(now time.Time, own ...any) []any {
-	return append([]any{now, string(OutboxKindDispatchStatus), string(OutboxKindSupervise), string(OutboxKindIssueBranch), kindNames(LaneKinds(LaneLifecycle))}, own...)
+	return append([]any{now, string(OutboxKindDispatchStatus), string(OutboxKindSupervise), string(OutboxKindIssueBranch), lifecycleKindNames}, own...)
 }
 
 // kindNames is kinds as the text the outbox stores them in, an empty list for none.
@@ -684,7 +688,7 @@ func (s *Postgres) NextDue(ctx context.Context, tx pgx.Tx, issue string, kinds [
 func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error) {
 	rows, err := tx.Query(ctx, `select distinct issue, case when kind = any($2::text[]) then $3::text else $4::text end as lane
 		from outbox where split_part(issue, '-', 1) = $1 order by issue, lane`,
-		project, kindNames(LaneKinds(LaneLifecycle)), string(LaneLifecycle), string(LaneBoard))
+		project, lifecycleKindNames, string(LaneLifecycle), string(LaneBoard))
 	if err != nil {
 		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
 	}
@@ -708,21 +712,23 @@ func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project strin
 // HeldRows is every due, unleased lifecycle row of project's issues a lane may not run at now
 // (outboxClaimable negated) that has a lifecycle row of its issue running to wait on (outboxLaneFree
 // negated), by next_at then id, each with that row: the oldest of its issue's running lifecycle
-// rows. It is the lanes' own predicates read back, so what the state shows held is exactly what the
-// lanes hold back. A start fenced behind an older issue_branch row of its issue is held while the
-// branch row runs — issue_branch is a lifecycle kind, so the start waits on it — and listed by
-// nothing while the branch row waits unleased for its retry, since it then waits on no running row,
-// as it did before the lanes. Board rows are never held: their lane runs them as they come due. A
-// row the lane rule holds fails the claim, so the claim's negation adds no row to the lane rule's;
-// it is written out because Postgres types a parameter by its uses and refuses a statement with
-// one it never uses, and the ordering rules' kinds are among the parameters every fragment shares.
-func (s *Postgres) HeldRows(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]HeldRow, error) {
+// rows. Issue "" is every issue of project. It is the lanes' own predicates read back, so what the
+// state shows held is exactly what the lanes hold back. A start fenced behind an older issue_branch
+// row of its issue is held while the branch row runs — issue_branch is a lifecycle kind, so the
+// start waits on it — and listed by nothing while the branch row waits unleased for its retry, since
+// it then waits on no running row, as it did before the lanes. Board rows are never held: their lane
+// runs them as they come due. A row the lane rule holds fails the claim, so the claim's negation
+// adds no row to the lane rule's; it is written out because Postgres types a parameter by its uses
+// and refuses a statement with one it never uses, and the ordering rules' kinds are among the
+// parameters every fragment shares.
+func (s *Postgres) HeldRows(ctx context.Context, tx pgx.Tx, project, issue string, now time.Time) ([]HeldRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+`, (select min(running.id) from outbox running
 			where running.issue = outbox.issue and running.id <> outbox.id and running.kind = any($5::text[]) and running.lease_until > $1) as waits_on
-		from outbox where split_part(outbox.issue, '-', 1) = $6 and outbox.kind = any($5::text[])
+		from outbox where split_part(outbox.issue, '-', 1) = $6 and ($7::text = '' or outbox.issue = $7::text)
+		and outbox.kind = any($5::text[])
 		and `+outboxUnleasedDue+` and not (`+outboxClaimable+`) and not `+outboxLaneFree+`
 		order by next_at, id`,
-		outboxDueArgs(now, project)...)
+		outboxDueArgs(now, project, issue)...)
 	if err != nil {
 		return nil, fmt.Errorf("list the held outbox rows of %s: %w", project, err)
 	}
@@ -730,14 +736,10 @@ func (s *Postgres) HeldRows(ctx context.Context, tx pgx.Tx, project string, now 
 	held := []HeldRow{}
 	for rows.Next() {
 		var row HeldRow
-		var kind string
-		var payload []byte
-		if err := rows.Scan(&row.ID, &kind, &row.Issue, &payload, &row.Attempts, &row.NextAt, &row.LastError,
-			&row.CreatedAt, &row.LeaseToken, &row.LeaseUntil, &row.WaitsOn); err != nil {
+		var err error
+		if row.OutboxRow, err = scanOutbox(rows, &row.WaitsOn); err != nil {
 			return nil, fmt.Errorf("list the held outbox rows of %s: %w", project, err)
 		}
-		row.Kind = OutboxKind(kind)
-		row.Payload = append(json.RawMessage(nil), payload...)
 		held = append(held, row)
 	}
 	if err := rows.Err(); err != nil {
@@ -996,12 +998,14 @@ func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project s
 	return pending, nil
 }
 
-func scanOutbox(row scanner) (OutboxRow, error) {
+// scanOutbox reads one row of outboxColumns, then extra: the destinations of any columns the
+// statement selects after them.
+func scanOutbox(row scanner, extra ...any) (OutboxRow, error) {
 	var out OutboxRow
 	var kind string
 	var payload []byte
-	if err := row.Scan(&out.ID, &kind, &out.Issue, &payload, &out.Attempts, &out.NextAt, &out.LastError,
-		&out.CreatedAt, &out.LeaseToken, &out.LeaseUntil); err != nil {
+	if err := row.Scan(append([]any{&out.ID, &kind, &out.Issue, &payload, &out.Attempts, &out.NextAt, &out.LastError,
+		&out.CreatedAt, &out.LeaseToken, &out.LeaseUntil}, extra...)...); err != nil {
 		return OutboxRow{}, err
 	}
 	out.Kind = OutboxKind(kind)

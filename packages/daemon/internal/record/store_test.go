@@ -593,7 +593,8 @@ func TestRenewOutboxLeaseRenewsOnlyUnderItsToken(t *testing.T) {
 // row; a start the branch rule holds behind an issue_branch row is held on the branch row while it
 // runs, and listed by nothing while the branch row waits unleased for its retry. A due lifecycle
 // row no sibling is running is not held, a board row is never held, another project's rows are
-// never listed, and the held rows come by next_at then id with their own next_at.
+// never listed, the held rows come by next_at then id with their own next_at, and an issue given
+// narrows them to its own.
 func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -636,7 +637,7 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 		lease(tx, otherSuspend)
 	})
 	inTx(t, st, func(tx pgx.Tx) {
-		held, err := records.HeldRows(ctx, tx, "LEGION", now)
+		held, err := records.HeldRows(ctx, tx, "LEGION", "", now)
 		must(t, err)
 		if len(held) != 2 {
 			t.Fatalf("held rows = %+v, want LEGION-209's start then LEGION-208's workspace removal", held)
@@ -647,10 +648,15 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 		if held[1].ID != removal || held[1].WaitsOn != runningSuspend || !held[1].NextAt.Equal(now) {
 			t.Errorf("second held row = %+v, want the workspace removal %d, due at %s, waiting on the suspend %d", held[1], removal, now, runningSuspend)
 		}
-		other, err := records.HeldRows(ctx, tx, "OTHER", now)
+		other, err := records.HeldRows(ctx, tx, "OTHER", "", now)
 		must(t, err)
 		if len(other) != 1 || other[0].Issue != "OTHER-7" || other[0].Kind != OutboxKindWorkspaceRemove {
 			t.Errorf("OTHER's held rows = %+v, want its workspace removal alone", other)
+		}
+		ofIssue, err := records.HeldRows(ctx, tx, "LEGION", "LEGION-208", now)
+		must(t, err)
+		if len(ofIssue) != 1 || ofIssue[0].ID != removal || ofIssue[0].WaitsOn != runningSuspend {
+			t.Errorf("LEGION-208's held rows = %+v, want its workspace removal %d alone, waiting on the suspend %d", ofIssue, removal, runningSuspend)
 		}
 	})
 	// Once the running rows finish, nothing of LEGION is held: 208's removal and 211's close are
@@ -661,7 +667,7 @@ func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
 			must(t, tx.QueryRow(ctx, "select lease_token from outbox where id = $1", id).Scan(&token))
 			must(t, records.FinishOutbox(ctx, tx, id, token))
 		}
-		held, err := records.HeldRows(ctx, tx, "LEGION", now)
+		held, err := records.HeldRows(ctx, tx, "LEGION", "", now)
 		must(t, err)
 		if len(held) != 0 {
 			t.Fatalf("held rows with nothing running = %+v, want none", held)

@@ -32,7 +32,7 @@ func (s projectionStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) {
 func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx, string) ([]record.OutboxRow, error) {
 	return nil, nil
 }
-func (s projectionStore) HeldRows(context.Context, pgx.Tx, string, time.Time) ([]record.HeldRow, error) {
+func (s projectionStore) HeldRows(context.Context, pgx.Tx, string, string, time.Time) ([]record.HeldRow, error) {
 	return s.held, nil
 }
 func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]record.PhaseRow, error) {

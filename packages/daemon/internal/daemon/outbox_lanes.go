@@ -405,7 +405,7 @@ func (r *outbox) warnHeld(ctx context.Context, row record.OutboxRow, renewal *le
 	var held []record.HeldRow
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		var err error
-		held, err = r.records.HeldRows(ctx, tx, r.dispatchProject, now)
+		held, err = r.records.HeldRows(ctx, tx, r.dispatchProject, row.Issue, now)
 		return err
 	}); err != nil {
 		if ctx.Err() == nil {
@@ -414,7 +414,7 @@ func (r *outbox) warnHeld(ctx context.Context, row record.OutboxRow, renewal *le
 		return
 	}
 	for _, waiting := range held {
-		if waiting.Issue != row.Issue || waiting.WaitsOn != row.ID {
+		if waiting.WaitsOn != row.ID {
 			continue
 		}
 		waited := now.Sub(waiting.NextAt)
