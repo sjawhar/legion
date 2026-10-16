@@ -213,6 +213,34 @@ func TestManifestGoldens(t *testing.T) {
 	}
 }
 
+// Every Legion pod carries the two stop-eviction annotations unconditionally: Karpenter's own,
+// which protects a pod on an AWS cluster, and GKE Autopilot's cluster-autoscaler equivalent, which
+// Karpenter's annotation does nothing for (GKE ignores it) — so a pod on Autopilot without this one
+// can be evicted mid-turn by consolidation or a node upgrade. Both are unconditional, so no
+// operator configuration can regress this by omission.
+func TestEveryLegionPodIsProtectedFromAutoscalerEviction(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"karpenter.sh/do-not-disrupt":                    "true",
+		"cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
+	}
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.podTemplate(l).Metadata.Annotations; !maps.Equal(got, want) {
+				t.Errorf("pod annotations = %v, want exactly %v", got, want)
+			}
+		})
+	}
+}
+
 // Every field of every manifest, podTemplate.spec included, is one the v1.0.3 CRD declares with
 // that type: the API server prunes an unknown field without a word, so this walk is the only place
 // a misspelled or misplaced one shows (decision 9, N18).

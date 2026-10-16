@@ -1649,7 +1649,10 @@ Every pod runs:
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated `karpenter.sh/do-not-disrupt: "true"`.
+- annotated `karpenter.sh/do-not-disrupt: "true"` and
+  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, Karpenter's and GKE Autopilot's
+  cluster-autoscaler's own stop-eviction annotations, both unconditional (an autoscaler that reads
+  neither ignores both).
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -2978,7 +2981,9 @@ tree's cleanup lists it, and the boot census holds it to exactly the one launche
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
 agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
 so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
-"true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
+"true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
+or replaces for drift the node it runs on, and GKE Autopilot's cluster-autoscaler never evicts the
+pod for consolidation or a node upgrade, while it runs, which
 is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
