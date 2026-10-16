@@ -21,12 +21,13 @@ var gitCredentialStdin io.Reader = os.Stdin
 // runGitCredential is every shared clone's credential helper (workspace.GitHubCredentialHelper),
 // which git runs with its operation and the request on stdin. `get` answers a request for
 // https://github.com with the installation-token username and the token of the owner the
-// request's path names (credential.useHttpPath, which every shared clone sets): the hosts.yml in
-// that owner's directory of LEGION_GH_OWNERS_DIR when the bundle holds the owner, and otherwise
-// the one under GH_CONFIG_DIR, the issue's owner's. Any other host or protocol, an unset
-// GH_CONFIG_DIR, or a hosts.yml with no token answers nothing and exits 1, and git, which every
-// shared clone tells credential.interactive=false, then fails rather than prompts. `store` and
-// `erase` change nothing: the daemon is the one writer of the gh files.
+// request's path names (credential.useHttpPath, which every shared clone sets), from the hosts.yml
+// in that owner's directory of LEGION_GH_OWNERS_DIR and from nothing else. Any other host or
+// protocol, a request with no path, a path whose owner is no GitHub login or one the bundle holds
+// no directory for, an unset LEGION_GH_OWNERS_DIR, and a hosts.yml with no token answer nothing,
+// exit 1, naming why on stderr, and git, which every shared clone tells
+// credential.interactive=false, then fails rather than prompts. `store` and `erase` change
+// nothing: the daemon is the one writer of the gh files.
 func runGitCredential(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 1 && helpRequested(args[0]) {
 		fmt.Fprintln(stderr, gitCredentialUsage)
@@ -54,13 +55,26 @@ func runGitCredential(_ context.Context, args []string, stdout, stderr io.Writer
 		fmt.Fprintf(stderr, "legion git-credential: host %q is not github.com; answering nothing\n", request["host"])
 		return 1
 	}
-	defaultDir := os.Getenv("GH_CONFIG_DIR")
-	if defaultDir == "" {
-		fmt.Fprintln(stderr, "legion git-credential: GH_CONFIG_DIR is unset; answering nothing")
+	ownersDir := os.Getenv("LEGION_GH_OWNERS_DIR")
+	if ownersDir == "" {
+		fmt.Fprintln(stderr, "legion git-credential: LEGION_GH_OWNERS_DIR is unset; answering nothing")
 		return 1
 	}
-	owner, _, _ := strings.Cut(strings.TrimPrefix(request["path"], "/"), "/")
-	dir := ownerGHConfigDir(os.Getenv("LEGION_GH_OWNERS_DIR"), defaultDir, owner)
+	if request["path"] == "" {
+		fmt.Fprintln(stderr, "legion git-credential: git sent no path (credential.useHttpPath is off), so the request names no owner; answering nothing")
+		return 1
+	}
+	segment, _, _ := strings.Cut(strings.TrimPrefix(request["path"], "/"), "/")
+	owner, _, err := checkedOwner(segment, "the path "+request["path"])
+	if err != nil {
+		fmt.Fprintf(stderr, "legion git-credential: %v; answering nothing\n", err)
+		return 1
+	}
+	dir, err := ownerGHConfigDir(ownersDir, owner)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion git-credential: %v; answering nothing\n", err)
+		return 1
+	}
 	hosts, err := os.ReadFile(filepath.Join(dir, ghconfig.HostsFile))
 	if err != nil {
 		fmt.Fprintf(stderr, "legion git-credential: %v; answering nothing\n", err)
@@ -92,17 +106,12 @@ func readCredentialRequest(r io.Reader) map[string]string {
 	return request
 }
 
-// ownerGHConfigDir is the gh directory for owner: its directory of the bundle under ownersDir when
-// owner, lowercased, is a login the bundle holds, and defaultDir — the issue's owner's, which
-// GH_CONFIG_DIR names — otherwise, an empty owner and an unset ownersDir included.
-func ownerGHConfigDir(ownersDir, defaultDir, owner string) string {
-	owner = strings.ToLower(owner)
-	if ownersDir == "" || !ghconfig.IsOwner(owner) {
-		return defaultDir
-	}
+// ownerGHConfigDir is owner's gh directory of the bundle under ownersDir, refused when the bundle
+// holds none: owner is then no owner of this project.
+func ownerGHConfigDir(ownersDir, owner string) (string, error) {
 	dir := ghconfig.OwnerDir(ownersDir, owner)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return defaultDir
+		return "", fmt.Errorf("%q is not an owner of this project: %s holds no gh directory for it", owner, ownersDir)
 	}
-	return dir
+	return dir, nil
 }

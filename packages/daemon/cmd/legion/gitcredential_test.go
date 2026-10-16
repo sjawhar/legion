@@ -38,16 +38,21 @@ func runGitCredentialHere(t *testing.T, stdin string, args ...string) (code int,
 }
 
 // `legion git-credential get` answers git's credential protocol from the hosts.yml of the owner the
-// path git asks about names (credential.useHttpPath), lowercased, when the bundle holds that
-// owner, and otherwise from GH_CONFIG_DIR's; it answers nothing, exit 1, for any host but
-// github.com over https, a GH_CONFIG_DIR that is unset, or a hosts.yml with no token. store and
-// erase write nothing and exit 0.
+// path git asks about names (credential.useHttpPath), lowercased, in that owner's directory of
+// LEGION_GH_OWNERS_DIR, and from nothing else: it answers nothing, exit 1, naming why, for any host
+// but github.com over https, a request with no path, a path whose owner is no GitHub login or one
+// the bundle holds no directory for, an unset LEGION_GH_OWNERS_DIR, and a hosts.yml with no token.
+// GH_CONFIG_DIR, the issue owner's write token, is never an answer for another owner's repository.
+// store and erase write nothing and exit 0.
 func TestGitCredentialAnswersFromTheOwnersDirectory(t *testing.T) {
 	root, defaultDir := gitCredentialBundle(t)
-	empty := t.TempDir()
-	if err := os.WriteFile(filepath.Join(empty, ghconfig.HostsFile), nil, 0o600); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, "empty"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(root, "empty", ghconfig.HostsFile), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	both := map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root}
 	const answer = "username=x-access-token\npassword=%s\n"
 	for _, tc := range []struct {
 		name     string
@@ -59,50 +64,61 @@ func TestGitCredentialAnswersFromTheOwnersDirectory(t *testing.T) {
 		stderrIn string
 	}{
 		{
-			name:   "the owner's directory",
-			env:    map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
+			name:   "another owner's directory",
+			env:    both,
 			args:   []string{"get"},
 			stdin:  "protocol=https\nhost=github.com\npath=sjawhar/legion-smoke.git\n\n",
 			stdout: strings.Replace(answer, "%s", "ghs_sjawhar_read", 1),
 		},
 		{
 			name:   "an owner named in another case",
-			env:    map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
+			env:    both,
 			args:   []string{"get"},
 			stdin:  "protocol=https\nhost=github.com\npath=SJawhar/legion-smoke\n",
 			stdout: strings.Replace(answer, "%s", "ghs_sjawhar_read", 1),
 		},
 		{
-			name:   "an owner the bundle does not hold",
-			env:    map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
+			name:   "the issue owner's directory",
+			env:    map[string]string{"LEGION_GH_OWNERS_DIR": root},
 			args:   []string{"get"},
-			stdin:  "protocol=https\nhost=github.com\npath=Other/Thing\n\n",
+			stdin:  "protocol=https\nhost=github.com\npath=/acme/widgets.git\n\n",
 			stdout: strings.Replace(answer, "%s", "ghs_acme_write", 1),
 		},
 		{
-			name:   "a path that is no owner",
-			env:    map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
-			args:   []string{"get"},
-			stdin:  "protocol=https\nhost=github.com\npath=../sjawhar/x\n\n",
-			stdout: strings.Replace(answer, "%s", "ghs_acme_write", 1),
+			name:     "an owner the bundle does not hold",
+			env:      both,
+			args:     []string{"get"},
+			stdin:    "protocol=https\nhost=github.com\npath=Other/Thing\n\n",
+			code:     1,
+			stderrIn: `"other" is not an owner of this project`,
 		},
 		{
-			name:   "no path (useHttpPath off)",
-			env:    map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
-			args:   []string{"get"},
-			stdin:  "protocol=https\nhost=github.com\n\n",
-			stdout: strings.Replace(answer, "%s", "ghs_acme_write", 1),
+			name:     "a path that is no owner",
+			env:      both,
+			args:     []string{"get"},
+			stdin:    "protocol=https\nhost=github.com\npath=../sjawhar/x\n\n",
+			code:     1,
+			stderrIn: `"..", which is no GitHub login`,
 		},
 		{
-			name:   "no owners directory",
-			env:    map[string]string{"GH_CONFIG_DIR": defaultDir},
-			args:   []string{"get"},
-			stdin:  "protocol=https\nhost=github.com\npath=sjawhar/legion-smoke.git\n\n",
-			stdout: strings.Replace(answer, "%s", "ghs_acme_write", 1),
+			name:     "no path (useHttpPath off)",
+			env:      both,
+			args:     []string{"get"},
+			stdin:    "protocol=https\nhost=github.com\n\n",
+			code:     1,
+			stderrIn: "git sent no path",
+		},
+		{
+			name:     "no owners directory",
+			env:      map[string]string{"GH_CONFIG_DIR": defaultDir},
+			args:     []string{"get"},
+			stdin:    "protocol=https\nhost=github.com\npath=acme/widgets.git\n\n",
+			code:     1,
+			stderrIn: "LEGION_GH_OWNERS_DIR is unset",
 		},
 		{
 			name:     "another host",
-			env:      map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
+			env:      both,
 			args:     []string{"get"},
 			stdin:    "protocol=https\nhost=gitlab.com\npath=acme/widgets.git\n\n",
 			code:     1,
@@ -110,25 +126,17 @@ func TestGitCredentialAnswersFromTheOwnersDirectory(t *testing.T) {
 		},
 		{
 			name:     "plain http",
-			env:      map[string]string{"GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root},
+			env:      both,
 			args:     []string{"get"},
 			stdin:    "protocol=http\nhost=github.com\npath=acme/widgets.git\n\n",
 			code:     1,
 			stderrIn: `protocol "http"`,
 		},
 		{
-			name:     "no GH_CONFIG_DIR",
-			env:      map[string]string{"LEGION_GH_OWNERS_DIR": root},
-			args:     []string{"get"},
-			stdin:    "protocol=https\nhost=github.com\npath=other/thing\n\n",
-			code:     1,
-			stderrIn: "GH_CONFIG_DIR is unset",
-		},
-		{
 			name:     "a hosts.yml with no token",
-			env:      map[string]string{"GH_CONFIG_DIR": empty},
+			env:      both,
 			args:     []string{"get"},
-			stdin:    "protocol=https\nhost=github.com\n\n",
+			stdin:    "protocol=https\nhost=github.com\npath=empty/thing.git\n\n",
 			code:     1,
 			stderrIn: "names no github.com oauth_token",
 		},
