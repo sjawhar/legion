@@ -161,3 +161,22 @@ func TestConstructRefusesAPlainFieldFromAnotherResource(t *testing.T) {
 	require.ErrorContains(t, err, "hostname")
 	require.Empty(t, m.Types())
 }
+
+// listener.webhooks is a plain object input. The provider must refuse a value another resource
+// computes rather than render user data whose public route is unknown at preview.
+func TestConstructRefusesWebhooksFromAnotherResource(t *testing.T) {
+	inputs := plainInputs()
+	listener := inputs["listener"].AsMap().AsMap()
+	listener["webhooks"] = property.New(property.NewMap(map[string]property.Value{
+		"providers":           property.New(property.NewArray([]property.Value{property.New("github")})),
+		"githubWebhookSecret": property.New("example-hub-github-webhook-secret"),
+		"reviewerAppId":       property.New("1234567"),
+		"funnelPort":          property.New(443.0),
+	})).WithDependencies([]resource.URN{upstream})
+	inputs["listener"] = property.New(property.NewMap(listener))
+	inputs["tailnetAuthKey"] = property.New(authKey).WithSecret(true)
+
+	m, _, err := construct(t, inputs, false)
+	require.ErrorContains(t, err, `copying input "listener"`)
+	require.Empty(t, m.Types())
+}

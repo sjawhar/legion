@@ -135,6 +135,15 @@ func exampleArgs() *gcp.NatsHubArgs {
 	}
 }
 
+func withGitHubWebhooks(args *gcp.NatsHubArgs) {
+	args.Listener.Webhooks = &gcp.HubWebhooksArgs{
+		Providers:           []string{"github"},
+		GitHubWebhookSecret: "example-hub-github-webhook-secret",
+		ReviewerAppId:       "1234567",
+		FunnelPort:          443,
+	}
+}
+
 func readGolden(t *testing.T, name string) string {
 	t.Helper()
 	b, err := os.ReadFile("testdata/" + name)
@@ -411,6 +420,24 @@ func TestNatsHubGroupWaitsForTheKeyAndItsGrant(t *testing.T) {
 		"the VM is created after the grant that lets it read the key")
 	require.Contains(t, deps, child+accessorType+"::example-hub-listener-seed-accessor",
 		"the VM is created after the grant that lets its listener read its seed")
+}
+
+func TestNatsHubGrantsTheGitHubWebhookSecretBeforeTheGroup(t *testing.T) {
+	args := exampleArgs()
+	withGitHubWebhooks(args)
+	m, err := run(t, args, nil, true)
+	require.NoError(t, err)
+
+	grant := named(t, m, accessorType, "example-hub-github-webhook-secret-accessor")
+	require.Equal(t, "example-hub-github-webhook-secret-accessor", grant.Name)
+	require.Equal(t, map[string]any{
+		"secretId": "example-hub-github-webhook-secret",
+		"role":     "roles/secretmanager.secretAccessor",
+		"member":   "serviceAccount:example-hub-hub@example-project.iam.gserviceaccount.com",
+	}, grant.Inputs.Mappable())
+	require.Contains(t, m.One(t, groupType).RPC.GetDependencies(),
+		"urn:pulumi:s::p::"+hubType+"$"+accessorType+"::example-hub-github-webhook-secret-accessor",
+		"the VM starts only once its listener can fetch the GitHub signing secret")
 }
 
 // A hub without a listener registers no grant on a seed secret, and its group waits for the key's
@@ -768,6 +795,53 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
+// Each webhook field is resolved before the component asks for a provider or registers a resource.
+func TestNatsHubRefusesInvalidWebhooksBeforeRegistering(t *testing.T) {
+	for _, row := range []struct {
+		name string
+		edit func(*gcp.HubWebhooksArgs)
+		want string
+	}{
+		{
+			name: "an unknown provider",
+			edit: func(w *gcp.HubWebhooksArgs) { w.Providers = []string{"slack"} },
+			want: `webhooks.providers[0] "slack" is not supported; this version supports github`,
+		},
+		{
+			name: "a missing GitHub signing secret",
+			edit: func(w *gcp.HubWebhooksArgs) { w.GitHubWebhookSecret = "" },
+			want: "webhooks.githubWebhookSecret is required with provider \"github\"",
+		},
+		{
+			name: "an unsupported Funnel port",
+			edit: func(w *gcp.HubWebhooksArgs) { w.FunnelPort = 9000 },
+			want: "webhooks.funnelPort 9000 must be one of 443, 8443 or 10000",
+		},
+		{
+			name: "a missing reviewer App id",
+			edit: func(w *gcp.HubWebhooksArgs) { w.ReviewerAppId = "" },
+			want: "webhooks.reviewerAppId is required with provider \"github\"",
+		},
+		{
+			name: "a non-decimal reviewer App id",
+			edit: func(w *gcp.HubWebhooksArgs) { w.ReviewerAppId = "1234 app" },
+			want: `webhooks.reviewerAppId "1234 app" must be a positive decimal GitHub App id`,
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := exampleArgs()
+			withGitHubWebhooks(args)
+			row.edit(args.Listener.Webhooks)
+
+			err := gcp.ResolveNatsHub(args)
+			require.EqualError(t, err, row.want)
+			m, err := run(t, args, nil, true)
+			require.ErrorContains(t, err, hubType+" example-hub: "+row.want)
+			require.Equal(t, []string{gcpProviderType}, m.Types(), "the refusal happens before registration")
+		})
+	}
+}
+
 // A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone, machine type and disk type, which reach the group and
@@ -830,6 +904,18 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a seed as the listener's seed secret", "listener.seedSecret", func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = seed }},
 		{"a listener seed secret split by a hyphen", "listener.seedSecret", func(a *gcp.NatsHubArgs) {
 			a.Listener.SeedSecret = splitSeed(lower, "-")
+		}},
+		{"a seed as a webhook provider", "listener.webhooks.providers[0]", func(a *gcp.NatsHubArgs) {
+			withGitHubWebhooks(a)
+			a.Listener.Webhooks.Providers = []string{seed}
+		}},
+		{"a seed as the GitHub webhook secret id", "listener.webhooks.githubWebhookSecret", func(a *gcp.NatsHubArgs) {
+			withGitHubWebhooks(a)
+			a.Listener.Webhooks.GitHubWebhookSecret = splitSeed(lower, "-")
+		}},
+		{"a seed as the reviewer App id", "listener.webhooks.reviewerAppId", func(a *gcp.NatsHubArgs) {
+			withGitHubWebhooks(a)
+			a.Listener.Webhooks.ReviewerAppId = lower
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {

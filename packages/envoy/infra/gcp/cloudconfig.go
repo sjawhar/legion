@@ -33,7 +33,11 @@ const (
 	keyPath      = keyDir + "/tailnet-auth-key"
 	// listenerEnvPath is the listener's seed, as docker run --env-file reads it.
 	listenerEnvPath = keyDir + "/listener.env"
-	unitDir         = "/etc/systemd/system/"
+	// githubWebhookEnvPath is the GitHub signing secret, written only while the listener starts.
+	githubWebhookEnvPath = keyDir + "/github-webhook.env"
+	// githubWebhookEnvScriptPath writes the GitHub signing secret to githubWebhookEnvPath.
+	githubWebhookEnvScriptPath = "/etc/envoy/github-webhook-env"
+	unitDir                    = "/etc/systemd/system/"
 	// tailnetInterface is the interface tailscaled's kernel networking (TS_USERSPACE=false) makes.
 	tailnetInterface = "tailscale0"
 	// localNATS is NATS as a process on the VM's host network reaches it.
@@ -48,8 +52,8 @@ const (
 )
 
 // vm is what the hub VM's cloud-config is built from. Every field comes from a plain input, so
-// the cloud-config is known at preview, and none holds a secret: the VM fetches the tailnet auth
-// key at boot.
+// the cloud-config is known at preview and holds no secret value: the VM fetches both secrets at
+// run time.
 type vm struct {
 	hostname       string
 	keySecret      string // the secret id of the tailnet auth key, which the VM fetches at boot
@@ -61,11 +65,13 @@ type vm struct {
 }
 
 // listener is the hub's Envoy listener: its image, the secret id of its NATS seed, which the VM
-// fetches whenever the listener starts, and its environment but the seed (core.ListenerConfig.Env).
+// fetches whenever the listener starts, its environment but the secrets (core.ListenerConfig.Env),
+// and its optional GitHub webhook configuration.
 type listener struct {
 	image      string
 	seedSecret string
 	env        []string
+	webhooks   *hubWebhooks
 }
 
 // cloudConfig is the document cloud-init reads from the VM's user data.
@@ -91,7 +97,8 @@ type writeFile struct {
 //
 // write_files holds the NATS configuration, the secret fetcher and the units; runcmd loads the
 // units and starts them in order. They are started, never enabled: /etc does not outlive the boot.
-// A hub with a listener also gets the listener's seed script and Tailscale Serve's configuration.
+// A hub with a listener also gets its seed script and Tailscale Serve configuration; webhooks add
+// the GitHub signing-secret script.
 func (v vm) document() cloudConfig {
 	files := []writeFile{
 		{Path: natsConfPath, Permissions: "0644", Content: v.natsConf},
@@ -101,8 +108,13 @@ func (v vm) document() cloudConfig {
 	if v.listener != nil {
 		files = append(files,
 			writeFile{Path: seedEnvPath, Permissions: "0755", Content: seedEnvScript},
-			writeFile{Path: servePath, Permissions: "0644", Content: serveConfig()},
+			writeFile{Path: servePath, Permissions: "0644", Content: v.serveConfig()},
 		)
+		if v.listener.webhooks != nil {
+			files = append(files, writeFile{
+				Path: githubWebhookEnvScriptPath, Permissions: "0755", Content: githubWebhookEnvScript,
+			})
+		}
 	}
 	runcmd := []string{"systemctl daemon-reload"}
 	for _, u := range v.units() {
@@ -271,12 +283,53 @@ rm -f "$tmp"
 exit 1
 `
 
-// serveConfig is Tailscale Serve's configuration for the hub's listener: the listener's port on
-// the tailnet, forwarded as TCP to the same port on the VM's loopback, where the listener listens.
-// It is the form `tailscale serve --tcp` leaves and `tailscale serve status --json` prints.
-func serveConfig() string {
+// githubWebhookEnvScript writes the GitHub signing secret as the one variable the listener reads.
+// It follows seedEnvScript's fetching, temporary-file and one-line rules so the secret reaches
+// neither the cloud-config, a unit's command nor its journal.
+const githubWebhookEnvScript = `#!/bin/sh
+# github-webhook-env ENV_FILE SECRET writes the latest version of the Secret Manager secret SECRET
+# to ENV_FILE as the one line ENVOY_GITHUB_WEBHOOK_SECRET=<secret>, readable by root alone. It
+# fetches with the fetch-secret beside it, and so retries as that does. Nothing of the secret is
+# printed or passed in a command's arguments.
+set -u
+env_file=$1
+secret_name=$2
+raw=$(mktemp "$env_file.raw.XXXXXX") || exit 1
+trap 'rm -f "$raw"' EXIT
+"$(dirname "$0")/fetch-secret" "$raw" "$secret_name" || exit 1
+secret=$(cat "$raw") || exit 1
+case $secret in
+*'
+'*)
+  echo "github-webhook-env: the latest version of $secret_name holds more than one line" >&2
+  exit 1
+  ;;
+esac
+tmp=$(mktemp "$env_file.XXXXXX") || exit 1
+if printf 'ENVOY_GITHUB_WEBHOOK_SECRET=%s\n' "$secret" >"$tmp" && mv -f "$tmp" "$env_file"; then
+  exit 0
+fi
+rm -f "$tmp"
+exit 1
+`
+
+// serveConfig is Tailscale Serve's configuration for the hub's listener. It keeps the listener's
+// existing tailnet TCP forward. With GitHub webhooks, it also enables HTTPS for the Funnel port,
+// proxies exactly the GitHub webhook path, and allows Funnel only on that hostname and port. This
+// is the shape ipn.ServeConfig.SetWebHandler and SetFunnel write in Tailscale v1.104.1
+// (ipn/serve.go:440-478, 528-544); containerboot substitutes TS_CERT_DOMAIN before applying it
+// (cmd/containerboot/serve.go:176-200).
+func (v vm) serveConfig() string {
 	port := strconv.Itoa(core.DefaultListenerPort)
-	return `{"TCP":{"` + port + `":{"TCPForward":"127.0.0.1:` + port + `"}}}` + "\n"
+	tcp := `{"TCP":{"` + port + `":{"TCPForward":"127.0.0.1:` + port + `"}`
+	if v.listener.webhooks == nil {
+		return tcp + "}}\n"
+	}
+	funnelPort := strconv.Itoa(v.listener.webhooks.funnelPort)
+	funnel := "${TS_CERT_DOMAIN}:" + funnelPort
+	return tcp + `,"` + funnelPort + `":{"HTTPS":true}},"Web":{"` + funnel +
+		`":{"Handlers":{"/webhook/github":{"Proxy":"http://127.0.0.1:` + port +
+		`"}}}},"AllowFunnel":{"` + funnel + `":true}}` + "\n"
 }
 
 // fetchKeyUnit runs the secret fetcher for the tailnet auth key once per boot, on a mounted data
@@ -413,13 +466,19 @@ func (v vm) natsUnit() string {
 // docker stop -t 30, since the listener's own shutdown takes up to about twenty seconds.
 func (v vm) listenerUnit() string {
 	run := []string{"--env-file", listenerEnvPath}
+	if v.listener.webhooks != nil {
+		run = append(run, "--env-file", githubWebhookEnvPath)
+	}
 	for _, e := range v.listener.env {
 		run = append(run, "-e", e)
 	}
+	service := []string{"ExecStartPre=" + seedEnvPath + " " + listenerEnvPath + " " + v.listener.seedSecret}
+	if w := v.listener.webhooks; w != nil {
+		service = append(service, "ExecStartPre="+githubWebhookEnvScriptPath+" "+githubWebhookEnvPath+" "+w.githubWebhookSecret)
+	}
+	service = append(service, "ExecStop=/usr/bin/docker stop -t 30 envoy-listener")
 	return containerUnit("Envoy's listener, which the tailnet reaches through Tailscale Serve", natsService, "envoy-listener",
-		append(run, v.listener.image),
-		"ExecStartPre="+seedEnvPath+" "+listenerEnvPath+" "+v.listener.seedSecret,
-		"ExecStop=/usr/bin/docker stop -t 30 envoy-listener")
+		append(run, v.listener.image), service...)
 }
 
 // containerUnit is a unit that runs one container, name, on the host's network, with run its

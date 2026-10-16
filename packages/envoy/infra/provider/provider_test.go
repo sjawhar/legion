@@ -70,7 +70,8 @@ func TestSchemaTypes(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:nats:Rules",
-		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:HubListener", "envoy-infra:gcp:SessionUser",
+		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:HubListener",
+		"envoy-infra:gcp:HubWebhooks", "envoy-infra:gcp:SessionUser",
 	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
@@ -123,7 +124,11 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Equal(t, "#/types/envoy-infra:gcp:NatsUser", hub.InputProperties["users"].Items.Ref)
 	require.Equal(t, "#/types/envoy-infra:gcp:HubListener", hub.InputProperties["listener"].Ref)
 	require.Equal(t, "#/types/envoy-infra:gcp:SessionUser", hub.InputProperties["sessionUser"].Ref)
-	require.ElementsMatch(t, []string{"image", "seedSecret", "nkey"}, schema.Types["envoy-infra:gcp:HubListener"].Required)
+	listener := schema.Types["envoy-infra:gcp:HubListener"]
+	require.Equal(t, "#/types/envoy-infra:gcp:HubWebhooks", listener.Properties["webhooks"].Ref)
+	require.ElementsMatch(t, []string{"image", "seedSecret", "nkey"}, listener.Required)
+	require.ElementsMatch(t, []string{"providers", "githubWebhookSecret", "reviewerAppId", "funnelPort"},
+		schema.Types["envoy-infra:gcp:HubWebhooks"].Required)
 	require.ElementsMatch(t, []string{"name", "nkey"}, schema.Types["envoy-infra:gcp:SessionUser"].Required)
 	require.ElementsMatch(t, []string{"natsUrl", "instanceGroup"}, slices.Collect(maps.Keys(hub.Properties)))
 

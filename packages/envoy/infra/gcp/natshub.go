@@ -105,6 +105,9 @@ var (
 	// secretIDRule is Secret Manager's rule for a secret id (secrets.create), which also keeps it
 	// whole in the unit's command.
 	secretIDRule = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
+	// reviewerAppIDRule keeps the listener's environment and systemd unit one token, and matches
+	// the positive decimal identifier GitHub assigns an App.
+	reviewerAppIDRule = regexp.MustCompile(`^[1-9][0-9]*$`)
 )
 
 // healthCheckRanges are the source ranges of Google Cloud's health checks.
@@ -161,13 +164,26 @@ func (p *PermissionsArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Permi
 // user itself, named after the hub's hostname, the listener's machine id, and granted
 // core.ListenerPermissions for that machine.
 type HubListenerArgs struct {
-	Image      string `pulumi:"image"`      // pinned: <name>@sha256:<digest>
-	SeedSecret string `pulumi:"seedSecret"` // a secret id, never the seed
-	NKey       string `pulumi:"nkey"`       // the seed's public key; never the seed
+	Image      string           `pulumi:"image"`      // pinned: <name>@sha256:<digest>
+	SeedSecret string           `pulumi:"seedSecret"` // a secret id, never the seed
+	NKey       string           `pulumi:"nkey"`       // the seed's public key; never the seed
+	Webhooks   *HubWebhooksArgs `pulumi:"webhooks,optional"`
 }
 
 // Annotate names the type gcp:HubListener in the schema, for the reason NATSUserArgs's gives.
 func (l *HubListenerArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "HubListener") }
+
+// HubWebhooksArgs are the optional public webhook routes of the hub's listener. This version
+// supports GitHub alone; its signing secret stays in Secret Manager until the listener starts.
+type HubWebhooksArgs struct {
+	Providers           []string `pulumi:"providers"`
+	GitHubWebhookSecret string   `pulumi:"githubWebhookSecret"` // a Secret Manager secret id, never its value
+	ReviewerAppId       string   `pulumi:"reviewerAppId"`       // ENVOY_REVIEWER_APP_ID
+	FunnelPort          int      `pulumi:"funnelPort"`          // 443, 8443 or 10000
+}
+
+// Annotate names the type gcp:HubWebhooks in the schema, for the reason HubListenerArgs's gives.
+func (w *HubWebhooksArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "HubWebhooks") }
 
 // SessionUserArgs is the NATS user every client presenting no credential becomes: an agent session
 // on any device that reaches the hub. It is granted core.SessionPermissions and has no seed, so its
@@ -319,7 +335,66 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &listener{image: l.Image, seedSecret: l.SeedSecret, env: env}, nil
+	out := &listener{image: l.Image, seedSecret: l.SeedSecret, env: env}
+	webhooks, err := resolveHubWebhooks(l.Webhooks)
+	if err != nil {
+		return nil, err
+	}
+	if webhooks != nil {
+		out.webhooks = webhooks
+		out.env = append(out.env,
+			"ENVOY_WEBHOOKS=github",
+			"ENVOY_REVIEWER_APP_ID="+webhooks.reviewerAppID,
+		)
+	}
+	return out, nil
+}
+
+// hubWebhooks are the listener webhook settings that reach the VM's cloud-config. The signing
+// secret's id is public; its value is fetched only by the VM at each listener start.
+type hubWebhooks struct {
+	githubWebhookSecret string
+	reviewerAppID       string
+	funnelPort          int
+}
+
+// resolveHubWebhooks validates the optional webhook input before the component registers anything.
+func resolveHubWebhooks(args *HubWebhooksArgs) (*hubWebhooks, error) {
+	if args == nil {
+		return nil, nil
+	}
+	if len(args.Providers) == 0 {
+		return nil, errors.New(`webhooks.providers must be exactly ["github"]`)
+	}
+	if args.Providers[0] != "github" {
+		return nil, fmt.Errorf(`webhooks.providers[0] %q is not supported; this version supports github`, args.Providers[0])
+	}
+	if len(args.Providers) != 1 {
+		return nil, errors.New(`webhooks.providers must be exactly ["github"]`)
+	}
+	if args.GitHubWebhookSecret == "" {
+		return nil, errors.New(`webhooks.githubWebhookSecret is required with provider "github"`)
+	}
+	if !secretIDRule.MatchString(args.GitHubWebhookSecret) {
+		return nil, fmt.Errorf("webhooks.githubWebhookSecret %q must be a secret id in the hub's project, matching %s",
+			args.GitHubWebhookSecret, secretIDRule)
+	}
+	if args.ReviewerAppId == "" {
+		return nil, errors.New(`webhooks.reviewerAppId is required with provider "github"`)
+	}
+	if !reviewerAppIDRule.MatchString(args.ReviewerAppId) {
+		return nil, fmt.Errorf("webhooks.reviewerAppId %q must be a positive decimal GitHub App id", args.ReviewerAppId)
+	}
+	switch args.FunnelPort {
+	case 443, 8443, 10000:
+	default:
+		return nil, fmt.Errorf("webhooks.funnelPort %d must be one of 443, 8443 or 10000", args.FunnelPort)
+	}
+	return &hubWebhooks{
+		githubWebhookSecret: args.GitHubWebhookSecret,
+		reviewerAppID:       args.ReviewerAppId,
+		funnelPort:          args.FunnelPort,
+	}, nil
 }
 
 // seededInput names the first plain input of args that the hub itself carries and that holds an
@@ -355,6 +430,15 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 	}
 	if args.Listener != nil {
 		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret})
+		if w := args.Listener.Webhooks; w != nil {
+			for i, provider := range w.Providers {
+				fields = append(fields, field{fmt.Sprintf("listener.webhooks.providers[%d]", i), provider})
+			}
+			fields = append(fields,
+				field{"listener.webhooks.githubWebhookSecret", w.GitHubWebhookSecret},
+				field{"listener.webhooks.reviewerAppId", w.ReviewerAppId},
+			)
+		}
 	}
 	for _, f := range fields {
 		if bus.HoldsSeed(f.value) {
@@ -540,6 +624,18 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 			return nil, err
 		}
 		readsSecrets = append(readsSecrets, seedAccessor)
+		if w := l.webhooks; w != nil {
+			webhookAccessor, err := secretmanager.NewSecretIamMember(ctx, hostname+"-github-webhook-secret-accessor",
+				&secretmanager.SecretIamMemberArgs{
+					SecretId: pulumi.String(w.githubWebhookSecret),
+					Role:     pulumi.String("roles/secretmanager.secretAccessor"),
+					Member:   account.Member,
+				}, child)
+			if err != nil {
+				return nil, err
+			}
+			readsSecrets = append(readsSecrets, webhookAccessor)
+		}
 	}
 
 	var network pulumi.StringOutput
