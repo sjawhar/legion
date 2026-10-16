@@ -1502,7 +1502,6 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	return state, nil
 }
 
-
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
 // over identity, minted for the owner of the repository the claim's issue's record names
 // (repository): an issue the workflow does not record works no repository and adopts nothing. nil
