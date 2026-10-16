@@ -3628,18 +3628,25 @@ fixture_dir=/legion/workspaces/$repo/${tree2,,}
 # warm-up lines are kept as codegraph-warm-up.txt, which the fail line names.
 # codegraph_warm_up_lines: every warm-up line every container of tree 2's pod has logged, each
 # prefixed `[pod/<pod>/<container>]` and timestamped, kept as the evidence every read below judges
-# (so a wait that times out leaves the file its fail line names).
-codegraph_warm_up_lines() { op logs "$pod" --all-containers --timestamps --prefix | grep -F 'codegraph warm-up for' >"$evidence/codegraph-warm-up.txt"; }
-# codegraph_built: a role shim of the pod logged the warm-up's success line.
-codegraph_built() { codegraph_warm_up_lines && grep -qF 'built the index' "$evidence/codegraph-warm-up.txt"; }
+# (so a wait that times out leaves the file its fail line names). The match is anchored at the line
+# start, the prefix and the timestamp then the shim's own `[legion] codegraph warm-up for `: an
+# agent's tool arguments (`tool_execution_start <tool> <args>`) go to the same stream and could
+# carry those words, but such a line starts with the frame's own words and never matches.
+codegraph_warm_up_lines() { op logs "$pod" --all-containers --timestamps --prefix | grep -E '^\[pod/[^]]+\] [^ ]+ \[legion\] codegraph warm-up for ' >"$evidence/codegraph-warm-up.txt"; }
+# codegraph_built: a role shim of the pod logged the warm-up's success line, anchored the same way
+# and in the success line's own shape, so no line an agent's tool arguments could carry passes.
+codegraph_built() { codegraph_warm_up_lines && grep -qE '^\[pod/[^]]+\] [^ ]+ \[legion\] codegraph warm-up for .* built the index: codegraph (init|index) took ' "$evidence/codegraph-warm-up.txt"; }
 # warm_up_built_elapsed CREATED reads prefixed, timestamped pod log lines on stdin and prints
 # `<container> <seconds>` for the first success line: the container of its `[pod/<pod>/<container>]`
 # prefix, and the whole seconds from CREATED, the pod's creationTimestamp, to its timestamp. With
-# no success line it prints nothing and returns 1.
+# no success line it prints nothing and returns 1. Past the prefix and the timestamp a shim's line
+# begins `[legion] `, and the pattern is the success line's whole shape from there (a case pattern
+# matches the whole word, so its leading literal anchors it): a line an agent's tool arguments could
+# carry starts with the frame's own words and never matches.
 warm_up_built_elapsed() {
   local created=$1 prefix stamp rest
   while read -r prefix stamp rest; do
-    case $rest in *'built the index'*) ;; *) continue ;; esac
+    case $rest in '[legion] codegraph warm-up for '*' built the index: codegraph '*' took '*', done '*' after launch') ;; *) continue ;; esac
     prefix=${prefix%]}
     printf '%s %s\n' "${prefix##*/}" "$(($(date -u -d "$stamp" +%s) - $(date -u -d "$created" +%s)))"
     return 0

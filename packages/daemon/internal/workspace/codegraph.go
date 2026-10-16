@@ -52,6 +52,10 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // carries this holder's token, so a holder stalled past warmLeaseStale and taken over refreshes
 // nothing of its successor's lease — its heartbeat stops at the first tick that reads the
 // successor's token, and a dead holder's lease is never kept alive by a stalled one's ticks. A
+// tick that cannot read the lease at all (a takeover's remove-and-create caught between its two
+// steps, a hiccup of the volume) refreshes nothing and the heartbeat goes on: a missed tick is
+// what the six-tick budget is for, and a heartbeat ended there would let a live build's lease go
+// stale under it, a sibling take it over and a second build run on the same workspace. A
 // holder releases its lease on every exit it can see: the warm-up's deferred release runs once its
 // codegraph child has ended, and the one process that runs a warm-up and may exit before it, a
 // role's shim, ends the warm-up and waits for that release before it exits (WarmCodegraphIndex),
@@ -342,15 +346,16 @@ func takeOverWarmLease(path string) (bool, error) {
 // holdWarmLease keeps the lease at path fresh, its mtime set to now every heartbeat so a live
 // holder's lease is never read as stale, until release. The heartbeat, like the release, knows the
 // lease by its token: each tick refreshes the file only while it still carries this holder's token
-// (refreshWarmLease), and the first tick that reads another token, or no file, ends the heartbeat
-// for good, the build itself running on. The lease of a holder stalled past warmLeaseStale and
-// taken over belongs to its successor by then: a stalled holder's ticks refreshing it would keep
-// the successor's lease fresh past the successor's own death, a dead holder's lease that nothing
-// ever takes over. release stops the heartbeat and removes the file, but only while it still
-// holds this holder's token: the stalled holder must not remove it from under the successor's
-// build. The token, written at the create, is the lease's identity — never its inode, which the
-// tree volume (v9fs) hands a successor's file created at the same path, so os.SameFile would call
-// the successor's lease this holder's.
+// (refreshWarmLease). The first tick that reads another token ends the heartbeat for good, the
+// build itself running on; one that cannot read the lease refreshes nothing and tries again at the
+// next tick. The lease of a holder stalled past warmLeaseStale and taken over belongs to its
+// successor by then: a stalled holder's ticks refreshing it would keep the successor's lease fresh
+// past the successor's own death, a dead holder's lease that nothing ever takes over. release
+// stops the heartbeat and removes the file, but only while it still holds this holder's token: the
+// stalled holder must not remove it from under the successor's build. The token, written at the
+// create, is the lease's identity — never its inode, which the tree volume (v9fs) hands a
+// successor's file created at the same path, so os.SameFile would call the successor's lease this
+// holder's.
 func holdWarmLease(path, token string, heartbeat time.Duration) (release func()) {
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
@@ -378,15 +383,25 @@ func holdWarmLease(path, token string, heartbeat time.Duration) (release func())
 	}
 }
 
-// refreshWarmLease is one heartbeat tick: it sets the mtime of the lease at path to now, but only
-// while the file still carries token, this holder's, and reports whether it did. A lease carrying
-// another token is a successor's, taken over once this holder stalled past warmLeaseStale, and
-// one that cannot be read was released or removed: either way this holder's heartbeat is over
-// (false), and nothing of the successor's lease is touched. The time written is taken here, at
-// the call, never the tick's own value: a tick delivered late would otherwise set an mtime already
-// old, and a lease kept fresh must say when it was last known live.
+// refreshWarmLease is one heartbeat tick, and reports whether the heartbeat goes on. It reads the
+// lease at path. One carrying token, this holder's, has its mtime set to now (true). One carrying
+// another token is a successor's, taken over once this holder stalled past warmLeaseStale: this
+// holder's heartbeat is over for good (false), the build itself running on, and nothing of the
+// successor's lease is touched. One that cannot be read gets no refresh and is read again at the
+// next tick (true): a read error is no proof the lease is gone, since a takeover's remove-and-create
+// is two steps and a tick between them finds no file at the path, and the tree volume's 9p can fail
+// a read outright (EIO) while the lease is still this holder's. The stale budget is six ticks
+// (warmLeaseStale): a heartbeat ended at the first unreadable tick would let a live build's lease
+// age past that, a sibling take it over and a second `codegraph init` run on the same workspace.
+// The time written is taken here, at the call, never the tick's own value: a tick delivered late
+// would otherwise set an mtime already old, and a lease kept fresh must say when it was last known
+// live.
 func refreshWarmLease(path, token string) bool {
-	if !warmLeaseHasToken(path, token) {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	if string(current) != token {
 		return false
 	}
 	now := time.Now()
@@ -395,8 +410,8 @@ func refreshWarmLease(path, token string) bool {
 }
 
 // warmLeaseHasToken reports whether the lease at path still carries token, this holder's: the one
-// question the heartbeat and the release both ask before touching the file. A lease that cannot
-// be read is nobody's to touch.
+// question the release asks before removing the file. A lease that cannot be read is nobody's to
+// remove.
 func warmLeaseHasToken(path, token string) bool {
 	current, err := os.ReadFile(path)
 	return err == nil && string(current) == token

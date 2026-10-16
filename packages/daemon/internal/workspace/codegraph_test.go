@@ -856,9 +856,62 @@ func TestAStalledHoldersHeartbeatLeavesItsSuccessorsLeaseAtTheSameInode(t *testi
 	}
 }
 
+// TestALiveHoldersHeartbeatOutlivesAnUnreadableLease: a tick that cannot read the lease must not
+// end the heartbeat. A takeover's remove-and-create is two steps, so a tick between them finds no
+// file at the path, and the tree volume's 9p can fail a read outright (EIO); the design budgets
+// six missed heartbeats before a lease is stale (warmLeaseStale). A heartbeat ended for good at
+// the first such tick would let a running build's lease age past the minute, a sibling take it
+// over and a second `codegraph init` run on the same workspace. Here the lease is moved away for
+// three ticks and moved back 30 s old: a heartbeat still alive brings its mtime forward again, and
+// the release that follows removes the lease, which carried this holder's token throughout. The
+// control comes first: the heartbeat does refresh the lease before it is moved away.
+func TestALiveHoldersHeartbeatOutlivesAnUnreadableLease(t *testing.T) {
+	dir := t.TempDir()
+	lease := filepath.Join(dir, ".codegraph", warmLeaseName)
+	if err := os.Mkdir(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const heartbeat = 10 * time.Millisecond
+	past := time.Now().Add(-30 * time.Second)
+	if err := os.WriteFile(lease, []byte("A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lease, past, past); err != nil {
+		t.Fatal(err)
+	}
+	release := holdWarmLease(lease, "A", heartbeat)
+	refreshed := func() bool {
+		info, err := os.Stat(lease)
+		return err == nil && info.ModTime().After(past)
+	}
+	waitFor(t, refreshed, "A's heartbeat to refresh its own lease")
+
+	// The lease is unreadable for three ticks — each finds no file at the path — and then back,
+	// 30 s old again, so the only thing that could bring its mtime forward is A's heartbeat.
+	away := lease + ".away"
+	if err := os.Rename(lease, away); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * heartbeat)
+	if err := os.Rename(away, lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lease, past, past); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, refreshed, "A's heartbeat to refresh its lease again after three ticks that could not read it")
+
+	release()
+	if _, err := os.Stat(lease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat after the release of a lease carrying this holder's token: %v, want it gone", err)
+	}
+}
+
 // TestRefreshWarmLease table-tests the heartbeat's one tick: a lease carrying this holder's token
-// is refreshed to now (true); one carrying another token — a successor's — is left exactly as old
-// as it was, and one that is gone is nothing to refresh, and either ends the heartbeat (false).
+// is refreshed to now and the heartbeat goes on (true); one carrying another token — a successor's
+// — is left exactly as old as it was and ends the heartbeat (false); one that cannot be read is
+// nothing to refresh, and nothing is created, but the heartbeat goes on to read it again at the
+// next tick (true).
 func TestRefreshWarmLease(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -868,7 +921,7 @@ func TestRefreshWarmLease(t *testing.T) {
 	}{
 		{"own token: refreshed", "A", false, true},
 		{"another token: left as old as it was", "the-successors-token", false, false},
-		{"no file: nothing to refresh", "", true, false},
+		{"no file: nothing to refresh, the heartbeat goes on", "", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			lease := filepath.Join(t.TempDir(), warmLeaseName)
