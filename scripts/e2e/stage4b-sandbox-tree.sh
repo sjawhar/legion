@@ -2215,8 +2215,13 @@ tool_ran() {
   session_jq "$1" -e --arg tool "$2" 'include "stage4b-tools"; tool_ran($tool)' >/dev/null
 }
 # tool_result_answered SESSION TOOL ARGS TEXT: tool_result_said for the calls of TOOL whose
-# arguments carry ARGS (lib/stage4b-tools.jq): the read of skill://<name> among the session's reads,
-# the hover of one file among its hovers.
+# arguments carry ARGS (lib/stage4b-tools.jq): for bash, ARGS must be in the call's command alone
+# (Oh My Pi's bash arguments carry the model's intent beside the command, and an intent naming a
+# command the call never ran proves nothing); for every other tool, in its arguments' JSON text (the
+# read of skill://<name> among the session's reads, the hover of one file among its hovers). A bash
+# call dispatched through eval, or through a write to xd://bash whose content is no JSON object,
+# has no command, so a bound bash assertion does not see it, while `tool_result_said SESSION bash
+# TEXT` still counts it.
 tool_result_answered() {
   session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
@@ -2226,7 +2231,7 @@ tool_result_answered() {
 # meet.
 tool_result_quotes() {
   session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
-    [tool_results($tool)[] | select(.arguments | contains($args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
+    [tool_results($tool)[] | select(arguments_carry($tool; $args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
     | join(" ; ")'
 }
 # codegraph_control SESSION: the session holds a codegraph call for NoSuchSymbol, a symbol the

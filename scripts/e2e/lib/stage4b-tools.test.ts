@@ -9,8 +9,8 @@ import { scriptFunctions } from "./script-functions";
 // proof a tool ran and answered, where assistant_said only proves the model said so. Each test pins
 // one rule of lib/stage4b-tools.jq: a result is the tool's by the call it answers (a write to
 // xd://lsp records toolName write), an error result never counts, a tool that never ran has no
-// result, a result whose call the session no longer holds is no tool's, and a result carries its
-// call's arguments.
+// result, a result whose call the session no longer holds is no tool's, a result carries its
+// call's arguments, and a bash call is bound on its command, not its intent.
 const root = join(import.meta.dir, "..", "..", "..");
 const lib = import.meta.dir;
 const fn = scriptFunctions(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"));
@@ -198,6 +198,98 @@ describe("the library", () => {
     // The hover's text is not the status call's, and a text of the wrong call is no answer.
     expect(helper("tool_result_answered", "lsp", '"status"', "func liveDetail")).toBe(1);
     expect(helper("tool_result_answered", "lsp", "liveDetail", "Language servers")).toBe(1);
+  });
+
+  // bashExcerpt is a session of one bash call, with COMMAND and the model's intent I, answered
+  // without error by a text naming legion-implementer[bot].
+  const bashExcerpt = (command: string, i: string) =>
+    [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "toolu_b", name: "bash", arguments: { command, i } }],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "bash",
+          toolCallId: "toolu_b",
+          isError: false,
+          content: [{ type: "text", text: '{"author":{"login":"legion-implementer[bot]"}}' }],
+        },
+      },
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
+
+  test("a bash call is bound on its command, not the model's intent", () => {
+    const intentOnly = bashExcerpt(
+      "gh pr view 1866 --json author",
+      "Running gh api graphql for the viewer login"
+    );
+    // The intent is in the arguments' JSON text, which a rule over the whole text would match.
+    expect(jqOver(intentOnly, 'tool_results("bash")[0].arguments')).toContain("gh api graphql");
+    expect(
+      jqOver(intentOnly, 'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")')
+    ).toBe(false);
+    const ran = bashExcerpt(
+      "gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login",
+      "Running gh pr view"
+    );
+    expect(
+      jqOver(ran, 'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")')
+    ).toBe(true);
+    expect(
+      jqOver(ran, 'tool_result_answered("bash"; "gh pr view"; "legion-implementer[bot]")')
+    ).toBe(false);
+  });
+
+  test("the real fixture's gh api graphql call through the lifted helper", () => {
+    expect(helper("tool_result_answered", "bash", "gh api graphql", "legion-implementer[bot]")).toBe(
+      0
+    );
+    expect(helper("tool_result_answered", "bash", "gh pr view", "legion-implementer[bot]")).toBe(1);
+  });
+
+  test("the stated limit: a bash call dispatched through eval has no command", () => {
+    const text = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "toolu_e",
+              name: "eval",
+              arguments: {
+                language: "js",
+                code: "await tool.bash({ command: \"gh api graphql -f query='{ viewer { login } }'\" })",
+              },
+            },
+          ],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "eval",
+          toolCallId: "toolu_e",
+          isError: false,
+          content: [{ type: "text", text: "legion-implementer[bot]" }],
+        },
+      },
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
+    expect(jqOver(text, 'tool_result_said("bash"; "legion-implementer[bot]")')).toBe(true);
+    expect(
+      jqOver(text, 'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")')
+    ).toBe(false);
   });
 
   test("a result whose call the session no longer holds is no tool's", () => {

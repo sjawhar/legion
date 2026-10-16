@@ -41,15 +41,30 @@ def tool_result_quote($lead; $max):
 # note to quote.
 def tool_result_texts(name): [tool_results(name)[] | select(.isError == false) | .text];
 
+# arguments_carry(name; $args) is whether one of tool_results' entries answers a call whose
+# arguments carry $args: for bash, $args is a substring of the call's command alone (Oh My Pi's
+# bash arguments carry the model's `i` intent beside the command, and an intent naming a command
+# the call never ran must not satisfy a bound assertion); for every other tool, of the arguments'
+# JSON text (the hover among lsp's results, by its action and symbol in the device's content). A
+# bash call dispatched through eval (call_arguments is {} for eval, omp-tool-calls.jq) or through a
+# write to xd://bash whose content is no JSON object (call_arguments is {} then too) has no
+# command, so a bound bash assertion does not see it, while tool_result_said("bash"; …), whose
+# $args is "", still counts every bash call, since "" is in every string.
+def arguments_carry(name; $args):
+  if name == "bash" then (.arguments | fromjson | .command? // "" | tostring | contains($args))
+  else (.arguments | contains($args)) end;
+
 # tool_ran(name) is whether one call of the tool returned without error.
 def tool_ran(name): any(tool_results(name)[]; .isError == false);
 
 # tool_result_answered(name; $args; $text) is whether one call of the tool whose arguments carry
-# $args returned without error with $text in its text, literally and case-sensitively: the hover of
+# $args (arguments_carry: the command alone for bash, the arguments' JSON text for every other
+# tool) returned without error with $text in its text, literally and case-sensitively: the hover of
 # one file among a tool's hovers, the read of one skill:// among its reads.
 def tool_result_answered(name; $args; $text):
-  any(tool_results(name)[]; .isError == false and (.arguments | contains($args)) and (.text | contains($text)));
+  any(tool_results(name)[]; .isError == false and arguments_carry(name; $args) and (.text | contains($text)));
 
 # tool_result_said(name; $text) is tool_result_answered for every call of the tool, whatever its
-# arguments: they are always JSON text, and every string contains "".
+# arguments: "" is in every command and every JSON text, so it still counts every call of the tool,
+# the eval-dispatched and device-written bash calls included.
 def tool_result_said(name; $text): tool_result_answered(name; ""; $text);
