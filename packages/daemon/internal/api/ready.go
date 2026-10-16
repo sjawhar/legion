@@ -242,16 +242,24 @@ func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules confi
 }
 
 // pullRequestPaths is every path pull request number's change touches, both names of a renamed
-// file among them, and how many files GitHub listed.
+// file among them (changedPaths), and how many files GitHub listed.
 func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, int, error) {
-	type file struct {
-		Filename         string `json:"filename"`
-		PreviousFilename string `json:"previous_filename"`
-	}
-	files, err := githubrest.GetPages[file](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
+	files, err := githubrest.GetPages[changedFile](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
 	if err != nil {
 		return nil, 0, err
 	}
+	return changedPaths(files), len(files), nil
+}
+
+// changedFile is one file GitHub lists in a change, a pull request's or a compare's.
+type changedFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// changedPaths is every path files touch: each file's name, and a renamed file's old name too,
+// since moving a file out of a path changes that path.
+func changedPaths(files []changedFile) []string {
 	paths := make([]string, 0, len(files))
 	for _, file := range files {
 		paths = append(paths, file.Filename)
@@ -259,7 +267,7 @@ func pullRequestPaths(ctx context.Context, github githubrest.Client, number int)
 			paths = append(paths, file.PreviousFilename)
 		}
 	}
-	return paths, len(files), nil
+	return paths
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.
@@ -321,11 +329,8 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		return &refusal{http.StatusConflict, "READY_UNREVIEWED_CHANGE", fmt.Sprintf(format, args...) + "; " + remedy}
 	}
 	var compare struct {
-		Status string `json:"status"`
-		Files  *[]struct {
-			Filename         string `json:"filename"`
-			PreviousFilename string `json:"previous_filename"`
-		} `json:"files"`
+		Status string         `json:"status"`
+		Files  *[]changedFile `json:"files"`
 	}
 	err := github.Get(ctx, "/compare/"+approved+"..."+head+"?per_page=1", &compare)
 	approvedAt := fmt.Sprintf("%s, the head %s's review round approved", shortSHA(approved), issue)
@@ -346,11 +351,9 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 	files := *compare.Files
 	handoffs := handoffDir(issue) + "/"
 	var outside []string
-	for _, file := range files {
-		for _, path := range []string{file.Filename, file.PreviousFilename} {
-			if path != "" && !strings.HasPrefix(path, "docs/solutions/") && !strings.HasPrefix(path, handoffs) {
-				outside = append(outside, path)
-			}
+	for _, path := range changedPaths(files) {
+		if !strings.HasPrefix(path, "docs/solutions/") && !strings.HasPrefix(path, handoffs) {
+			outside = append(outside, path)
 		}
 	}
 	if len(outside) > 0 {
