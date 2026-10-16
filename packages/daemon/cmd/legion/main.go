@@ -226,10 +226,11 @@ func pluginsSourceWords(source string) string {
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 // Under kubernetes, when the image probe's attempt budget is derived above
 // slow_command_timeout_seconds (daemon.ProbeBudget), one plain line names the derived bound and
-// why, before the plugin line: both run only under kubernetes, since the probe runs only there.
-// Then a last plain line names the plugin pair this daemon would install for a stale-plugin
+// why; then one names the repository cache every mapped repository gets, as the file settles it;
+// then a last plain line names the plugin pair this daemon would install for a stale-plugin
 // relaunch — the file's or the binary's — or, with neither, the gap; it is its own line rather
-// than a capability row, since it would otherwise be open on every unreleased build.
+// than a capability row, since it would otherwise be open on every unreleased build. All of them
+// run only under kubernetes, since the probe and the caches run only there.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
 	if err == nil {
@@ -258,6 +259,9 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		if line, derived := daemon.ProbeBudgetLine(cfg); derived {
 			fmt.Fprintln(stdout, line)
 		}
+		cache := cfg.Runtime.Kubernetes.RepositoryCache
+		fmt.Fprintf(stdout, "repository cache: a %s volume per mapped repository, fetched from GitHub every %d minutes, kept %d hours after its repository leaves the mapping; its container reserves cpu %s, memory %s, ephemeral storage %s under %s\n",
+			cache.Volume, cache.RefreshMinutes, cache.RetainHours, cache.Resources.CPU, cache.Resources.Memory, cache.Resources.EphemeralStorageRequest, cache.Resources.EphemeralStorage)
 		if pair, source := daemon.ResolvedPlugins(cfg); pair != nil {
 			fmt.Fprintf(stdout, "plugins: @sjawhar/pi-legion %s @sjawhar/pi-envoy %s (from %s)\n", pair.PiLegion, pair.PiEnvoy, pluginsSourceWords(source))
 		} else {

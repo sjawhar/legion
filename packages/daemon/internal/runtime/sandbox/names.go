@@ -8,31 +8,43 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
-// role launcher, and sessions stay on it. Each role container has its own launcher token
-// projection at LauncherDir, and its own memory-backed LauncherPrivateDir, where its launcher
-// writes the generation's boot token and launch credentials, and StateDir. GHConfigDir is a role
-// container's GH_CONFIG_DIR, in an issue pod or the controller's: the read-only projection of its
-// role Secret's two gh files (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as
-// ghconfig.ConfigFile), mounted in that role's container alone, which its plain `gh` and the
-// clone's `gh auth git-credential` helper read the role's App token from. The kubelet rewrites a
-// whole-volume Secret projection in place when the Secret changes, so the refresher's Secret
-// update is what the next gh runs with.
+// role launcher, and sessions stay on it. The pod's feed, where workspace-fetch fills the bare
+// repository the issue's clone keeps its objects in, is the volume's feedSubPath directory, mounted
+// at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and read-only
+// over the whole volume's mount in every other container, so the path the clone's
+// objects/info/alternates names is the same in each and no agent writes what the token-holding
+// container reads. Each role container has its own launcher token projection at LauncherDir, and
+// its own memory-backed LauncherPrivateDir, where its launcher writes the generation's boot token
+// and launch credentials, and StateDir. GHConfigDir is a role container's GH_CONFIG_DIR, in an
+// issue pod or the controller's: the read-only projection of its role Secret's two gh files
+// (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as ghconfig.ConfigFile), mounted in that
+// role's container alone, which its plain `gh` and the clone's `gh auth git-credential` helper read
+// the role's App token from. The kubelet rewrites a whole-volume Secret projection in place when
+// the Secret changes, so the refresher's Secret update is what the next gh runs with. CacheRoot is
+// where a repository cache's pod mounts its own volume.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
+	FeedDir            = TreeRoot + "/" + feedSubPath
+	CacheRoot          = "/legion/cache"
 	LauncherDir        = "/var/run/legion/launcher"
 	LauncherPrivateDir = "/var/run/legion/private"
 	LauncherTokenFile  = "LAUNCHER_TOKEN"
 	GHConfigDir        = "/var/run/legion/gh"
 	ProvisionDir       = "/var/run/legion/provision"
-	FeedDir            = "/var/run/legion/feed"
 	StateDir           = "/var/run/legion/state"
 	ProvidersDir       = "/var/run/legion/providers"
 )
+
+// feedSubPath is the issue volume's directory that holds the pod's feed (FeedDir). The kubelet
+// makes it on first use, so a volume provisioned before the feed moved onto it is relaunched as it
+// is: nothing of its tree moves.
+const feedSubPath = "feed"
 
 // AgentSecretsKeyDir is the memory-backed directory the pod's agent-secrets key and enrollment id
 // live in, and AgentSecretsTokenDir where its projected token for the broker's audience is
@@ -112,6 +124,22 @@ const (
 // v1.0.3, sandbox_controller.go:1641), which is IssueClaimName.
 const issueVolume = "issue"
 
+// A repository cache's identity and parts. labelCache marks every object of a cache — its Sandbox,
+// pod template, pod and Secret — with the one value cacheMarker, for listing and passing over;
+// it names no repository, which a label value cannot hold (`/`) and a DNS-safe form of it cannot
+// be read back from. The repository is the annotation annotationCacheRepo alone, exactly as GitHub
+// names it, on the Sandbox, its pod template and its Secret (cacheRepository). The sweep marks a
+// cache whose repository left the mapping with annotationCacheUnmappedAt. cacheVolume is a cache
+// Sandbox's one claim template and cacheContainer its pod's one container.
+const (
+	labelCache                = "legion.dev/cache"
+	cacheMarker               = "true"
+	annotationCacheRepo       = "legion.dev/cache-repo"
+	annotationCacheUnmappedAt = "legion.dev/cache-unmapped-at"
+	cacheVolume               = "cache"
+	cacheContainer            = "cache"
+)
+
 // maxNameLength is a DNS-1123 label's length: a Sandbox name is also its pod's and, were one
 // asked for, its Service's.
 const maxNameLength = 63
@@ -150,6 +178,24 @@ func issueSandboxName(project, issue string) (string, error) {
 	}
 	return SandboxName(token), nil
 }
+
+// CacheSandboxName is the Sandbox and pod name of repo's cache in project: a DNS label derived from
+// the project and the repository, always ending in a dash and the first eight hex digits of the
+// sha256 of the repository's lowercased name, so two repositories whose slugs coincide
+// (acme/widgets-x and acme-widgets/x) still get two names; at most 63 characters. It is never
+// parsed back: the repository is the annotation's (cacheRepository).
+func CacheSandboxName(project string, repo ghrepo.Repository) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(repo.String())))
+	return dnsName("legion-"+project+"-cache-"+repo.Owner()+"-"+repo.Name(), maxNameLength-1-hashLength) + "-" + hex.EncodeToString(sum[:])[:hashLength]
+}
+
+// cacheSecretName is a cache's Secret, which its Sandbox owns: the implement App's token for the
+// repository's owner.
+func cacheSecretName(sandbox string) string { return sandbox + "-token" }
+
+// cacheClaimName is a cache's volume claim, as the controller names the claim it makes from the
+// Sandbox's cacheVolume template.
+func cacheClaimName(sandbox string) string { return cacheVolume + "-" + sandbox }
 
 // IssueClaimName is the volume claim of the Sandbox that t's claim runs in, the issue's or the
 // controller's, as the controller names the claim it makes from the Sandbox's `issue` template.

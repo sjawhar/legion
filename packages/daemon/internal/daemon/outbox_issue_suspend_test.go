@@ -344,6 +344,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout: time.Second, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 			Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: quietLogger(),
+			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -492,6 +493,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 		Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 		BootTimeout: 300 * time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 		Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: logger,
+		RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 	})
 	if err != nil {
 		t.Fatal(err)

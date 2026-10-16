@@ -121,7 +121,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 		volumes[v.Name] = v
 	}
 	for _, name := range []string{
-		provisionVolume, feedVolume, tempVolume, agentSecretsTokenVolume,
+		provisionVolume, tempVolume, agentSecretsTokenVolume,
 		roleVolume(agentSecretsKeyVolume, claim.RoleController),
 	} {
 		if _, ok := volumes[name]; ok {

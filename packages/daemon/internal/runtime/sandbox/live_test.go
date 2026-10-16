@@ -127,6 +127,25 @@ const (
 // the pool has room.
 var liveIssueVolume = resource.MustParse("20Gi")
 
+// liveRepositoryCache is the daemon's default repository cache (config.DefaultRepositoryCache), as
+// sandboxOptions translates it.
+func liveRepositoryCache() RepositoryCache {
+	return RepositoryCache{
+		Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("4Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
+			Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("4Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("2Gi")},
+		},
+	}
+}
+
+// mappedRepositories is the run's mapping as the runtime reads it.
+func (r *liveRig) mappedRepositories() []ghrepo.Repository {
+	r.mappedMu.Lock()
+	defer r.mappedMu.Unlock()
+	return slices.Clone(r.mapped)
+}
+
 // liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
 // `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
 // and memory, the tester's ephemeral-storage limit beside them, the reviewer's memory alone (its
@@ -597,6 +616,10 @@ type liveRig struct {
 	// trees is the durable state every runtime of the run reads (Options.Store): every tree live
 	// until a check records its cleanup confirmed.
 	trees *fakeStore
+	// mapped is the repositories the run maps (Options.Mapped): none until repository-cache maps
+	// LEGION_E2E_REPO, so no sweep before it makes a cache the run did not ask for.
+	mappedMu sync.Mutex
+	mapped   []ghrepo.Repository
 
 	// The current runtime instance and its listener; stop ends both.
 	rt      *Runtime
@@ -800,6 +823,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		Agent: stubAgent, BootTimeout: liveBootTimeout,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
+		RepositoryCache: liveRepositoryCache(), Mapped: r.mappedRepositories,
 	}
 	if r.env.agentSecretsURL != "" {
 		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}

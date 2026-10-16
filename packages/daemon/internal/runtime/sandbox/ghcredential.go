@@ -20,8 +20,9 @@ import (
 // (start); a test that must see a tick inside its run shortens it before starting one.
 var gitHubRefreshInterval = time.Minute
 
-// refreshGitHubCredentialsEvery runs refreshGitHubCredentials every interval until ctx ends: the
-// informers' lifetime (start), so the walk never reads a pod store nothing feeds.
+// refreshGitHubCredentialsEvery runs refreshGitHubCredentials, then refreshCacheTokens, every
+// interval until ctx ends: the informers' lifetime (start), so the walk never reads a store nothing
+// feeds.
 func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval time.Duration) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -31,6 +32,7 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 			return
 		case <-tick.C:
 			r.refreshGitHubCredentials(ctx)
+			r.refreshCacheTokens(ctx)
 		}
 	}
 }
@@ -39,7 +41,9 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // role's GitHub credential, so the gh files its container projects (GHConfigDir) carry the token
 // the daemon holds now: the kubelet rewrites the projection in place once the Secret changes. It
 // walks the pod store for the pods of this project (every launcher role's container holds its
-// App's gh files, the controller's included) that are Pending or Running and not being deleted —
+// App's gh files, the controller's included; a repository cache's pod names no kind and holds none,
+// so it is passed over, its token refreshCacheTokens') that are Pending or Running and not being
+// deleted —
 // a pod waiting to be scheduled starts its launchers from the Secret as it is then — and, for each
 // of the kind's roles, reads the role's Secret, skips one another Sandbox owns (the pod's Sandbox
 // replaced since the pod was listed), renders the credential, and leaves a Secret whose hosts.yml

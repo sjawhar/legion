@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -321,6 +322,11 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 	if a := k.AgentSecrets; a != nil {
 		agentSecrets = &sandbox.AgentSecrets{URL: a.URL, Audience: a.Audience, TokenExpiry: time.Duration(a.TokenExpirySeconds) * time.Second}
 	}
+	cache, err := repositoryCache(k.RepositoryCache)
+	if err != nil {
+		return sandbox.Options{}, err
+	}
+	repository := cfg.Projects[cfg.Project].Repo
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, IssueVolume: issueVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
@@ -338,7 +344,26 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ProbeInterval:    cfg.ProbeInterval,
 		AdoptTimeout:     cfg.SlowCommandTimeout,
 		AgentSecrets:     agentSecrets,
+		RepositoryCache:  cache,
+		Mapped:           func() []ghrepo.Repository { return []ghrepo.Repository{repository} },
 		Log:              log,
+	}, nil
+}
+
+// repositoryCache is runtime.kubernetes.repository_cache as the runtime takes it: the volume as a
+// quantity, the intervals as durations, and the reservation as a container's requirements.
+func repositoryCache(c config.RepositoryCacheConfig) (sandbox.RepositoryCache, error) {
+	volume, err := resource.ParseQuantity(c.Volume)
+	if err != nil {
+		return sandbox.RepositoryCache{}, fmt.Errorf("runtime.kubernetes.repository_cache.volume: %w", err)
+	}
+	resources, err := requirements("runtime.kubernetes.repository_cache.resources", c.Resources)
+	if err != nil {
+		return sandbox.RepositoryCache{}, err
+	}
+	return sandbox.RepositoryCache{
+		Volume: volume, Refresh: time.Duration(c.RefreshMinutes) * time.Minute, Retain: time.Duration(c.RetainHours) * time.Hour,
+		Resources: resources,
 	}, nil
 }
 

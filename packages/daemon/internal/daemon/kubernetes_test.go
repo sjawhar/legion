@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -44,7 +45,7 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "gp2", IssueVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
-		Resources: config.DefaultResources(),
+		Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
 	}}
 	return cfg
 }
@@ -64,6 +65,20 @@ func defaultReservations(t *testing.T) map[claim.Role]corev1.ResourceRequirement
 	}
 	return reservations
 }
+
+// defaultRepositoryCache is the repository cache at the daemon's defaults, translated as
+// sandboxOptions translates it, for a test that builds Options by hand.
+func defaultRepositoryCache(t *testing.T) sandbox.RepositoryCache {
+	t.Helper()
+	cache, err := repositoryCache(config.DefaultRepositoryCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cache
+}
+
+// noRepositories is a mapping that names none, for a test whose runtime makes no cache.
+func noRepositories() []ghrepo.Repository { return nil }
 
 // writeKubeconfig is a kubeconfig of one cluster at server and one context, its current context
 // when current names it.
@@ -470,6 +485,32 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 	}
 	if controller := opts.Resources[claim.RoleController]; reflect.DeepEqual(probe.Resources, controller) {
 		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", controller)
+	}
+}
+
+// runtime.kubernetes.repository_cache reaches the runtime's Options as its volume, its intervals and
+// its container's requirements, and the repositories the caches follow are the project's.
+func TestTheRepositoryCacheReachesTheSandboxRuntime(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	reservation := config.RoleResources{CPU: "2", Memory: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"}
+	cfg.Runtime.Kubernetes.RepositoryCache = config.RepositoryCacheConfig{Volume: "50Gi", RefreshMinutes: 5, RetainHours: 24, Resources: reservation}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	want, err := requirements("runtime.kubernetes.repository_cache.resources", reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := opts.RepositoryCache
+	if cache.Volume.Cmp(resource.MustParse("50Gi")) != 0 || cache.Refresh != 5*time.Minute || cache.Retain != 24*time.Hour || !reflect.DeepEqual(cache.Resources, want) {
+		t.Errorf("RepositoryCache = %+v, want 50Gi, 5m, 24h and %+v", cache, want)
+	}
+	if opts.Mapped == nil {
+		t.Fatal("the runtime is handed no mapping")
+	}
+	if got, project := opts.Mapped(), cfg.Projects[cfg.Project].Repo; len(got) != 1 || got[0] != project {
+		t.Errorf("the caches follow %v, want the project's repository %s", got, project)
 	}
 }
 

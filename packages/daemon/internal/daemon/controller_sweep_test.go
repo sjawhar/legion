@@ -69,6 +69,7 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 				Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 				BootTimeout: time.Second, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 				Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: quietLogger(),
+				RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 			})
 			if err != nil {
 				t.Fatal(err)

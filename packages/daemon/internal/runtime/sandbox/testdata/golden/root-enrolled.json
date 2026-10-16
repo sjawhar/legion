@@ -111,6 +111,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -205,6 +211,12 @@
                 "mountPath": "/var/run/legion/gh",
                 "name": "gh-planner",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -303,6 +315,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -397,6 +415,12 @@
                 "mountPath": "/var/run/legion/gh",
                 "name": "gh-tester",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -495,6 +519,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -591,6 +621,12 @@
                 "readOnly": true
               },
               {
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -613,7 +649,7 @@
               "--repo",
               "sjawhar/legion-smoke",
               "--feed",
-              "/var/run/legion/feed"
+              "/legion/feed"
             ],
             "env": [
               {
@@ -665,11 +701,12 @@
                 "name": "tmp"
               },
               {
-                "mountPath": "/var/run/legion/feed",
-                "name": "feed"
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "subPath": "feed"
               }
             ],
-            "workingDir": "/var/run/legion/feed"
+            "workingDir": "/legion/feed"
           },
           {
             "command": [
@@ -687,7 +724,7 @@
               "--credential-helper",
               "!gh auth git-credential",
               "--feed",
-              "/var/run/legion/feed"
+              "/legion/feed"
             ],
             "env": [
               {
@@ -742,9 +779,10 @@
                 "name": "issue"
               },
               {
-                "mountPath": "/var/run/legion/feed",
-                "name": "feed",
-                "readOnly": true
+                "mountPath": "/legion/feed",
+                "name": "issue",
+                "readOnly": true,
+                "subPath": "feed"
               },
               {
                 "mountPath": "/home/legion/.config",
@@ -794,10 +832,6 @@
               ],
               "secretName": "legion-legion-legion-208-boot"
             }
-          },
-          {
-            "emptyDir": {},
-            "name": "feed"
           },
           {
             "emptyDir": {

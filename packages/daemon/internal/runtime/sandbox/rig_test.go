@@ -84,7 +84,12 @@ func testOptions() Options {
 		Tokens:           staticTokens{},
 		GitHubCredential: staticCredential,
 		Conns:            fake.NewConns(),
-		Log:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		RepositoryCache: RepositoryCache{
+			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
+			Resources: reservations()[claim.RoleController],
+		},
+		Mapped: func() []ghrepo.Repository { return nil },
+		Log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
 }
 

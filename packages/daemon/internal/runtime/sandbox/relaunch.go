@@ -507,8 +507,16 @@ func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMet
 }
 
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
+	existing, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, want.Name, metav1.GetOptions{})
+	return r.writeSecret(ctx, existing, err, want)
+}
+
+// writeSecret brings the Secret want names to want from existing, the read of it that returned
+// getErr: created when the read found none, updated in place when want's owner owns it, and
+// replaced, fenced to its uid, when another owns it.
+func (r *Runtime) writeSecret(ctx context.Context, existing *corev1.Secret, getErr error, want corev1.Secret) error {
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
-	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
+	err := getErr
 	switch {
 	case apierrors.IsNotFound(err):
 		_, err = secrets.Create(ctx, &want, metav1.CreateOptions{})

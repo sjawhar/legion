@@ -290,7 +290,7 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 			return err
 		}
 		if c.Name == fetchContainer {
-			rig.holdsNoCanary("the feed", volumes[feedVolume])
+			rig.holdsNoCanary("the feed", filepath.Join(volumes[issueVolume], feedSubPath))
 		}
 	}
 	return nil
@@ -310,6 +310,12 @@ func (rig *initRig) runContainer(podDir string, volumes map[string]string, c cor
 	var readOnly []string
 	for _, mount := range c.VolumeMounts {
 		host := filepath.Join(volumes[mount.Name], mount.SubPath)
+		// The kubelet makes a subPath that does not exist yet before it mounts it.
+		if mount.SubPath != "" {
+			if err := os.MkdirAll(host, 0o700); err != nil {
+				return err
+			}
+		}
 		moves = append(moves, move{mount.MountPath, host})
 		mounted[volumes[mount.Name]] = true
 		if mount.ReadOnly {

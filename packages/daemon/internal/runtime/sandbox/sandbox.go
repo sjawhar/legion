@@ -46,6 +46,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -97,6 +98,10 @@ type Runtime struct {
 	launcherAuth                   launcherCredentials
 	now                            func() time.Time
 	log                            *slog.Logger
+	// cacheConfig is how each repository's cache is made, and mapped the repositories the project's
+	// mapping names now (Options.RepositoryCache, Options.Mapped).
+	cacheConfig RepositoryCache
+	mapped      func() []ghrepo.Repository
 
 	// lifetime is the informers' context; a read no single caller waits for
 	// (readLauncherCredential) ends with it.
@@ -121,6 +126,9 @@ type Runtime struct {
 	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
 	// other: each issue's pod provisions its own clone on its own volume.
 	podTurns map[string]chan struct{}
+	// occupiedCaches are the cache names RepositoryCache found held by another repository's cache and
+	// has logged, so each is logged once.
+	occupiedCaches map[string]bool
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -155,9 +163,10 @@ func configure(opts Options) (*Runtime, error) {
 }
 
 // checkSupervision refuses opts that lack what only supervision reads — launching, relaunching,
-// adopting and sweeping a claim's pod: the provisioning token source, the roles' gh-files
-// function, the store, the connection directory, and a worker stream address a pod can dial. A
-// runtime that runs the image probe alone (newProber) reads none of them.
+// adopting and sweeping a claim's pod, and making, refreshing and sweeping the repository caches:
+// the provisioning token source, the roles' gh-files function, the store, the connection
+// directory, a worker stream address a pod can dial, the repository caches' configuration and the
+// mapping they follow. A runtime that runs the image probe alone (newProber) reads none of them.
 func checkSupervision(opts Options) error {
 	refuse := func(format string, args ...any) error { return fmt.Errorf("sandbox runtime: "+format, args...) }
 	switch {
@@ -169,6 +178,11 @@ func checkSupervision(opts Options) error {
 		return refuse("no store")
 	case opts.Conns == nil:
 		return refuse("no connection directory")
+	case opts.Mapped == nil:
+		return refuse("no repository mapping for the repository caches")
+	}
+	if err := opts.RepositoryCache.check(); err != nil {
+		return refuse("%v", err)
 	}
 	host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
 	if _, _, err := net.SplitHostPort(host); !ok || err != nil {
@@ -253,7 +267,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		launchers: newLaunchers(),
+		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped, occupiedCaches: map[string]bool{},
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -281,13 +295,19 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 	if !ok {
 		return fmt.Errorf("resources: no reservation for role %s", role)
 	}
+	return checkRequirements("role "+string(role), requirements)
+}
+
+// checkRequirements is why requirements, what's (a role's, or the repository cache's), is not a
+// reservation (checkReservation's rule), or nil when it is one.
+func checkRequirements(what string, requirements corev1.ResourceRequirements) error {
 	for _, list := range []struct {
 		name string
 		list corev1.ResourceList
 	}{{"requests", requirements.Requests}, {"limits", requirements.Limits}} {
 		for _, name := range slices.Sorted(maps.Keys(list.list)) {
 			if name != corev1.ResourceCPU && name != corev1.ResourceMemory && name != corev1.ResourceEphemeralStorage {
-				return fmt.Errorf("resources: role %s names %s in its %s; a reservation is cpu, memory and ephemeral-storage alone", role, name, list.name)
+				return fmt.Errorf("resources: %s names %s in its %s; a reservation is cpu, memory and ephemeral-storage alone", what, name, list.name)
 			}
 		}
 	}
@@ -295,17 +315,17 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 		request, limit := requirements.Requests[name], requirements.Limits[name]
 		switch {
 		case request.Sign() <= 0 || limit.Sign() <= 0:
-			return fmt.Errorf("resources: role %s reserves no %s (request %s, limit %s); a reservation is a positive quantity as both", role, name, request.String(), limit.String())
+			return fmt.Errorf("resources: %s reserves no %s (request %s, limit %s); a reservation is a positive quantity as both", what, name, request.String(), limit.String())
 		case request.Cmp(limit) != 0:
-			return fmt.Errorf("resources: role %s requests %s %s but is limited to %s; a reservation is one value as both", role, name, request.String(), limit.String())
+			return fmt.Errorf("resources: %s requests %s %s but is limited to %s; a reservation is one value as both", what, name, request.String(), limit.String())
 		}
 	}
 	request, limit := requirements.Requests[corev1.ResourceEphemeralStorage], requirements.Limits[corev1.ResourceEphemeralStorage]
 	switch {
 	case request.Sign() <= 0 || limit.Sign() <= 0:
-		return fmt.Errorf("resources: role %s bounds no ephemeral-storage (request %s, limit %s); the bound is a positive request under a positive limit", role, request.String(), limit.String())
+		return fmt.Errorf("resources: %s bounds no ephemeral-storage (request %s, limit %s); the bound is a positive request under a positive limit", what, request.String(), limit.String())
 	case request.Cmp(limit) > 0:
-		return fmt.Errorf("resources: role %s requests ephemeral-storage %s past its limit %s; the request may not exceed the limit", role, request.String(), limit.String())
+		return fmt.Errorf("resources: %s requests ephemeral-storage %s past its limit %s; the request may not exceed the limit", what, request.String(), limit.String())
 	}
 	return nil
 }
@@ -757,7 +777,9 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
 // next sweep judges it on the claims known then. The image probe's Sandbox (labelled
 // legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
-// has the controller delete it otherwise (probe.go). known's located claims join the watch, unless
+// has the controller delete it otherwise (probe.go). A repository cache's Sandbox (labelled
+// legion.dev/cache) is no claim's either: the claim path passes over it, and sweepCaches keeps,
+// repairs or retires it after the claim path. known's located claims join the watch, unless
 // it already holds a newer incarnation of the claim, and are evaluated at once. Nothing here lists
 // Secrets: each goes with its Sandbox. Each Sandbox whose pod runs an image other than the
 // runtime's (imageDrift) is warned of, named with both images, at the boot reconciliation and at
@@ -789,7 +811,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	}
 	for _, obj := range r.sandboxes.GetStore().List() {
 		u := obj.(*unstructured.Unstructured)
-		if u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
+		if u.GetLabels()[labelProbe] != "" || u.GetLabels()[labelCache] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
 		r.warnImageDrift(u)
@@ -800,6 +822,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 			errs = append(errs, err)
 		}
 	}
+	r.sweepCaches(ctx)
 	return errors.Join(errs...)
 }
 

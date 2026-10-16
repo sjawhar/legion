@@ -34,7 +34,6 @@ const (
 // projection of its role Secret's two gh files its container alone mounts at GHConfigDir.
 const (
 	provisionVolume = "provision"
-	feedVolume      = "feed"
 	stateVolume     = "state"
 	tempVolume      = "tmp"
 	configVolume    = "config"
@@ -103,7 +102,7 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // launcher role's, the controller's included: every launcherRoles entry holds a GitHub credential.
 func legionVolumeNames() []string {
 	names := []string{
-		issueVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role))
@@ -118,10 +117,11 @@ func legionVolumeNames() []string {
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // each role container and the image probe's: an operator's mount may be neither at, under, nor
 // above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
-// deployment enrolls, and GHConfigDir whether or not the pod is an issue's.
+// deployment enrolls, GHConfigDir whether or not the pod is an issue's, and FeedDir, which TreeRoot
+// already covers, is named for the read-only mount every issue pod's role container carries there.
 func legionMountPaths() []string {
 	paths := []string{
-		TreeRoot, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
+		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
 		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
 	}
 	slices.Sort(paths)
@@ -163,6 +163,10 @@ type launch struct {
 	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
 	// controller's is held to one.
 	sessionsInDatabase bool
+	// cache is the issue's repository's cache as the stores showed it when the pod was readied
+	// (issuePod.provision): its fetch container is told the cache's address only while it is Ready
+	// (fetchEnvironment).
+	cache CacheStatus
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -420,6 +424,7 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			{Name: configVolume, MountPath: xdgConfigHome},
 			{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true},
 		}
+		mounts = append(mounts, l.kind.agentMounts()...)
 		containers = append(containers, corev1.Container{
 			Name:  string(role),
 			Image: r.image,
@@ -688,15 +693,21 @@ func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
 
-// fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, and the
-// mounted provisioning token. Its git reads no configuration but its own, so it is told no config
-// home.
-func fetchEnvironment() []corev1.EnvVar {
-	return []corev1.EnvVar{
+// fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
+// provisioning token, and, while the repository's cache is Ready (l.cache), the cache's address,
+// which `fetch` streams the feed from before it asks GitHub for the delta; with no ready cache it
+// clones from GitHub and says so. Its git reads no configuration but its own, so it is told no
+// config home.
+func fetchEnvironment(l launch) []corev1.EnvVar {
+	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "TMPDIR", Value: initTempDir},
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
 	}
+	if l.cache.Ready {
+		env = append(env, corev1.EnvVar{Name: "LEGION_REPOSITORY_CACHE_URL", Value: l.cache.Address})
+	}
+	return env
 }
 
 // initEnvironment is `workspace-init provision`'s contract (research runtime §2.3), the one
