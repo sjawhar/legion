@@ -39,6 +39,12 @@ func (handoffTokens) Token(_ context.Context, role appauth.AppRole, _ string) (a
 	return appauth.Lease{Token: string(role) + "-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
+func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // handoffFile is a handoff of phase word as a worker stamps it for issue: READY reads only whether
 // the head still carries the directory, never what a file holds.
 func handoffFile(word, issue string) string {

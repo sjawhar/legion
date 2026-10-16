@@ -1163,6 +1163,12 @@ func (c *controllerCredentialTokens) Token(context.Context, appauth.AppRole, str
 	return appauth.Lease{Token: c.token, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
+func (c *controllerCredentialTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := c.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // requestsTo answers how many of d's recorded requests were to path.
 func requestsTo(d *controllerDaemon, path string) int {
 	n := 0

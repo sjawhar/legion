@@ -106,6 +106,12 @@ func (roleTokens) Token(_ context.Context, role appauth.AppRole, owner string) (
 	return appauth.Lease{Token: string(role) + "-app-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
+func (t roleTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // branchAdmission is an outbox over a fresh database whose admission admits LEGION-208 when the
 // test applies its todo, with GitHub answered by github and the runner's clock the test's own.
 type branchAdmission struct {

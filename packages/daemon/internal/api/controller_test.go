@@ -136,6 +136,10 @@ func (failingTokens) Token(context.Context, appauth.AppRole, string) (appauth.Le
 	return appauth.Lease{}, errors.New("github is down")
 }
 
+func (failingTokens) ReadToken(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	return appauth.Lease{}, errors.New("github is down")
+}
+
 // The route that mints a controller capability answers only the operator's bearer, and a refusal
 // mints nothing: the incumbent controller keeps working.
 func TestControllerSecretRefusesWithoutTheOperatorBearer(t *testing.T) {
