@@ -783,6 +783,12 @@
   caller that no longer resolves, depending on a race. The published image, built in module mode
   with gorilla v1.5.3, never did. The page reconnects with backoff after either close.
 
+- The delivery live hub arms its one timer for the moment the next view is due, rather than for a
+  wait counted from the moment its worker read the clock (LEGION-690). A wait put the timer late by
+  however long the worker took between that read and the arm, and a test that moved its clock
+  forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
+  timer armed for a moment the clock has already passed fires at once.
+
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
   his approval only while the approved version holds a block under the same id whose stored

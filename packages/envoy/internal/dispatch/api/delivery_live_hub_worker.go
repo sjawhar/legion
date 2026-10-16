@@ -42,7 +42,7 @@ func (h *deliveryHub) work(ctx context.Context) {
 			timer = nil
 		}
 		if ok {
-			timer = h.clock.AfterFunc(next.Sub(now), func() { signal(h.wakeWork) })
+			timer = h.clock.At(next, func() { signal(h.wakeWork) })
 		}
 		select {
 		case <-ctx.Done():
