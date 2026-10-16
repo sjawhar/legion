@@ -312,12 +312,22 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 // --- GET /v1/settings, POST /v1/secrets/{name}/reread (public: no proof) ---
 
 // Settings is GET /v1/settings's exact response shape: the namespace and key every agent secret
-// lives under, and the account and region they are in.
+// lives under, the account and region (AWS) or project (GCP) they are in, and which store the
+// broker uses.
 type Settings struct {
 	SecretsPrefix string `json:"secrets_prefix"`
 	KMSKeyARN     string `json:"kms_key_arn"`
 	AWSAccountID  string `json:"aws_account_id"`
 	AWSRegion     string `json:"aws_region"`
+	// Store is "" or "aws-secrets-manager" for the AWS backend (a broker that predates this field
+	// answers neither), or "gcp-secret-manager" for the GCP backend.
+	Store string `json:"store,omitempty"`
+	// KMSKeyName is the GCP backend's CMEK key name
+	// (projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>), the GCP
+	// counterpart of KMSKeyARN.
+	KMSKeyName string `json:"kms_key_name,omitempty"`
+	// GCPProject is the GCP backend's project, the counterpart of AWSAccountID.
+	GCPProject string `json:"gcp_project,omitempty"`
 }
 
 func (c *client) Settings(ctx context.Context) (Settings, error) {
