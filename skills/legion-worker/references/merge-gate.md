@@ -25,11 +25,14 @@ the head voids it.
   every commit above that push's head changes only `.legion/` (a push that changes only
   `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
   `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
-  `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set, from
-  the base branch's rulesets
-  (`gh api repos/<o>/<r>/rules/branches/<base> --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'`)
+  `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. A branch endpoint takes
+  the base as a URL path, each segment escaped and each `/` kept (a raw `#` or `%` reads another
+  branch), built from the name as GitHub returns it, never pasted:
+  `base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && base_path=$(jq -rn --arg b "$base" '$b | split("/") | map(@uri) | join("/")')`. The
+  required set, from the base branch's rulesets
+  (`gh api "repos/<o>/<r>/rules/branches/$base_path" --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'`)
   and its branch protection, when it has any
-  (`gh api repos/<o>/<r>/branches/<base> --jq '.protection.required_status_checks.checks[].context'`);
+  (`gh api "repos/<o>/<r>/branches/$base_path" --jq '.protection.required_status_checks.checks[].context'`);
   a read GitHub refuses is reported to the architect, never guessed. The CI head, the head of the
   branch's newest `pull_request` run
   (`gh api 'repos/<o>/<r>/actions/runs?branch=<headRefName>&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'`,
