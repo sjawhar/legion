@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +26,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-const branchMainCommit = "c0ffee0123456789abcdef0123456789abcdef01"
+const branchBaseCommit = "c0ffee0123456789abcdef0123456789abcdef01"
 
 // branchCreated, branchExists and branchRefused are GitHub's answers to a create of a ref.
 var (
 	branchCreated = func() (int, string) {
-		return http.StatusCreated, `{"ref":"refs/heads/legion/LEGION-208","object":{"sha":"` + branchMainCommit + `"}}`
+		return http.StatusCreated, `{"ref":"refs/heads/legion/LEGION-208","object":{"sha":"` + branchBaseCommit + `"}}`
 	}
 	branchExists = func() (int, string) {
 		return http.StatusUnprocessableEntity, `{"message":"Reference already exists","status":"422"}`
@@ -40,14 +41,17 @@ var (
 	}
 )
 
-// branchGitHub is GitHub's REST API for acme/widgets as an issue_branch row calls it: main's ref, and
-// each create of a ref answered by answer. It records each create, with the launches the runtime had
-// made when it came.
+// branchGitHub is GitHub's REST API for acme/widgets as an issue_branch row calls it: the
+// repository, naming defaultBranch (main unless a test sets another before its first request), the
+// ref of that branch, and each create of a ref answered by answer. It records each read's path, in
+// order, and each create, with the launches the runtime had made when it came.
 type branchGitHub struct {
-	url     string
-	mu      sync.Mutex
-	answer  func() (int, string)
-	creates []branchCreate
+	url           string
+	mu            sync.Mutex
+	defaultBranch string
+	answer        func() (int, string)
+	reads         []string
+	creates       []branchCreate
 }
 
 type branchCreate struct {
@@ -57,11 +61,19 @@ type branchCreate struct {
 
 func newBranchGitHub(t *testing.T, rt *fake.Runtime, answer func() (int, string)) *branchGitHub {
 	t.Helper()
-	g := &branchGitHub{answer: answer}
+	g := &branchGitHub{answer: answer, defaultBranch: "main"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		base := g.defaultBranch
+		if r.Method == http.MethodGet {
+			g.reads = append(g.reads, r.URL.Path)
+		}
+		g.mu.Unlock()
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/git/ref/heads/main":
-			_, _ = io.WriteString(w, `{"ref":"refs/heads/main","object":{"sha":"`+branchMainCommit+`","type":"commit"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
+			_, _ = io.WriteString(w, `{"full_name":"acme/widgets","default_branch":"`+base+`"}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/git/ref/heads/"+base:
+			_, _ = io.WriteString(w, `{"ref":"refs/heads/`+base+`","object":{"sha":"`+branchBaseCommit+`","type":"commit"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/widgets/git/refs":
 			var body struct{ Ref, SHA string }
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -93,11 +105,27 @@ func (g *branchGitHub) created() []branchCreate {
 	return append([]branchCreate(nil), g.creates...)
 }
 
+func (g *branchGitHub) read() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.reads...)
+}
+
 func (g *branchGitHub) answerWith(answer func() (int, string)) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.answer = answer
 }
+
+// defaultBranchOf is the outbox's and the specs' reader of a repository's default branch over
+// github, as the daemon wires it (defaultBranches.Of), with roleTokens' implement App.
+func defaultBranchOf(github *branchGitHub) func(context.Context, ghrepo.Repository) (string, error) {
+	return newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now).Of
+}
+
+// mainBranch is a repository's default branch for an outbox test whose subject is not the default
+// branch: main, asking GitHub nothing.
+func mainBranch(context.Context, ghrepo.Repository) (string, error) { return "main", nil }
 
 // roleTokens mints a token named for the App it is minted as, so a request shows which App made it.
 type roleTokens struct{}
@@ -107,7 +135,8 @@ func (roleTokens) Token(_ context.Context, role appauth.AppRole, owner string) (
 }
 
 // branchAdmission is an outbox over a fresh database whose admission admits LEGION-208 when the
-// test applies its todo, with GitHub answered by github and the runner's clock the test's own.
+// test applies its todo, with GitHub answered by github, whose default branch is release/v7.1, and
+// the runner's clock the test's own.
 type branchAdmission struct {
 	runner *outbox
 	rt     *fake.Runtime
@@ -121,6 +150,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	records := record.NewStore()
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	github := newBranchGitHub(t, rt, answer)
+	github.defaultBranch = "release/v7.1"
 	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now()
@@ -128,10 +158,13 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: roleTokens{}, project: "legion", stateDir: t.TempDir(),
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url,
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url, defaultBranch: defaultBranchOf(github),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
-		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+		provision: func(_ context.Context, request workspace.Request) (workspace.Workspace, error) {
+			if request.DefaultBranch != "release/v7.1" {
+				t.Errorf("the workspace of %s was provisioned at %q, want GitHub's default branch release/v7.1", request.Issue, request.DefaultBranch)
+			}
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
 	}
@@ -157,10 +190,12 @@ func (b *branchAdmission) launches() int {
 	return len(b.rt.CallsOf("Spawn")) + len(b.rt.CallsOf("Resume"))
 }
 
-// Admitting a root creates its branch on GitHub at main, as the implement App, before its
-// architect starts: the architect's start waits for the branch's row. A branch GitHub already has
-// (its create answered 422 "Reference already exists") is the same success.
-func TestAdmissionCreatesTheRootsBranchAtMainBeforeItsArchitectStarts(t *testing.T) {
+// Admitting a root creates its branch on GitHub at the repository's default branch, as GitHub
+// names it, as the implement App, before its architect starts: the architect's start waits for the
+// branch's row. The row reads the repository's default branch, then that branch's ref, and creates
+// the branch at its commit. A branch GitHub already has (its create answered 422 "Reference already
+// exists") is the same success.
+func TestAdmissionCreatesTheRootsBranchAtTheDefaultBranchBeforeItsArchitectStarts(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		answer func() (int, string)
@@ -174,7 +209,10 @@ func TestAdmissionCreatesTheRootsBranchAtMainBeforeItsArchitectStarts(t *testing
 			admitted.run(t)
 			admitted.run(t)
 
-			want := branchCreate{ref: "refs/heads/legion/LEGION-208", sha: branchMainCommit, authorization: "Bearer implement-app-token-for-acme"}
+			if got, want := github.read(), []string{"/repos/acme/widgets", "/repos/acme/widgets/git/ref/heads/release/v7.1"}; !slices.Equal(got, want) {
+				t.Fatalf("GitHub reads = %q, want %q", got, want)
+			}
+			want := branchCreate{ref: "refs/heads/legion/LEGION-208", sha: branchBaseCommit, authorization: "Bearer implement-app-token-for-acme"}
 			if got := github.created(); len(got) != 1 || got[0] != want {
 				t.Fatalf("GitHub creates = %+v, want one, %+v, before any launch", got, want)
 			}
@@ -202,7 +240,7 @@ func TestARefusedBranchCreateHoldsTheArchitectBackUntilACreatePasses(t *testing.
 		t.Fatalf("GitHub saw %d creates, want one per run", got)
 	}
 	want := "create the branch of LEGION-208, which its roles' starts wait for: create refs/heads/legion/LEGION-208 on acme/widgets at " +
-		branchMainCommit + `: GitHub answered POST /git/refs with 403: {"message":"Resource not accessible by integration","status":"403"}`
+		branchBaseCommit + `: GitHub answered POST /git/refs with 403: {"message":"Resource not accessible by integration","status":"403"}`
 	var lastError string
 	var attempts int
 	if err := admitted.runner.pool.QueryRow(context.Background(), "select last_error, attempts from outbox where kind = 'issue_branch'").Scan(&lastError, &attempts); err != nil {
