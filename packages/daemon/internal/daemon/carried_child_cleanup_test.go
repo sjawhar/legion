@@ -143,9 +143,9 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	records := record.NewStore()
 	expired := time.Now().Add(-time.Minute)
 	parent := rootKey
-	root := record.Issue{Key: rootKey, Project: "LEGION", Tree: rootKey, Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A",
+	root := record.Issue{Key: rootKey, Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: rootKey, Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A",
 		LingerUntil: &expired, LastDispatchSeq: 1}
-	child := record.Issue{Key: childKey, Project: "LEGION", Tree: childKey, Parent: &parent, Title: "child", Phase: phase.Implementing, Generation: 2,
+	child := record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: childKey, Parent: &parent, Title: "child", Phase: phase.Implementing, Generation: 2,
 		Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "B", LastDispatchSeq: 2}
 	for _, issue := range []record.Issue{root, child} {
 		putOutboxIssue(t, pool, records, issue)

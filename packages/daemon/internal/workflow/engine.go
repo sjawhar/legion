@@ -38,6 +38,9 @@ type Config struct {
 	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
 	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
 	ReviewAppLogin string
+	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
+	// records an issue's repository and default branch from when it first records the issue.
+	Repositories Repositories
 }
 
 // Engine interprets Table and writes only records and outbox rows through the supplied Store.
@@ -135,6 +138,14 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	}
 	if issue == nil {
 		return e.recordChildUnderLiveTree(ctx, tx, fact)
+	}
+	// The record keeps the repository it was recorded with, so a newer event resolving the issue
+	// to another is not applied, which the issue is told. This runs before any fence below: an
+	// edit of the repository alone changes no status.
+	if fact.Seq == 0 || fact.Seq > issue.LastDispatchSeq {
+		if err := e.NoteRepositoryKept(ctx, tx, *issue, fact.ResolvedRepo); err != nil {
+			return intake.Result{}, err
+		}
 	}
 	if consumed, err := e.rejectStaleHandover(ctx, tx, *issue, fact); err != nil || consumed {
 		return intake.Result{}, err
@@ -283,7 +294,21 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 	if err != nil || !live {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.enterChild(ctx, tx, *root, fact, root.Generation)
+	return intake.Result{}, e.recordChild(ctx, tx, *root, fact)
+}
+
+// recordChild records an unrecorded todo child under root's live tree on the repository its event
+// resolves to, or, when that is none or one Legion does not serve, records nothing and says why on
+// the child and to the tree's architect.
+func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue) error {
+	resolution, err := e.ResolveRepository(fact.ResolvedRepo)
+	if err != nil {
+		return err
+	}
+	if resolution.Refusal != "" {
+		return e.refuseChild(ctx, tx, root, fact.Key, fact.ResolvedRepo, resolution)
+	}
+	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution.Repo, resolution.DefaultBranch)
 }
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
@@ -325,18 +350,20 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, child.Repo, child.DefaultBranch); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
-// enterChild records a todo child under root's live tree, admitted at generation, and starts its
-// planning when the tree's gate is open.
-func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64) error {
+// enterChild records a todo child under root's live tree, admitted at generation on repo at its
+// default branch, and starts its planning when the tree's gate is open. A re-entered child keeps
+// the repository it was first recorded with.
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, repo, defaultBranch string) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status}
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
+		Repo: repo, DefaultBranch: defaultBranch}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}

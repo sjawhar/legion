@@ -87,6 +87,12 @@ type workflowRuntime struct {
 	// and kept defaultBranchTTL: the base the outbox creates an issue's branch at and provisions
 	// its workspace from, and the one every launch names (specs.defaultBranch).
 	defaultBranches *defaultBranches
+	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
+	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
+	// mapped repository; mappingMu serializes the mapping's re-reads.
+	repositories *repositories
+	installs     appauth.Installations
+	mappingMu    sync.Mutex
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.

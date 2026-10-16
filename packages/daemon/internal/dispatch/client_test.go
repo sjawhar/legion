@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -78,6 +79,71 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	}
 	if issue.Parent == nil || *issue.Parent != "LEGION-1" {
 		t.Fatalf("issue parent = %v, want LEGION-1", issue.Parent)
+	}
+}
+
+// An issue's resolved repository is Dispatch's to compute (its own, else its nearest ancestor's,
+// else the project's default); the list and the detail carry it, and null reads as none.
+func TestListAndDetailCarryTheResolvedRepository(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/issues":
+			writeJSON(t, w, []map[string]any{
+				{"key": "LEGION-1", "status": "todo", "rank": "a", "repo": nil, "resolved_repo": "acme/widgets"},
+				{"key": "LEGION-2", "status": "todo", "rank": "b", "repo": nil, "resolved_repo": nil},
+			})
+		case "/api/v1/issues/LEGION-3":
+			writeJSON(t, w, map[string]any{"key": "LEGION-3", "status": "todo", "rank": "c", "repo": "acme/gadgets", "resolved_repo": "acme/gadgets"})
+		default:
+			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	client := New(server.URL, dispatchToken)
+
+	issues, err := client.ListIssues(context.Background(), "LEGION", nil)
+	if err != nil {
+		t.Fatalf("list issues: %v", err)
+	}
+	if len(issues) != 2 || issues[0].ResolvedRepo != "acme/widgets" || issues[1].ResolvedRepo != "" {
+		t.Fatalf("listed issues = %#v, want LEGION-1 resolved to acme/widgets and LEGION-2 to none", issues)
+	}
+	issue, err := client.GetIssue(context.Background(), "LEGION-3")
+	if err != nil {
+		t.Fatalf("get issue: %v", err)
+	}
+	if issue.ResolvedRepo != "acme/gadgets" {
+		t.Fatalf("issue = %#v, want it resolved to acme/gadgets", issue)
+	}
+}
+
+// The repository mapping is every project's (GET /api/v1/settings/repo-projects), each mapping
+// with its project and whether it is that project's default; the daemon keeps its own project's.
+func TestListRepoProjectsReadsEveryMappingWithItsDefault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+			t.Fatalf("request = %s %s, want GET /api/v1/settings/repo-projects", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		writeJSON(t, w, []map[string]any{
+			{"repo": "acme/gadgets", "project": "LEGION", "default": false, "created_by": nil, "created_at": "2026-10-16T12:00:00Z"},
+			{"repo": "acme/widgets", "project": "LEGION", "default": true, "created_by": nil, "created_at": "2026-10-16T12:00:00Z"},
+			{"repo": "other/thing", "project": "OTHER", "default": true, "created_by": nil, "created_at": "2026-10-16T12:00:00Z"},
+		})
+	}))
+	defer server.Close()
+
+	mappings, err := New(server.URL, dispatchToken).ListRepoProjects(context.Background())
+	if err != nil {
+		t.Fatalf("list repo projects: %v", err)
+	}
+	want := []RepoProject{
+		{Repo: "acme/gadgets", Project: "LEGION"},
+		{Repo: "acme/widgets", Project: "LEGION", Default: true},
+		{Repo: "other/thing", Project: "OTHER", Default: true},
+	}
+	if !reflect.DeepEqual(mappings, want) {
+		t.Fatalf("mappings = %#v, want %#v", mappings, want)
 	}
 }
 

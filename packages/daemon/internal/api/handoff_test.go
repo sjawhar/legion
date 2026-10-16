@@ -224,7 +224,7 @@ func seedIssueAt(t *testing.T, h *harness, key string, at phase.Phase) {
 	t.Helper()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: key, Tree: key, Project: testProject, Title: key, Phase: at, Generation: 1, Status: "in_progress",
+			Key: key, Repo: "acme/widgets", DefaultBranch: "main", Tree: key, Project: testProject, Title: key, Phase: at, Generation: 1, Status: "in_progress",
 		})
 	})
 	if err != nil {
@@ -613,7 +613,7 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	h := newHarness(t)
 	github := newHandoffGitHub(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	facts := &factRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
@@ -622,10 +622,10 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
 	}).Handler
 	// The tester takes run 1's task, and the child is then re-entered at run 2 while it works.
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
@@ -679,7 +679,7 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 	github := newHandoffGitHub(t)
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
@@ -687,7 +687,7 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
 	}).Handler
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	h.recordIssue(issue)
 	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
@@ -852,7 +852,7 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _ := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
-			h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			token, boot := h.launch("LEGION-208", claim.RoleTester)
 			session := "ses_tester_foreign"
@@ -947,7 +947,7 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	// The tester served run 1, and the child is re-entered at run 2 once that turn ends.
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
@@ -958,7 +958,7 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
 		t.Fatalf("end the first run's turn: %v", err)
 	}
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	// The next run's task is sent, a foreign turn confirms it, and the agent refuses it as busy.
 	id := "outbox:99"
@@ -1018,7 +1018,7 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 			delivered := tc.delivered
 			github := newHandoffGitHub(t)
 			h, facts := newHandoffHarness(t, github, nil, nil)
-			h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 			machine, ok := h.supervisor.Machine(tester.token)

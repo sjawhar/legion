@@ -151,7 +151,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	github := newBranchGitHub(t, rt, answer)
 	github.defaultBranch = "release/v7.1"
-	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now()
 	var logs bytes.Buffer
@@ -169,7 +169,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 		},
 	}
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "todo", intake.DispatchIssue{
-		Key: "LEGION-208", Seq: 1, Type: "issue.created", Status: "todo", Title: "Workflow", Rank: "U", HandedOver: true,
+		Key: "LEGION-208", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.created", Status: "todo", Title: "Workflow", Rank: "U", HandedOver: true,
 	}, engine, admission); err != nil {
 		t.Fatalf("admit LEGION-208: %v", err)
 	}
@@ -282,12 +282,12 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
 		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url}
 	until := time.Now().Add(time.Hour)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
 		Generation: 2, Status: "in_progress", Rank: "U"})
 	parent := "LEGION-210"
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Title: "Closed", Phase: phase.Done,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-210", Title: "Closed", Phase: phase.Done,
 		Generation: 1, Status: "backlog", Rank: "V", LingerUntil: &until})
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-211", Project: "LEGION", Tree: "LEGION-210", Parent: &parent, Title: "Child",
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-210", Parent: &parent, Title: "Child",
 		Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
 
 	for _, row := range []record.OutboxRow{

@@ -45,11 +45,11 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	now := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
-			{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
-			{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
-			{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true},
-			{Key: "LEGION-214", Tree: "LEGION-214", Status: "todo", Rank: "00002", HandedOver: true},
+			{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-210", Status: "done", Rank: "00000"},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
+			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+			{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing, HandedOver: true},
+			{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-214", Status: "todo", Rank: "00002", HandedOver: true},
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
@@ -127,7 +127,7 @@ func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
 func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	token := claim.Token("legion-208-architect")
 	store := projectionStore{
-		issues: []record.Issue{{Key: "LEGION-208", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
+		issues: []record.Issue{{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: token}},
 		},
@@ -153,8 +153,8 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-208", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
-			{Key: "LEGION-209", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Status: "needs_review", Phase: phase.Reviewing},
+			{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-209", Status: "needs_review", Phase: phase.Reviewing},
 		},
 		phases: map[string][]record.PhaseRow{
 			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "gone-reviewer",

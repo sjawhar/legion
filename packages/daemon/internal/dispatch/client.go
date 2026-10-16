@@ -58,13 +58,14 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			}
 		}
 		issues = append(issues, IssueSummary{
-			Key:        issue.Key,
-			Title:      issue.Title,
-			Status:     issue.Status,
-			Parent:     issue.Parent,
-			Rank:       issue.Rank,
-			HandedOver: CarriesLegionLabel(issue.Labels),
-			LastSeq:    issue.LastSeq,
+			Key:          issue.Key,
+			Title:        issue.Title,
+			Status:       issue.Status,
+			Parent:       issue.Parent,
+			Rank:         issue.Rank,
+			HandedOver:   CarriesLegionLabel(issue.Labels),
+			LastSeq:      issue.LastSeq,
+			ResolvedRepo: deref(issue.ResolvedRepo),
 		})
 	}
 	return issues, nil
@@ -87,7 +88,29 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 		HandedOver:        CarriesLegionLabel(response.Labels),
 		PrimaryArtifactID: response.PrimaryArtifactID,
 		LastSeq:           response.LastSeq,
+		ResolvedRepo:      deref(response.ResolvedRepo),
 	}, nil
+}
+
+// ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
+// which the caller filters to its own project.
+func (c *HTTPClient) ListRepoProjects(ctx context.Context) ([]RepoProject, error) {
+	var response []repoProjectResponse
+	if err := c.request(ctx, http.MethodGet, "/api/v1/settings/repo-projects", nil, &response); err != nil {
+		return nil, err
+	}
+	mappings := make([]RepoProject, 0, len(response))
+	for _, mapping := range response {
+		mappings = append(mappings, RepoProject{Repo: mapping.Repo, Project: mapping.Project, Default: mapping.Default})
+	}
+	return mappings, nil
+}
+
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // SetStatus updates an issue through PATCH /api/v1/issues/{key}.
@@ -285,13 +308,14 @@ func dispatchError(status int, statusText string, payload []byte) *Error {
 }
 
 type issueSummaryResponse struct {
-	Key     string   `json:"key"`
-	Title   string   `json:"title"`
-	Status  string   `json:"status"`
-	Parent  *string  `json:"parent"`
-	Rank    string   `json:"rank"`
-	Labels  []string `json:"labels"`
-	LastSeq int64    `json:"last_seq"`
+	Key          string   `json:"key"`
+	Title        string   `json:"title"`
+	Status       string   `json:"status"`
+	Parent       *string  `json:"parent"`
+	Rank         string   `json:"rank"`
+	Labels       []string `json:"labels"`
+	LastSeq      int64    `json:"last_seq"`
+	ResolvedRepo *string  `json:"resolved_repo"`
 }
 
 type issueResponse struct {
@@ -304,6 +328,13 @@ type issueResponse struct {
 	Labels            []string `json:"labels"`
 	PrimaryArtifactID string   `json:"primary_artifact_id"`
 	LastSeq           int64    `json:"last_seq"`
+	ResolvedRepo      *string  `json:"resolved_repo"`
+}
+
+type repoProjectResponse struct {
+	Repo    string `json:"repo"`
+	Project string `json:"project"`
+	Default bool   `json:"default"`
 }
 
 type issueEventResponse struct {

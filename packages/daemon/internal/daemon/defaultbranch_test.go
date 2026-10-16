@@ -23,6 +23,7 @@ type repositoryGitHub struct {
 	mu            sync.Mutex
 	status        int
 	defaultBranch string
+	fullName      string
 	authorized    []string
 	release       chan struct{}
 }
@@ -39,7 +40,7 @@ func newRepositoryGitHub(t *testing.T, defaultBranch string) *repositoryGitHub {
 		g.reads.Add(1)
 		g.mu.Lock()
 		g.authorized = append(g.authorized, r.Header.Get("Authorization"))
-		status, branch, release := g.status, g.defaultBranch, g.release
+		status, branch, release, fullName := g.status, g.defaultBranch, g.release, g.fullName
 		g.mu.Unlock()
 		if release != nil {
 			<-release
@@ -49,7 +50,10 @@ func newRepositoryGitHub(t *testing.T, defaultBranch string) *repositoryGitHub {
 			_, _ = io.WriteString(w, `{"message":"Server Error"}`)
 			return
 		}
-		_, _ = io.WriteString(w, `{"full_name":"acme/widgets","default_branch":"`+branch+`"}`)
+		if fullName == "" {
+			fullName = "acme/widgets"
+		}
+		_, _ = io.WriteString(w, `{"full_name":"`+fullName+`","default_branch":"`+branch+`"}`)
 	}))
 	t.Cleanup(server.Close)
 	g.url = server.URL
@@ -113,6 +117,38 @@ func TestDefaultBranchesKeepsNoRefusal(t *testing.T) {
 	}
 	if reads := github.reads.Load(); reads != 2 {
 		t.Fatalf("GitHub was asked %d times, want twice: the refusal is not kept", reads)
+	}
+}
+
+// Named is a repository as GitHub names it, read with its default branch and kept the same TTL,
+// whatever spelling it was asked by: Dispatch's mapping is lowercased, and GitHub's events carry
+// GitHub's spelling. Kept is the last read the daemon made, however old, and asks GitHub nothing:
+// what the workflow records an issue with inside its transaction, once the read was made.
+func TestDefaultBranchesNamesTheRepositoryAndKeepsTheLastRead(t *testing.T) {
+	github := newRepositoryGitHub(t, "release/v7.1")
+	github.fullName = "Acme/Widgets"
+	clock := time.Now()
+	branches := newDefaultBranches(roleTokens{}, github.url, 10*time.Minute, func() time.Time { return clock })
+
+	if _, ok := branches.Kept("acme/widgets"); ok {
+		t.Fatal("Kept answered before any read")
+	}
+	named, err := branches.Named(context.Background(), ghrepo.MustParse("acme/widgets"))
+	if err != nil || named.Name != ghrepo.MustParse("Acme/Widgets") || named.DefaultBranch != "release/v7.1" {
+		t.Fatalf("Named = %+v, %v; want Acme/Widgets at release/v7.1", named, err)
+	}
+	if got, err := branches.Of(context.Background(), ghrepo.MustParse("Acme/Widgets")); err != nil || got != "release/v7.1" {
+		t.Fatalf("Of in GitHub's spelling = %q, %v", got, err)
+	}
+	if reads := github.reads.Load(); reads != 1 {
+		t.Fatalf("two spellings of one repository asked GitHub %d times, want once", reads)
+	}
+	clock = clock.Add(time.Hour)
+	if kept, ok := branches.Kept("ACME/widgets"); !ok || kept != named {
+		t.Fatalf("Kept an hour later = %+v, %v; want the read %+v", kept, ok, named)
+	}
+	if reads := github.reads.Load(); reads != 1 {
+		t.Fatalf("Kept asked GitHub: %d reads", reads)
 	}
 }
 
