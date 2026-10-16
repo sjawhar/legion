@@ -5097,16 +5097,28 @@ case $last in
 esac
 [ "$why" = "$expected" ] || fail "$tree3's implementer claim $held_claim failed with '$why', but its last relaunch's death leads to '$expected'"
 note "the daemon failed $held_claim because $why ($counts, bound $launch_failure_limit)"
-# The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
-controller_notice() {
+# controller_deliveries [NEEDLE] prints the raw session lines of the controller's sessions that are
+# Envoy deliveries (envoy-message custom messages), those holding NEEDLE when one is given, in file
+# order, and prints nothing and exits 0 when none match: grep exits 1 on no match, which errexit
+# would take as a failure, and `|| true` keeps the scan going. Every scan of the controller's
+# deliveries below reads it.
+controller_deliveries() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    grep -F '"customType":"envoy-message"' "$file" | grep -qF "$(notice_needle held "$tree3")" && return 0
+    if [ $# -eq 0 ]; then
+      grep -F '"customType":"envoy-message"' -- "$file"
+    else
+      grep -F '"customType":"envoy-message"' -- "$file" | grep -F -- "$1"
+    fi || true
   done
-  return 1
 }
-until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_notice
+# controller_received NEEDLE: an Envoy delivery in the controller's session holds NEEDLE. The
+# consumer is [ -n … ] over the whole output, never a grep -q on it, which would close the pipe
+# early (github-credential's notes on SIGPIPE under pipefail say why).
+controller_received() { [ -n "$(controller_deliveries "$1")" ]; }
+# The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
+until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_received "$(notice_needle held "$tree3")"
 note "the controller session $controller_session received the held notice for $tree3"
 # That session is under the run's own home, and the operator's profile root holds none of the
 # controller's profile (make_omp_home, lib/omp-home.sh).
@@ -5124,19 +5136,18 @@ note "the controller's session is under $profile_agent/sessions; $HOME/.omp/prof
 # pool-capacity when the sending daemon's probe found the pool cold, and nothing else;
 # model-fallback and resource-limits are present, so the daemon names neither. The daemon that
 # reported the gap keeps running: every checkpoint after this one is that evidence.
-# tick_open_capabilities prints one object per tick delivery in the controller's sessions: the
-# list, and the delivery trimmed.
-tick_open_capabilities() {
-  local file
-  for file in "$profile_agent/sessions"/*/*.jsonl; do
-    [ -f "$file" ] || continue
-    jq -R -s -c -L "$root/scripts/e2e/lib" --arg tick "$(notice_needle tick "$project")" 'include "controller-ticks"; controller_ticks($tick)[]' "$file"
-  done
+# controller_ticks prints one object per tick delivery in the controller's sessions: the list, and
+# the delivery trimmed (the module's controller_ticks($tick), lib/controller-ticks.jq, over the
+# controller's deliveries; the shell function and the jq def share the name on purpose).
+controller_ticks() {
+  local tick
+  tick=$(notice_needle tick "$project")
+  controller_deliveries "$tick" | jq -R -s -c -L "$root/scripts/e2e/lib" --arg tick "$tick" 'include "controller-ticks"; controller_ticks($tick)[]'
 }
 # The daemon's periodic tick (controller_wake_interval_seconds: 60) reaches the controller's session.
-controller_ticked() { tick_open_capabilities | jq -s -e 'length > 0' >/dev/null; }
+controller_ticked() { controller_ticks | jq -s -e 'length > 0' >/dev/null; }
 until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_ticked
-tick_open_capabilities | jq -s . >"$evidence/controller-ticks.json"
+controller_ticks | jq -s . >"$evidence/controller-ticks.json"
 # Each tick's list is judged alone, as a set, against the two lists the deployment can open:
 # ["secrets"] and ["secrets","pool-capacity"]. Each tick alone, not all against one set:
 # restart-mid-tree, address-moved-env-same-pod and address-moved-stream-new-pod each ran a new
@@ -5200,14 +5211,7 @@ note "the daemon warned at the report: $(jq -r .msg <<<"$warned")"
 # The next tick names the open row to the controller (a tick alone carries openCapabilities,
 # admit.Admission.wakeController). controller_tick_names NAME: an Envoy delivery in the controller's
 # session carries openCapabilities and NAME on one line.
-controller_tick_names() {
-  local file
-  for file in "$profile_agent/sessions"/*/*.jsonl; do
-    [ -f "$file" ] || continue
-    grep -F '"customType":"envoy-message"' "$file" | grep -F openCapabilities | grep -qF "$1" && return 0
-  done
-  return 1
-}
+controller_tick_names() { [ -n "$(controller_deliveries openCapabilities | grep -F -- "$1" || true)" ]; }
 until_true 300 "a tick naming web-search among its openCapabilities to reach the controller session $controller_session" controller_tick_names web-search
 note "the controller session $controller_session received a tick naming web-search open"
 # The daemon ran the planner it reported: it answers.
@@ -5245,16 +5249,7 @@ until_true 120 "Dispatch to show $tree3 in backlog" dispatch_status_is "$tree3" 
 note "legion status $tree3 backlog from the operator shell, with the operator bearer: Dispatch moved $tree3 from $before_status to $(dispatch_get "issues/$tree3" | jq -r .status)"
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
-# The controller's walk wakes (LEGION-392). controller_received NEEDLE: an Envoy delivery in the
-# controller's session holds NEEDLE.
-controller_received() {
-  local file
-  for file in "$profile_agent/sessions"/*/*.jsonl; do
-    [ -f "$file" ] || continue
-    grep -F '"customType":"envoy-message"' "$file" | grep -qF "$1" && return 0
-  done
-  return 1
-}
+# The controller's walk wakes (LEGION-392).
 # (1) The controller was launched with the daemon's own design gate policy (gates.design: off): the
 # Oh My Pi running in the controller's directory carries the line in its --append-system-prompt.
 # shellcheck disable=SC2016 # the backticks are the line's own text, never a substitution
