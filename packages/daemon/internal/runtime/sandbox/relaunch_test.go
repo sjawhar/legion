@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -1152,12 +1154,14 @@ const burstImage = "ghcr.io/sjawhar/legion-worker@sha256:0ld00000000000000000000
 // answered so. Half the pods run an image the runtime no longer launches, so the first relaunch into
 // each replaces it and every kind of request a launch makes meets the throttle: the Sandbox's
 // suspension and its Running patch, the wait for the old pod's end, the launcher Secrets' writes
-// and binding, their reads, and the address record. The burst converges: every claim is launched,
-// and none is charged a launch failure.
+// and binding, their reads, and the address record. The informers meet it too: their watches end as
+// the burst begins, and the server refuses their next lists and watches for half a second, so every
+// store's feed is failing while the launches wait for their launchers. The burst converges: every
+// claim is launched, and none is charged a launch failure.
 func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *testing.T) {
 	const issues = 8
 	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer}
-	g := newRig(t, nil)
+	g := newRig(t, nil, withBreakableWatches(), withOptions(func(o *Options) { o.BootTimeout = 15 * time.Second }))
 	type role struct {
 		spec    runtime.SpawnSpec
 		machine *supervise.Machine
@@ -1190,11 +1194,17 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 		}
 	}
 
-	var throttling atomic.Bool
-	var sent, tooMany, serverError, text atomic.Int64
+	var throttling, refusingFeeds atomic.Bool
+	var sent, tooMany, serverError, text, feedRefusals atomic.Int64
 	throttle := func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		switch a.GetVerb() {
 		case "get", "create", "update", "patch", "delete":
+		case "list":
+			if refusingFeeds.Load() {
+				feedRefusals.Add(1)
+				return true, nil, apierrors.NewTooManyRequests("the request has been limited by the API server's flow control", 1)
+			}
+			return false, nil, nil
 		default:
 			return false, nil, nil
 		}
@@ -1221,7 +1231,20 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 	g.dyn.PrependReactor("*", "sandboxes", throttle)
 	g.kube.PrependReactor("*", "secrets", throttle)
 	g.kube.PrependReactor("*", "pods", throttle)
+	refuseWatch := func(k8stesting.Action) (bool, watch.Interface, error) {
+		if !refusingFeeds.Load() {
+			return false, nil, nil
+		}
+		feedRefusals.Add(1)
+		return true, nil, apierrors.NewInternalError(errors.New(etcdThrottle))
+	}
+	g.dyn.PrependWatchReactor("sandboxes", refuseWatch)
+	g.kube.PrependWatchReactor("pods", refuseWatch)
 	throttling.Store(true)
+	refusingFeeds.Store(true)
+	g.breakWatches()
+	testwait.Eventually(t, "the stores' feeds to fail", func() bool { return g.r.sandboxFeed.check() != nil && g.r.podFeed.check() != nil })
+	time.AfterFunc(500*time.Millisecond, func() { refusingFeeds.Store(false) })
 
 	relaunched := make(chan error, len(all))
 	for _, r := range all {
@@ -1256,7 +1279,44 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 		t.Fatalf("the throttle answered %d requests 429, %d 500 and %d with the gRPC text alone of %d sent; want some of each",
 			tooMany.Load(), serverError.Load(), text.Load(), sent.Load())
 	}
-	t.Logf("the throttle answered %d requests 429, %d 500 and %d with the gRPC text alone of %d sent", tooMany.Load(), serverError.Load(), text.Load(), sent.Load())
+	if feedRefusals.Load() == 0 {
+		t.Fatal("the server refused none of the informers' lists and watches")
+	}
+	t.Logf("the throttle answered %d requests 429, %d 500 and %d with the gRPC text alone of %d sent, and refused %d of the informers' lists and watches",
+		tooMany.Load(), serverError.Load(), text.Load(), sent.Load(), feedRefusals.Load())
+}
+
+// A write the server applied and answered timed out (a 504) is sent again and refused as already
+// done: the launch reads what the write left and goes on from it, and is launched, charged nothing.
+func TestAWriteTheServerAppliedButAnsweredTimedOutIsLaunchedUncharged(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	machine, _, _ := supervisedSandboxMachine(t, g, spec)
+	provisioning := secretName(SandboxName(spec.Claim))
+	apply := k8stesting.ObjectReaction(g.kube.Tracker())
+	var answered atomic.Bool
+	g.kube.PrependReactor("create", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		object, err := metaOf(a.(k8stesting.CreateAction).GetObject())
+		if err != nil || object.GetName() != provisioning || !answered.CompareAndSwap(false, true) {
+			return false, nil, nil
+		}
+		g.record(a)
+		if _, _, err := apply(a); err != nil {
+			t.Errorf("apply the create of %s: %v", provisioning, err)
+		}
+		return true, nil, apierrors.NewTimeoutError("the request did not complete in time", 0)
+	})
+	g.launcher(spec.Claim)
+	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
+		t.Fatalf("spawn through a create applied and answered 504: %v", err)
+	}
+	if !answered.Load() {
+		t.Fatalf("the launch never created %s", provisioning)
+	}
+	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Budgets.LaunchFailures != 0 || got.Locator == nil {
+		t.Fatalf("claim after a create applied and answered 504 = %s with %d launch failures and locator %v, want launching with none",
+			got.State, got.Budgets.LaunchFailures, got.Locator)
+	}
 }
 
 // A Resume whose next spec prepare rejects must stop the old role child too. Machine has already

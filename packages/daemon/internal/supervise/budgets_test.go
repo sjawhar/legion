@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync"
@@ -267,29 +268,66 @@ func TestChargedLaunchFailuresAreSpacedByTheBackoff(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t)
-			var mu sync.Mutex
-			tried := map[uint64]time.Time{}
-			h.store.onPut = func(c Claim) {
-				mu.Lock()
-				defer mu.Unlock()
-				if _, seen := tried[c.Generation]; c.State == StateLaunching && !seen {
-					tried[c.Generation] = time.Now()
-				}
+			h := newBareHarness(t)
+			timed := &timedSpecs{Specs: h.specs, at: map[uint64]time.Time{}}
+			h.deps.Specs = timed
+			if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+				t.Fatal(err)
 			}
+			h.start(queuedClaim())
 
 			fail(h)
 
 			h.wantState(StateFailed)
 			h.wantBudgets(Budgets{LaunchFailures: 3})
-			mu.Lock()
-			defer mu.Unlock()
+			timed.mu.Lock()
+			defer timed.mu.Unlock()
 			for generation, least := range map[uint64]time.Duration{2: testLaunchBackoff / 2, 3: testLaunchBackoff} {
-				if gap := tried[generation].Sub(tried[generation-1]); gap < least {
+				if gap := timed.at[generation].Sub(timed.at[generation-1]); gap < least {
 					t.Errorf("try %d came %s after try %d, want at least %s", generation, gap, generation-1, least)
 				}
 			}
 		})
+	}
+}
+
+// timedSpecs records when each generation's launch was built, the moment before the runtime is
+// asked to start it.
+type timedSpecs struct {
+	Specs
+	mu sync.Mutex
+	at map[uint64]time.Time
+}
+
+func (s *timedSpecs) SpawnSpec(ctx context.Context, c Claim) (runtime.SpawnSpec, error) {
+	s.mu.Lock()
+	s.at[c.Generation] = time.Now()
+	s.mu.Unlock()
+	return s.Specs.SpawnSpec(ctx, c)
+}
+
+// A charged launch failure is written before the backoff waits, so the daemon's stop during the
+// wait forgives nothing: the claim is stored launching, with the charge, for the next boot to
+// launch again.
+func TestAChargeOutlivesADaemonStopDuringTheBackoff(t *testing.T) {
+	h := newBareHarness(t)
+	h.deps.Timeouts.LaunchBackoff = time.Hour
+	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+		t.Fatal(err)
+	}
+	h.start(queuedClaim())
+	h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom})
+	stopping, stop := context.WithTimeout(h.ctx, 50*time.Millisecond)
+	defer stop()
+
+	if err := h.m.Handle(stopping, RequestSpawn{Claim: testToken}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("spawn whose backoff the stop cut short = %v, want the stop's context error", err)
+	}
+
+	h.wantCalls("Spawn", 1)
+	if stored := h.store.load(testToken); stored.State != StateLaunching || stored.Budgets.LaunchFailures != 1 || stored.Locator != nil {
+		t.Fatalf("stored claim after a stop in the backoff = %s with budgets %+v and locator %v, want launching with the charge and no process",
+			stored.State, stored.Budgets, stored.Locator)
 	}
 }
 

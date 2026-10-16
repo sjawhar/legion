@@ -22,8 +22,10 @@ import (
 const etcdThrottle = "rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many requests"
 
 // An API server's overloaded or failed answer is told from its refusal of a request, and from no
-// answer at all, in one place: 429 and every 5xx, by status or by reason, and etcd's
-// ResourceExhausted gRPC status by its text alone, wherever each sits in the error's chain.
+// answer at all, in one place: a status error by its reason, and by its code (429, or 500 and up)
+// only when it names no reason; a webhook's denial is a refusal whatever its code; and etcd's
+// ResourceExhausted gRPC status by its text, only in an error that carries no status, wherever
+// each sits in the error's chain.
 func TestServerBusyTellsAnOverloadedServerFromARefusal(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err  error
@@ -45,6 +47,12 @@ func TestServerBusyTellsAnOverloadedServerFromARefusal(t *testing.T) {
 		"the client's own timeout":      {fmt.Errorf("the client gave up: %w", context.DeadlineExceeded), false},
 		"a connection refused":          {errors.New("dial tcp 192.0.2.1:443: connect: connection refused"), false},
 		"no error":                      {nil, false},
+		"a 500 with no reason":          {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError}}, true},
+		"a 500 with reason Forbidden, a webhook's denial": {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError,
+			Reason: metav1.StatusReasonForbidden, Message: `admission webhook "policy.example" denied the request: not allowed`}}, false},
+		"a webhook's denial as a 500 with no reason": {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError,
+			Message: `admission webhook "policy.example" denied the request: not allowed`}}, false},
+		"a 409 carrying etcd's throttle text": {apierrors.NewConflict(sandboxGVR.GroupResource(), "s", errors.New(etcdThrottle)), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := serverBusy(tc.err); got != tc.busy {
@@ -113,5 +121,24 @@ func TestALaunchsRequestStopsWaitingAtTheLaunchsDeadline(t *testing.T) {
 	}
 	if sent.Load() < 2 {
 		t.Fatalf("the read was sent %d times, want it sent again inside its deadline", sent.Load())
+	}
+}
+
+// A launch's request on a context with no deadline stops being sent again at the boot timeout from
+// its first send: the bound each wait of a launch has, never a multiple of it.
+func TestALaunchsRequestWithNoDeadlineStopsWaitingAtTheBootTimeout(t *testing.T) {
+	const boot = 400 * time.Millisecond
+	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = boot }))
+	g.kube.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewInternalError(errors.New(etcdThrottle))
+	})
+	start := time.Now()
+	_, err := g.r.kube.CoreV1().Secrets(testNamespace).Get(launching(g.ctx), "a-secret", metav1.GetOptions{})
+	took := time.Since(start)
+	if !apierrors.IsInternalError(err) {
+		t.Fatalf("get through a throttle that never clears = %v, want the server's last answer", err)
+	}
+	if took < boot/2 || took > boot*3/2 {
+		t.Fatalf("the read was waited out for %s, want about the boot timeout %s", took, boot)
 	}
 }

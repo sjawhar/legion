@@ -238,6 +238,8 @@ type rig struct {
 
 	mu      sync.Mutex
 	actions []action
+	// watches are the informers' watches withBreakableWatches served, for breakWatches to end.
+	watches []watch.Interface
 	uids    atomic.Int64
 
 	// hold stops the controller creating pods; autoStart makes a pod it creates scheduled on a
@@ -928,5 +930,44 @@ func withLaggingSandboxInformer(delay time.Duration) rigOption {
 			}()
 			return true, watch.NewProxyWatcher(events), nil
 		})
+	}
+}
+
+// withBreakableWatches serves every Sandbox and pod watch from the trackers through watchers the
+// rig keeps, so breakWatches can end the informers' watches, as an API server ends a watch, and
+// make them watch or list again.
+func withBreakableWatches() rigOption {
+	return func(g *rig, _ *Options) {
+		for _, served := range []struct {
+			fake     *k8stesting.Fake
+			tracker  k8stesting.ObjectTracker
+			resource string
+		}{{&g.dyn.Fake, g.dyn.Tracker(), "sandboxes"}, {&g.kube.Fake, g.kube.Tracker(), "pods"}} {
+			served.fake.PrependWatchReactor(served.resource, func(a k8stesting.Action) (bool, watch.Interface, error) {
+				var opts metav1.ListOptions
+				if w, ok := a.(k8stesting.WatchActionImpl); ok {
+					opts = w.ListOptions
+				}
+				w, err := served.tracker.Watch(a.GetResource(), a.GetNamespace(), opts)
+				if err != nil {
+					return true, nil, err
+				}
+				g.mu.Lock()
+				g.watches = append(g.watches, w)
+				g.mu.Unlock()
+				return true, w, nil
+			})
+		}
+	}
+}
+
+// breakWatches ends every watch withBreakableWatches served.
+func (g *rig) breakWatches() {
+	g.mu.Lock()
+	watches := g.watches
+	g.watches = nil
+	g.mu.Unlock()
+	for _, w := range watches {
+		w.Stop()
 	}
 }
