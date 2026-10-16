@@ -1649,10 +1649,14 @@ Every pod runs:
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated `karpenter.sh/do-not-disrupt: "true"` and
-  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, Karpenter's and GKE Autopilot's
-  cluster-autoscaler's own stop-eviction annotations, both unconditional (an autoscaler that reads
-  neither ignores both).
+- annotated `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own stop-eviction annotation, which
+  GKE's cluster-autoscaler ignores; the issue pod and the project controller's additionally carry
+  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, GKE Autopilot's own, protecting a Pod
+  from Autopilot's scale-down and node-upgrade eviction for up to seven days — not indefinitely, and
+  not from node pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node
+  repair, or an operator-initiated drain. The image probe pod (below) carries only the first: GKE
+  treats the second as a request for extended-duration protection and raises its enforced minimum
+  CPU and memory past the probe's own low fixed reservation.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -2982,9 +2986,11 @@ name and to the volume it owns. It is never enrolled with the secrets broker: it
 agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
 so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
 "true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
-or replaces for drift the node it runs on, and GKE Autopilot's cluster-autoscaler never evicts the
-pod for consolidation or a node upgrade, while it runs, which
-is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
+or replaces for drift the node it runs on, and GKE Autopilot's cluster-autoscaler holds off a
+scale-down or node-upgrade eviction of the pod for up to seven days (not indefinitely, and not
+against node pressure, an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or
+an operator-initiated drain), as long as the daemon keeps it within that window, though issue pods
+can still be scheduled onto that node. Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them

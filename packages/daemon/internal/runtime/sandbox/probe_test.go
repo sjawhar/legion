@@ -873,19 +873,20 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 	}
 }
 
-// The image probe's pod carries the same two unconditional stop-eviction annotations a worker or
-// controller pod does (TestEveryLegionPodIsProtectedFromAutoscalerEviction): it runs on the same
-// pool and is just as subject to Autopilot's cluster-autoscaler, and Karpenter's own annotation
-// alone leaves it unprotected on GKE.
-func TestTheProbePodIsProtectedFromAutoscalerEviction(t *testing.T) {
+// The image probe's pod carries Karpenter's `do-not-disrupt` annotation alone, never GKE
+// Autopilot's `safe-to-evict` that a worker or controller pod does
+// (TestEveryLegionPodIsProtectedFromAutoscalerEviction): GKE treats that annotation as a request
+// for extended-duration protection, which raises its enforced minimum CPU and memory past the
+// probe's deliberately low fixed reservation (probeReservation, 250m/1Gi) — exactly the reservation
+// that lets the probe boot on a pool too full for a role-sized pod. A regression that adds the GKE
+// annotation here would silently cost the probe that low-capacity boot property on a real GKE
+// Autopilot cluster.
+func TestTheProbePodCarriesNoGKEExtendedDurationAnnotation(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]string{
-		"karpenter.sh/do-not-disrupt":                    "true",
-		"cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
-	}
+	want := map[string]string{"karpenter.sh/do-not-disrupt": "true"}
 	manifest := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC))
 	if got := manifest.Spec.PodTemplate.Metadata.Annotations; !maps.Equal(got, want) {
 		t.Errorf("probe pod annotations = %v, want exactly %v", got, want)
