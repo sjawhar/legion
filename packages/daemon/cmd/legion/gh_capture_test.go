@@ -233,12 +233,13 @@ func realGHForCapture(t *testing.T) string {
 // request `legion gh` and `legion git-credential` let through carries the token of the owner of
 // the repository it targets — -R before the command, a selector after `--`, an option's value read
 // as that option's from the leaf command's own help, GH_REPO under an explicit endpoint, -R under
-// GH_REPO, --help=false, a name in --repos under --org, -R after an optional-value shorthand — the
-// issue owner's write token only for the issue owner's repository and for a command naming none,
-// another owner's read-only token for that owner's. A command the wrapper cannot read for certain
-// (a gh alias, an extension, a search qualifier it cannot read, GH_HOST naming another host, an
-// argument a later gh's usage names otherwise), one naming two owners, and one naming an owner the
-// bundle does not hold are refused with exit 2 and send nothing; no alias or extension runs.
+// GH_REPO, --help=false, a name in --repos under --org, -R after an optional-value shorthand, every
+// argument of a plural slot — the issue owner's write token only for the issue owner's repository
+// and for a command naming none, another owner's read-only token for that owner's. A command the
+// wrapper cannot read for certain (a gh alias or an extension, run or as `gh help`'s target, a
+// search qualifier it cannot read, GH_HOST naming another host, an argument a later gh's usage
+// names otherwise), one naming two owners, and one naming an owner the bundle does not hold are
+// refused with exit 2 and send nothing; no alias or extension runs, and gh's own help answers.
 func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	gh := realGHForCapture(t)
 	git, err := exec.LookPath("git")
@@ -382,6 +383,15 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		{nil, []string{"search", "issues", "repo:sjawhar/legion", "is:open"}, "sjawhar", ""},
 		{[]string{"GH_HOST=ghe.example.com"}, []string{"api", "repos/sjawhar/legion"}, "", `GH_HOST is "ghe.example.com"`},
 		{[]string{"LEGION_GH_PATH=" + drift}, []string{"pr", "view", "--json", "title", "https://github.com/sjawhar/legion/pull/1"}, "", "<URL>"},
+		// The third re-review's: gh's help of an extension runs the extension, so a help target is
+		// read as a command, a gh alias or an extension refused; and a plural slot takes one or
+		// more arguments, every one a selector.
+		{nil, []string{"help", "hello"}, "", `"hello" is a gh extension`},
+		{nil, []string{"help", "pr", "pv2"}, "", `"pv2" is a gh alias`},
+		{nil, []string{"help", "co"}, "", `"co" is a gh alias`},
+		{nil, []string{"issue", "edit", "1", "2", "--title", "capture", "-R", "sjawhar/legion"}, "sjawhar", ""},
+		{nil, []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/1", "https://github.com/sjawhar/legion/issues/2", "--title", "capture"}, "sjawhar", ""},
+		{nil, []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/1", "https://github.com/acme/widgets/issues/2", "--title", "capture"}, "", "more than one owner"},
 		// Controls: the issue owner's repository, a command naming none, an owner outside the
 		// bundle, and an option the leaf's help does not list.
 		{nil, []string{"pr", "view", "--json", "title", "https://github.com/sjawhar/legion/pull/2"}, "sjawhar", ""},
@@ -405,6 +415,16 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 			t.Errorf("%s exit 0 against the capture proxy, which answers nothing: %s", what, out)
 		}
 		wantSent(what, tc.owner, false)
+	}
+	// gh's own help and its topics still answer, exit 0, and send nothing.
+	for _, args := range [][]string{{"help"}, {"help", "pr", "view"}, {"help", "environment"}, {"pr", "view", "--help"}} {
+		code, out := run(ghEnv, os.Args[0], append([]string{"gh"}, args...)...)
+		if code != 0 || out == "" {
+			t.Errorf("legion gh %s = exit %d, %q; want gh's help, exit 0", strings.Join(args, " "), code, out)
+		}
+		if sent := proxy.take(); len(sent) != 0 {
+			t.Errorf("legion gh %s sent %+v, want nothing", strings.Join(args, " "), sent)
+		}
 	}
 	for _, marker := range []string{"-shx", "-hello"} {
 		if _, err := os.Stat(ran + marker); err == nil {
