@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,21 +43,32 @@ func (t loginTokens) Token(_ context.Context, role appauth.AppRole, _ string) (a
 	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: t[role]}}, nil
 }
 
+func (loginTokens) InstalledOn(context.Context, appauth.AppRole, ghrepo.Repository) (bool, error) {
+	return true, nil
+}
+
 // The engine judges a push by its pusher against the review App's login, so a configuration whose
 // two roles resolve to one App would count no fix attempt at all: boot refuses it, and a review
 // lease with no login, before anything else opens.
 func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testing.T) {
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !servedMapping(t, w, r, "demo") {
+			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
 	cfg := config.Config{
-		Project: "demo", DispatchURL: "http://127.0.0.1:1",
+		Project: "demo", DispatchURL: dispatchServer.URL,
 		Projects: map[string]config.Project{"demo": {Repo: ghrepo.MustParse("acme/widgets")}},
 	}
+	github := repositoriesGitHub(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	for name, tokens := range map[string]loginTokens{
 		"one App for both roles": {appauth.Implement: "legion-bot[bot]", appauth.Review: "legion-bot[bot]"},
 		"no review login":        {appauth.Implement: "legion-implementer[bot]"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens, "")
+			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", "dispatch-token", log, tokens, github)
 			if err == nil || !strings.Contains(err.Error(), "the workflow needs two different Apps") {
 				t.Fatalf("openWorkflow = %v, want the two-Apps refusal", err)
 			}

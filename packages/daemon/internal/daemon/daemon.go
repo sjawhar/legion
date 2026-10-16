@@ -224,9 +224,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The App mint waits out GitHub's transient failures, which the boot budget does not bound, as
-	// it does not bound the plugin gate or the image probe: the work after it has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens, o.githubAPI)
+	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
+	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
+	// after them has a budget of its own.
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, log, o.workflowTokens, o.githubAPI)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
@@ -267,11 +268,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
-	if workflow != nil {
-		workflow.bind(cfg.DispatchURL, plan.dispatchToken)
-		log.Info("legion workflow boot stage", "stage", "dispatch")
-	}
-
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
 	listen := net.Listen
 	if o.listen != nil {
@@ -741,36 +737,41 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 	}
 }
 
-// reconfigureCloneCredential brings the shared clone an earlier daemon provisioned under the state
-// directory to the helper every clone gets now (workspace.ConfigureRepositoryCredential): a clone
-// provisioned before each pane read GitHub from its own gh files names that daemon's `legion
-// credential` by the pane launcher's path, which answers no pane now, so its first push would
-// fail. It runs the git boot resolved (tools), as the outbox's provisioning does, and logs the one
-// clone it rewrote. A configuration with no repository, or a state directory with no clone yet, is
-// nothing to do: provisioning writes the helper into a clone it makes.
+// reconfigureCloneCredential brings every shared clone an earlier daemon provisioned under the state
+// directory, one per repository, to the helper every clone gets now
+// (workspace.ConfigureRepositoryCredential): a clone provisioned before each pane read GitHub from
+// its own gh files names that daemon's `legion credential` by the pane launcher's path, which
+// answers no pane now, so its first push would fail. It runs the git boot resolved (tools), as the
+// outbox's provisioning does, and logs each clone it rewrote. A state directory with no clone yet
+// is nothing to do: provisioning writes the helper into a clone it makes.
 func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools map[string]string, log *slog.Logger) error {
-	repo := cfg.Projects[cfg.Project].Repo
-	if repo.IsZero() || tools == nil {
+	if tools == nil {
 		return nil
 	}
-	// Location derives the clone from the repository alone; the issue names only the workspace
-	// beside it, which nothing here reads.
-	located, err := workspace.Location(cfg.StateDir, repo, cfg.Project)
+	// Location lays every repository's clone out as <root>/<owner>/<name>; a probe repository
+	// names the root without restating that layout here.
+	probe, err := workspace.Location(cfg.StateDir, ghrepo.MustParse("owner/name"), cfg.Project)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(located.Clone, ".git")); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read the shared clone %s: %w", located.Clone, err)
-	}
-	changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone)
+	clones, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(probe.Clone)), "*", "*"))
 	if err != nil {
-		return fmt.Errorf("set the shared clone's git credential helper: %w", err)
+		return fmt.Errorf("list the shared clones: %w", err)
 	}
-	if changed {
-		log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	for _, clone := range clones {
+		if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("read the shared clone %s: %w", clone, err)
+		}
+		changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), clone)
+		if err != nil {
+			return fmt.Errorf("set the shared clone %s's git credential helper: %w", clone, err)
+		}
+		if changed {
+			log.Info("legion daemon set the shared clone's git credential helper", "clone", clone, "helper", workspace.GitHubCredentialHelper)
+		}
 	}
 	return nil
 }
@@ -1267,10 +1268,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
+	var prepare func(context.Context, intake.DispatchIssue) error
 	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady = workflow.claimReady
+		claimReady, prepare = workflow.claimReady, workflow.prepareRepository
 		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
@@ -1307,6 +1309,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Log:                s.log,
 		Pool:               st.Pool(),
 		Handlers:           handlers,
+		PrepareRepository:  prepare,
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,

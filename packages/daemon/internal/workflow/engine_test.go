@@ -204,7 +204,7 @@ func TestReadyRefusedWithNoDesignGateCommitsAndRecordsNoPendingVersion(t *testin
 func TestAReopenedPullRequestKeepsItsAttemptCounters(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{
 		Issue: "LEGION-208", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-208", HeadSHA: "old",
 		HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), Failing: []string{},

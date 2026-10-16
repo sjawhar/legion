@@ -50,8 +50,8 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 		t.Fatalf("seed the live tree: %v", err)
 	}
 	statuses.issues = map[string]dispatch.Issue{
-		root:  {Key: root, Status: "in_progress"},
-		child: {Key: child, Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
+		root:  {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		child: {Key: child, ResolvedRepo: "acme/widgets", Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
 	}
 	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 	release := func() {
@@ -116,9 +116,9 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 		t.Fatalf("seed the live tree: %v", err)
 	}
 	statuses.issues = map[string]dispatch.Issue{
-		root:   {Key: root, Status: "in_progress"},
-		parent: {Key: parent, Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
-		child:  {Key: child, Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
+		root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
+		child:  {Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
 	}
 	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 	release := func() *httptest.ResponseRecorder {
@@ -131,7 +131,7 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 		t.Fatalf("the child before its parent is recorded = %#v, want none", got)
 	}
 	// The parent's todo event, from the release's write, reaches the daemon.
-	statuses.issues[parent] = dispatch.Issue{Key: parent, Title: parent, Status: "todo", Parent: &root, LastSeq: 3}
+	statuses.issues[parent] = dispatch.Issue{Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "todo", Parent: &root, LastSeq: 3}
 	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "dispatch", "parent-todo", intake.DispatchIssue{
 		Key: parent, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: parent, Parent: root,
 	}, engine); err != nil {
@@ -178,9 +178,9 @@ func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testi
 		t.Fatalf("seed retry: %v", err)
 	}
 	statuses.issues = map[string]dispatch.Issue{
-		root:   {Key: root, Status: "in_progress"},
-		parent: {Key: parent, Title: parent, Status: "todo", Parent: &root, LastSeq: 3},
-		child:  {Key: child, Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
+		root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "todo", Parent: &root, LastSeq: 3},
+		child:  {Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
 	}
 	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil), http.StatusConflict, "CHILD_RELEASE_STALLED")

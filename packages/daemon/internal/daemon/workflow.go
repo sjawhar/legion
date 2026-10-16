@@ -24,7 +24,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -177,36 +176,61 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 	return logins[appauth.Review], nil
 }
 
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
+// openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
+// Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
+// checked for both GitHub Apps), the App tokens minted for every served owner, then the fill of any
+// record written before the record carried its repository.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
-	// The loader refuses a workflow whose projects do not configure the daemon's own, and a repo that
-	// is not owner/name.
+	// The loader refuses a workflow whose projects do not configure the daemon's own.
 	project := cfg.Projects[cfg.Project]
-	owner := project.Repo.Owner()
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
-	reviewAppLogin, err := mintAtBoot(ctx, tokens, owner, log)
-	if err != nil {
-		return nil, err
+	installs, ok := tokens.(appauth.Installations)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source answers no App installation, which the repository mapping is checked against")
 	}
-	log.Info("legion workflow boot stage", "stage", "appauth")
-	// The database is shared by every project's daemon: the workflow reads this project's issues.
-	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
-	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
-	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
-	return &workflowRuntime{
-		pool: st.Pool(), records: records, engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
+	w := &workflowRuntime{
+		tokens: tokens, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: newRepositories(cfg.Project),
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
-	}, nil
+	}
+	log.Info("legion workflow boot stage", "stage", "dispatch")
+	if err := w.loadMapping(ctx); err != nil {
+		return nil, err
+	}
+	reviewAppLogin := ""
+	for _, owner := range w.repositories.Owners() {
+		login, err := mintAtBoot(ctx, tokens, owner, log)
+		if err != nil {
+			return nil, err
+		}
+		reviewAppLogin = login
+	}
+	w.owner = project.Repo.Owner()
+	log.Info("legion workflow boot stage", "stage", "appauth")
+	if err := w.nameMapping(ctx); err != nil {
+		return nil, err
+	}
+	// The database is shared by every project's daemon: the workflow reads this project's issues.
+	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project}
+	engineCfg := engineConfig(cfg, reviewAppLogin)
+	engineCfg.Repositories = w
+	w.engine = workflow.New(w.records, engineCfg, log)
+	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
+	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine, w.admission}, reviewAppLogin
+	w.pool = st.Pool()
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, w.defaultBranches, log); err != nil {
+		return nil, err
+	}
+	return w, nil
 }
 
 // engineConfig is the workflow engine's configuration from the daemon's and the review App's bot
@@ -218,11 +242,6 @@ func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
 		MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
 	}
-}
-
-// bind is the workflow's Dispatch client, with the bearer prepare read.
-func (w *workflowRuntime) bind(url, token string) {
-	w.dispatch = dispatch.New(url, token)
 }
 
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
@@ -250,9 +269,16 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
+	heard, err := w.heardRepositories(ctx)
+	if err != nil {
+		conn.Close()
+		w.conn = nil
+		return err
+	}
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		Project: cfg.Project, Repositories: heard, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
+		RepositoryMapping: w.refreshMapping, PrepareRepository: w.prepareRepository,
 	})
 	if err != nil {
 		conn.Close()
@@ -341,6 +367,13 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	issues, err := w.dispatch.ListIssues(ctx, w.dispatchProject, nil)
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
+	}
+	// The transaction performs no I/O: what admission reads of a todo issue's repository is read now.
+	for _, summary := range issues {
+		if err := w.prepareRepository(ctx, intake.DispatchIssue{Key: summary.Key, Status: summary.Status, Parent: deref(summary.Parent),
+			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}); err != nil {
+			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
+		}
 	}
 	target, err := w.consumers.DispatchTarget(ctx)
 	if err != nil {

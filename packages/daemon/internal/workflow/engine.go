@@ -831,15 +831,46 @@ func (e *Engine) phaseRow(ctx context.Context, tx pgx.Tx, issue string, role cla
 	return record.PhaseRow{Issue: issue, Role: role}, nil
 }
 
-func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, branch string) (*record.Issue, error) {
+// issueForBranch is the issue whose branch legion/<KEY> is, when it is recorded on repo: a pull
+// request on legion/<KEY> in another repository is never <KEY>'s.
+func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.Issue, error) {
 	if !strings.HasPrefix(branch, "legion/") {
 		return nil, nil
 	}
-	return e.store.Issue(ctx, tx, strings.TrimPrefix(branch, "legion/"))
+	issue, err := e.store.Issue(ctx, tx, strings.TrimPrefix(branch, "legion/"))
+	if err != nil || issue == nil || !strings.EqualFold(issue.Repo, repo) {
+		return nil, err
+	}
+	return issue, nil
 }
 
+// pullRequest is the recorded pull request number of repo, when its issue is recorded on repo.
 func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number int) (*record.PullRequest, error) {
-	return e.store.PullRequestByNumber(ctx, tx, repo, number)
+	pr, err := e.store.PullRequestByNumber(ctx, tx, repo, number)
+	if err != nil || pr == nil {
+		return nil, err
+	}
+	return e.ownPullRequest(ctx, tx, pr, repo)
+}
+
+// pullRequestByBranch is the recorded pull request of repo on branch, when its issue is recorded
+// on repo.
+func (e *Engine) pullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.PullRequest, error) {
+	pr, err := e.store.PullRequestByBranch(ctx, tx, repo, branch)
+	if err != nil || pr == nil {
+		return nil, err
+	}
+	return e.ownPullRequest(ctx, tx, pr, repo)
+}
+
+// ownPullRequest is pr when the issue it is recorded for is recorded on repo, and nil otherwise: a
+// GitHub fact applies to an issue only when it names the issue's repository.
+func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, repo string) (*record.PullRequest, error) {
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil || !strings.EqualFold(issue.Repo, repo) {
+		return nil, err
+	}
+	return pr, nil
 }
 
 func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) ([]record.Issue, error) {

@@ -515,11 +515,11 @@ func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *t
 	seedTree(t, h, "LEGION-208")
 	root, child := "LEGION-208", "LEGION-209"
 	statuses.issues = map[string]dispatch.Issue{
-		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
-		"LEGION-209": {Key: "LEGION-209", Status: "backlog", Parent: &root},
-		"LEGION-210": {Key: "LEGION-210", Status: "triage", Parent: &child},
-		"LEGION-211": {Key: "LEGION-211", Status: "in_progress", Parent: &root},
-		"LEGION-212": {Key: "LEGION-212", Status: "backlog"},
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root},
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "triage", Parent: &child},
+		"LEGION-211": {Key: "LEGION-211", ResolvedRepo: "acme/widgets", Status: "in_progress", Parent: &root},
+		"LEGION-212": {Key: "LEGION-212", ResolvedRepo: "acme/widgets", Status: "backlog"},
 	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
@@ -569,9 +569,9 @@ func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing
 	seedTree(t, h, "LEGION-208", "LEGION-209") // the first attempt's todo event recorded LEGION-209
 	root := "LEGION-208"
 	statuses.issues = map[string]dispatch.Issue{
-		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
-		"LEGION-209": {Key: "LEGION-209", Status: "todo", Parent: &root},    // the first attempt released it
-		"LEGION-210": {Key: "LEGION-210", Status: "backlog", Parent: &root}, // its write is the one that failed
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "todo", Parent: &root},    // the first attempt released it
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root}, // its write is the one that failed
 	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 

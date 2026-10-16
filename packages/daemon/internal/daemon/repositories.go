@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -146,11 +147,12 @@ func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal
 }
 
 // readMapping reads Dispatch's repository mapping of project and checks, for each repository, that
-// both GitHub Apps are installed on it (installs; per repository, since an installation on an
-// owner may cover only some of its repositories), reading each served one as GitHub names it, with
-// its default branch (named). A repository an App is not installed on is refused, naming the App;
-// any read that fails is an error that fails the whole read, so nothing is left out on a guess.
-func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations, named *defaultBranches) ([]mappedRepository, []refusedRepository, error) {
+// both GitHub Apps are installed on it (installs, under each App's JWT; per repository, since an
+// installation on an owner may cover only some of its repositories). A repository an App is not
+// installed on is refused, naming the App; any read that fails is an error that fails the whole
+// read, so nothing is left out on a guess. Accepted repositories carry Dispatch's spelling until
+// nameAccepted reads GitHub's.
+func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
 	mappings, err := client.ListRepoProjects(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read the repository mapping from Dispatch: %w", err)
@@ -185,20 +187,31 @@ func readMapping(ctx context.Context, client dispatch.Client, project string, in
 			refused = append(refused, refusedRepository{Repo: mapping.Repo, Reason: fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), repo)})
 			continue
 		}
-		read, err := named.Named(ctx, repo)
-		if err != nil {
-			return nil, nil, err
-		}
-		accepted = append(accepted, mappedRepository{Repo: read.Name, Default: mapping.Default})
+		accepted = append(accepted, mappedRepository{Repo: repo, Default: mapping.Default})
 	}
 	return accepted, refused, nil
+}
+
+// nameAccepted is accepted as GitHub names each repository (named: its own spelling of owner and
+// name, which its events and the subjects Envoy publishes them on carry), each read with its
+// default branch as the implement App.
+func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defaultBranches) ([]mappedRepository, error) {
+	out := make([]mappedRepository, 0, len(accepted))
+	for _, mapped := range accepted {
+		read, err := named.Named(ctx, mapped.Repo)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, mappedRepository{Repo: read.Name, Default: mapped.Default})
+	}
+	return out, nil
 }
 
 // loadMapping is the boot's read of the repository mapping, run again after a failure GitHub or
 // Dispatch reports as its own trouble (appauth.TransientError, dispatch.Unreachable) on the App
 // mint's schedule; any other failure refuses the boot. A project with no repository mapped refuses
 // it too, as does one none of whose repositories both Apps are installed on: the workflow would
-// have nothing to work.
+// have nothing to work. nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var accepted []mappedRepository
 	var refused []refusedRepository
@@ -206,7 +219,7 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
 		defer cancel()
 		var err error
-		accepted, refused, err = readMapping(attempt, w.dispatch, w.dispatchProject, w.installs, w.defaultBranches)
+		accepted, refused, err = readMapping(attempt, w.dispatch, w.dispatchProject, w.installs)
 		if err == nil {
 			return bootprobe.Outcome{Passed: true}
 		}
@@ -230,6 +243,31 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 		return fmt.Errorf("no repository mapped to project %s in Dispatch has both GitHub Apps installed (%s): install them, or map a repository they are installed on", w.dispatchProject, strings.Join(reasons, "; "))
 	}
 	w.repositories.set(accepted, refused)
+	return nil
+}
+
+// nameMapping replaces the served repositories with GitHub's spelling of each, on the boot's
+// retry, and logs the mapping the daemon serves.
+func (w *workflowRuntime) nameMapping(ctx context.Context) error {
+	var named []mappedRepository
+	err := bootprobe.Run(ctx, "repository read", appMintRetry, w.log, func(ctx context.Context) bootprobe.Outcome {
+		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
+		defer cancel()
+		var err error
+		if named, err = nameAccepted(attempt, w.repositories.Mapped(), w.defaultBranches); err == nil {
+			return bootprobe.Outcome{Passed: true}
+		}
+		var transient *appauth.TransientError
+		var answer *githubrest.Answer
+		if errors.As(err, &transient) || errors.As(err, &answer) && answer.Status >= 500 {
+			return bootprobe.Outcome{Detail: err.Error()}
+		}
+		return bootprobe.Outcome{Refusal: err}
+	})
+	if err != nil {
+		return err
+	}
+	w.repositories.set(named, w.repositories.Refused())
 	w.log.Info("legion workflow boot stage", "stage", "repositories", "accepted", repositoryNames(w.repositories.Accepted()), "refused", refusalReasons(w.repositories.Refused()))
 	return nil
 }
@@ -241,8 +279,11 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
-	accepted, refused, err := readMapping(ctx, w.dispatch, w.dispatchProject, w.installs, w.defaultBranches)
+	accepted, refused, err := readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
 	if err != nil {
+		return err
+	}
+	if accepted, err = nameAccepted(ctx, accepted, w.defaultBranches); err != nil {
 		return err
 	}
 	added, removed := w.repositories.set(accepted, refused)

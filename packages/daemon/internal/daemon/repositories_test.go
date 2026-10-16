@@ -73,9 +73,12 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 	}}
 	branches := newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
 
-	accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs, branches)
+	accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs)
 	if err != nil {
 		t.Fatalf("readMapping: %v", err)
+	}
+	if accepted, err = nameAccepted(context.Background(), accepted, branches); err != nil {
+		t.Fatalf("nameAccepted: %v", err)
 	}
 	repos.set(accepted, refused)
 	if got, want := repos.Owners(), []string{"acme", "zeta"}; !reflect.DeepEqual(got, want) {
@@ -110,17 +113,15 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 // A repository both Apps lack names both; an installation read that fails is no answer, and fails
 // the whole read rather than leaving the repository out on a guess.
 func TestTheMappingNamesEveryMissingAppAndFailsOnAFailedRead(t *testing.T) {
-	github := newNamedGitHub(t, nil)
-	branches := newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}}}
 	installs := &installations{missing: map[string]bool{"implement acme/gadgets": true, "review acme/gadgets": true}}
-	accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs, branches)
+	accepted, refused, err := readMapping(context.Background(), client, "LEGION", installs)
 	if err != nil || len(accepted) != 0 || len(refused) != 1 || refused[0].Reason != "the implement and review Apps are not installed on acme/gadgets" {
 		t.Fatalf("readMapping = %#v, %#v, %v; want acme/gadgets left out naming both Apps", accepted, refused, err)
 	}
 
 	installs = &installations{fail: &appauth.TransientError{Err: errors.New("GitHub answered 502")}}
-	if _, _, err := readMapping(context.Background(), client, "LEGION", installs, branches); err == nil || !strings.Contains(err.Error(), "acme/gadgets") {
+	if _, _, err := readMapping(context.Background(), client, "LEGION", installs); err == nil || !strings.Contains(err.Error(), "acme/gadgets") {
 		t.Fatalf("readMapping with a failed installation read = %v, want an error naming acme/gadgets", err)
 	}
 }
