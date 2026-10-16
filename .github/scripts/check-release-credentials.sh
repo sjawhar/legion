@@ -452,6 +452,12 @@ def write_scopes(job: Mapping, workflow: Mapping) -> list[str]:
     return [scope for scope in WRITE_SCOPES if permissions.get(scope) == "write"]
 
 
+def needs_of(job: Mapping) -> list:
+    """The jobs a job needs, as GitHub reads `needs:`: one name, or a list of them."""
+    needs = job.get("needs")
+    return [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
+
+
 # The path of the workflow-level `env:` texts, which every job's scan takes in with its own: GitHub
 # gives those variables to every step of every job.
 WORKFLOW_ENV = ("workflow", "env")
@@ -672,21 +678,7 @@ NEEDS_OUTPUTS = re.compile(NEEDS_REF + r"outputs\b", re.IGNORECASE)
 NEEDS_RESULT = re.compile(NEEDS_REF + r"result\b", re.IGNORECASE)
 
 
-def needs_of(job: Mapping) -> list:
-    """The jobs a job needs, as GitHub reads `needs:`: one name, or a list of them."""
-    needs = job.get("needs")
-    return [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
-
-
-def needs_result(cond: str, job: str) -> bool:
-    """Whether the condition tests `needs.<job>.result`, by dot or by index, in any casing."""
-    return any(
-        (match.group(1) or match.group(2)).lower() == job.lower()
-        for match in NEEDS_RESULT.finditer(cond)
-    )
-
-
-def ancestors(jobs: Mapping, name) -> list[str]:
+def ancestors(jobs: Mapping, name: str) -> list[str]:
     """Every job upstream of the named one through `needs`, at any distance, in the file's job
     order. A visited set keeps a cycle from looping the walk; a `needs` entry that names no job of
     the file is ignored (GitHub refuses such a workflow at parse)."""
@@ -714,10 +706,14 @@ def check_conditions(path: Path, jobs: Mapping) -> None:
             # 6a. always() turns GitHub's gating off, so every job whose outputs the condition
             # reads must have its result tested, else a failed or skipped one is read through its
             # empty outputs (`'' != 'true'` is true).
+            tested = {
+                (match.group(1) or match.group(2)).lower()
+                for match in NEEDS_RESULT.finditer(cond)
+            }
             missing: list[str] = []
             for match in NEEDS_OUTPUTS.finditer(cond):
                 read = match.group(1) or match.group(2)
-                if read not in missing and not needs_result(cond, read):
+                if read not in missing and read.lower() not in tested:
                     missing.append(read)
             if missing:
                 reads = ", ".join(f"needs.{read}.outputs" for read in missing)
