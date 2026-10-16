@@ -2376,6 +2376,12 @@ export async function executeDispatchTool(
       // re-send the issue's current links unchanged.
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
+      const sentLinks =
+        requestedLinks === undefined
+          ? undefined
+          : requestedLinks.length === 0
+            ? []
+            : [...before.external_links, ...newLinks.map((url) => ({ url }))];
       let after: Advised<Issue>;
       try {
         after = await client.updateIssue(issueKey, {
@@ -2387,13 +2393,7 @@ export async function executeDispatchTool(
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
           ...(blockedBy === undefined ? {} : { blocked_by: blockedBy }),
           ...(components === undefined ? {} : { components }),
-          ...(requestedLinks === undefined
-            ? {}
-            : requestedLinks.length === 0
-              ? { external_links: [] }
-              : {
-                  external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))],
-                }),
+          ...(sentLinks === undefined ? {} : { external_links: sentLinks }),
           actor,
         });
       } catch (error) {

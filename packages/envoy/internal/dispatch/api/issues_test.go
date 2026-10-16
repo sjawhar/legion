@@ -825,9 +825,10 @@ func TestIssuePatchExternalLinkTakenByAnotherIssue(t *testing.T) {
 	}
 }
 
-// A closed issue can give up an external link — a pure removal — so it can move to the issue
-// that replaced it, but still refuses to gain a new one or to touch any other field alongside
-// the removal.
+// A closed issue can give up an external link — a write that adds no URL it does not already
+// have, whether a full clear, a partial removal, or a harmless same-set resend — so a link can
+// move to the issue that replaced it, but still refuses to gain a new one or to touch any other
+// field alongside the removal.
 func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -847,8 +848,9 @@ func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
 	}
 	issue := create("Moved")
 	pullRequest := "https://github.com/owner/repo/pull/7"
+	secondLink := "https://github.com/owner/repo/pull/9"
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
-		"external_links": []map[string]string{{"url": pullRequest}},
+		"external_links": []map[string]string{{"url": pullRequest}, {"url": secondLink}},
 	}, "alice"); response.Code != http.StatusOK {
 		t.Fatalf("link: status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -858,7 +860,8 @@ func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
 		t.Fatalf("close: status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	// Adding a new link to a closed issue is still refused, like any other content write.
+	// Adding a new link to a closed issue is still refused, like any other content write, even
+	// when the same request also drops an existing one.
 	newLink := "https://github.com/owner/repo/pull/8"
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
 		"external_links": []map[string]string{{"url": pullRequest}, {"url": newLink}},
@@ -872,7 +875,19 @@ func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
 		t.Fatalf("clear beside title on closed issue: status=%d body=%s, want 409 ISSUE_CLOSED", response.Code, response.Body.String())
 	}
 
-	// Clearing the existing link alone is a pure removal: it is allowed.
+	// Dropping just one of two links (a partial removal, not a full clear) is allowed too: the
+	// request is still a subset of what the issue already holds.
+	partial := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{{"url": pullRequest}},
+	}, "alice")
+	if partial.Code != http.StatusOK {
+		t.Fatalf("partial removal on closed issue: status=%d body=%s", partial.Code, partial.Body.String())
+	}
+	if links := decodeBody[model.Issue](t, partial).ExternalLinks; len(links) != 1 || links[0].URL != pullRequest {
+		t.Fatalf("external links after partial removal = %#v, want only %s", links, pullRequest)
+	}
+
+	// Clearing the one remaining link is a full removal: it is allowed too.
 	cleared := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
 		"external_links": []map[string]string{},
 	}, "alice")
@@ -883,12 +898,12 @@ func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
 		t.Fatalf("external links after clear = %#v, want none", links)
 	}
 
-	// The URL is now free for the replacement issue to claim.
+	// Both URLs are now free for the replacement issue to claim.
 	replacement := create("Replacement")
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+replacement.Key, map[string]any{
-		"external_links": []map[string]string{{"url": pullRequest}},
+		"external_links": []map[string]string{{"url": pullRequest}, {"url": secondLink}},
 	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("re-link freed URL: status=%d body=%s", response.Code, response.Body.String())
+		t.Fatalf("re-link freed URLs: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

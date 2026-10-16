@@ -192,16 +192,16 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	externalLinksRemovalOnly := input.ExternalLinks != nil && isExternalLinksSubset(*input.ExternalLinks, before.ExternalLinks)
 	if before.ClosedAt != nil {
 		// A closed issue takes only its rank (board order), its component attachment
-		// (classified without reopening), and the removal of an external link (so a link can move
-		// to the issue that replaced it) — alone or beside a reopening status; every other field,
-		// and closing it again, waits for a reopen. Adding a link stays refused like any other
-		// content write.
-		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || (input.ExternalLinks != nil && !externalLinksRemovalOnly) || assigneeProvided || parentProvided || input.BlockedBy != nil
+		// (classified without reopening), and an external_links write that adds no URL the issue
+		// does not already have (so a link can move to the issue that replaced it, a same-set
+		// resend is a harmless no-op, and a kept URL's kind may still be retyped) — alone or
+		// beside a reopening status; every other field, and closing it again, waits for a reopen.
+		addsLink := input.ExternalLinks != nil && !isExternalLinksSubset(*input.ExternalLinks, before.ExternalLinks)
+		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || addsLink || assigneeProvided || parentProvided || input.BlockedBy != nil
 		reopening := input.Status != nil && status != "done"
-		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided && !externalLinksRemovalOnly) {
+		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided && input.ExternalLinks == nil) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
 		}
@@ -466,9 +466,10 @@ func mergeIssueLabels(existing, added []string) ([]string, error) {
 }
 
 // isExternalLinksSubset reports whether every URL in requested already belongs to existing: the
-// closed-issue gate uses this to tell a pure removal (always allowed, so a link can move off a
-// closed issue onto whatever replaced it) from a request that would add a new one (refused on a
-// closed issue like any other content write).
+// closed-issue gate uses this to tell a request that adds no URL (always allowed, so a link can
+// move off a closed issue onto whatever replaced it; a same-set resend or a kept URL's retyped
+// kind also pass this check, harmlessly) from one that would add a new URL (refused on a closed
+// issue like any other content write).
 func isExternalLinksSubset(requested, existing []model.ExternalLink) bool {
 	existingURLs := make(map[string]bool, len(existing))
 	for _, link := range existing {
