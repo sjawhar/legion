@@ -632,9 +632,24 @@ func (s *Postgres) DueRows(ctx context.Context, tx pgx.Tx, project, issue string
 // outbox, due, under no live lease, in order, and no other lifecycle row of its issue is running
 // (outboxClaimable). The claim is one conditional update, never a read and then a write, so two
 // lanes that listed the same due row take it exactly once whichever commits first: the other's
-// update waits on the row lock, then finds the lease taken, the row finished and gone, an older row
-// of its issue since queued ahead of it, or a lifecycle row of its issue since leased, and claims
-// nothing. False is nothing claimed.
+// update waits on the row lock, then finds the lease taken, the row finished and gone, or an older
+// row of its issue since queued ahead of it, and claims nothing. False is nothing claimed.
+//
+// The lane rule (outboxLaneFree) is the one predicate the row lock does not cover. Two daemons
+// claiming different lifecycle rows of one issue at once update different rows, so neither waits
+// on the other's row lock, and each update's subquery runs in its own READ COMMITTED snapshot,
+// where the other's uncommitted lease is invisible: Postgres rechecks a concurrently updated row's
+// new version against the where clause, but only the row being updated, never a subquery over
+// other rows, so both claims would succeed and the issue would have two lifecycle rows running
+// side by side. So a lifecycle claim is two statements: first a transaction-scoped advisory lock
+// keyed by the row's issue, then the update. The second daemon blocks on the lock until the first
+// commits, and its update then takes a fresh snapshot, in which the first's lease is live, and
+// refuses. The lock statement is a select over the row, so a board row, or a row finished and gone,
+// selects nothing and locks nothing: an issue's board lane never waits on its lifecycle claim. The
+// lock is released at the claim transaction's commit, so it is held for the claim alone, never
+// across an executor. intake.ApplyFact's advisory lock (hashtext('legion.apply_fact')) is a
+// different key, and no transaction takes both — a lane claims in a transaction of its own, and no
+// fact handler claims a row — so no lock ordering arises between them.
 func (s *Postgres) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.Time, leaseFor time.Duration) (OutboxRow, bool, error) {
 	if leaseFor <= 0 {
 		return OutboxRow{}, false, fmt.Errorf("claim outbox row %d: lease duration must be positive", id)
@@ -642,6 +657,10 @@ func (s *Postgres) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.T
 	token, err := leaseToken()
 	if err != nil {
 		return OutboxRow{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('legion.outbox.lifecycle:' || issue)) from outbox
+		where id = $1 and kind = any($2::text[])`, id, lifecycleKindNames); err != nil {
+		return OutboxRow{}, false, fmt.Errorf("claim outbox row %d: %w", id, err)
 	}
 	row, err := scanOutbox(tx.QueryRow(ctx, `update outbox set lease_token = $7, lease_until = $8
 		where outbox.id = $6 and `+outboxClaimable+`

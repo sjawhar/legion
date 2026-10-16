@@ -1016,6 +1016,97 @@ func TestTwoDaemonsClaimingDifferentLifecycleRowsOfOneIssueAtOnceLeaseOnlyOne(t 
 	}
 }
 
+// The lock a lifecycle claim takes on its issue is the lifecycle lane's alone: a board row of the
+// issue, claimed while the lifecycle claim is still uncommitted, is leased at once rather than
+// waiting on it. Board rows are not under the lane rule, and an issue's board lane never waits on
+// its lifecycle claim.
+func TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	var suspendID, statusID int64
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, payload := range []OutboxPayload{
+			SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1},
+			StatusWrite{Status: "done"},
+		} {
+			row, err := NewOutboxRow("LEGION-208", payload, now)
+			must(t, err)
+			must(t, records.Enqueue(ctx, tx, row))
+		}
+		must(t, tx.QueryRow(ctx, "select min(id), max(id) from outbox where issue = 'LEGION-208'").Scan(&suspendID, &statusID))
+	})
+
+	// Daemon A's lifecycle lane claims the suspend and is a moment from committing.
+	txA, err := st.BeginTx(ctx, pgx.TxOptions{})
+	must(t, err)
+	_, okA, err := records.ClaimRow(ctx, txA, suspendID, now, time.Minute)
+	must(t, err)
+	if !okA {
+		t.Fatal("the lifecycle lane's claim of the suspend was refused with nothing leased")
+	}
+	// The board lane claims the status row in that moment. The claim runs apart so a claim that
+	// waits on A's transaction is reported as the failure it is, rather than hanging the test: the
+	// wait shows in pg_stat_activity, and A commits nothing until the claim has returned.
+	type attempt struct {
+		ok  bool
+		err error
+	}
+	second := make(chan attempt, 1)
+	go func() {
+		txB, err := st.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			second <- attempt{err: err}
+			return
+		}
+		defer txB.Rollback(ctx)
+		_, ok, err := records.ClaimRow(ctx, txB, statusID, now, time.Minute)
+		if err == nil {
+			err = txB.Commit(ctx)
+		}
+		second <- attempt{ok: ok && err == nil, err: err}
+	}()
+	var got attempt
+	returned := false
+	testwait.Eventually(t, "the board lane's claim to return or to wait on the lifecycle claim's transaction", func() bool {
+		select {
+		case got = <-second:
+			returned = true
+			return true
+		default:
+		}
+		var waiting int
+		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	})
+	if !returned {
+		must(t, txA.Rollback(ctx))
+		t.Fatal("the board lane's claim of the status row waited on a lock while the lifecycle claim was uncommitted; want it leased at once")
+	}
+	if got.err != nil || !got.ok {
+		t.Fatalf("the board lane's claim of the status row = %v, %v; want it leased while the lifecycle claim is uncommitted", got.ok, got.err)
+	}
+	must(t, txA.Commit(ctx))
+
+	var leased []string
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := tx.Query(ctx, "select kind from outbox where issue = 'LEGION-208' and lease_until > $1 order by id", now)
+		must(t, err)
+		defer rows.Close()
+		for rows.Next() {
+			var kind string
+			must(t, rows.Scan(&kind))
+			leased = append(leased, kind)
+		}
+		must(t, rows.Err())
+	})
+	if want := []string{"supervise", "dispatch_status"}; !reflect.DeepEqual(leased, want) {
+		t.Fatalf("the issue's rows under a live lease = %v, want %v: the lifecycle lane's suspend and the board lane's status write both leased", leased, want)
+	}
+}
+
 // A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
 // role starts before its branch exists on GitHub. Nothing else waits on it: a suspend of the same
 // issue, a start queued before the row, and another issue's start are each due.
