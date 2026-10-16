@@ -493,7 +493,7 @@ func crashLooping(pod *corev1.Pod) *corev1.Pod {
 // its readiness probe passes, and failing, with the kubelet's reason, while its container waits to
 // restart or its image cannot be pulled.
 func TestRepositoryCacheReadsItsState(t *testing.T) {
-	g := newRig(t, []k8sruntime.Object{cacheObject(t, cacheRepo, "uid-cache", modeRunning, "")})
+	g := newRig(t, []k8sruntime.Object{cacheObject(t, cacheRepo, "uid-cache", modeRunning, "")}, withoutController())
 	name := CacheSandboxName(testProject, cacheRepo)
 	state := func() (string, string) {
 		status, _ := g.r.RepositoryCache(cacheRepo)
@@ -530,10 +530,11 @@ func TestRepositoryCacheReadsItsState(t *testing.T) {
 		}, cacheReady, ""},
 	} {
 		g.update(g.pod(name), tc.edit)
-		g.eventually("the cache "+tc.state, func() bool { got, _ := state(); return got == tc.state })
-		if _, reason := state(); reason != tc.reason {
-			t.Errorf("the cache %s says %q, want %q", tc.state, reason, tc.reason)
-		}
+		// Two steps in a row are failing: the step is the store's once its reason is the step's too.
+		g.eventually(fmt.Sprintf("the cache %s, saying %q", tc.state, tc.reason), func() bool {
+			got, reason := state()
+			return got == tc.state && reason == tc.reason
+		})
 	}
 }
 
