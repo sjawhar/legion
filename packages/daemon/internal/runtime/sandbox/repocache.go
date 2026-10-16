@@ -60,9 +60,10 @@ func (c RepositoryCache) check() error {
 // CacheStatus is a repository's cache as the runtime's stores show it: the repository, exactly as
 // the cache's annotation names it; its Sandbox; its State (starting, cloning, ready or failing),
 // with the kubelet's Reason while it is failing; whether its pod has passed its readiness probe,
-// and its address then; once the repository has left the mapping, until when the sweep keeps it;
-// and, from RepositoryCaches alone, the pod's last health read: what its /healthz answered
-// (Health), or why it could not be read (HealthError), both empty when it was not Ready to be read.
+// and its address then, its Service's (cacheURL); once the repository has left the mapping, until
+// when the sweep keeps it; and, from RepositoryCaches alone, the pod's last health read: what its
+// /healthz answered (Health), or why it could not be read (HealthError), both empty when it was
+// not Ready to be read.
 type CacheStatus struct {
 	Repo          ghrepo.Repository
 	Sandbox       string
@@ -448,9 +449,9 @@ var cacheFailures = []string{"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePu
 // answers not found); its State — starting while the Sandbox owns no live pod or the pod is not
 // yet running, failing with the kubelet's reason while its container waits on one of
 // cacheFailures or the pod has failed, ready once the pod's Ready condition is True (the readiness
-// probe passed) with its address, http://<pod ip>:8418, and cloning otherwise — and RetainedUntil
-// from annotationCacheUnmappedAt plus the retention when the annotation is set. Not found when no
-// Sandbox of the name is stored.
+// probe passed) with its address, its Service's (cacheURL), and cloning otherwise — and
+// RetainedUntil from annotationCacheUnmappedAt plus the retention when the annotation is set. Not
+// found when no Sandbox of the name is stored.
 func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 	name := CacheSandboxName(r.project, repo)
 	s, err := r.storedSandbox(name)
@@ -478,8 +479,8 @@ func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 		ready := podCondition(pod, corev1.PodReady)
 		container := containerStatus(pod, cacheContainer)
 		switch {
-		case ready != nil && ready.Status == corev1.ConditionTrue && pod.Status.PodIP != "":
-			status.State, status.Ready, status.Address = cacheReady, true, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, r.cachePort)
+		case ready != nil && ready.Status == corev1.ConditionTrue:
+			status.State, status.Ready, status.Address = cacheReady, true, r.cacheURL(name)
 		case container != nil && container.State.Waiting != nil && slices.Contains(cacheFailures, container.State.Waiting.Reason):
 			status.State = cacheFailing
 			status.Reason = fmt.Sprintf("container %s %s: %s (restarted %d times)", cacheContainer, container.State.Waiting.Reason, container.State.Waiting.Message, container.RestartCount)
@@ -495,7 +496,7 @@ func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 
 // RepositoryCaches is every cache the stores hold whose repository parses, sorted by repository,
 // each as RepositoryCache answers it with the last health read (readCacheHealth) of the pod it
-// names: what `legion state` shows of the caches.
+// owns now, none when that read was of another: what `legion state` shows of the caches.
 func (r *Runtime) RepositoryCaches() []CacheStatus {
 	var caches []CacheStatus
 	for _, u := range r.storedCaches() {
@@ -510,7 +511,7 @@ func (r *Runtime) RepositoryCaches() []CacheStatus {
 		r.mu.Lock()
 		read, held := r.cacheHealth[status.Sandbox]
 		r.mu.Unlock()
-		if held && read.address == status.Address {
+		if pod := r.storedPod(status.Sandbox); held && pod != nil && pod.UID == read.pod {
 			status.Health, status.HealthError = read.health, read.err
 		}
 		caches = append(caches, status)
@@ -521,19 +522,21 @@ func (r *Runtime) RepositoryCaches() []CacheStatus {
 	return caches
 }
 
-// cacheHealthRead is one health read of a cache's pod at address: what its /healthz answered, or
-// why it could not be read.
+// cacheHealthRead is one health read of the cache whose pod was pod when the read began: what its
+// /healthz answered, or why it could not be read.
 type cacheHealthRead struct {
-	address string
-	health  *repocache.Health
-	err     string
+	pod    types.UID
+	health *repocache.Health
+	err    string
 }
 
 // readCacheHealth runs on the gh refresher's tick, after refreshCacheTokens: it asks every Ready
 // cache's /healthz with that cache's bearer token, each bounded by a call's budget, and keeps the
 // answer, or why there is none, as that cache's last health read, which RepositoryCaches serves
-// without asking again. A cache that is not Ready has no read: the store already says it is not
-// serving.
+// without asking again. It asks at the cache's Service (cacheURL), as the issue pods do, which
+// Kubernetes routes to the Sandbox's own Ready pod, and never at the pod address the store holds:
+// once that pod is gone, the address is any pod's to take, and the token is the cache's /tar. A
+// cache that is not Ready has no read: the store already says it is not serving.
 func (r *Runtime) readCacheHealth(ctx context.Context) {
 	reads := map[string]cacheHealthRead{}
 	for _, u := range r.storedCaches() {
@@ -545,8 +548,12 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 		if !found || !status.Ready {
 			continue
 		}
-		read := cacheHealthRead{address: status.Address}
-		health, err := cacheHealthOf(ctx, status.Address, r.cacheBearer(status.Sandbox), repo)
+		pod := r.storedPod(status.Sandbox)
+		if pod == nil {
+			continue
+		}
+		read := cacheHealthRead{pod: pod.UID}
+		health, err := cacheHealthOf(ctx, r.cacheHealthClient(), status.Address, r.cacheBearer(status.Sandbox), repo)
 		if err != nil {
 			read.err = err.Error()
 		} else {
@@ -559,10 +566,10 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 	r.mu.Unlock()
 }
 
-// cacheHealthOf is GET <address>/healthz with bearer, decoded, within a call's budget: an error
-// when the runtime holds no bearer for the cache yet, or the answer names a repository other than
-// repo (workspace.CacheRepositoryHeader).
-func cacheHealthOf(ctx context.Context, address, bearer string, repo ghrepo.Repository) (repocache.Health, error) {
+// cacheHealthOf is GET <address>/healthz through client with bearer, decoded, within a call's
+// budget: an error when the runtime holds no bearer for the cache yet, or the answer names a
+// repository other than repo (workspace.CacheRepositoryHeader).
+func cacheHealthOf(ctx context.Context, client *http.Client, address, bearer string, repo ghrepo.Repository) (repocache.Health, error) {
 	if bearer == "" {
 		return repocache.Health{}, errors.New("the runtime holds no token for the cache yet")
 	}
@@ -573,7 +580,7 @@ func cacheHealthOf(ctx context.Context, address, bearer string, repo ghrepo.Repo
 		return repocache.Health{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+bearer)
-	response, err := cacheHealthClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return repocache.Health{}, err
 	}
@@ -588,9 +595,11 @@ func cacheHealthOf(ctx context.Context, address, bearer string, repo ghrepo.Repo
 	return health, nil
 }
 
-// cacheHealthClient reaches a cache pod directly, at its pod address: no proxy stands between the
-// daemon and a pod of its namespace.
-var cacheHealthClient = &http.Client{Transport: &http.Transport{Proxy: nil}}
+// cacheHealthClient reaches a cache directly through cacheDial: no proxy stands between the daemon
+// and a pod of its namespace.
+func (r *Runtime) cacheHealthClient() *http.Client {
+	return &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: r.cacheDial, DisableKeepAlives: true}}
+}
 
 // storedCaches are the cache Sandboxes in the store that are not being deleted.
 func (r *Runtime) storedCaches() []*unstructured.Unstructured {

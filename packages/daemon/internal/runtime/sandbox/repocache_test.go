@@ -2,8 +2,11 @@ package sandbox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -436,9 +439,10 @@ func TestRefreshCacheTokensRewritesALostOrForeignSecret(t *testing.T) {
 	}
 }
 
-// A cache is ready, at http://<pod ip>:8418, when the pod its Sandbox owns has passed its readiness
-// probe, and not before; a long repository is found by the name it derives, with its whole name;
-// and a cache name another repository's cache holds answers not found, logged once.
+// A cache is ready, at its Service's http://<sandbox>.<namespace>.svc:8418, when the pod its Sandbox
+// owns has passed its readiness probe, and not before, whatever address the pod holds; a long
+// repository is found by the name it derives, with its whole name; and a cache name another
+// repository's cache holds answers not found, logged once.
 func TestRepositoryCacheReadsReadiness(t *testing.T) {
 	logs := &logBuffer{}
 	g := newRig(t, []k8sruntime.Object{cacheObject(t, ghrepo.MustParse("acme/gadgets"), "uid-gadgets", modeRunning, "acme/sprockets")}, withLog(logs))
@@ -458,8 +462,9 @@ func TestRepositoryCacheReadsReadiness(t *testing.T) {
 		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	})
 	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(cacheRepo); return status.Ready })
-	if status, _ := g.r.RepositoryCache(cacheRepo); status.Address != "http://10.0.0.5:8418" || !status.RetainedUntil.IsZero() {
-		t.Errorf("RepositoryCache once ready = %+v, want http://10.0.0.5:8418 and no retention", status)
+	want := "http://" + name + "." + testNamespace + ".svc:8418"
+	if status, _ := g.r.RepositoryCache(cacheRepo); status.Address != want || !status.RetainedUntil.IsZero() {
+		t.Errorf("RepositoryCache once ready = %+v, want %s and no retention", status, want)
 	}
 	if status, found := g.r.RepositoryCache(longRepo); !found || status.Repo != longRepo {
 		t.Errorf("RepositoryCache(%s) = %+v, %t; want found with the whole repository", longRepo, status, found)
@@ -900,10 +905,7 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: "acme/widgets", Head: "0123abcd", LastFetchAt: fetched, Bytes: 6612345678})
 	}))
 	t.Cleanup(served.Close)
-	port, err := strconv.Atoi(served.URL[strings.LastIndex(served.URL, ":")+1:])
-	if err != nil {
-		t.Fatal(err)
-	}
+	service := CacheSandboxName(testProject, cacheRepo) + "." + testNamespace + ".svc:" + strconv.Itoa(repocache.Port)
 	gadgets := ghrepo.MustParse("acme/gadgets")
 	var mapped atomic.Bool
 	mapped.Store(true)
@@ -915,7 +917,12 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 			return []ghrepo.Repository{cacheRepo}
 		}
 	}))
-	g.r.cachePort = port
+	g.r.cacheDial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != service {
+			return nil, fmt.Errorf("dialed %s, not the cache's Service", address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, served.Listener.Addr().String())
+	}
 	for _, repo := range []ghrepo.Repository{cacheRepo, gadgets} {
 		if err := g.r.EnsureRepositoryCache(g.ctx, repo); err != nil {
 			t.Fatal(err)
@@ -961,5 +968,81 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 	g.r.readCacheHealth(g.ctx)
 	if widgets := g.r.RepositoryCaches()[1]; widgets.Health != nil || !strings.Contains(widgets.HealthError, "connection refused") {
 		t.Errorf("a cache whose /healthz cannot be read is %+v, want the read's failure and no health", widgets)
+	}
+}
+
+// A health read presents the cache's bearer token at the cache's Service alone — the address its
+// issue pods reach it at, which Kubernetes routes to the Sandbox's own pod while it is Ready —
+// never at the pod address the runtime's store last held, which, once the pod is gone, another pod
+// may hold: another repository's cache, or any pod at all. A stranger answering at the stored pod
+// address is asked nothing and receives no token, and the read is the cache's own. A read is the
+// pod's it was made of: once that pod is replaced, its successor shows none until it is read.
+func TestTheHealthReadPresentsTheBearerAtTheCachesServiceAlone(t *testing.T) {
+	var presented atomic.Value
+	presented.Store("")
+	served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		presented.Store(r.Header.Get("Authorization"))
+		w.Header().Set(workspace.CacheRepositoryHeader, cacheRepo.String())
+		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: cacheRepo.String(), Head: "0123abcd"})
+	}))
+	t.Cleanup(served.Close)
+	var strangerAsked atomic.Int32
+	var captured atomic.Value
+	captured.Store("")
+	stranger := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		strangerAsked.Add(1)
+		captured.Store(r.Header.Get("Authorization"))
+		w.Header().Set(workspace.CacheRepositoryHeader, "acme/gadgets")
+		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: "acme/gadgets"})
+	}))
+	t.Cleanup(stranger.Close)
+
+	g := newRig(t, nil)
+	name := CacheSandboxName(testProject, cacheRepo)
+	service := name + "." + testNamespace + ".svc:" + strconv.Itoa(repocache.Port)
+	var mu sync.Mutex
+	var dialed []string
+	g.r.cacheDial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		mu.Lock()
+		dialed = append(dialed, address)
+		mu.Unlock()
+		to := stranger.Listener.Addr().String()
+		if address == service {
+			to = served.Listener.Addr().String()
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, to)
+	}
+	if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("the cache pod", func() bool { return g.r.storedPod(name) != nil })
+	g.update(g.pod(name), func(p *corev1.Pod) {
+		p.Status.PodIP = "10.0.0.5"
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	})
+	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(cacheRepo); return status.Ready })
+
+	g.r.readCacheHealth(g.ctx)
+	mu.Lock()
+	got := slices.Clone(dialed)
+	mu.Unlock()
+	if !slices.Equal(got, []string{service}) {
+		t.Errorf("the health read dialed %q, want the cache's Service %s alone", got, service)
+	}
+	if strangerAsked.Load() != 0 || captured.Load() != "" {
+		t.Errorf("the stranger at the stored pod address was asked %d times and given %q, want nothing", strangerAsked.Load(), captured.Load())
+	}
+	if want := "Bearer " + string(g.secret(cacheSecretName(name)).Data[cacheTokenKey]); presented.Load() != want {
+		t.Errorf("the cache's Service was presented %q, want the cache's own %q", presented.Load(), want)
+	}
+	caches := g.r.RepositoryCaches()
+	if len(caches) != 1 || caches[0].Address != "http://"+service || caches[0].Health == nil || caches[0].Health.Head != "0123abcd" || caches[0].HealthError != "" {
+		t.Fatalf("RepositoryCaches = %+v, want the cache at its Service with its own health", caches)
+	}
+
+	g.update(g.pod(name), func(p *corev1.Pod) { p.UID = "uid-cache-pod-successor" })
+	g.eventually("the successor pod", func() bool { pod := g.r.storedPod(name); return pod != nil && pod.UID == "uid-cache-pod-successor" })
+	if caches := g.r.RepositoryCaches(); len(caches) != 1 || caches[0].Health != nil || caches[0].HealthError != "" {
+		t.Errorf("RepositoryCaches after the pod was replaced = %+v, want no read shown for the successor", caches)
 	}
 }

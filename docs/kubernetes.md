@@ -1784,15 +1784,18 @@ used, and a damaged or incomplete history fails the fetch. A cache that is not r
 for, and one that never becomes ready fails the fetch, naming its last answer; the issue pod's
 failure then names the cache's state (`the repository cache of <owner>/<repo>, which a fresh feed
 comes from alone, is failing: container cache CrashLoopBackOff: …`). The issue pods reach the cache
-pods on port 8418 inside the namespace, and so does the daemon, which reads each Ready cache's
-`/healthz` every minute: a NetworkPolicy that isolates the namespace's pods must admit both, or
-every fresh feed waits on a cache it cannot reach and `legion state` shows the read's failure.
+on port 8418 at its Service's name, inside the namespace, and so does the daemon, which reads each
+Ready cache's `/healthz` there every minute, presenting the cache's token only at that name, which
+Kubernetes routes to the cache's own Ready pod, and never at the pod's address, which another pod
+may hold once the cache's pod is gone. A NetworkPolicy that isolates the namespace's pods must
+admit both, or every fresh feed waits on a cache it cannot reach and `legion state` shows the
+read's failure.
 
 `legion state --json | jq .repositories` shows them: each `mapped[]` repository carries `cache`
 (`repo`, `sandbox`, `state` — `starting`, `cloning`, `ready`, or `failing` with the kubelet's
-`reason` — `ready`, `address` while Ready, and from the last health read `head`, `lastFetchAt` and
-`bytes`, or `healthError`) once the cache exists, and `caches` lists the caches of repositories the
-mapping no longer names, each with `retainedUntil`.
+`reason` — `ready`, `address`, the cache's Service, while Ready, and from the last health read of
+the pod it runs now `head`, `lastFetchAt` and `bytes`, or `healthError`) once the cache exists, and
+`caches` lists the caches of repositories the mapping no longer names, each with `retainedUntil`.
 
 An issue pod's launch makes its repository's cache when there is none yet, and the daemon makes
 the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:

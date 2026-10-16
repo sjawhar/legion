@@ -47,7 +47,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -101,11 +100,11 @@ type Runtime struct {
 	now                            func() time.Time
 	log                            *slog.Logger
 	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
-	// mapping names now (Options.RepositoryCache, Options.Mapped), and cachePort the port a cache pod
-	// serves on (repocache.Port; a test serves its own).
+	// mapping names now (Options.RepositoryCache, Options.Mapped), and cacheDial opens every
+	// connection the health read makes (net.Dialer's own; a test routes the Service's name itself).
 	cacheConfig RepositoryCache
 	mapped      func() []ghrepo.Repository
-	cachePort   int
+	cacheDial   func(ctx context.Context, network, address string) (net.Conn, error)
 
 	// lifetime is the informers' context; a read no single caller waits for
 	// (readLauncherCredential) ends with it.
@@ -278,8 +277,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped, cachePort: repocache.Port,
-		occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
+		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
+		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}

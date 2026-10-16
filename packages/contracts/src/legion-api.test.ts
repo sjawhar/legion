@@ -293,7 +293,7 @@ test("the state golden carries each issue's repository and the project's mapping
     sandbox: "legion-legion-cache-acme-widgets-d782c874",
     state: "ready",
     ready: true,
-    address: "http://10.8.1.4:8418",
+    address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
     head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992",
     lastFetchAt: "2026-10-16T19:20:30Z",
     bytes: 6612345678,
