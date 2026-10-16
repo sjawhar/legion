@@ -94,6 +94,9 @@ const (
 	// charged launch failure (supervise.Timeouts.LaunchBackoff), doubled for each one after it: a
 	// three-failure budget's tries span three seconds at least, never a moment one fault lasts.
 	launchBackoffFirst = 2 * time.Second
+	// busyBackoffFirst is the Sandbox runtime's first wait before a launch's request the API server
+	// answered overloaded is sent again (sandbox.Options.BusyBackoff), doubled up to 8 s.
+	busyBackoffFirst = 250 * time.Millisecond
 )
 
 // overrides are the parts of a daemon a test replaces; the zero value is the real daemon.

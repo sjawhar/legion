@@ -152,8 +152,8 @@ type Options struct {
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
 	// BusyBackoff is the first wait before a launch's request the API server answered overloaded is
-	// sent again, doubled for each such answer after it (resend), which BootTimeout bounds;
-	// defaultBusyBackoff, 250 ms, when zero.
+	// sent again, doubled for each such answer after it up to 32 times (resend, backoff.Wait), which
+	// BootTimeout bounds.
 	BusyBackoff time.Duration
 	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release
 	// wait for a process to end itself after its shutdown frame (worker_stop_timeout_seconds).

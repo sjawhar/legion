@@ -1195,7 +1195,7 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 	}
 
 	var throttling, refusingFeeds atomic.Bool
-	var sent, tooMany, serverError, text, feedRefusals atomic.Int64
+	var sent, tooMany, serverError, feedRefusals atomic.Int64
 	throttle := func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		switch a.GetVerb() {
 		case "get", "create", "update", "patch", "delete":
@@ -1215,17 +1215,14 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 		if n%5 != 0 {
 			return false, nil, nil
 		}
-		switch (n / 5) % 3 {
+		switch (n / 5) % 2 {
 		case 0:
 			tooMany.Add(1)
 			return true, nil, apierrors.NewTooManyRequests("the request has been limited by the API server's flow control", 1)
-		case 1:
+		default:
 			serverError.Add(1)
 			return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusInternalServerError,
 				Message: "rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many requests"}}
-		default:
-			text.Add(1)
-			return true, nil, errors.New("rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many requests")
 		}
 	}
 	g.dyn.PrependReactor("*", "sandboxes", throttle)
@@ -1275,15 +1272,14 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 			t.Errorf("%s still runs the old image after the burst, want its pod replaced", name)
 		}
 	}
-	if tooMany.Load() == 0 || serverError.Load() == 0 || text.Load() == 0 {
-		t.Fatalf("the throttle answered %d requests 429, %d 500 and %d with the gRPC text alone of %d sent; want some of each",
-			tooMany.Load(), serverError.Load(), text.Load(), sent.Load())
+	if tooMany.Load() == 0 || serverError.Load() == 0 {
+		t.Fatalf("the throttle answered %d requests 429 and %d 500 of %d sent; want some of each", tooMany.Load(), serverError.Load(), sent.Load())
 	}
 	if feedRefusals.Load() == 0 {
 		t.Fatal("the server refused none of the informers' lists and watches")
 	}
-	t.Logf("the throttle answered %d requests 429, %d 500 and %d with the gRPC text alone of %d sent, and refused %d of the informers' lists and watches",
-		tooMany.Load(), serverError.Load(), text.Load(), sent.Load(), feedRefusals.Load())
+	t.Logf("the throttle answered %d requests 429 and %d 500 of %d sent, and refused %d of the informers' lists and watches",
+		tooMany.Load(), serverError.Load(), sent.Load(), feedRefusals.Load())
 }
 
 // A write the server applied and answered timed out (a 504) is sent again and refused as already

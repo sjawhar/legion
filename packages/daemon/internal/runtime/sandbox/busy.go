@@ -21,29 +21,24 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/backoff"
 )
 
-// defaultBusyBackoff is Options.BusyBackoff when it names none: the first wait before a launch's
-// request the API server answered overloaded is sent again, doubled for each such answer after it
-// up to 8 s (backoff.Wait).
-const defaultBusyBackoff = 250 * time.Millisecond
-
 // serverBusy is whether err is the API server's answer that it is overloaded or failed, rather
-// than its refusal of the request. It is the one place the runtime tells the two apart. An answer
-// that carries a status is judged by the status's reason: TooManyRequests, which API Priority and
-// Fairness answers once client-go's own Retry-After retries ran out, InternalError, such as the 500
-// etcd's throttle reaches a client as (`rpc error: code = ResourceExhausted desc = etcdserver:
-// throttle: too many requests`), ServerTimeout, Timeout and ServiceUnavailable are busy, and every
-// other reason refuses the request; only a status that names no reason is judged by its code, 429
-// or 500 and up. A status whose message says an admission webhook denied the request is a refusal
-// whatever its reason or code. An error that carries no status is busy only when it carries etcd's
-// ResourceExhausted gRPC status in its text; no answer at all — the client's own timeout, a
-// connection that never reached the server — is not.
+// than its refusal of the request. It is the one place the runtime tells the two apart. client-go
+// hands back a status for every answer that is not a success, so an error that carries none got no
+// answer — the client's own timeout, a connection that never reached the server — and is not busy.
+// A status is judged by its reason: TooManyRequests, which API Priority and Fairness answers once
+// client-go's own Retry-After retries ran out, InternalError, such as the 500 etcd's throttle
+// reaches a client as (`rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many
+// requests`), ServerTimeout, Timeout and ServiceUnavailable are busy, and every other reason refuses
+// the request; only a status that names no reason is judged by its code, 429 or 500 and up. A
+// status whose message says an admission webhook denied the request is a refusal whatever its
+// reason or code.
 func serverBusy(err error) bool {
 	if err == nil {
 		return false
 	}
 	var status apierrors.APIStatus
 	if !errors.As(err, &status) {
-		return strings.Contains(err.Error(), "code = ResourceExhausted")
+		return false
 	}
 	s := status.Status()
 	if strings.Contains(s.Message, "denied the request") {
@@ -64,9 +59,10 @@ type launchKey struct{}
 
 // launching is ctx marked as a launch's: each Kubernetes request the runtime makes on it, or on a
 // context made from it, is sent again while the API server answers it overloaded (resend). relaunch
-// marks its whole launch, so every request of a launch waits the server out and none of the
-// runtime's other requests does: a sweep, a suspension and a hello's read each fail on the answer
-// and are tried again by their own callers.
+// marks its whole launch, a failed launch's suspension of its Sandbox included (suspendFailedLaunch,
+// bounded by apiTimeout), so every request of a launch waits the server out and none of the
+// runtime's other requests does: a sweep, a claim's suspension and a hello's read each fail on the
+// answer and are tried again by their own callers.
 func launching(ctx context.Context) context.Context {
 	return context.WithValue(ctx, launchKey{}, true)
 }

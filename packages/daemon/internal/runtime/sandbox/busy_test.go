@@ -23,31 +23,29 @@ const etcdThrottle = "rpc error: code = ResourceExhausted desc = etcdserver: thr
 
 // An API server's overloaded or failed answer is told from its refusal of a request, and from no
 // answer at all, in one place: a status error by its reason, and by its code (429, or 500 and up)
-// only when it names no reason; a webhook's denial is a refusal whatever its code; and etcd's
-// ResourceExhausted gRPC status by its text, only in an error that carries no status, wherever
-// each sits in the error's chain.
+// only when it names no reason; a webhook's denial is a refusal whatever its code; and an error
+// that carries no status got no answer and is not busy, wherever each sits in the error's chain.
 func TestServerBusyTellsAnOverloadedServerFromARefusal(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err  error
 		busy bool
 	}{
-		"429 from flow control":         {apierrors.NewTooManyRequests("the request has been limited", 1), true},
-		"etcd's throttle as a 500":      {&apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusInternalServerError, Message: etcdThrottle}}, true},
-		"an internal error":             {apierrors.NewInternalError(errors.New("etcdserver: request timed out")), true},
-		"503":                           {apierrors.NewServiceUnavailable("the server is currently unable to handle the request"), true},
-		"504":                           {apierrors.NewTimeoutError("the request did not complete", 0), true},
-		"the server's own timeout":      {apierrors.NewServerTimeout(sandboxGVR.GroupResource(), "patch", 1), true},
-		"502 by its code alone":         {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusBadGateway}}, true},
-		"etcd's throttle by text alone": {errors.New(etcdThrottle), true},
-		"a wrapped 500":                 {fmt.Errorf("record the addresses: %w", apierrors.NewInternalError(errors.New("etcd leader changed"))), true},
-		"403":                           {apierrors.NewForbidden(sandboxGVR.GroupResource(), "s", errors.New("RBAC")), false},
-		"404":                           {apierrors.NewNotFound(sandboxGVR.GroupResource(), "s"), false},
-		"409":                           {apierrors.NewConflict(sandboxGVR.GroupResource(), "s", errors.New("modified")), false},
-		"422":                           {apierrors.NewInvalid(sandboxGVR.GroupVersion().WithKind("Sandbox").GroupKind(), "s", nil), false},
-		"the client's own timeout":      {fmt.Errorf("the client gave up: %w", context.DeadlineExceeded), false},
-		"a connection refused":          {errors.New("dial tcp 192.0.2.1:443: connect: connection refused"), false},
-		"no error":                      {nil, false},
-		"a 500 with no reason":          {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError}}, true},
+		"429 from flow control":    {apierrors.NewTooManyRequests("the request has been limited", 1), true},
+		"etcd's throttle as a 500": {&apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusInternalServerError, Message: etcdThrottle}}, true},
+		"an internal error":        {apierrors.NewInternalError(errors.New("etcdserver: request timed out")), true},
+		"503":                      {apierrors.NewServiceUnavailable("the server is currently unable to handle the request"), true},
+		"504":                      {apierrors.NewTimeoutError("the request did not complete", 0), true},
+		"the server's own timeout": {apierrors.NewServerTimeout(sandboxGVR.GroupResource(), "patch", 1), true},
+		"502 by its code alone":    {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusBadGateway}}, true},
+		"a wrapped 500":            {fmt.Errorf("record the addresses: %w", apierrors.NewInternalError(errors.New("etcd leader changed"))), true},
+		"403":                      {apierrors.NewForbidden(sandboxGVR.GroupResource(), "s", errors.New("RBAC")), false},
+		"404":                      {apierrors.NewNotFound(sandboxGVR.GroupResource(), "s"), false},
+		"409":                      {apierrors.NewConflict(sandboxGVR.GroupResource(), "s", errors.New("modified")), false},
+		"422":                      {apierrors.NewInvalid(sandboxGVR.GroupVersion().WithKind("Sandbox").GroupKind(), "s", nil), false},
+		"the client's own timeout": {fmt.Errorf("the client gave up: %w", context.DeadlineExceeded), false},
+		"a connection refused":     {errors.New("dial tcp 192.0.2.1:443: connect: connection refused"), false},
+		"no error":                 {nil, false},
+		"a 500 with no reason":     {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError}}, true},
 		"a 500 with reason Forbidden, a webhook's denial": {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError,
 			Reason: metav1.StatusReasonForbidden, Message: `admission webhook "policy.example" denied the request: not allowed`}}, false},
 		"a webhook's denial as a 500 with no reason": {&apierrors.StatusError{ErrStatus: metav1.Status{Code: http.StatusInternalServerError,

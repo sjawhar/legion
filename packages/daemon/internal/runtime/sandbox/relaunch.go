@@ -290,10 +290,15 @@ func provisioning(pod *corev1.Pod) bool {
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
 // Suspended again. The patch may have been applied even when its answer was an error, and a pod the
-// controller made later would run a valid token for a claim the supervisor counts as failed. Best
-// effort, and not cancelled with the caller: the next relaunch suspends the Sandbox in any case.
+// controller made later would run a valid token for a claim the supervisor counts as failed. It is
+// not cancelled with the caller, and it is bounded by apiTimeout: it is part of the launch, so it
+// waits out an API server answering it overloaded (resend), but no longer than that, so a daemon
+// stop never waits a boot timeout on it. A suspension that still fails is logged; the next
+// relaunch suspends the Sandbox in any case.
 func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s *sandbox) {
-	if err := r.setMode(context.WithoutCancel(ctx), s, modeSuspended); err != nil {
+	suspending, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiTimeout)
+	defer cancel()
+	if err := r.setMode(suspending, s, modeSuspended); err != nil {
 		r.log.Error("sandbox runtime: could not suspend the sandbox of a failed launch", "claim", token, "err", err)
 	}
 }
@@ -319,6 +324,11 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // before any launch (treeVolumeLayout).
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
+	// refused is the relabel the API server refused as invalid, and refusedAt the resourceVersion its
+	// fence tested: a Sandbox read again still at that resourceVersion has not changed since, so the
+	// refusal was the patch's own, and it is the answer.
+	var refused error
+	var refusedAt string
 	tree := r.labels(l)[labelTree]
 	for {
 		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
@@ -350,6 +360,9 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
+			if refused != nil && s.ResourceVersion == refusedAt {
+				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, refused)
+			}
 			// Fenced to the resourceVersion read, beside the uid patch tests: a delete, a relabel or a
 			// mode change since that read conflicts, and the next launch reads the Sandbox again.
 			ops := []jsonPatchOp{
@@ -373,7 +386,9 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if apierrors.IsInvalid(err) && time.Now().Before(deadline) {
 				// The fence's test failed: the Sandbox changed since the read, or this patch, sent
 				// again after an overloaded answer (resend), was already applied. Read it again and
-				// decide from what it holds now.
+				// decide from what it holds now; one still at the tested resourceVersion refused the
+				// patch itself.
+				refused, refusedAt = err, s.ResourceVersion
 				continue
 			}
 			if err != nil {

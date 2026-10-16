@@ -199,8 +199,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
-	case opts.BusyBackoff < 0:
-		return refuse("the busy backoff %s is negative", opts.BusyBackoff)
+	case opts.BusyBackoff <= 0:
+		return refuse("the busy backoff %s is not positive", opts.BusyBackoff)
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
@@ -263,9 +263,6 @@ func configureProber(opts Options) (*Runtime, error) {
 	}
 	if r.now == nil {
 		r.now = time.Now
-	}
-	if r.busyBackoff == 0 {
-		r.busyBackoff = defaultBusyBackoff
 	}
 	if r.log == nil {
 		r.log = slog.Default()
@@ -485,13 +482,11 @@ func (r *Runtime) notify(obj any) {
 
 // await re-checks done after every informer event, and every recheck interval, until it reports
 // true, fails, or budget passes; what names the wait in the timeout. done is handed ctx bounded by
-// budget, so a request it makes, a launch's waiting out an overloaded server included (resend),
-// ends with the wait rather than up to a boot timeout past it.
+// budget, and that one bound is the wait's: a request done makes, a launch's waiting out an
+// overloaded server included (resend), ends with the wait rather than up to a boot timeout past it.
 func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, done func(context.Context) (bool, error)) error {
 	bounded, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	deadline := time.NewTimer(budget)
-	defer deadline.Stop()
 	recheck := time.NewTicker(recheckInterval)
 	defer recheck.Stop()
 	for {
@@ -503,9 +498,10 @@ func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, 
 			return err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
+		case <-bounded.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("timed out after %s waiting for %s", budget, what)
 		case <-changed:
 		case <-recheck.C:
