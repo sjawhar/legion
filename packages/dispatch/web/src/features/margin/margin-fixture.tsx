@@ -41,6 +41,8 @@ export const issue: IssueDetails = {
   project: "CORE",
   referenced_by_count: 0,
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "open",
   priority: null,
   rank: "U",

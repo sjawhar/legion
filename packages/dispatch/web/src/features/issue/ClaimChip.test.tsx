@@ -35,6 +35,8 @@ const base: Issue = {
   project: "CORE",
   rank: "U",
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "in_progress",
   title: "Claim the issue before working it",
   updated_at: "2026-09-24T06:00:00Z",
