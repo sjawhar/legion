@@ -691,7 +691,14 @@ type probeSpec struct {
 // secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
 // and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
 // requires. Its command and env are escaped against the kubelet's expansion as every worker
-// container's are (kubeletLiteral).
+// container's are (kubeletLiteral). It carries Karpenter's `do-not-disrupt` annotation alone, never
+// GKE Autopilot's `safe-to-evict` (evictionProtectionAnnotations, used by podTemplate instead): GKE
+// treats that annotation as a request for extended-duration protection, which raises its enforced
+// minimum CPU and memory past the probe's deliberately low fixed reservation (250m/1Gi,
+// probeReservation, "a probe sized as a role could keep the daemon from booting on a full pool").
+// The probe is short-lived, explicitly deleted by its own Sandbox at shutdown, and already retried
+// on a kubelet-initiated failure (kubeletFailure, imageProbeRetry), so it needs no eviction
+// protection the way a multi-hour issue pod does.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
