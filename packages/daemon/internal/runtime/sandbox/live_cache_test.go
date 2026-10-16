@@ -1,9 +1,10 @@
 //go:build e2e
 
-// The Stage 4a harness's repository cache checks: an issue pod's launch makes its repository's
-// cache and fills its feed from it alone, a second pod does too, asking GitHub only for the
-// delta, and an issue whose volume is lost is provisioned again through the cache onto a commit of
-// its pushed branch that neither the default branch nor the cache holds. The rig is live_test.go.
+// The Stage 4a harness's repository cache checks: the cache the run's first issue pod made at
+// root-ready serves its repository only with its token, a second pod fills its feed from it alone,
+// asking GitHub only for the delta, and an issue whose volume is lost is provisioned again through
+// the cache onto a commit of its pushed branch that neither the default branch nor the cache holds.
+// The rig is live_test.go.
 
 package sandbox
 
@@ -19,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -29,51 +29,30 @@ import (
 // cache: the tar's bytes, the cache's address, and the bytes and refs GitHub's delta brought.
 var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes from the repository cache (http://\S+) in \S+, its history verified in \S+; ([0-9,]+) bytes from GitHub for the delta \(([0-9]+) refs?\)`)
 
-// repository-cache: the run's repository has no cache until cache-a, its first issue pod, is
-// launched: the launch makes it (its Sandbox recorded for the teardown first), cache-a's fetch
-// waits for it and fills its feed from it, asking GitHub only for the delta, and the cache, Ready,
-// answers /healthz — asked inside its own pod with its own token — at the head GitHub names for the
-// repository's default branch. The same request without the token is refused.
+// repository-cache: the cache the root's launch made (root-ready) is Ready as the runtime's stores
+// show it, at its Service, and its /healthz — asked inside its own pod — refuses a request without
+// its token, 401 naming nothing, and answers its own token at the head GitHub names for the
+// repository's default branch. The token reaches curl on its standard input (`-H @-`) from the
+// file the pod mounts, never in a process's argv.
 func (r *liveRig) checkRepositoryCache() error {
 	name := CacheSandboxName(r.env.project, r.env.repo)
-	if _, found := r.rt.RepositoryCache(r.env.repo); found {
-		return fmt.Errorf("the repository cache %s exists before any issue of %s launched", name, r.env.repo)
-	}
-	if err := r.recordSandbox(name); err != nil {
-		return err
-	}
-	r.mappedMu.Lock()
-	r.mapped = []ghrepo.Repository{r.env.repo}
-	r.mappedMu.Unlock()
-	first := r.claim("cache-a")
-	if err := r.ensureRunning(first); err != nil {
-		return err
-	}
-	if _, found := r.rt.RepositoryCache(r.env.repo); !found {
-		return fmt.Errorf("cache-a's launch made no repository cache of %s", r.env.repo)
-	}
-	if err := r.assertCacheFed(first); err != nil {
-		return err
-	}
 	status, err := r.awaitCacheReady()
 	if err != nil {
 		return err
 	}
-	ask := func(token string) (string, error) {
-		header := ""
-		if token != "" {
-			header = `-H "Authorization: Bearer $(cat "$` + repocache.CacheTokenFileEnv + `")" `
-		}
-		return r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", fmt.Sprintf(`curl -s -w ' %%{http_code}' %slocalhost:%d/healthz`, header, repocache.Port))
+	if want := r.rt.cacheURL(name); status.Address != want {
+		return fmt.Errorf("the repository cache %s is Ready at %q, want its Service %s", name, status.Address, want)
 	}
-	refused, err := ask("")
+	healthz := fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d/healthz`, repocache.Port)
+	refused, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", healthz)
 	if err != nil {
 		return err
 	}
 	if !strings.HasSuffix(strings.TrimSpace(refused), " 401") || strings.Contains(refused, r.env.repo.String()) {
 		return fmt.Errorf("the cache's /healthz without its token answered %q, want 401 naming nothing", strings.TrimSpace(refused))
 	}
-	out, err := ask("its own")
+	withToken := `{ printf 'Authorization: Bearer '; tr -d '\r\n' <"$` + repocache.CacheTokenFileEnv + `"; echo; } | ` + strings.Replace(healthz, "curl -s", "curl -s -H @-", 1)
+	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", withToken)
 	if err != nil {
 		return err
 	}
@@ -89,15 +68,15 @@ func (r *liveRig) checkRepositoryCache() error {
 	if !health.Ready || health.Repo != r.env.repo.String() || health.Head != head || health.Bytes <= 0 || health.LastFetchAt.IsZero() {
 		return fmt.Errorf("the cache's /healthz answered %+v, want ready for %s at %s's head %s", health, r.env.repo, r.defaultBranch, head)
 	}
-	note("runtime", "cache-a's launch made %s; RepositoryCache(%s): %s at %s", name, r.env.repo, status.State, status.Address)
-	note("operator", "exec %s -c %s -- curl localhost:%d/healthz: %s without its token, %s with it; GitHub's %s is %s", name, cacheContainer, repocache.Port, strings.TrimSpace(refused), body, r.defaultBranch, head)
+	note("runtime", "RepositoryCache(%s): %s at %s", r.env.repo, status.State, status.Address)
+	note("operator", "exec %s -c %s -- curl localhost:%d/healthz: %s without its token, %s with it on stdin; GitHub's %s is %s", name, cacheContainer, repocache.Port, strings.TrimSpace(refused), body, r.defaultBranch, head)
 	return nil
 }
 
-// cache-second-pod: a second issue pod (cache-b) fills its feed from the cache's tar and fetches
-// from GitHub only the delta, under 1 MiB; its clone's objects are the feed's
-// (objects/info/alternates names the feed on the issue volume), and git checks the clone's
-// connectivity through them.
+// cache-second-pod: another issue pod of the run's repository (cache-b), launched while the cache
+// is Ready, fills its feed from the cache's tar and fetches from GitHub only the delta, under 1 MiB;
+// its clone's objects are the feed's (objects/info/alternates names the feed on the issue volume),
+// and git checks the clone's connectivity through them.
 func (r *liveRig) checkCacheSecondPod() error {
 	if _, err := r.awaitCacheReady(); err != nil {
 		return err
@@ -271,16 +250,17 @@ func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, e
 }
 
 // assertCacheFed is cache-stream's evidence for c's pod: its workspace-fetch log's last line names
-// the bytes it streamed from the repository's cache at the address the runtime gave it and the
+// the bytes it streamed from its repository's cache at the address the runtime gave it and the
 // GitHub delta, under 1 MiB, and nothing was cloned from GitHub.
 func (r *liveRig) assertCacheFed(c *liveClaim) error {
 	log, err := r.fetchLog(SandboxName(c.token))
 	if err != nil {
 		return err
 	}
-	address := r.rt.cacheURL(CacheSandboxName(r.env.project, r.env.repo))
+	repo := r.claimRepository(c)
+	address := r.rt.cacheURL(CacheSandboxName(r.env.project, repo))
 	match := cacheStreamLine.FindStringSubmatch(log)
-	if match == nil || match[2] != address || strings.Contains(log, "cloned "+r.env.repo.String()+" from GitHub") {
+	if match == nil || match[2] != address || strings.Contains(log, "cloned "+repo.String()+" from GitHub") {
 		return fmt.Errorf("%s's workspace-fetch log does not name the stream from the cache at %s alone: %s", c.name, address, strings.TrimSpace(log))
 	}
 	streamed, delta := printedCount(match[1]), printedCount(match[3])
