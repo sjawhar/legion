@@ -58,8 +58,11 @@ both by `subPath`, which the kubelet never refreshes.
 `legion-operator-route-apply`, and forces conflicts. When another tool wrote the ConfigMap before
 (an earlier client-side apply, or an infrastructure tool's server-side apply), the script takes the
 two data keys over from it instead of failing, and leaves that tool's labels and annotations as they
-are. A tool that still declares the ConfigMap writes its own copy back at its next apply, so stop it
-declaring the ConfigMap before the operator's directory takes over.
+are. Before it applies, it names on stderr each other field manager that holds a data key, kubectl's
+client-side apply (an earlier run of the script) aside. A tool that still declares the ConfigMap
+acts at its own next apply: an apply that forces conflicts writes the tool's copy back, and one that
+does not fails on any key whose value differs and leaves the operator's copy in place. Either way,
+stop the tool declaring the ConfigMap before the operator's directory takes over.
 
 The ConfigMap carries no `legion.dev/project` label. A live harness run creates its own copy under a
 run-scoped name and deletes only objects labelled with its own run's project, so it never touches
