@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runJq } from "./run-jq";
 import { scriptFunctions } from "./script-functions";
 
 // Stage 4b's prerequisites checkpoint compiles every lib/*.jq module the script includes on the
@@ -18,7 +19,7 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 writeFileSync(join(dir, "good.jq"), "def ok: true;\n");
 writeFileSync(join(dir, "includer.jq"), 'include "good"; def also: ok;\n');
 writeFileSync(join(dir, "broken.jq"), "def broken: (;\n");
-const version = Bun.spawnSync(["jq", "--version"]).stdout.toString().trim();
+const version = runJq(["--version"], "").trim();
 
 interface Run {
   readonly code: number;

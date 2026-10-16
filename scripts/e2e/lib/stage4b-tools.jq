@@ -49,9 +49,10 @@ def tool_result_texts(name): [tool_results(name)[] | select(.isError == false) |
 # bash call dispatched through eval (call_arguments is {} for eval, omp-tool-calls.jq) or through a
 # write to xd://bash whose content is no JSON object (call_arguments is {} then too) has no
 # command, so a bound bash assertion does not see it, while tool_result_said("bash"; …), whose
-# $args is "", still counts every bash call, since "" is in every string.
+# $args is "", still counts every bash call, since "" is in every string. Arguments that are no JSON
+# text are read as {} the same way, so one odd call never aborts the program.
 def arguments_carry(name; $args):
-  if name == "bash" then (.arguments | fromjson | .command? // "" | tostring | contains($args))
+  if name == "bash" then (.arguments | fromjson? // {} | .command? // "" | tostring | contains($args))
   else (.arguments | contains($args)) end;
 
 # tool_ran(name) is whether one call of the tool returned without error.

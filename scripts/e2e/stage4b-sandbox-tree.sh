@@ -2247,9 +2247,9 @@ tool_result_answered() {
   session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
 # tool_result_quotes SESSION TOOL [ARGS]: every result of TOOL in the session (of the calls whose
-# arguments carry ARGS, when given) on one line, each with its call's arguments, an error marked
-# and its text trimmed: what the tool did return, for the fail line of an expectation it did not
-# meet.
+# arguments carry ARGS, when given: arguments_carry, the command alone for bash) on one line, each
+# with its call's arguments, an error marked and its text trimmed: what the tool did return, for the
+# fail line of an expectation it did not meet.
 tool_result_quotes() {
   session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
     [tool_results($tool)[] | select(arguments_carry($tool; $args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
@@ -5107,19 +5107,15 @@ esac
 [ "$why" = "$expected" ] || fail "$tree3's implementer claim $held_claim failed with '$why', but its last relaunch's death leads to '$expected'"
 note "the daemon failed $held_claim because $why ($counts, bound $launch_failure_limit)"
 # controller_deliveries [NEEDLE] prints the raw session lines of the controller's sessions that are
-# Envoy deliveries (envoy-message custom messages), those holding NEEDLE when one is given, in file
-# order, and prints nothing and exits 0 when none match: grep exits 1 on no match, which errexit
-# would take as a failure, and `|| true` keeps the scan going. Every scan of the controller's
-# deliveries below reads it.
+# Envoy deliveries (envoy-message custom messages), those holding NEEDLE when one is given (an
+# empty fixed-string pattern matches every line), in file order, and prints nothing and exits 0
+# when none match: grep exits 1 on no match, which errexit would take as a failure, and `|| true`
+# keeps the scan going. Every scan of the controller's deliveries below reads it.
 controller_deliveries() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    if [ $# -eq 0 ]; then
-      grep -F '"customType":"envoy-message"' -- "$file"
-    else
-      grep -F '"customType":"envoy-message"' -- "$file" | grep -F -- "$1"
-    fi || true
+    grep -F '"customType":"envoy-message"' -- "$file" | grep -F -- "${1-}" || true
   done
 }
 # controller_received NEEDLE: an Envoy delivery in the controller's session holds NEEDLE. The

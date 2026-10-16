@@ -233,7 +233,10 @@ describe("the library", () => {
     // The intent is in the arguments' JSON text, which a rule over the whole text would match.
     expect(jqOver(intentOnly, 'tool_results("bash")[0].arguments')).toContain("gh api graphql");
     expect(
-      jqOver(intentOnly, 'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")')
+      jqOver(
+        intentOnly,
+        'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")'
+      )
     ).toBe(false);
     const ran = bashExcerpt(
       "gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login",
@@ -248,9 +251,9 @@ describe("the library", () => {
   });
 
   test("the real fixture's gh api graphql call through the lifted helper", () => {
-    expect(helper("tool_result_answered", "bash", "gh api graphql", "legion-implementer[bot]")).toBe(
-      0
-    );
+    expect(
+      helper("tool_result_answered", "bash", "gh api graphql", "legion-implementer[bot]")
+    ).toBe(0);
     expect(helper("tool_result_answered", "bash", "gh pr view", "legion-implementer[bot]")).toBe(1);
   });
 

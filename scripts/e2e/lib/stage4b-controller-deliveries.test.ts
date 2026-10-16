@@ -85,7 +85,10 @@ describe("controller_deliveries", () => {
   });
 
   test("with a needle no delivery holds, prints nothing and exits 0", () => {
-    expect(run('controller_deliveries "summary: todo on LEGSMOKE-9"')).toEqual({ code: 0, out: "" });
+    expect(run('controller_deliveries "summary: todo on LEGSMOKE-9"')).toEqual({
+      code: 0,
+      out: "",
+    });
   });
 
   test("takes a needle's double quotes literally", () => {
