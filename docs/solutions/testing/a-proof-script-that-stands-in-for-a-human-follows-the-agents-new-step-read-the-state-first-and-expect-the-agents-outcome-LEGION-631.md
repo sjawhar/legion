@@ -8,7 +8,7 @@ tags:
   - prompt-change
   - fake-gh
 date: 2026-10-10
-status: active
+status: superseded by the daemon's READY merge submission (`ready_merge` outbox row) — an accepted READY is the daemon's to merge, so a proof never merges it by hand, armed or not; it reads the pull request until the daemon's merge lands (`await_ready_merge` in `scripts/e2e/lib/workflow.sh`) and fails naming GitHub's state when none does, since a hand merge there would hide a READY merge that never came. Reading the state first and expecting the agent's outcome stands, and `merge_when_clean`'s hand merge is only for a pull request no accepted READY covers (one merged before its READY, one whose merger is held)
 module: scripts/e2e
 related_issues:
   - "LEGION-631"

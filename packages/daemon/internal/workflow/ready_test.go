@@ -55,6 +55,139 @@ func TestTheDaemonPostsTheMergersREADYPacket(t *testing.T) {
 	}
 }
 
+// READY owns a durable merge submission for its exact head, whether the READY is accepted at once
+// or held by the design gate until a human approves. A READY a person merges queues none. The
+// outbox keeps retrying that submission while GitHub's requirements are pending; a later push
+// makes the row stale instead of letting it merge another head.
+func TestTheDaemonQueuesAMergeForTheREADYHead(t *testing.T) {
+	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	for _, tc := range []struct {
+		name      string
+		approved  bool
+		mergeNote string
+		want      []record.ReadyMerge
+	}{
+		{name: "accepted at once", approved: true, want: []record.ReadyMerge{{Number: 42, Head: "head"}}},
+		{name: "refused by the design gate, then approved", want: []record.ReadyMerge{{Number: 42, Head: "head"}}},
+		{name: "merged by hand", approved: true, mergeNote: byHand},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+			gate := record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4}
+			if tc.approved {
+				gate.ApprovedVersion = new(4)
+			}
+			seedGate(t, pool, gate)
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+			apply := applyFacts(t, pool, readyEngine(""))
+
+			result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true,
+				Summary: readyPacket, Commit: "head", RecordedHead: "head", MergeNote: tc.mergeNote})
+			if !tc.approved {
+				if refusalCode(result) != "DESIGN_GATE_CLOSED" {
+					t.Fatalf("READY with the gate closed = %#v, want DESIGN_GATE_CLOSED", result)
+				}
+				if got := readyMerges(t, pool); len(got) != 0 {
+					t.Fatalf("READY merges before the approval = %v, want none", got)
+				}
+				apply("approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 4})
+			}
+			assertPhase(t, pool, phase.AwaitingMerge)
+			if got := readyMerges(t, pool); !slices.Equal(got, tc.want) {
+				t.Fatalf("READY merges = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// readyMerges is every READY merge the outbox holds, in order.
+func readyMerges(t *testing.T, pool *pgxpool.Pool) []record.ReadyMerge {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select (payload->>'number')::int, payload->>'head' from outbox where kind = 'ready_merge' order by id")
+	if err != nil {
+		t.Fatalf("read READY merges: %v", err)
+	}
+	defer rows.Close()
+	var merges []record.ReadyMerge
+	for rows.Next() {
+		var merge record.ReadyMerge
+		if err := rows.Scan(&merge.Number, &merge.Head); err != nil {
+			t.Fatalf("scan READY merge: %v", err)
+		}
+		merges = append(merges, merge)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate READY merges: %v", err)
+	}
+	return merges
+}
+
+// A pull request closed while its READY awaits the merge ends that READY's merge row once the close
+// reaches the record. Reopened at the READY head, the READY still stands, so the daemon submits its
+// merge again; reopened at another head, the READY is withdrawn and nothing is submitted, and a
+// READY a person merges is never submitted. A tree that lingers queues the row as any other does:
+// its executor reads the lingering tree as awaiting nothing and submits nothing (the daemon
+// package's TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead).
+func TestAReopenAtTheREADYHeadSubmitsTheMergeAgain(t *testing.T) {
+	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	for _, tc := range []struct {
+		name, head, mergeNote string
+		lingers               bool
+		want                  []record.ReadyMerge
+	}{
+		{name: "at the READY head", head: "head", want: []record.ReadyMerge{{Number: 42, Head: "head"}}},
+		{name: "at another head", head: "moved"},
+		{name: "at the READY head of a by-hand READY", head: "head", mergeNote: byHand},
+		{name: "at the READY head in a lingering tree", head: "head", lingers: true, want: []record.ReadyMerge{{Number: 42, Head: "head"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"}
+			if tc.lingers {
+				until, parent := time.Now().Add(time.Hour), "LEGION-207"
+				seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "closed root", Phase: phase.Done,
+					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
+				issue.Tree, issue.Parent, issue.Title = "LEGION-207", &parent, "child"
+			}
+			seedIssue(t, pool, issue)
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket, MergeNote: tc.mergeNote})
+			applyRefusingNothing(t, pool, readyEngine(""), intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.head, Reopened: true})
+			if got := readyMerges(t, pool); !slices.Equal(got, tc.want) {
+				t.Fatalf("READY merges after the reopen = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// A ready_merge that was already waiting when a pull request closed must be reused when the pull
+// request reopens at that READY head. Two rows would submit the same mutation and turn one
+// permanent GitHub refusal into two architect notices.
+func TestAReopenAtTheREADYHeadReusesItsWaitingMergeRow(t *testing.T) {
+	pool := migratedPool(t)
+	records := record.NewStore()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
+	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "head"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Fatalf("queue the waiting READY merge: %v", err)
+	}
+	applyRefusingNothing(t, pool, readyEngine(""), intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Reopened: true})
+	if got, want := readyMerges(t, pool), []record.ReadyMerge{{Number: 42, Head: "head"}}; !slices.Equal(got, want) {
+		t.Fatalf("READY merges after the reopen = %v, want one row %v", got, want)
+	}
+}
+
 // A READY the design gate refused is posted when a human approves: the packet is kept with the
 // merger's completion across the refusal, and nothing is posted before the approval.
 func TestAREADYTheGateRefusedIsPostedWhenAHumanApproves(t *testing.T) {
