@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 var _ Store = NewStore()
@@ -920,6 +921,99 @@ func TestADueLifecycleRowWaitsWhileItsIssuesLifecycleRowRuns(t *testing.T) {
 			t.Fatalf("claim of the removal once the suspend finished = %#v, %v, want it leased", removal, ok)
 		}
 	})
+}
+
+// Two daemons' lanes claim different lifecycle rows of one issue at the same moment: the first
+// daemon's claim of the suspend is still uncommitted when the second daemon's claim of the removal
+// runs. The rule outboxLaneFree states — no lifecycle row of an issue runs while another of its
+// lifecycle rows is under a live lease, across daemons — holds only if at most one of the two is
+// leased once both have committed: the second claim must see the first's lease, or wait for it,
+// rather than read a snapshot from before it and lease a second row beside it.
+func TestTwoDaemonsClaimingDifferentLifecycleRowsOfOneIssueAtOnceLeaseOnlyOne(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	var suspendID, removalID int64
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, payload := range []OutboxPayload{
+			SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1},
+			WorkspaceRemove{Linger: 1},
+		} {
+			row, err := NewOutboxRow("LEGION-208", payload, now)
+			must(t, err)
+			must(t, records.Enqueue(ctx, tx, row))
+		}
+		must(t, tx.QueryRow(ctx, "select min(id), max(id) from outbox where issue = 'LEGION-208'").Scan(&suspendID, &removalID))
+	})
+
+	// Daemon A's lane claims the suspend and is a moment from committing.
+	txA, err := st.BeginTx(ctx, pgx.TxOptions{})
+	must(t, err)
+	_, okA, err := records.ClaimRow(ctx, txA, suspendID, now, time.Minute)
+	must(t, err)
+	if !okA {
+		t.Fatal("the first daemon's claim of the suspend was refused with nothing leased")
+	}
+	// Daemon B's lane, whose list also showed both rows, claims the removal in that moment. Its
+	// claim either returns — before A commits, it must then have leased nothing — or waits on A's
+	// transaction, which commits once B is seen waiting. A claim refused by an error of its own
+	// (a serialization failure at commit) leased nothing either; the test checks what is leased.
+	type attempt struct {
+		ok  bool
+		err error
+	}
+	second := make(chan attempt, 1)
+	go func() {
+		txB, err := st.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			second <- attempt{err: err}
+			return
+		}
+		defer txB.Rollback(ctx)
+		_, ok, err := records.ClaimRow(ctx, txB, removalID, now, time.Minute)
+		if err == nil {
+			err = txB.Commit(ctx)
+		}
+		second <- attempt{ok: ok && err == nil, err: err}
+	}()
+	var got attempt
+	returned := false
+	testwait.Eventually(t, "the second daemon's claim to return or to wait on the first's transaction", func() bool {
+		select {
+		case got = <-second:
+			returned = true
+			return true
+		default:
+		}
+		var waiting int
+		err := st.Pool().QueryRow(ctx, `select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock'`).Scan(&waiting)
+		return err == nil && waiting > 0
+	})
+	must(t, txA.Commit(ctx))
+	if !returned {
+		got = <-second
+	}
+	if got.err != nil {
+		t.Logf("the second daemon's claim was refused by an error: %v", got.err)
+	}
+
+	var leased []string
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := tx.Query(ctx, "select kind from outbox where issue = 'LEGION-208' and lease_until > $1 order by id", now)
+		must(t, err)
+		defer rows.Close()
+		for rows.Next() {
+			var kind string
+			must(t, rows.Scan(&kind))
+			leased = append(leased, kind)
+		}
+		must(t, rows.Err())
+	})
+	if got.ok || len(leased) != 1 {
+		t.Fatalf("second daemon's claim of the removal = %v and the issue's lifecycle rows under a live lease = %v; want the claim refused and the suspend leased alone", got.ok, leased)
+	}
 }
 
 // A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
