@@ -54,6 +54,11 @@ type DispatchArgs struct {
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
 	Namespace          *string `pulumi:"namespace,optional"`
+
+	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
+	// pods the NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster namespace;
+	// the tailnet path (Tailscale Serve on 443) is unaffected either way.
+	AllowedNamespaces []string `pulumi:"allowedNamespaces,optional"`
 }
 
 // dispatchSeededInput names the first plain string input that holds an nkey seed. No component
