@@ -313,7 +313,7 @@ and the command exits 1:
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN < token.txt
 set a new value of DEMO_DEPLOY_TOKEN
-agent-secrets secret set: the write to Secrets Manager stands, but the broker could not be asked to reread DEMO_DEPLOY_TOKEN, so it serves the change only from its next reload: too many secret rereads; try again later (RATE_LIMITED)
+agent-secrets secret set: the write to the secret store stands, but the broker could not be asked to reread DEMO_DEPLOY_TOKEN, so it serves the change only from its next reload: too many secret rereads; try again later (RATE_LIMITED)
 ```
 
 Do not repeat the write. A new value is read at the next grant read anyway, and a create, a
