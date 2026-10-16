@@ -73,7 +73,7 @@ func TestATransientCloneFailureIsToldFromAPermanentOne(t *testing.T) {
 		{"a certificate refused on a request of the transfer", fatal("error: RPC failed; curl 60 SSL certificate problem: unable to get local issuer certificate\nfatal: expected flush after ref listing\n"), false},
 		{"a write that failed on a request of the transfer", fatal("error: RPC failed; curl 23 Failure writing output to destination\nfatal: early EOF\n"), false},
 		{"a curl error nobody has seen on a request of the transfer", fatal("error: RPC failed; curl 999 something nobody has seen\nfatal: early EOF\n"), false},
-		{"a destination already there", fatal("fatal: destination path '/var/run/legion/feed/acme/widgets.git' already exists and is not an empty directory.\n"), false},
+		{"a destination already there", fatal("fatal: destination path '/legion/feed/acme/widgets.git.clone-1234' already exists and is not an empty directory.\n"), false},
 		{"a full disk", fatal("fatal: write error: No space left on device\nfatal: fetch-pack: invalid index-pack output\n"), false},
 		{"a transient text under another exit", Result{ExitCode: 1, Stderr: "error: RPC failed; curl 92 HTTP/2 stream 7 was not closed cleanly: CANCEL (err 8)\n"}, false},
 		{"a clone killed by a signal", Result{ExitCode: -1, Stderr: "error: RPC failed; curl 92 HTTP/2 stream 7 was not closed cleanly: CANCEL (err 8)\n"}, false},

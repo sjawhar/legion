@@ -994,7 +994,7 @@ every issue pod is relaunched onto the new image.
 
 ### Contract discipline
 
-`DaemonAPIVersion` (27) is the Go daemon's own contract number; each claim records the contract
+`DaemonAPIVersion` (30) is the Go daemon's own contract number; each claim records the contract
 its process registered with as `pluginContract`. A role's `pi-legion` declares the contract it was built against
 (`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass
 (`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path
@@ -1102,6 +1102,11 @@ runtime:
       env: { PI_CONFIG_FILES: /etc/legion-operator/overlay.yml }
       volumes: [...]
       volume_mounts: [...]
+    repository_cache:           # optional: each mapped repository's cache (The repository cache, below)
+      volume: 20Gi              # default 20Gi; the cache's own volume, which holds the bare clone
+      refresh_minutes: 10       # default 10; how long between the cache's fetches from GitHub
+      retain_hours: 168         # default 168; how long a cache outlives its repository leaving the mapping
+      resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # the defaults
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: <the port advertise_host or bind serves it on>
@@ -1169,7 +1174,10 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 - an ephemeral-storage request past its limit, once both are settled — the file set one side or
   both, since the defaults never exceed:
   `runtime.kubernetes.resources.<role>.ephemeral_storage_request <request> exceeds ephemeral_storage
-  <limit>`;
+  <limit>`, and `runtime.kubernetes.repository_cache.resources.ephemeral_storage_request …` likewise;
+- a `repository_cache` that is not a mapping, or names a member but `volume`, `refresh_minutes`,
+  `retain_hours` and `resources`; a `volume` that is not a positive Kubernetes quantity; a
+  `refresh_minutes` or `retain_hours` that is not a positive integer;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - `agent_secrets.operator`, removed with LEGION-664: the daemon logs in with its own ServiceAccount
   token (`token_file`), which no person approves, so it names no approver;
@@ -1519,11 +1527,25 @@ one Sandbox per issue, shared by every role that works it, owning the issue's vo
 template (`manifest.go`) has two init containers and one container per role (`claim.Roles`:
 architect, planner, implementer, tester, reviewer, merger), named for its role:
 
-1. `workspace-fetch` clones the repository into the pod's feed, cloning again up to four times
-   after a transient failure, within its 30-minute bound. It is the only process that holds the
-   provisioning token ([Trust model](#trust-model-the-provisioning-token)).
+1. `workspace-fetch` fills the pod's feed, the bare repository at `/legion/feed/<owner>/<repo>.git`
+   on the issue's own volume. While the repository's cache is Ready the pod is told its address
+   (`LEGION_REPOSITORY_CACHE_URL`), and the fetch unpacks the cache's copy of the repository, then
+   fetches from GitHub only what the cache lacks: its log's last line is `workspace-init fetch:
+   <n> bytes from the repository cache http://<cache pod ip>:8418 in <d>; <m> bytes from GitHub
+   for the delta (<k> refs)`. With no ready cache it clones from GitHub (`no ready repository cache
+   for <owner>/<repo>: cloning from GitHub (<n> bytes)`), and a cache it cannot use is logged with
+   why and cloned past (`the repository cache <url> was not used: <why>; cloning from GitHub`); a
+   relaunch, whose volume already holds the feed, fetches the delta into it alone (`the feed holds
+   <owner>/<repo> already: …`). Each transfer from GitHub, the clone or the delta, is tried again
+   up to four times after a transient failure, within its 30-minute bound.
+   It is the only process that holds the provisioning token
+   ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the issue's clone and its jj workspace on the issue's own volume from
    the read-only feed, taking no lock and waiting on no other pod: no other pod mounts the volume.
+   The clone is a `git clone --shared` of the feed, so its objects stay in the feed
+   (`.git/objects/info/alternates` names `/legion/feed/<owner>/<repo>.git/objects`) and only what
+   the issue's own commits add is written into the clone; its `origin` names GitHub, and
+   `jj git init --colocate` makes it jj's, tracking the default branch as a `jj git clone` would.
    Its environment is the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME=true` when the volume must
    already hold the clone or a retained session (the launching claim resumes a session, or any
    stored claim of the issue recorded one), `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after
@@ -1561,7 +1583,12 @@ relabelled. From it Agent Sandbox creates the PVC `issue-legion-<project>-<issue
 (`IssueClaimName`, `names.go`) with the Sandbox as its owner, so `kubectl -n legion get pvc -l
 legion.dev/issue=<KEY>` finds it and the Sandbox's deletion takes it. `workspace-init` and every
 role container mount it at `/legion`, and each role container again at Oh My Pi's sessions directory
-through a `subPath`, so a session survives its pod. Each role's Secret,
+through a `subPath`, so a session survives its pod. The feed is the volume's `feed` directory:
+`workspace-fetch` mounts that `subPath` alone, read-write, at `/legion/feed`, and `workspace-init`
+and every role container mount the same `subPath` again, read-only, at `/legion/feed` over their
+whole-volume mount, so the path the clone's alternates names is one in every container and no
+agent writes what the token-holding container reads. The kubelet makes the directory on first use,
+so a volume that has none is relaunched as it is: nothing on it moves. Each role's Secret,
 `<sandbox>-<role>-boot`, holds that role's launcher token and its two gh files — `github-hosts`,
 gh's `hosts.yml` carrying the role's GitHub App installation token under user `x-access-token`, and
 `github-config`, a `config.yml` of `version: "1"` — all projected read-only into the role's own
@@ -1681,6 +1708,59 @@ The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>
 at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from
 booting on a full pool ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes),
 [Issue sizing](#issue-sizing-one-reservation-per-pod)).
+
+### The repository cache
+
+Each repository the project maps has a cache of its own: one Sandbox, `legion-<project>-cache-<owner>-<repo>-<8 hex>`
+(`CacheSandboxName`, `names.go`; the hex is of the repository's name, so two repositories whose
+names slug alike get two caches), labelled `legion.dev/project` and `legion.dev/cache=true` and
+annotated `legion.dev/cache-repo: <owner>/<repo>`, which is the one place its repository is read
+from (`kubectl -n legion get sandbox -l legion.dev/cache`). It is no issue's and no claim's: no
+tree's cleanup lists it, and nothing of it registers on the worker stream
+(`internal/runtime/sandbox/repocache.go`). Its pod runs one container, `cache`, the image's
+`legion workspace-init cache --repo <owner>/<repo> --root /legion/cache --listen :8418 --refresh
+10m0s` (`refresh_minutes`, as a duration), on the Legion pool under gVisor with the operator's
+ServiceAccount, and nothing
+of an agent's: no model route, provider key or Dispatch variable. It owns one volume,
+`cache-<sandbox>`, of `runtime.kubernetes.repository_cache.volume` (20Gi by default), holding a bare
+clone of the repository at `/legion/cache/<owner>/<repo>.git`, and its Secret,
+`<sandbox>-token`, holds the implement App's installation token for the repository's owner,
+read again before every fetch and brought to the current lease on the gh refresher's minute.
+
+The process clones the repository once, through the same one-shot credential and bounds as an issue
+pod's fetch, then fetches every branch from GitHub every `refresh_minutes` (10 by default), pruning
+the branches GitHub deleted, and repacks the clone once a day. It serves, on port 8418:
+
+- `GET /healthz`: `503 {"ready":false,…}` until the first clone is whole, then `200 {"ready":true,
+  "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`, the
+  pod's readiness probe; it waits on no fetch.
+- `GET /tar`: the clone's history and refs as a tar stream, which waits for a fetch under way to
+  finish, so it never streams a half-written ref or pack.
+
+A fetch that fails is logged and tried at the next tick, and the cache stays ready on what it last
+fetched; a restarted cache whose volume holds its clone fetches into it, and serves it as it is when
+GitHub cannot be reached; a first clone that fails ends the process, and the kubelet restarts it.
+
+An issue pod's `workspace-fetch` is told the cache's address only while the cache's pod is Ready,
+as the daemon's own watch of the pod shows it when the issue pod is launched. With no ready cache,
+and with a cache it cannot reach or use, the fetch clones from GitHub as it always could, and says
+so ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so a cache that is not there yet, or
+down, makes a launch slower and never fails it. The issue pods reach the cache pods on port 8418
+inside the namespace: a NetworkPolicy that isolates the namespace's pods must admit that, or every
+fetch logs the cache it could not reach and clones from GitHub.
+
+The daemon makes each mapped repository's cache at boot and on the orphan sweep after it: a missing
+cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then its pod
+template and `Running`), and a cache whose pod runs another image than the daemon's, has ended, or
+was left `Suspended` gets a new pod while its Sandbox and volume stay, so a new release costs a pod,
+not a clone. The cache of a repository the mapping no longer names is annotated
+`legion.dev/cache-unmapped-at` at the sweep that finds it so, kept for
+`runtime.kubernetes.repository_cache.retain_hours` (168 by default), and then deleted with its
+volume and Secret; mapped again before that, it loses the annotation and stays. A cache the sweep
+cannot make or repair — its owner's token cannot be minted, say — is a warning naming it, tried
+again at the next sweep, and holds back no issue's launch. The boot census refuses a Sandbox
+labelled `legion.dev/cache` that is not one this runtime builds (no repository annotation, or
+another container or claim template), by name.
 
 ### A pod whose address moved
 
@@ -2182,23 +2262,33 @@ issue exists, happens in no process whose git or jj an agent's plant can reach. 
 coordinator's pods (`packages/daemon`) keep to that with two init containers:
 
 - **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
-  pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
-  /var/run/legion/feed`: a `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
-  reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
-  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the issue's volume nor the config home. Every other provisioning command is
-  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but this clone's duration follows the
-  repository's size and the network's speed, not a fixed step in provisioning: it runs under
-  `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A clone that
-  fails transiently is cloned again: git's fatal exit (128) with a cause line — `RPC failed; …` for
+  issue volume's `feed` directory alone (a `subPath`, at `/legion/feed`), which every other
+  container of the pod mounts read-only, and runs `legion workspace-init fetch --repo
+  <owner>/<repo> --feed /legion/feed`: a `git clone --bare` of `https://github.com/<owner>/<repo>`
+  into the feed — or, while the repository's cache is Ready, the cache's tar unpacked into a feed
+  of its own making (`git init --bare`) and a `git fetch` of the delta from GitHub; or, when the
+  volume already holds the feed, that fetch alone — reading no git configuration but the feed's
+  own, which only this container writes (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
+  `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com`
+  alone. The cache's tar may hold only the repository's history and refs (`HEAD`, `packed-refs`,
+  `refs/`, `objects/`), each a regular file or a directory inside the feed, never a configuration,
+  hook or alternates file; the first entry that is not is refused by name and the feed cloned from
+  GitHub instead (`FeedEntry`, `internal/workspace/clone.go`). A feed is filled beside its final
+  path and renamed into place once whole, with git's automatic garbage collection off, since the
+  issue's clone keeps its objects there. It mounts no other part of the issue's volume and no
+  config home. Every other provisioning command is
+  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer from GitHub's duration
+  follows the repository's size and the network's speed, not a fixed step in provisioning: it runs
+  under `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A transfer
+  that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
   5xx, or a connection that could not be made or broke (connect, DNS, reset, timeout, empty reply,
   a transfer cut short, an HTTP/2 stream reset, a TLS session closed); or, with no cause line, a
   pack stream that ended early. Each retry logs the attempt's error on stdout as one line, the
-  token replaced by `***`, removes whatever the attempt left at the feed, and waits 5 s, 15 s,
-  30 s, then a minute: four retries at most, so a clone still failing after the fourth fails the
-  fetch. Each attempt is bounded by what remains of the 30 minutes from the first one's start, and
-  no retry starts past them. Any other failure — a token refused, a repository not found or not
+  token replaced by `***`, removes whatever a failed clone left beside the feed, and waits 5 s,
+  15 s, 30 s, then a minute: four retries at most, so a transfer still failing after the fourth
+  fails the fetch. Each attempt is bounded by what remains of the 30 minutes from the first one's
+  start, and no retry starts past them. Any other failure — a token refused, a repository not found or not
   granted, a certificate that does not verify, a curl error the list does not name — fails the
   fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`). The launch waits for the
   pod's launchers while either init container runs, up to the same 30 minutes plus its boot timeout
@@ -2209,14 +2299,14 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   (`internal/appauth/appauth.go`), so a retry late in a long fetch can outlast the token: an
   attempt that starts after it expired fails with `Authentication failed`, which the fetch reads as
   permanent, and the launch's next pod is handed a token afresh.
-- **`workspace-init`** mounts the issue's volume, the feed read-only, and the config home — never
-  the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
+- **`workspace-init`** mounts the issue's volume, the feed read-only over it, and the config home —
+  never the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
   --default-branch <name> --root /legion --credential-helper '!gh auth git-credential' --feed
-  /var/run/legion/feed`: the clone's clone and fetch reach `https://github.com/<owner>/<repo>`,
-  the remote its origin names, at the feed over git's file transport, the fetch bringing the
-  default branch and the issue's branch alone, each by its exact name, then the workspace add,
-  `update-stale`, and the configuration writes, once it has removed the clone's stale git locks
-  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
+  /legion/feed`: the clone is a `git clone --shared` of the feed, its origin set to
+  `https://github.com/<owner>/<repo>`, and its fetch reaches that remote at the feed over git's
+  file transport, bringing the default branch and the issue's branch alone, each by its exact
+  name, then the workspace add, `update-stale`, and the configuration writes, once it has removed
+  the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
   volume, and no other provision shares the repository. What an agent of the issue planted can run
   there, with nothing to take that the agent does not already hold.
