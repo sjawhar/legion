@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -134,8 +135,8 @@ func resolveProviderKey(key ProviderKey, env []string, log *slog.Logger) (string
 // never its stdout.
 func runSecretsGet(key ProviderKey, flag string, env []string) ([]byte, error) {
 	args := []string{"get", key.Secret, flag}
-	binary, err := lookPathIn("secrets", env)
-	if err != nil {
+	binary, ok := lookpath.On(pathValue(env), "secrets")
+	if !ok {
 		return nil, fmt.Errorf("provider_keys.%s: the secrets command is not on PATH, so %s cannot be read", key.Env, key.Secret)
 	}
 	cmd := exec.Command(binary, args...)
@@ -157,25 +158,15 @@ func runSecretsGet(key ProviderKey, flag string, env []string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// lookPathIn finds an executable command on the PATH env carries — the daemon's own, which the
-// child runs under — rather than on this process's PATH.
-func lookPathIn(command string, env []string) (string, error) {
+// pathValue is PATH's value in env, the last assignment winning, and "" when env holds none.
+func pathValue(env []string) string {
 	path := ""
 	for _, entry := range env {
 		if value, ok := strings.CutPrefix(entry, "PATH="); ok {
 			path = value
 		}
 	}
-	for _, dir := range filepath.SplitList(path) {
-		if dir == "" {
-			continue
-		}
-		candidate := filepath.Join(dir, command)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("%s is not on PATH", command)
+	return path
 }
 
 // writeAtomically replaces path with a 0600 file holding value: a temporary file beside it, synced

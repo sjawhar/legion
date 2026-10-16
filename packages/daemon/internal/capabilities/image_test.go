@@ -10,18 +10,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
 )
-
-// stubBinaries are the binaries the image rows look for, each a stub answering what the checks
-// run: `go version` and `chromium --version`.
-var stubBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
-
-const stubScript = `#!/bin/sh
-case "$1" in
-version) echo "go version go1.26.8 linux/amd64" ;;
---version) echo "Chromium 141.0.0.0" ;;
-esac
-`
 
 // fakeOmp answers the two Oh My Pi commands the checks run as this pod's omp answers them, by
 // the variables a test sets in the Image's Env: Python unavailable (exit 1, as omp exits) under
@@ -38,9 +28,6 @@ case "$*" in
 esac
 `
 
-// codeGraphLock is the lock `omp plugin install` writes in the worker image.
-const codeGraphLock = `{"plugins":{"@bopstack/pi-codegraph":{"version":"0.1.1","enabledFeatures":null,"enabled":true}}}`
-
 // stubs is a worker image in miniature: a bin directory first on PATH with a stub for every
 // binary the image rows look for, a HOME whose legion profile's plugin lock enables the CodeGraph
 // plugin, and an omp that answers the checks' commands.
@@ -52,14 +39,12 @@ type stubs struct {
 func newStubs(t *testing.T) stubs {
 	t.Helper()
 	s := stubs{t: t, bin: t.TempDir(), home: t.TempDir()}
-	for _, name := range stubBinaries {
-		s.install(name, stubScript)
-	}
+	capabilitiestest.InstallBinaries(t, s.bin)
 	s.omp = filepath.Join(t.TempDir(), "omp")
 	if err := os.WriteFile(s.omp, []byte(fakeOmp), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s.writeLock(codeGraphLock)
+	s.writeLock(capabilitiestest.CodeGraphLock)
 	return s
 }
 
@@ -80,7 +65,7 @@ func (s stubs) remove(name string) {
 
 // lock is the legion profile's plugin lock.
 func (s stubs) lock() string {
-	return filepath.Join(s.home, ".omp", "profiles", "legion", "plugins", "omp-plugins.lock.json")
+	return capabilitiestest.LockPath(s.home)
 }
 
 func (s stubs) writeLock(content string) {
@@ -249,7 +234,7 @@ func TestToolchainSummaryNamesTheListToolchainChecks(t *testing.T) {
 // a chromium on PATH, which Oh My Pi would never launch under that variable.
 func TestCheckImageResolvesTheBrowserAsOhMyPiDoes(t *testing.T) {
 	s := newStubs(t)
-	s.install("my-chrome", stubScript)
+	s.install("my-chrome", capabilitiestest.BinaryScript)
 	for name, testCase := range map[string]struct {
 		env    []string
 		status string
@@ -451,31 +436,9 @@ func TestReadModelFallback(t *testing.T) {
 	})
 }
 
-// lookPath walks the PATH it is given, not this process's, and finds only executables under
-// absolute elements.
-func TestLookPathReadsThePATHItIsGiven(t *testing.T) {
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "notes"), []byte("text"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(bin, "dir"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	env := []string{"PATH=relative/bin:" + bin}
-	if got, ok := lookPath(env, "tool"); !ok || got != filepath.Join(bin, "tool") {
-		t.Errorf("lookPath(tool) = %q, %t, want %s", got, ok, filepath.Join(bin, "tool"))
-	}
-	for _, name := range []string{"notes", "dir", "sh"} {
-		if got, ok := lookPath(env, name); ok {
-			t.Errorf("lookPath(%s) = %q, want none: not an executable on the given PATH", name, got)
-		}
-	}
-	if _, ok := lookPath([]string{"PATH="}, "tool"); ok {
-		t.Error("lookPath found tool on an empty PATH")
-	}
+// envValue is name's value in env, the last assignment winning as it does for the process env
+// starts.
+func TestEnvValueTakesTheLastAssignment(t *testing.T) {
 	if got := envValue([]string{"PATH=a", "PATH=b"}, "PATH"); got != "b" {
 		t.Errorf("envValue = %q, want the last assignment", got)
 	}

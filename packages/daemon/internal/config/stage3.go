@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -454,8 +455,8 @@ func decodeBase64LikeNode(encoded string) ([]byte, error) {
 func runAppSecretsGet(name, flag, field string) (string, error) {
 	args := []string{"get", name, flag}
 	environment := daemonEnvironment()
-	binary, err := lookPathIn("secrets", environment)
-	if err != nil {
+	binary, ok := lookpath.On(pathValue(environment), "secrets")
+	if !ok {
 		return "", fmt.Errorf("%s: the secrets command is not on PATH, so %s cannot be read", field, name)
 	}
 	command := exec.Command(binary, args...)

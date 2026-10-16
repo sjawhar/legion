@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
 )
@@ -151,14 +152,14 @@ func browser(ctx context.Context, img Image) (string, bool) {
 	path, how := envValue(img.Env, "PUPPETEER_EXECUTABLE_PATH"), "PUPPETEER_EXECUTABLE_PATH"
 	switch {
 	case path == "":
-		found, ok := lookPath(img.Env, "chromium")
+		found, ok := lookpath.On(envValue(img.Env, "PATH"), "chromium")
 		if !ok {
 			return "chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable", false
 		}
 		path, how = found, "chromium on PATH"
 	case !strings.Contains(path, "/"):
 		// A bare name: Oh My Pi spawns it, and the spawn looks it up on PATH.
-		found, ok := lookPath(img.Env, path)
+		found, ok := lookpath.On(envValue(img.Env, "PATH"), path)
 		if !ok {
 			return fmt.Sprintf("%s (%s) is not on PATH", path, how), false
 		}
@@ -187,7 +188,7 @@ const codeGraphPlugin = "@bopstack/pi-codegraph"
 // disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once.
 func codeGraph(_ context.Context, img Image) (string, bool) {
 	var evidence, why []string
-	if path, ok := lookPath(img.Env, "codegraph"); ok {
+	if path, ok := lookpath.On(envValue(img.Env, "PATH"), "codegraph"); ok {
 		evidence = append(evidence, path+" on PATH")
 	} else {
 		why = append(why, "codegraph is not on PATH")
@@ -258,9 +259,10 @@ func toolchain(ctx context.Context, img Image) (string, bool) {
 // onPath is the verdict on every name being on img's PATH: where each found one is, in names'
 // order, and the detail — where each is, or which are not.
 func onPath(img Image, names ...string) ([]string, string, bool) {
+	searchPath := envValue(img.Env, "PATH")
 	var found, absent []string
 	for _, name := range names {
-		if path, ok := lookPath(img.Env, name); ok {
+		if path, ok := lookpath.On(searchPath, name); ok {
 			found = append(found, path)
 		} else {
 			absent = append(absent, name)
@@ -273,24 +275,6 @@ func onPath(img Image, names ...string) ([]string, string, bool) {
 		return found, absent[0] + " is not on PATH", false
 	}
 	return found, strings.Join(absent, ", ") + " are not on PATH", false
-}
-
-// lookPath resolves name on env's PATH, as the pod's Oh My Pi would, rather than on this
-// process's: the checks run where the pod's Oh My Pi runs, but it is the environment the pod
-// baseline and the operator's pod env shaped that decides what a worker finds. An executable is
-// a regular file with an execute bit, as exec.LookPath judges it; a relative PATH element is
-// skipped, as exec.LookPath refuses the result it would give.
-func lookPath(env []string, name string) (string, bool) {
-	for _, dir := range filepath.SplitList(envValue(env, "PATH")) {
-		if !filepath.IsAbs(dir) {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return path, true
-		}
-	}
-	return "", false
 }
 
 // envValue is name's value in env, the last assignment winning as it does for the process env
