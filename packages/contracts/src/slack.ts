@@ -15,3 +15,11 @@ export const SLACK_CHANNEL_ID_PATTERN = /^[CG][A-Z0-9]+$/;
 export function slackMentionTopic(channel: string): string {
   return `notifications.slack.*.${channel}.mention`;
 }
+
+/** The channel token of an Envoy Slack topic (`notifications.slack.<team>.<channel>…`): `""` for a
+ * Slack topic that names none, such as `notifications.slack.>`, and undefined for any topic that is
+ * not Slack's. */
+export function slackTopicChannel(topic: string): string | undefined {
+  const [scope, source, , channel] = topic.split(".");
+  return scope === "notifications" && source === "slack" ? (channel ?? "") : undefined;
+}

@@ -137,9 +137,9 @@ func TestTheRealPluginsOnTheRealOhMyPi(t *testing.T) {
 		answer  []string
 		refusal string
 	}{
-		{"pi-envoy alone", []string{envoy}, []string{"LEGION_PLUGIN_LOADED=no\n", "LEGION_ENVOY_INTERFACE=2\n"},
+		{"pi-envoy alone", []string{envoy}, []string{"LEGION_PLUGIN_LOADED=no\n", "LEGION_ENVOY_INTERFACE=3\n"},
 			"pi-legion manifest at @MANIFEST could not be read"},
-		{"both", []string{envoy, legion}, []string{"LEGION_PLUGIN_LOADED=yes\n", "LEGION_PLUGIN_ENVOY_INTERFACE=2\n", "LEGION_ENVOY_INTERFACE=2\n"}, ""},
+		{"both", []string{envoy, legion}, []string{"LEGION_PLUGIN_LOADED=yes\n", "LEGION_PLUGIN_ENVOY_INTERFACE=3\n", "LEGION_ENVOY_INTERFACE=3\n"}, ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()

@@ -17,6 +17,7 @@ import {
   readEnvoyPluginInterface,
 } from "@legion/pi-shared/interface";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
+import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
@@ -39,6 +40,7 @@ import {
   stepPhaseStall,
 } from "../src/phase-stall";
 import { applySessionTitle, legionSessionTitle } from "../src/session-title";
+import { daemonControllerSlackChannels, daemonLaunchedController } from "../src/slack-channels";
 import { createLegionTool } from "../src/tools";
 import {
   branchHoldsWorkspaceRecreatedNotice,
@@ -115,6 +117,20 @@ export default function legionExtension(pi: PiApi): void {
     from: import.meta.url,
     envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION,
   };
+  // The daemon-launched controller's Slack channels, for the Envoy entry's recovery of a resumed
+  // session's registered interests, which drops a Slack topic of any other channel before it
+  // restores the rest. Set here, at load, because that recovery runs in the Envoy entry's
+  // session_start, before this entry's claim. A list the claim will refuse, naming why, stands
+  // here as none, so nothing of Slack is restored meanwhile.
+  if (daemonLaunchedController(process.env)) {
+    let channels: readonly string[] = [];
+    try {
+      channels = daemonControllerSlackChannels(process.env);
+    } catch {
+      // The claim refuses the same list and exits, naming the variable.
+    }
+    legionRoleClaimBridge().slackChannels = channels;
+  }
 
   // Gates session_start and the session-change re-claim below, one call per hook; its settled
   // answer is kept, so it runs once per session.

@@ -5,23 +5,16 @@ you, and you answer in that thread. The `Slack channels:` line of your system pr
 channel `legion.yaml` gives the project (`projects.<KEY>.slack_channels`). Only the controller the
 daemon launches has one: the Slack bot token is the Legion daemon service's, which the secrets
 broker grants to that service's own pods alone. With no such line the project has no channel, and
-nothing here applies but the sweep below.
+nothing here applies.
 
 ## Your session subscribes for you
 
 Your session hears each listed channel's mentions by itself, on
-`notifications.slack.*.<channel>.mention`, for as long as it holds the controller role, and keeps no
-record of them: a resumed or relaunched session hears the channels its launch names and no others.
-Never `envoy_subscribe` a Slack topic yourself: the listener keeps that one, and a resume restores
-it after the project stops naming its channel.
+`notifications.slack.*.<channel>.mention`, for as long as it holds the controller role: a resumed or
+relaunched session hears the channels its launch names and no others, and drops any Slack topic of
+another channel an earlier session subscribed to. Never `envoy_subscribe` a Slack topic yourself.
 
-At every start, whether or not the line is there, run `envoy_list` and `envoy_unsubscribe` every
-topic it lists that begins `notifications.slack.` and names a channel the line does not (every one
-of them when there is no line). Such a topic was subscribed by hand, and would bring you a channel
-the project no longer names, or one another project's controller now answers.
-
-A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it,
-and unsubscribe its topic.
+A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it.
 
 A mention published while no controller ran never arrives: Envoy hands a session no copy of an
 event from before it subscribed. Nothing tells you about one, so there is nothing to catch up. A

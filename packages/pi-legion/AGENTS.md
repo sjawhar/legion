@@ -15,7 +15,7 @@ in the environment: a person's own session gets no tool, no title and no daemon 
 The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
 through the interface the Envoy entry publishes: one process-wide object on `globalThis` under
 `Symbol.for("legion.pi-shared.envoy-plugin-interface")`, at `ENVOY_PLUGIN_INTERFACE_VERSION`
-(currently 2), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
+(currently 3), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
 sets its own load marker, `Symbol.for("legion.pi-legion.loaded")`, to
 `{ from: import.meta.url, envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION }`, which the daemon's load
 probe reads.
@@ -253,9 +253,11 @@ controller grant and posts `POST /legion/v1/issues/status` with it. The claim: `
 `api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
-`LEGION_PROJECT`), then one to each Slack channel `LEGION_SLACK_CHANNELS` names, on its mention
-topic (`slackMentionTopic`; the daemon sets the variable only for the controller it launches, from
-the project's `slack_channels`, and an entry that is not a channel id refuses the claim); each
+`LEGION_PROJECT`), then, in the controller the daemon launched (`daemonLaunchedController`: a
+controller session with a boot token), one to each Slack channel `LEGION_SLACK_CHANNELS` names, on
+its mention topic (`slackMentionTopic`; the daemon always sets the variable for that controller,
+from the project's `slack_channels`, empty for none, and the claim refuses it unset or with an entry
+that is not a channel id; any other controller ignores it); each
 `set_status` then mints from the `/grants` controller-session form with the secret the
 registration was issued. What the daemon publishes
 on the controller topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
@@ -269,8 +271,12 @@ outlasts its 30-second budget, and the switch's drop of the outgoing role (`endO
 leaves a role already claimed under the new session id alone. None is ever registered with the
 listener, so a replaced controller resumed later gets them back only by claiming the role, which
 the daemon refuses its replaced capability, and a resumed controller hears the channels its own
-launch names, never a list an earlier launch had. The controller topic is a live wake that changes no
-request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
+launch names, never a list an earlier launch had. A Slack topic a session registered by hand is
+dropped too: in the daemon's controller the factory sets the interface's `roleClaim.slackChannels`
+from `LEGION_SLACK_CHANNELS`, and the Envoy entry, restoring a resumed session's registered
+interests, unregisters and skips every Slack topic of another channel. The controller topic is a
+live wake that changes no request, response or pane variable, and a daemon publishes to the topic
+whether anyone listens. A
 controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
 subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
 contract, and the daemon refuses its registration with 409. A later

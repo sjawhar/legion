@@ -142,8 +142,6 @@ else:
 3. Fill the free admission slots ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
 4. Post the day's report when this is your first turn of the UTC day
    ([Daily report](#daily-report-go-daemon)).
-5. `envoy_unsubscribe` each `notifications.slack.` topic `envoy_list` shows for a channel your
-   `Slack channels:` line does not name, or every one with no line ([Slack mentions](skill://legion-controller/references/slack-mentions.md)).
 
 The issue record and Dispatch are the truth; the topic is the wake.
 

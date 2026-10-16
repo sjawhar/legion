@@ -72,6 +72,16 @@ export type LegionRoleClaimBridge = {
    * the slot always holds the identity-bearing instance's listener.
    */
   regained: LegionRoleRegained | undefined;
+  /**
+   * The daemon-launched controller's Slack channels (LEGION_SLACK_CHANNELS), which the Legion
+   * entry's factory sets in that process alone, from its environment, so the value is the same in
+   * every instance; undefined in any other process. A resumed session's registered interests are
+   * restored after the Envoy entry drops every Slack topic among them whose channel this list does
+   * not name (`slackTopicChannel`), unsubscribing it from the listener: the controller hears its
+   * listed channels through subscriptions it never registers, so such a topic was subscribed by
+   * hand and would bring it a channel the project no longer names.
+   */
+  slackChannels: readonly string[] | undefined;
 };
 
 /** The bridge, read from the interface at each call: a consumer never keeps the object, so the
