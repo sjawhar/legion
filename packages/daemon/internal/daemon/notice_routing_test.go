@@ -717,13 +717,23 @@ func TestACatchUpDroppedUnderItsLeaseIsNotPublished(t *testing.T) {
 	}
 	clock := time.Now()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-1", catchUp(1), clock))
-	var leased []record.OutboxRow
+	var leased record.OutboxRow
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		var err error
-		leased, err = records.ClaimDue(ctx, tx, "LEGION", clock, 10, time.Minute)
+		due, err := records.DueRows(ctx, tx, "LEGION", "LEGION-1", nil, clock)
+		if err != nil {
+			return err
+		}
+		if len(due) != 1 {
+			return fmt.Errorf("%d rows due, want the first catch-up", len(due))
+		}
+		var claimed bool
+		leased, claimed, err = records.ClaimRow(ctx, tx, due[0].ID, clock, time.Minute)
+		if err == nil && !claimed {
+			return errors.New("the first catch-up was not claimed")
+		}
 		return err
-	}); err != nil || len(leased) != 1 {
-		t.Fatalf("lease the first catch-up: %v rows, %v", len(leased), err)
+	}); err != nil {
+		t.Fatalf("lease the first catch-up: %v", err)
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		if err := records.DropCatchUps(ctx, tx, "LEGION-1"); err != nil {
@@ -737,7 +747,7 @@ func TestACatchUpDroppedUnderItsLeaseIsNotPublished(t *testing.T) {
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
 		project: "legion", now: func() time.Time { return clock }}
 
-	if err := runner.execute(ctx, leased[0]); err != nil {
+	if err := runner.execute(ctx, leased); err != nil {
 		t.Fatalf("execute the leased first catch-up: %v", err)
 	}
 	if err := runner.RunOnce(ctx); err != nil {

@@ -356,10 +356,15 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	sup, stopRuntime := newSupervisorRuntime()
 	clock := time.Now()
 	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
-	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st,
-		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "done"}}, notices: &outboxPublisher{},
-		handlers: []intake.Handler{engine}, log: quietLogger(), now: func() time.Time { return clock },
+	// newRunner is the outbox over the given supervisor: the restart below builds a second one
+	// over the restarted runtime, since the outbox carries locks a copy must not.
+	newRunner := func(sup *supervisor) *outbox {
+		return &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st,
+			dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "done"}}, notices: &outboxPublisher{},
+			handlers: []intake.Handler{engine}, log: quietLogger(), now: func() time.Time { return clock },
+		}
 	}
+	runner := newRunner(sup)
 	token := claim.Token("legion-legion-legion-208-planner")
 	stored := supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, TreeEpoch: 1, Issue: issue.Key, Role: claim.RolePlanner,
 		State: supervise.StateLaunching, Generation: 1, Session: "saved-planner", SessionFile: "/legion/sessions/planner.jsonl"}
@@ -385,9 +390,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	// membership or an in-memory suspension request; the same database owns the pending effect.
 	stopRuntime()
 	restarted, _ := newSupervisorRuntime()
-	recovered := *runner
-	recovered.supervisor = restarted
-	runner = &recovered
+	runner = newRunner(restarted)
 	// The stored role's orderly stop completes independently of the runtime watch population.
 	stored.State = supervise.StateSuspended
 	if err := st.PutClaim(ctx, stored); err != nil {

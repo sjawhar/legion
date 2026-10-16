@@ -394,9 +394,6 @@ type Store interface {
 	// issue: a finished row is deleted, so any row of the kind is one still to run or retrying.
 	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
-	// ClaimDue leases project's claimable rows oldest first, for the runner that runs a project's
-	// outbox one row at a time; the lanes list and claim theirs by DueRows and ClaimRow.
-	ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error)
 	// DueRows is every row of project a lane may run at now — due, under no live lease, and in
 	// order behind none of its issue's older rows — oldest first, with no lease taken. Issue "" is
 	// every issue of project, kinds nil every kind.

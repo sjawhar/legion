@@ -578,54 +578,13 @@ func kindNames(kinds []OutboxKind) []string {
 	return names
 }
 
-// ClaimDue leases project's claimable rows (outboxClaimable), oldest first, for the runner that
-// runs a project's outbox one row at a time. The lanes' claim is ClaimRow. The database is shared
-// by the daemons of several projects, and a row belongs to its issue's project: an issue key is
-// `<project>-<n>`, and a project key has no hyphen (the configuration's projects keys,
-// claim.IsIssueKey). The scope is in the select, not a filter of what it returns, because the lease
-// is what would take another project's row from its own daemon.
-func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
-	if limit <= 0 {
-		return []OutboxRow{}, nil
-	}
-	if leaseFor <= 0 {
-		return nil, fmt.Errorf("claim due outbox rows: lease duration must be positive")
-	}
-	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where split_part(outbox.issue, '-', 1) = $5 and `+outboxClaimable+`
-		order by next_at, id limit $6 for update skip locked`, outboxDueArgs(now, project, limit)...)
-	if err != nil {
-		return nil, fmt.Errorf("claim due outbox rows: %w", err)
-	}
-	defer rows.Close()
-	claimed := []OutboxRow{}
-	for rows.Next() {
-		row, err := scanOutbox(rows)
-		if err != nil {
-			return nil, fmt.Errorf("claim due outbox rows: %w", err)
-		}
-		claimed = append(claimed, row)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("claim due outbox rows: %w", err)
-	}
-	for i := range claimed {
-		token, err := leaseToken()
-		if err != nil {
-			return nil, err
-		}
-		until := now.Add(leaseFor)
-		if _, err := tx.Exec(ctx, "update outbox set lease_token = $2, lease_until = $3 where id = $1", claimed[i].ID, token, until); err != nil {
-			return nil, fmt.Errorf("claim outbox row %d: %w", claimed[i].ID, err)
-		}
-		claimed[i].LeaseToken, claimed[i].LeaseUntil = token, &until
-	}
-	return claimed, nil
-}
-
 // DueRows lists the rows a lane may run at now (outboxClaimable), oldest first, leasing none: a
 // lane reads what is due, then claims each by id (ClaimRow). Issue "" is every issue of project,
-// kinds nil every kind. The project scope is ClaimDue's, in the select.
+// kinds nil every kind. The database is shared by the daemons of several projects, and a row
+// belongs to its issue's project: an issue key is `<project>-<n>`, and a project key has no hyphen
+// (the configuration's projects keys, claim.IsIssueKey). The scope is in the select, and ClaimRow
+// claims only an id a list gave it, because a lease taken on another project's row is what would
+// take it from its own daemon.
 func (s *Postgres) DueRows(ctx context.Context, tx pgx.Tx, project, issue string, kinds []OutboxKind, now time.Time) ([]OutboxRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
 		where split_part(outbox.issue, '-', 1) = $5 and ($6::text = '' or outbox.issue = $6::text)
