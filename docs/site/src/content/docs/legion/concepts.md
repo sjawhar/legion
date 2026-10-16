@@ -265,3 +265,11 @@ that. When a budget runs out (`launch_failure_limit`, `prompt_failure_limit` and
 the issue. A held phase worker is its architect's to retry or escalate to the controller; an
 architect that runs out goes to the controller, which can re-admit the tree.
 [Troubleshooting](/legion/legion/troubleshooting/) shows how to see each of these.
+
+A launch failure that is charged is spaced from the next try by a backoff: 2 s after the first,
+doubling after each further one, each wait drawn between half its step and the whole of it. A
+launch the runtime refused is tried again after it, and so is a process that died or was retired at
+its registration deadline, so the three tries of `launch_failure_limit`'s default span three
+seconds at least, never the moment one fault lasts. The wait logs `supervise: waiting before the
+next launch` with its length. The try it waits for is stored, with the charge, before the wait
+begins, so a daemon stop during it forgives nothing; the next boot launches the claim again.

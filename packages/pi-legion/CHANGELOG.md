@@ -45,6 +45,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 25 (LEGION-636): a deployment row of `legion state`'s `capabilities` carries
+  `source`, `configuration` (what legion.yaml alone decides) or `boot` (what boot measured);
+  `installed` leaves the status set (nothing has emitted it since LEGION-629); the probe's OK line
+  may read `model-fallback=unread` (boot could not read `retry.modelFallback`). Install this
+  release with a `legion` built from the same commit.
 - The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
   human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
   whole change since the version they approved, Dispatch carries their approval to the new version,

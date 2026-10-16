@@ -16,7 +16,7 @@ The Legion extension registers this session with the daemon as the controller an
 `legion-<project>-controller` during session startup. Do not handle a wake unless that startup
 succeeded.
 
-The session's `gh` acts as the review App (`legion-reviewer[bot]` in Legion's own deployment) from
+The session's `gh` acts as the review App's bot account (`gh api graphql -f query='{viewer{login}}'` names it) from
 `GH_CONFIG_DIR`, a directory Legion keeps current: in the pod the daemon launches, through the
 controller's role Secret the daemon refreshes every minute; in `legion controller start`'s session,
 through that command's own refresh loop. `gh pr view`, `gh api` and the rest read and write GitHub

@@ -78,6 +78,7 @@ func testOptions() Options {
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
 		BootTimeout:      2 * time.Second,
+		BusyBackoff:      time.Millisecond,
 		TerminationGrace: 200 * time.Millisecond,
 		ProbeInterval:    time.Hour,
 		AdoptTimeout:     time.Minute,
@@ -237,7 +238,9 @@ type rig struct {
 
 	mu      sync.Mutex
 	actions []action
-	uids    atomic.Int64
+	// feeds, when set, are the informers' feeds withBreakableFeeds serves.
+	feeds *breakableFeeds
+	uids  atomic.Int64
 
 	// hold stops the controller creating pods; autoStart makes a pod it creates scheduled on a
 	// node, past workspace-init, and Running at once.
@@ -928,4 +931,107 @@ func withLaggingSandboxInformer(delay time.Duration) rigOption {
 			return true, watch.NewProxyWatcher(events), nil
 		})
 	}
+}
+
+// breakableFeeds is what withBreakableFeeds keeps of the informers' feeds: the watches it served,
+// for refuseFeeds to end, the refusal their next lists and watches are answered with (nil for
+// none), how many it answered so, and the resources whose next watch is answered with the
+// resourceVersion it resumes from expired (expire).
+type breakableFeeds struct {
+	mu      sync.Mutex
+	watches []watch.Interface
+	refusal error
+	refused int
+	expire  map[string]bool
+}
+
+// expired is whether resource's next watch is answered with its resourceVersion expired, and clears
+// it: a server that refused a watch for a while no longer serves the resourceVersion the informer
+// watches again from, as a real API server answers 410 Expired, so the informer lists again. The
+// fake's tracker cannot replay what changed meanwhile, deletions included, so a watch resumed from
+// it would leave objects deleted in between in the store.
+func (f *breakableFeeds) expired(resource string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	expired := f.expire[resource]
+	delete(f.expire, resource)
+	return expired
+}
+
+// refuse is the refusal a list or watch is answered with now, counted, or nil.
+func (f *breakableFeeds) refuse() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.refusal != nil {
+		f.refused++
+	}
+	return f.refusal
+}
+
+// withBreakableFeeds serves every Sandbox and pod list and watch the informers make through
+// reactors refuseFeeds controls: a watch from the tracker, kept so refuseFeeds can end it as an API
+// server ends a watch, and a list from the tracker, unless a refusal stands.
+func withBreakableFeeds() rigOption {
+	return func(g *rig, _ *Options) {
+		g.feeds = &breakableFeeds{}
+		for _, served := range []struct {
+			fake     *k8stesting.Fake
+			tracker  k8stesting.ObjectTracker
+			resource string
+		}{{&g.dyn.Fake, g.dyn.Tracker(), "sandboxes"}, {&g.kube.Fake, g.kube.Tracker(), "pods"}} {
+			served.fake.PrependReactor("list", served.resource, func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				if err := g.feeds.refuse(); err != nil {
+					return true, nil, err
+				}
+				return false, nil, nil
+			})
+			served.fake.PrependWatchReactor(served.resource, func(a k8stesting.Action) (bool, watch.Interface, error) {
+				if err := g.feeds.refuse(); err != nil {
+					return true, nil, err
+				}
+				if g.feeds.expired(served.resource) {
+					w := watch.NewRaceFreeFake()
+					status := apierrors.NewResourceExpired("too old resource version").Status()
+					w.Error(&status)
+					return true, w, nil
+				}
+				var opts metav1.ListOptions
+				if w, ok := a.(k8stesting.WatchActionImpl); ok {
+					opts = w.ListOptions
+				}
+				w, err := served.tracker.Watch(a.GetResource(), a.GetNamespace(), opts)
+				if err != nil {
+					return true, nil, err
+				}
+				g.feeds.mu.Lock()
+				g.feeds.watches = append(g.feeds.watches, w)
+				g.feeds.mu.Unlock()
+				return true, w, nil
+			})
+		}
+	}
+}
+
+// refuseFeeds answers the informers' next lists and watches with refusal, and with refusal set
+// ends every watch withBreakableFeeds served, so the informers list and watch again; nil serves
+// them again, the next watch of each resource after a refusal answered expired (expired). It
+// returns how many lists and watches were refused so far.
+func (g *rig) refuseFeeds(refusal error) int {
+	g.feeds.mu.Lock()
+	if refusal == nil && g.feeds.refusal != nil {
+		g.feeds.expire = map[string]bool{"sandboxes": true, "pods": true}
+	}
+	g.feeds.refusal = refusal
+	refused := g.feeds.refused
+	watches := g.feeds.watches
+	if refusal != nil {
+		g.feeds.watches = nil
+	}
+	g.feeds.mu.Unlock()
+	if refusal != nil {
+		for _, w := range watches {
+			w.Stop()
+		}
+	}
+	return refused
 }

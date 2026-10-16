@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
+	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
@@ -30,7 +31,8 @@ import (
 // capability check's two commands as this pod's omp does: `setup python --check --json` says
 // Python is available when python3 is on its PATH and $LEGION_TEST_NO_PYTHON is unset, else
 // `available: false` and exit 1; `config get retry.modelFallback --json` says the setting is
-// false, or true under $LEGION_TEST_FALLBACK_ON. With $LEGION_TEST_SEEN set, each run appends the
+// false, or true under $LEGION_TEST_FALLBACK_ON, or fails with a message on stderr and exit 1
+// under $LEGION_TEST_FALLBACK_FAIL. With $LEGION_TEST_SEEN set, each run appends the
 // environment it saw there: PI_CONFIG_FILES, whether the first overlay it names exists, and
 // OMP_SESSION_STORAGE; with $LEGION_TEST_KEY_SEEN, the provider key TEST_PROVIDER_KEY.
 func imageOmp(t *testing.T) string {
@@ -59,6 +61,9 @@ case "$*" in
   fi
   echo '{"available": true}' ;;
 "config get retry.modelFallback --json")
+  if [ -n "${LEGION_TEST_FALLBACK_FAIL:-}" ]; then
+    echo "fake omp: config get retry.modelFallback failed" >&2; exit 1
+  fi
   if [ -n "${LEGION_TEST_FALLBACK_ON:-}" ]; then value=true; else value=false; fi
   printf '{"key":"retry.modelFallback","value":%s,"type":"boolean"}\n' "$value" ;;
 *) echo "Invalid $OMP_SESSION_STORAGE for OMP_SESSION_STORAGE" >&2; exit 1 ;;
@@ -69,21 +74,6 @@ esac
 	}
 	return path
 }
-
-// imageBinaries are the binaries the capability check's image rows look for, each stubbed on the
-// test's PATH: `go version` answers a Go version, `chromium --version` a Chromium one.
-var imageBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
-
-const imageBinary = `#!/bin/sh
-case "$1" in
-version) echo "go version go1.26.8 linux/amd64" ;;
---version) echo "Chromium 141.0.0.0" ;;
-esac
-`
-
-// codeGraphLock is the plugin lock `omp plugin install` writes in the worker image, with the
-// CodeGraph plugin enabled.
-const codeGraphLock = `{"plugins":{"@bopstack/pi-codegraph":{"version":"0.1.1","enabledFeatures":null,"enabled":true}}}`
 
 // thisBinarysContract is the daemon API contract this binary speaks, as a manifest writes it.
 var thisBinarysContract = strconv.Itoa(api.DaemonAPIVersion)
@@ -117,7 +107,7 @@ func inImage(t *testing.T, contract, omp string) image {
 	home := t.TempDir()
 	roots := image{
 		legion: filepath.Join(home, "pi-legion"), envoy: filepath.Join(home, "pi-envoy"), bin: t.TempDir(),
-		lock: filepath.Join(home, ".omp", "profiles", "legion", "plugins", "omp-plugins.lock.json"),
+		lock: capabilitiestest.LockPath(home),
 	}
 	for _, plugin := range []struct{ root, manifest string }{
 		{roots.legion, `{"name":"@sjawhar/pi-legion","version":"1.57.0","legion":{"daemonApiVersion":` + contract + `}}`},
@@ -130,17 +120,8 @@ func inImage(t *testing.T, contract, omp string) image {
 			t.Fatal(err)
 		}
 	}
-	if err := os.MkdirAll(filepath.Dir(roots.lock), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(roots.lock, []byte(codeGraphLock), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range imageBinaries {
-		if err := os.WriteFile(filepath.Join(roots.bin, name), []byte(imageBinary), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	capabilitiestest.WriteLock(t, home, capabilitiestest.CodeGraphLock)
+	capabilitiestest.InstallBinaries(t, roots.bin)
 	sh, err := exec.LookPath("sh")
 	if err != nil {
 		t.Fatal(err)
@@ -179,16 +160,6 @@ func tableLines(stdout string) []string {
 	return lines
 }
 
-// imageStatus is the status an image row the image carries prints: present, or installed where
-// the row awaits a pod launch that loads what the image carries (capabilities.Capability.Awaits;
-// no row does at present).
-func imageStatus(row capabilities.Capability) string {
-	if row.Awaits != "" {
-		return capabilities.StatusInstalled
-	}
-	return capabilities.StatusPresent
-}
-
 // As the worker image's build runs it, with no contract named, the command holds the image's plugin
 // to the contract this binary speaks, prints the capability table — one line per row of the
 // declared list, in its order, every image row present, codegraph with the CLI on PATH and the
@@ -211,8 +182,8 @@ func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.
 		if prefix := "probe-image: capability " + string(row.Name) + ": "; !strings.HasPrefix(table[i], prefix) {
 			t.Errorf("capability line %d = %q, want row %s: the table's order", i, table[i], row.Name)
 		}
-		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": "+imageStatus(row)+" (") {
-			t.Errorf("capability line %d = %q, want %s %s", i, table[i], row.Name, imageStatus(row))
+		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": "+capabilities.StatusPresent+" (") {
+			t.Errorf("capability line %d = %q, want %s %s", i, table[i], row.Name, capabilities.StatusPresent)
 		}
 	}
 	codegraph := "probe-image: capability codegraph: present (" + filepath.Join(img.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + img.lock + ")"
@@ -266,7 +237,10 @@ func TestProbeImageWithSkipAgentModelsSaysSoOnTheOKLine(t *testing.T) {
 }
 
 // The OK line's model-fallback mark is what the image's Oh My Pi answers for retry.modelFallback
-// under the probe's environment: off by default, on when the operator's configuration turns it on.
+// under the probe's environment: off by default, on when the operator's configuration turns it
+// on, and "unread" when Oh My Pi cannot answer at all — the probe does not refuse the run for
+// that alone, so a broken omp (or a transient one) never blocks the build; it warns on stderr
+// instead and still certifies the image, leaving the capability report's own row open.
 func TestProbeImageMarksTheOKLineWithTheModelFallbackItRead(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, omp)
@@ -283,6 +257,18 @@ func TestProbeImageMarksTheOKLineWithTheModelFallbackItRead(t *testing.T) {
 			}
 		})
 	}
+	t.Run("unread", func(t *testing.T) {
+		t.Setenv("LEGION_TEST_FALLBACK_FAIL", "1")
+
+		code, stdout, stderr := probeImage(img.flags()...)
+
+		if want := " capabilities=checked model-fallback=unread daemon-api-version=" + thisBinarysContract + "\n"; code != 0 || !strings.HasSuffix(stdout, want) {
+			t.Fatalf("probe-image = %d %q %q, want the OK line ending %q", code, stdout, stderr, want)
+		}
+		if !strings.Contains(stderr, "legion probe-image: model-fallback not read; the deployment's capability report shows the row open: ") {
+			t.Errorf("stderr = %q, want it to warn that model-fallback was not read", stderr)
+		}
+	})
 }
 
 // A capability the image lacks fails the probe after the launch probes passed: the whole table is
@@ -329,8 +315,8 @@ func TestProbeImageRefusesAnImageMissingACapability(t *testing.T) {
 				t.Errorf("stdout carries %d capability lines, want the whole table (%d) however many rows are missing", len(tableLines(stdout)), len(capabilities.Table))
 			}
 			for _, row := range capabilities.Table {
-				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": "+imageStatus(row)+" (") {
-					t.Errorf("stdout = %q, want the %s row still %s", stdout, row.Name, imageStatus(row))
+				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": "+capabilities.StatusPresent+" (") {
+					t.Errorf("stdout = %q, want the %s row still %s", stdout, row.Name, capabilities.StatusPresent)
 				}
 			}
 		})

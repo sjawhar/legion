@@ -146,6 +146,19 @@ func rebuildListenerDependencies(
 	return err
 }
 
+// disconnectedFailureThreshold bounds how many consecutive probe failures the self-health monitor
+// tolerates while the NATS client reads as not connected (RECONNECTING or CLOSED, mid-recovery).
+// nats.go retries a dropped connection every second (ReconnectWait) on its own, so a client still
+// disconnected after this many intervals is not inside a brief reconnect gap: the transport itself
+// has not come back (a NATS restart or deploy taking longer than expected, or a local forward that
+// keeps accepting connections without actually reaching the server), and nats.go's in-place
+// reconnect has no way to notice that and give up on its own. At the production interval (30s)
+// this is 10 minutes of reading as disconnected. A transport that stalls the open connection
+// rather than closing it reads as connected until nats.go's ping check marks it stale (its
+// defaults: a ping every 2 minutes, 2 outstanding), so there the exit comes about 15 minutes
+// after the stall.
+const disconnectedFailureThreshold = 20
+
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
 // consumer is rebuilt immediately, and a rebuild that reports success is
@@ -158,12 +171,19 @@ func rebuildListenerDependencies(
 // A probe that lands in a reconnect gap is that transient case: it fails at
 // once with "outbound buffer limit exceeded" while the bus is disconnected (its
 // reconnect buffer is off), or at its deadline when the reconnect lands during
-// the probe. Either is one WARN, then "self-health recovered" from the next.
+// the probe. Either is one WARN, then "self-health recovered" from the next -
+// unless connected reads false for disconnectedFailureThreshold consecutive
+// probes, in which case the bounded shutdown path runs for this too. That
+// count is its own, advanced only while connected reads false and reset the
+// moment it reads true again, so it never mixes with a transient failure that
+// happens while the client is connected (an unclassified JetStream timeout,
+// say), which keeps retrying under the unbounded path above.
 func runSelfHealthMonitor(
 	ctx context.Context,
 	logger *logging.Logger,
 	probe func() error,
 	isUnrecoverable func(error) bool,
+	connected func() bool,
 	rebuild func() error,
 	terminate func(),
 	interval time.Duration,
@@ -173,6 +193,10 @@ func runSelfHealthMonitor(
 	defer ticker.Stop()
 	failures := 0
 	terminalFailures := 0
+	disconnectedFailures := 0
+	// readsDisconnected classifies every probe result, the one right after a rebuild included, so
+	// the disconnected count is the same run of probes wherever in the loop they fall.
+	readsDisconnected := func() bool { return connected != nil && !connected() }
 	for {
 		select {
 		case <-ctx.Done():
@@ -182,7 +206,28 @@ func runSelfHealthMonitor(
 		err := probe()
 		if err != nil {
 			failures++
-			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
+			disconnected := readsDisconnected()
+			bound := threshold
+			if disconnected {
+				bound = disconnectedFailureThreshold
+			}
+			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", bound), slog.String("error", err.Error()))
+			if disconnected {
+				disconnectedFailures++
+				terminalFailures = 0
+				if disconnectedFailures >= disconnectedFailureThreshold {
+					logger.Error("self-health disconnected failure threshold exceeded; terminating for restart",
+						slog.Int("consecutive", disconnectedFailures),
+						slog.String("error", err.Error()),
+					)
+					if terminate != nil {
+						terminate()
+					}
+					return
+				}
+				continue
+			}
+			disconnectedFailures = 0
 			if isUnrecoverable == nil || !isUnrecoverable(err) {
 				terminalFailures = 0
 				continue
@@ -197,6 +242,10 @@ func runSelfHealthMonitor(
 					// increment: only a healthy read is a recovery.
 					if err = probe(); err != nil {
 						logger.Warn("self-health probe after rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", err.Error()))
+						if readsDisconnected() {
+							// The connected branch above reset the count, so this probe starts it.
+							disconnectedFailures = 1
+						}
 					}
 				}
 			}
@@ -207,6 +256,7 @@ func runSelfHealthMonitor(
 			}
 			failures = 0
 			terminalFailures = 0
+			disconnectedFailures = 0
 			continue
 		}
 		if terminalFailures < threshold {
@@ -773,6 +823,7 @@ func main() {
 			func(err error) bool {
 				return isUnrecoverableSelfHealthFailure(err, client, caches)
 			},
+			client.Connected,
 			func() error {
 				return rebuildListenerDependencies(
 					client,
