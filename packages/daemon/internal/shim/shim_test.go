@@ -566,7 +566,7 @@ func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
 		return slices.Clone(warmed)
 	}
 	cfg := config(t, path, child)
-	cfg.WarmCodegraph = func(_ context.Context, dir string) {
+	cfg.WarmCodegraph = func(_ context.Context, dir string, _ time.Time) {
 		mu.Lock()
 		defer mu.Unlock()
 		warmed = append(warmed, dir)
@@ -646,7 +646,7 @@ func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
 	var returned time.Time
 	ended := make(chan struct{})
 	cfg := config(t, path, child)
-	cfg.WarmCodegraph = func(ctx context.Context, _ string) {
+	cfg.WarmCodegraph = func(ctx context.Context, _ string, _ time.Time) {
 		<-ctx.Done()
 		close(ended)
 		// What a real warm-up does here: its codegraph child ends on the same context, it logs the
@@ -696,7 +696,7 @@ func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
 	// nothing, so Run returns at once without the warm-up, which never returns.
 	cfg.StopGrace = grace + 500*time.Millisecond
 	never := make(chan struct{})
-	cfg.WarmCodegraph = func(ctx context.Context, _ string) { <-never }
+	cfg.WarmCodegraph = func(ctx context.Context, _ string, _ time.Time) { <-never }
 	defer close(never)
 	clock := newClock()
 	sh := run(t, cfg, clock)

@@ -102,9 +102,11 @@ type Config struct {
 	// when its loop ends — the wrapped process has exited — and it must return once that context
 	// ends, its build stopped and its lease released, since Run waits for it (bounded by
 	// warmUpDrain) before returning the agent's exit status: a stop mid-build then leaves no lease
-	// behind for the role's relaunch to read as a live build. Nil on a tmux pane, whose workspace
-	// the daemon warms itself, and on the controller, which has no workspace: nothing runs.
-	WarmCodegraph func(ctx context.Context, dir string)
+	// behind for the role's relaunch to read as a live build. `launched` is when the shim's Run
+	// began — the role container's launcher starting this generation — which the warm-up's success
+	// line reports its build against. Nil on a tmux pane, whose workspace the daemon warms itself,
+	// and on the controller, which has no workspace: nothing runs.
+	WarmCodegraph func(ctx context.Context, dir string, launched time.Time)
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -124,7 +126,7 @@ type Config struct {
 // the shim exits 143 as that signal would have. The error is the shim's own failure to start
 // the child, never the child's.
 func Run(ctx context.Context, cfg Config) (int, error) {
-	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, stopGrace: cfg.StopGrace, childExited: make(chan struct{})}
+	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, stopGrace: cfg.StopGrace, childExited: make(chan struct{}), started: time.Now()}
 	if s.clock == nil {
 		s.clock = realClock{}
 	}
@@ -174,6 +176,9 @@ type shim struct {
 	// the agent spends its own grace ignoring SIGTERM.
 	warm     context.Context
 	stopWarm context.CancelFunc
+	// started is when Run began: the launch the warm-up's success line reports its build against
+	// (Config.WarmCodegraph's launched).
+	started time.Time
 
 	mu          sync.Mutex
 	child       *exec.Cmd
@@ -451,7 +456,7 @@ func (s *shim) warmCodegraph() {
 	s.warmUps.Add(1)
 	go func() {
 		defer s.warmUps.Done()
-		s.cfg.WarmCodegraph(s.warm, dir)
+		s.cfg.WarmCodegraph(s.warm, dir, s.started)
 	}()
 }
 
