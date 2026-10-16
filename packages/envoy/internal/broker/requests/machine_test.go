@@ -143,7 +143,7 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	m = &Machine{
 		Store:           st,
 		Policy:          policytest.Current(t, local, fixtureService),
-		Secrets:         secrets.AWS{Client: local},
+		Secrets:         policytest.Store(local),
 		PendingTTL:      12 * time.Hour,
 		Audience:        testAudience,
 		Skew:            time.Minute,
@@ -487,9 +487,9 @@ func TestCreateServesASecretCreatedAfterTheLastReload(t *testing.T) {
 func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 2}
-	count := &countingDescriber{DescribeSecretAPIClient: fixtureStore(m)}
+	count := &countingDescriber{SecretsManagerAPI: fixtureStore(m)}
 	loader := policytest.Loader(fixtureStore(m), fixtureService) // the fixture's services, as newFixture registers them
-	loader.Describer = count
+	loader.Store = policytest.StoreThrough(fixtureStore(m), count)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -526,13 +526,13 @@ func TestANameNoSecretCanCarrySpendsNoMissReread(t *testing.T) {
 
 // countingDescriber counts the DescribeSecret calls a policy reread makes.
 type countingDescriber struct {
-	policy.DescribeSecretAPIClient
+	secrets.SecretsManagerAPI
 	calls atomic.Int64
 }
 
 func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	c.calls.Add(1)
-	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
+	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
 // TestARereadItsCallerAbandonedRaisesNoAlarm pins that a miss-path reread cut short by its own
@@ -544,7 +544,7 @@ func TestARereadItsCallerAbandonedRaisesNoAlarm(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	loader := policytest.Loader(fixtureStore(m), fixtureService)
-	loader.Describer = abandoningDescriber{cancel: cancel}
+	loader.Store = policytest.StoreThrough(fixtureStore(m), abandoningDescriber{SecretsManagerAPI: fixtureStore(m), cancel: cancel})
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -567,7 +567,10 @@ func TestARereadItsCallerAbandonedRaisesNoAlarm(t *testing.T) {
 
 // abandoningDescriber is a client that goes away while the reread's DescribeSecret is in flight:
 // it ends the request's context and fails as the AWS SDK does once its context has ended.
-type abandoningDescriber struct{ cancel context.CancelFunc }
+type abandoningDescriber struct {
+	secrets.SecretsManagerAPI
+	cancel context.CancelFunc
+}
 
 func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	d.cancel()
@@ -580,7 +583,7 @@ func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanag
 func TestAnOrdinaryRereadFailureRaisesThePolicyAlarm(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	loader := policytest.Loader(fixtureStore(m), fixtureService)
-	loader.Describer = failingDescriber{err: errors.New("throttled")}
+	loader.Store = policytest.StoreThrough(fixtureStore(m), failingDescriber{SecretsManagerAPI: fixtureStore(m), err: errors.New("throttled")})
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -607,7 +610,10 @@ func TestAnOrdinaryRereadFailureRaisesThePolicyAlarm(t *testing.T) {
 }
 
 // failingDescriber is a Secrets Manager that answers every DescribeSecret with err.
-type failingDescriber struct{ err error }
+type failingDescriber struct {
+	secrets.SecretsManagerAPI
+	err error
+}
 
 func (d failingDescriber) DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	return nil, d.err
@@ -886,7 +892,7 @@ func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
 	if err != nil || req.GrantID == nil {
 		t.Fatalf("Create = %+v, %v, want an automatic grant", req, err)
 	}
-	reader := gatedReader{Reader: m.Secrets, entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	reader := gatedReader{Store: m.Secrets, entered: make(chan struct{}, 1), gate: make(chan struct{})}
 	m.Secrets = reader
 	done := make(chan error, 1)
 	go func() {
@@ -904,10 +910,10 @@ func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
 	}
 }
 
-// gatedReader is a secrets.Reader that announces each Read on entered and answers from the
-// Reader it wraps only once gate is closed.
+// gatedReader is a secrets.Store that announces each Read on entered and answers from the Store
+// it wraps only once gate is closed.
 type gatedReader struct {
-	secrets.Reader
+	secrets.Store
 	entered chan struct{}
 	gate    chan struct{}
 }
@@ -915,7 +921,7 @@ type gatedReader struct {
 func (g gatedReader) Read(ctx context.Context, source string) (string, error) {
 	g.entered <- struct{}{}
 	<-g.gate
-	return g.Reader.Read(ctx, source)
+	return g.Store.Read(ctx, source)
 }
 
 // awaitEntered waits for one announcement on entered, failing t after five seconds.

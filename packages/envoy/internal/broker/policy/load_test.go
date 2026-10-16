@@ -55,7 +55,7 @@ func TestLoadServesEveryWellTaggedSecretOnTheKey(t *testing.T) {
 		t.Fatalf("served %d secrets, want %d: %+v", len(set.Secrets), len(byForm)+1, set.Secrets)
 	}
 	deel := set.Secrets["DEEL_API_KEY"]
-	if deel.Name != "DEEL_API_KEY" || deel.Owner != policy.OwnerShared || deel.Tier != policy.TierHuman || deel.ARN != secrets.LocalARN(policytest.ID("DEEL_API_KEY")) {
+	if deel.Name != "DEEL_API_KEY" || deel.Owner != policy.OwnerShared || deel.Tier != policy.TierHuman || deel.Source != secrets.LocalARN(policytest.ID("DEEL_API_KEY")) {
 		t.Fatalf("DEEL_API_KEY = %+v, want shared, human, read by its ARN", deel)
 	}
 	if logged.String() != "" {
@@ -142,10 +142,18 @@ func TestLoadRefusesEachUnservableSecretByNameWithTheExactLine(t *testing.T) {
 }
 
 // pagedSecrets answers ListSecrets one secret per page, the shape a namespace bigger than one page
-// comes back in, and counts the filters it was asked for.
+// comes back in, and counts the filters it was asked for. Its other Secrets Manager calls are a
+// Local's, which a Load never makes.
 type pagedSecrets struct {
+	*secrets.Local
 	entries []smtypes.SecretListEntry
 	filters [][]smtypes.Filter
+}
+
+// pagedLoader is the Loader over a pagedSecrets listing entries, with no alias to resolve.
+func pagedLoader(t *testing.T, entries ...smtypes.SecretListEntry) (policy.Loader, *pagedSecrets) {
+	sm := &pagedSecrets{Local: secrets.NewLocal(), entries: entries}
+	return policy.Loader{Store: secrets.AWS{Client: sm, KMS: noAliases{t}, KeyARN: policytest.KeyARN}, Prefix: policytest.Prefix}, sm
 }
 
 func (p *pagedSecrets) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
@@ -193,17 +201,16 @@ func listEntry(name, arn string, versionsToStages map[string][]string) smtypes.S
 // nobody used.
 func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 	entry := func(name string) smtypes.SecretListEntry { return listEntry(name, "arn:"+name, onlyCurrent) }
-	sm := &pagedSecrets{entries: []smtypes.SecretListEntry{
-		entry(policytest.Prefix + "first"), entry(policytest.Prefix + "second"),
-		entry(strings.ToUpper(policytest.Prefix) + "third"), entry(policytest.Prefix + "fourth"),
-	}}
-	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+	loader, sm := pagedLoader(t,
+		entry(policytest.Prefix+"first"), entry(policytest.Prefix+"second"),
+		entry(strings.ToUpper(policytest.Prefix)+"third"), entry(policytest.Prefix+"fourth"),
+	)
 	logged := policytest.CaptureLog(t)
 	set, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(set.Secrets) != 3 || set.Secrets["FIRST"].ARN != "arn:"+policytest.Prefix+"first" || set.Secrets["FOURTH"].Name != "FOURTH" {
+	if len(set.Secrets) != 3 || set.Secrets["FIRST"].Source != "arn:"+policytest.Prefix+"first" || set.Secrets["FOURTH"].Name != "FOURTH" {
 		t.Fatalf("served %+v, want FIRST, SECOND and FOURTH", set.Secrets)
 	}
 	if logged.String() != "" {
@@ -227,15 +234,14 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	entry := func(name string, versionsToStages map[string][]string) smtypes.SecretListEntry {
 		return listEntry(policytest.ID(name), "arn:"+name, versionsToStages)
 	}
-	sm := &pagedSecrets{entries: []smtypes.SecretListEntry{
+	loader, _ := pagedLoader(t,
 		entry("CURRENT", onlyCurrent),
 		entry("ROTATING", map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}),
 		entry("NEVER_GIVEN_A_VALUE", nil),
 		entry("NO_STAGES", map[string][]string{}),
 		entry("PENDING_ONLY", map[string][]string{"v1": {"AWSPENDING"}}),
 		entry("PREVIOUS_ONLY", map[string][]string{"v1": {"AWSPREVIOUS"}}),
-	}}
-	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+	)
 	logged := policytest.CaptureLog(t)
 	set, err := loader.Load(context.Background())
 	if err != nil {
@@ -253,9 +259,9 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	}
 }
 
-// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's load and the
-// agent-secrets CLI's VALUE column read: a secret has a value while one of its versions carries
-// AWSCURRENT, and not otherwise.
+// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's AWS store
+// and the agent-secrets CLI's VALUE column read: a secret has a value while one of its versions
+// carries AWSCURRENT, and not otherwise.
 func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
 	for _, tc := range []struct {
 		stages map[string][]string
@@ -268,7 +274,7 @@ func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
 		{map[string][]string{"v1": {"AWSPENDING"}}, false},
 		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
 	} {
-		if got := policy.HasCurrentVersion(tc.stages); got != tc.want {
+		if got := secrets.HasCurrentVersion(tc.stages); got != tc.want {
 			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
 		}
 	}
@@ -322,7 +328,7 @@ func (f *failingSecrets) ListSecrets(ctx context.Context, in *secretsmanager.Lis
 func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
-		loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		loader := policy.Loader{Store: secrets.AWS{Client: store, KMS: store, KeyARN: policytest.KeyARN}, Prefix: policytest.Prefix}
 		logged := policytest.CaptureLog(t)
 		cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
 		if err != nil {
@@ -370,7 +376,7 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 	// Secrets Manager promises no listing order, so these listings come back in the order given.
 	listed := func(entries ...smtypes.SecretListEntry) string {
 		t.Helper()
-		loader := policy.Loader{Secrets: &pagedSecrets{entries: entries}, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		loader, _ := pagedLoader(t, entries...)
 		set, err := loader.Load(context.Background())
 		if err != nil {
 			t.Fatalf("Load: %v", err)
@@ -467,7 +473,7 @@ func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
 	ctx := context.Background()
 
 	lk, err := loader.LoadOne(ctx, "SERVED")
-	if s := lk.Secret; err != nil || !lk.Served || lk.Reason != "" || s.Name != "SERVED" || s.Owner != owner || s.Tier != policy.TierHuman || s.ARN != secrets.LocalARN(policytest.ID("SERVED")) {
+	if s := lk.Secret; err != nil || !lk.Served || lk.Reason != "" || s.Name != "SERVED" || s.Owner != owner || s.Tier != policy.TierHuman || s.Source != secrets.LocalARN(policytest.ID("SERVED")) {
 		t.Fatalf("LoadOne(SERVED) = %+v, %v; want it served, %s's, human, read by its ARN", lk, err, owner)
 	}
 	for name, reason := range map[string]string{
@@ -498,9 +504,9 @@ func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
 // Manager refuses a longer SecretId as invalid input rather than answering it not found.
 func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 	store := secrets.NewLocal()
-	count := &countingDescriber{DescribeSecretAPIClient: store}
+	count := &countingDescriber{SecretsManagerAPI: store}
 	loader := policytest.Loader(store)
-	loader.Describer = count
+	loader.Store = policytest.StoreThrough(store, count)
 	ctx := context.Background()
 
 	atLimit := "A" + strings.Repeat("B", 512-len(policytest.Prefix)-1)

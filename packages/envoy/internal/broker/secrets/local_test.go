@@ -247,11 +247,3 @@ func second[T any](_ T, err error) error { return err }
 func tag(key, value string) types.Tag {
 	return types.Tag{Key: aws.String(key), Value: aws.String(value)}
 }
-
-func tagMap(tags []types.Tag) map[string]string {
-	m := make(map[string]string, len(tags))
-	for _, t := range tags {
-		m[aws.ToString(t.Key)] = aws.ToString(t.Value)
-	}
-	return m
-}

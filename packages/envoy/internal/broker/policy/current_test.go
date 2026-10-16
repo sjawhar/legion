@@ -20,6 +20,7 @@ import (
 // staleLister freezes ListSecrets at construction while DescribeSecret stays live: AWS's
 // documented ListSecrets lag, reproduced.
 type staleLister struct {
+	*secrets.Local
 	page *secretsmanager.ListSecretsOutput
 }
 
@@ -34,7 +35,7 @@ func TestRefreshKeepsWhatARecentRereadSettled(t *testing.T) {
 		t.Fatal(err)
 	}
 	loader := policytest.Loader(store)
-	loader.Secrets = staleLister{page: stale} // the listing predates everything below
+	loader.Store = policytest.StoreThrough(store, staleLister{Local: store, page: stale}) // the listing predates everything below
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +69,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal(err)
 	}
 	loader := policytest.Loader(store)
-	loader.Secrets = staleLister{page: stale} // never lists NEW_KEY
+	loader.Store = policytest.StoreThrough(store, staleLister{Local: store, page: stale}) // never lists NEW_KEY
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -101,6 +102,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 // slowLister answers a frozen page, then runs fetched: a reload whose listing is fetched at one
 // time and whose Load returns at a later one.
 type slowLister struct {
+	*secrets.Local
 	page    *secretsmanager.ListSecretsOutput
 	fetched func()
 }
@@ -121,9 +123,9 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{page: stale} // lists OLD_KEY and never NEW_KEY
+	lister := &slowLister{Local: store, page: stale} // lists OLD_KEY and never NEW_KEY
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -166,9 +168,9 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{page: stale} // lists OLD_KEY throughout
+	lister := &slowLister{Local: store, page: stale} // lists OLD_KEY throughout
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -208,9 +210,9 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 // side: a served name a reread finds gone is still kept, so a lagging listing cannot bring it back.
 func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
-	count := &countingDescriber{DescribeSecretAPIClient: store}
+	count := &countingDescriber{SecretsManagerAPI: store}
 	loader := policytest.Loader(store)
-	loader.Describer = count
+	loader.Store = policytest.StoreThrough(store, count)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -229,13 +231,13 @@ func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 
 // countingDescriber counts the DescribeSecret calls a reread or a reload makes.
 type countingDescriber struct {
-	policy.DescribeSecretAPIClient
+	secrets.SecretsManagerAPI
 	calls atomic.Int64
 }
 
 func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	c.calls.Add(1)
-	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
+	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
 // heldCurrent loads an empty namespace's policy and starts a reload whose listing waits until the
@@ -248,9 +250,9 @@ func heldCurrent(t *testing.T) *policy.Current {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{page: page}
+	lister := &slowLister{Local: store, page: page}
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -318,6 +320,7 @@ func TestARereadWaitsForTheWriterLockOnlyWhileItsCallerDoes(t *testing.T) {
 // calls it has held. hang and unhang pair: a repeated hang keeps holding, and an unhang with
 // nothing held does nothing.
 type hangingLister struct {
+	*secrets.Local
 	page      *secretsmanager.ListSecretsOutput
 	heldCalls atomic.Int64
 	mu        sync.Mutex
@@ -364,9 +367,9 @@ func hangingLoader(t *testing.T) (*hangingLister, policy.Loader) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &hangingLister{page: page}
+	lister := &hangingLister{Local: store, page: page}
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	return lister, loader
 }
 

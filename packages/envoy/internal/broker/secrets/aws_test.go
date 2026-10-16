@@ -15,7 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
 
+// stubSMAPI answers GetSecretValue with out and err; its other Secrets Manager calls are an empty
+// Local's, which a Read never makes.
 type stubSMAPI struct {
+	*Local
 	out *secretsmanager.GetSecretValueOutput
 	err error
 }

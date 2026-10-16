@@ -214,7 +214,7 @@ func servedBy(sm secretsAPI) func(name string) Reread {
 		switch {
 		case err != nil || out.DeletedDate != nil:
 			return Reread{Name: name, Reason: policy.ReasonAbsent}
-		case !policy.HasCurrentVersion(out.VersionIdsToStages):
+		case !secrets.HasCurrentVersion(out.VersionIdsToStages):
 			return Reread{Name: name, Reason: policy.ReasonNoCurrentValue}
 		}
 		return Reread{Name: name, Served: true}

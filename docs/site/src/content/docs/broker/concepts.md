@@ -127,20 +127,29 @@ address before the token is verified, and per account once it is.
 ## Owner and tier: who may have which secret
 
 The broker reads who may have a secret from the secret itself
-(`packages/envoy/internal/broker/policy/`). Every agent secret is a secret in AWS Secrets Manager
-under one namespace, `BROKER_SECRETS_PREFIX` (such as `production/agent-secrets/`), encrypted with
-one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tier:
+(`packages/envoy/internal/broker/policy/`). Every agent secret is a secret in the broker's secret
+store (`BROKER_SECRETS_STORE`: AWS Secrets Manager, or Google Cloud Secret Manager) under one
+namespace, `BROKER_SECRETS_PREFIX` (such as `production/agent-secrets/`, or
+`projects/<project number>/secrets/agent-secrets-`), encrypted with one agent-secrets key
+(`BROKER_SECRETS_KMS_KEY_ARN` in AWS KMS, or `BROKER_SECRETS_KMS_KEY_NAME` in Cloud KMS), and
+marked with its owner and its tier, as AWS tags or as Secret Manager annotations:
 
 - **Its name** under the prefix is the name a session asks for, in lowercase with each underscore a
-  hyphen: `production/agent-secrets/deel-api-key` is `DEEL_API_KEY`. It is lowercase letters, digits
-  and single hyphens, starting with a letter.
+  hyphen: `production/agent-secrets/deel-api-key`, or
+  `projects/<number>/secrets/agent-secrets-deel-api-key`, is `DEEL_API_KEY`. It is lowercase
+  letters, digits and single hyphens, starting with a letter.
 - **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
   or a service the broker is configured with (`BROKER_SERVICES`).
 - **`tier`** is `agent` or `human`.
 
+In Secret Manager the two are annotations rather than labels because a label's value cannot hold
+an email (`@` and `.` are outside its alphabet), and the broker compares the owner with a Dispatch
+login byte for byte; an annotation holds the email as it is.
+
 People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
 changes them under the person's own AWS sign-in
-([manage a secret](/legion/broker/guides/manage-a-secret/)).
+([manage a secret](/legion/broker/guides/manage-a-secret/)); under Secret Manager, `gcloud secrets`
+does ([operating the broker](/legion/broker/operate/#people-who-manage-secrets)).
 
 Who gets a secret follows from those two tags alone:
 

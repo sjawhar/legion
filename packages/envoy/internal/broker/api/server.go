@@ -38,9 +38,15 @@ type Deps struct {
 	Policy *policy.Current
 	// SecretsPrefix is BROKER_SECRETS_PREFIX, the namespace GET /v1/settings answers.
 	SecretsPrefix string
+	// SecretsStore is BROKER_SECRETS_STORE, the store GET /v1/settings names: secrets.StoreAWS or
+	// secrets.StoreGCP.
+	SecretsStore string
 	// SecretsKMSKeyARN is BROKER_SECRETS_KMS_KEY_ARN, the agent-secrets key GET /v1/settings
-	// answers with its region and account.
+	// answers with its region and account for the AWS store.
 	SecretsKMSKeyARN string
+	// SecretsKMSKeyName is BROKER_SECRETS_KMS_KEY_NAME, the agent-secrets key GET /v1/settings
+	// answers for the GCP store.
+	SecretsKMSKeyName string
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means

@@ -33,6 +33,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 type secretForm struct {
@@ -440,6 +441,10 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the broker's settings: %w", err)
 	}
+	// A broker from before the store field names none and holds the secrets in Secrets Manager.
+	if settings.Store != "" && settings.Store != secrets.StoreAWS {
+		return nil, usageErr{fmt.Errorf("the broker holds its agent secrets in %s; this release's secret forms manage AWS Secrets Manager only", settings.Store)}
+	}
 	if err := checkSettingsKeyARN(settings); err != nil {
 		return nil, err
 	}
@@ -609,7 +614,7 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 			views = append(views, secretView{
 				Name: s.displayName(id), SecretName: id,
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-				HasValue: policy.HasCurrentVersion(e.SecretVersionsToStages),
+				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
 			})
@@ -671,7 +676,7 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	view := secretView{
 		Name: s.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-		HasValue: policy.HasCurrentVersion(out.VersionIdsToStages),
+		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
 		Versions: out.VersionIdsToStages,

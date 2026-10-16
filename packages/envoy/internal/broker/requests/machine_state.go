@@ -126,7 +126,7 @@ type Decision struct {
 type Machine struct {
 	Store      *store.Store
 	Policy     *policy.Current
-	Secrets    secrets.Reader
+	Secrets    secrets.Store
 	PendingTTL time.Duration
 	// Audience is BROKER_PUBLIC_URL: the aud every request object's signature is checked against.
 	Audience string
