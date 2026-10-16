@@ -85,6 +85,7 @@ type Runtime struct {
 	agentSecrets                   *AgentSecrets
 	agent                          []string
 	bootTimeout                    time.Duration
+	busyBackoff                    time.Duration
 	provisionBound                 time.Duration
 	terminationGrace               time.Duration
 	probeInterval                  time.Duration
@@ -198,6 +199,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
+	case opts.BusyBackoff <= 0:
+		return refuse("the busy backoff %s is not positive", opts.BusyBackoff)
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
@@ -249,7 +252,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionDSNKey: opts.SessionDSNKey,
-		bootTimeout:   opts.BootTimeout, provisionBound: workspace.FetchTimeout, terminationGrace: opts.TerminationGrace,
+		bootTimeout:   opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: workspace.FetchTimeout, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
@@ -323,9 +326,10 @@ func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
 
 // startInformers runs both informers over c's informers' clients, selected on the project label,
 // until ctx ends, and waits for both stores to sync; every other request of the runtime goes
-// through c's requests' clients.
+// through c's requests' clients, each read and write of them sent again while the API server
+// answers a launch's overloaded (patientDynamic, patientKube).
 func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
-	r.dyn, r.kube, r.lifetime = c.requests.dyn, c.requests.kube, ctx
+	r.dyn, r.kube, r.lifetime = patientDynamic{c.requests.dyn, r}, patientKube{c.requests.kube, r}, ctx
 	sandboxes := c.informers.dyn.Resource(sandboxGVR).Namespace(r.namespace)
 	pods := c.informers.kube.CoreV1().Pods(r.namespace)
 	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
@@ -437,10 +441,11 @@ func (f *feed) check() error {
 		f.resource, f.since.UTC().Format(time.RFC3339), f.failed)
 }
 
-// call is ctx bounded for one call no client of the runtime bounds whole: a GitHub App token mint,
-// and a pod log Stream, which client-go bounds by the client's timeout per attempt and not across
-// its Retry-After retries (rest/request.go, Request.Stream), so a log read fails fast rather than
-// hold its caller.
+// call is ctx bounded for one call no client of the runtime bounds whole: a GitHub App token mint;
+// a pod log Stream, which client-go bounds by the client's timeout per attempt and not across its
+// Retry-After retries (rest/request.go, Request.Stream), so a log read fails fast rather than hold
+// its caller; and a failed launch's suspension of its Sandbox (suspendFailedLaunch), which waits an
+// overloaded server out for no longer than this.
 func call(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }
@@ -477,24 +482,27 @@ func (r *Runtime) notify(obj any) {
 }
 
 // await re-checks done after every informer event, and every recheck interval, until it reports
-// true, fails, or budget passes; what names the wait in the timeout.
-func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, done func() (bool, error)) error {
-	deadline := time.NewTimer(budget)
-	defer deadline.Stop()
+// true, fails, or budget passes; what names the wait in the timeout. done is handed ctx bounded by
+// budget, and that one bound is the wait's: a request done makes, a launch's waiting out an
+// overloaded server included (resend), ends with the wait rather than up to a boot timeout past it.
+func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, done func(context.Context) (bool, error)) error {
+	bounded, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	recheck := time.NewTicker(recheckInterval)
 	defer recheck.Stop()
 	for {
 		r.mu.Lock()
 		changed := r.changed
 		r.mu.Unlock()
-		ok, err := done()
+		ok, err := done(bounded)
 		if err != nil || ok {
 			return err
 		}
 		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
+		case <-bounded.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("timed out after %s waiting for %s", budget, what)
 		case <-changed:
 		case <-recheck.C:

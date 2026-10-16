@@ -216,7 +216,7 @@ func (p *Prober) ProbeImage(ctx context.Context, probe ImageProbe) (bootprobe.Im
 // Sandbox whatever happened — with a context of its own, so a stopping daemon still cleans up.
 func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest string) bootprobe.Outcome {
 	// A pod an earlier attempt's Sandbox left, whose deletion is still under way, holds the name.
-	if err := r.await(ctx, p.Budget, "the pod of an earlier probe sandbox "+name+" to go", func() (bool, error) {
+	if err := r.await(ctx, p.Budget, "the pod of an earlier probe sandbox "+name+" to go", func(context.Context) (bool, error) {
 		pod := r.storedPod(name)
 		if pod == nil {
 			return true, nil
@@ -257,7 +257,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		readErr   error
 		mountRead time.Time
 	)
-	err := r.await(ctx, p.Budget, "probe pod "+name+" to finish", func() (bool, error) {
+	err := r.await(ctx, p.Budget, "probe pod "+name+" to finish", func(context.Context) (bool, error) {
 		s, err := r.storedSandbox(name)
 		if err != nil {
 			readErr = err
@@ -401,7 +401,7 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return "", apiOutcome(digest, err, "delete the leftover probe sandbox "+name, false), false
 	}
-	if err := r.await(ctx, budget, "the leftover probe sandbox "+name+" and its pod to go", func() (bool, error) {
+	if err := r.await(ctx, budget, "the leftover probe sandbox "+name+" and its pod to go", func(context.Context) (bool, error) {
 		s, err := r.storedSandbox(name)
 		return s == nil && r.storedPod(name) == nil, err
 	}); err != nil {

@@ -44,6 +44,8 @@ func (stillTime) Now() time.Time { return time.Date(2026, 9, 22, 12, 0, 0, 0, ti
 
 func (stillTime) AfterFunc(time.Duration, func()) supervise.Cancel { return neverFires{} }
 
+func (stillTime) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
 type neverFires struct{}
 
 func (neverFires) Stop() bool { return true }
@@ -186,7 +188,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Runtime: rt, Conns: fake.NewConns(), Store: tokens.Recording(claims), Specs: anyLaunch{}, Clock: stillTime{}, Log: quiet,
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
 		Timeouts: supervise.Timeouts{
-			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second,
+			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second, LaunchBackoff: time.Millisecond,
 		},
 		PluginContract: api.DaemonAPIVersion,
 	}

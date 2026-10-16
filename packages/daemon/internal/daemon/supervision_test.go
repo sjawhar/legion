@@ -374,6 +374,8 @@ func (c *heldClock) Now() time.Time {
 	return time.Now()
 }
 
+func (c *heldClock) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
 func (c *heldClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
 	c.mu.Lock()
 	defer c.mu.Unlock()
