@@ -96,6 +96,9 @@ notices to roles and to the controller through the listener's HTTP API, not over
 
 So the NATS user the daemon connects as needs exactly these permissions:
 
+When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
+`core.DaemonPermissions()` instead of a host's or an explicit user's grant.
+
 | Publish | Subscribe |
 | --- | --- |
 | `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS` | `notifications.envoy.exceptions.notifications.role.>` |

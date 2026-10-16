@@ -103,6 +103,7 @@ func TestNoSetRepeatsAnEntry(t *testing.T) {
 		"listener": core.ListenerPermissions("example-host-a"),
 		"session":  core.SessionPermissions(),
 		"host":     core.HostPermissions("example-host-a"),
+		"daemon":   core.DaemonPermissions(),
 	}
 	for name, p := range sets {
 		for direction, allow := range map[string][]string{"publish": p.Publish.Allow, "subscribe": p.Subscribe.Allow} {
@@ -127,6 +128,11 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	session := core.SessionPermissions()
 	session.Publish.Allow[0] = "edited"
 	require.Equal(t, "_INBOX.>", core.SessionPermissions().Publish.Allow[0])
+	daemon := core.DaemonPermissions()
+	daemon.Publish.Allow[0] = "edited"
+	daemon.Subscribe.Allow[0] = "edited"
+	require.Equal(t, "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", core.DaemonPermissions().Publish.Allow[0])
+	require.Equal(t, "notifications.envoy.exceptions.notifications.role.>", core.DaemonPermissions().Subscribe.Allow[0])
 }
 
 // A set drops into a User as its rules, and the authorization renders it.
@@ -141,4 +147,23 @@ func TestASetIsAUsersRules(t *testing.T) {
 	}}}
 	_, err := a.Render(nil)
 	require.NoError(t, err)
+}
+
+// The daemon grant is written out by hand. It is deliberately not derived from Envoy's
+// subject names, so changing either the deployment grant or the daemon's NATS calls requires a
+// conscious review of this least-privilege boundary.
+func TestDaemonPermissions(t *testing.T) {
+	require.Equal(t, core.Permissions{
+		Publish: core.Rules{Allow: []string{
+			"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
+			"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>",
+			"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>",
+			"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>",
+			"$JS.ACK.ENVOY_NOTIFICATIONS.>",
+		}},
+		Subscribe: core.Rules{Allow: []string{
+			"notifications.envoy.exceptions.notifications.role.>",
+			"_INBOX.>",
+		}},
+	}, core.DaemonPermissions())
 }

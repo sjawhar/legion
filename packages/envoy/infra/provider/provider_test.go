@@ -131,6 +131,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	// hub's, so a consumer running both writes them alike.
 	require.Contains(t, user.Properties, "nkey")
 	require.NotContains(t, user.Properties, "publicKey")
+	require.Equal(t, "boolean", user.Properties["daemon"].Type)
 	for _, direction := range []string{"publish", "subscribe"} {
 		require.Equal(t, "#/types/envoy-infra:nats:Rules",
 			schema.Types["envoy-infra:gcp:Permissions"].Properties[direction].Ref)

@@ -5,6 +5,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/daemonpermissions"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 )
@@ -85,6 +86,16 @@ func SessionPermissions() Permissions {
 	return Permissions{
 		Publish:   Rules{Allow: []string{inboxes, contracts.AgentStreamFramesSubject("*")}},
 		Subscribe: Rules{Allow: []string{bus.NotificationTopicPrefix + ">", contracts.AgentStreamControlSubject("*")}},
+	}
+}
+
+// DaemonPermissions is the NATS grant one Legion daemon needs. The grant itself lives with
+// Envoy's subject names so the daemon's real-NATS proof and the hub's rendered user share it.
+func DaemonPermissions() Permissions {
+	grant := daemonpermissions.Grant()
+	return Permissions{
+		Publish:   Rules{Allow: grant.Publish},
+		Subscribe: Rules{Allow: grant.Subscribe},
 	}
 }
 

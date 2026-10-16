@@ -1402,6 +1402,12 @@ the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. This reposi
 and a session, connected as one user holding it, are checked against real nats-server 2.10 and
 2.15.1 servers; `AGENTS.md` in this directory says how.
 
+`DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
+notification stream's info request, its consumers' info, create and next-message requests, and
+their acknowledgements. It subscribes to the daemon's role-lane delivery exceptions and to reply
+inboxes. A `gcp:NatsHub` user with `daemon: true` receives this set; its seed belongs to the daemon,
+not to a host or session.
+
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
 a later release.
