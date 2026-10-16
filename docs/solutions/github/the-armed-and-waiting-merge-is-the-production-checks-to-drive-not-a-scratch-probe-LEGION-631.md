@@ -8,7 +8,7 @@ tags:
   - negative-control
   - smoke-repository
 date: 2026-10-10
-status: active
+status: superseded by the daemon's READY merge submission (`ready_merge` outbox row, `ghautomerge.Submit`) — the merger runs no `gh pr merge --auto`, and in a repository without auto-merge (the smoke repository) the daemon waits for GitHub to report the pull request mergeable and then merges it, so the scratch repository now drives the waiting path end to end; only the arm on a repository that allows auto-merge, and a merge-queue enqueue, remain unreached there
 module: packages/daemon/internal/prompts
 related_issues:
   - "LEGION-631"

@@ -9,6 +9,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:host:Listener` | An `envoy-listener` container on a Docker host: see [host:Listener](#hostlistener). |
 | `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
+| `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach.
@@ -67,8 +68,9 @@ packages:
 
 It also generates an SDK for the project's language under `sdks/` and prints how to import it. A
 TypeScript program imports `@sjawhar/envoy-infra`, which `package add` adds to `package.json`. A Go
-program imports `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra/host` and `.../envoyinfra/aws`. A
-Python program imports `sjawhar_envoy_infra`, the generated `sjawhar-envoy-infra` package.
+program imports `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra/host`, `.../envoyinfra/aws` and
+`.../envoyinfra/gcp`. A Python program imports `sjawhar_envoy_infra`, the generated
+`sjawhar-envoy-infra` package.
 
 ### The command
 
@@ -219,14 +221,17 @@ another stack.
 
 ### Providers
 
-The listener creates its resources only with providers you pass it in its `providers` resource
-option: a `docker` provider always, and a `command` provider too when `watchdog` is set. Its
-resources use that provider at the version and with the configuration you give it, and the
-provider's `host` decides which Docker daemon the listener runs on. The plugin never falls back to a
-default provider of its own. Without one, the listener fails before it registers anything:
+A component creates its resources only with providers you pass it in its `providers` resource
+option. The listener takes a `docker` provider always, and a `command` provider too when
+`watchdog` is set; the hub takes a `gcp` provider. Their resources use that provider at the
+version and with the configuration you give it: a docker provider's `host` decides which Docker
+daemon the listener runs on, and a gcp provider's `project` which project the hub is created in.
+The plugin never falls back to a default provider of its own. Without one, the component fails
+before it registers anything:
 
 ```text
 envoy-infra:host:Listener needs a "docker" provider in its providers option
+envoy-infra:gcp:NatsHub needs a "gcp" provider in its providers option
 ```
 
 ### Readiness
@@ -311,8 +316,9 @@ YAML program, the listener that takes both over reads:
 
 ### Examples
 
-The examples use placeholders: `example-host-a`, the `*.internal.example` hosts and each `<...>`
-stand for your own values.
+The examples use placeholders: `example-host-a`, `example-project`, the `*.internal.example` hosts
+and each `<...>` stand for your own values. The hub's example is in
+[docs/nats-hub.md](docs/nats-hub.md#a-nats-hub-in-yaml).
 
 #### YAML
 
@@ -957,29 +963,46 @@ A NATS client authenticates as an nkey user with that user's seed, and the serve
 by its public key alone. `envoy-infra seed` keeps the two apart: it writes a new user's seed
 straight into a secret store and prints the public key, so the stack that runs the NATS server
 holds public keys only. The seed is never an argument, an environment variable, an output, a log
-line or part of an error. This version has one store, AWS Secrets Manager:
+line or part of an error. It has two stores, AWS Secrets Manager and Google Cloud Secret Manager:
 
 ```text
 envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
+envoy-infra seed {check|generate|verify} --store gcp-secret-manager --name projects/<project>/secrets/<secret> [--public-key U…]
 ```
 
-The command runs under your own AWS configuration, as the AWS SDK loads it: the environment, then
-the shared configuration and credentials files. `--region` overrides the region it names. Before
-any request or credential retrieval, it refuses a seed anywhere in that configuration or in the
-endpoints it resolves from it, without echoing it (see "What `check` and `verify` print"); then a
-Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or
-a profile's `services` section) that is not `https`, unless it is this machine's loopback address,
-since a seed would cross the network in plain text; and it retrieves your credentials, and with
-none it can use, it stops with `refused: <name>: no usable AWS credentials …`. With
-`--expect-account`, it then asks STS whose credentials they are and refuses, before any other
-call, unless they are that account's; an empty `--expect-account`, as `--expect-account
-"$ACCOUNT"` becomes with the variable unset, is a usage error, never a skipped check. STS and
-Secrets Manager each resolve their own endpoint, so the secret is checked too: `DescribeSecret`,
-every mode's first call, answers the secret's ARN, and the command refuses a secret in another
-region than the one it sends to, and with `--expect-account` one in another account, before it
-reads or writes a seed.
+With `aws-secrets-manager`, the command runs under your own AWS configuration, as the AWS SDK loads
+it: the environment, then the shared configuration and credentials files. `--region` overrides the
+region it names. Before any request or credential retrieval, it refuses a seed anywhere in that
+configuration or in the endpoints it resolves from it, without echoing it (see "What `check` and
+`verify` print"); then a Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL`,
+`AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is not `https`, unless
+it is this machine's loopback address, since a seed would cross the network in plain text; and it
+retrieves your credentials, and with none it can use, it stops with
+`refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks STS whose
+credentials they are and refuses, before any other call, unless they are that account's; an empty
+`--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage
+error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so the
+secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and the
+command refuses a secret in another region than the one it sends to, and with `--expect-account`
+one in another account, before it reads or writes a seed.
 Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
 from, a secret of the same name in another account.
+
+With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
+store refuses `--region` and `--expect-account`, and has no flag of its own to expect a project:
+every call names the secret by that name, so no call reaches a secret of another project. It checks
+the name's form before anything else and refuses a name of any other form, such as a regional
+secret's, without printing it, since a seed pasted there must not reach the terminal. It runs under
+your
+[Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials):
+the key file `GOOGLE_APPLICATION_CREDENTIALS` names, then the credentials
+`gcloud auth application-default login` saved, then the service account of the Google Cloud
+machine it runs on. When `GOOGLE_OAUTH_ACCESS_TOKEN` is set, it runs under that access token
+instead, such as one `gcloud auth print-access-token` prints. It calls Secret Manager's gRPC API at
+`secretmanager.googleapis.com`, or at the endpoint `SECRET_MANAGER_ENDPOINT` names as
+`https://<host>[:<port>]`, a test or private endpoint, whose TLS certificate this machine must
+trust. It refuses any other form before any call, `http` on this machine's loopback included: the
+client speaks TLS to every endpoint, so a seed is never sent in plain text.
 
 ### Making a seed
 
@@ -1017,9 +1040,10 @@ from, a secret of the same name in another account.
    ```
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
-   secret that is absent, is scheduled for deletion, holds any version, deprecated ones included, or
-   is already served by default, even when the versions listing, which Secrets Manager answers
-   eventually consistently, does not show it yet, so it never replaces a seed a client may already
+   secret that is absent, is scheduled for deletion or holds any version: the version
+   `DescribeSecret` names as `AWSCURRENT`, before it lists any, so even when the versions listing,
+   which Secrets Manager answers eventually consistently, does not show it yet, and otherwise any
+   the listing shows, deprecated ones included, so it never replaces a seed a client may already
    read. Every write uses one fixed `ClientRequestToken`, so a second run's first-version write with
    another seed, racing this one, is refused (`ResourceExistsException`, exit 2) rather than written
    beside it, and the key that run printed is not stored. It prints the public key just before the
@@ -1033,9 +1057,10 @@ from, a secret of the same name in another account.
    again after pauses of 0.25, 0.5, 1, 2 and 4 seconds; if the write is still not shown, it stops
    with an error after writing. More than one version, or another version served by default, is
    another writer's race.
-4. Put the public key into the NATS server's authorization as that user's `nkey`, with `hasSeed`
-   set: see [NATS authorization](#nats-authorization). It is public, so it may sit in the stack's
-   configuration in plain text.
+4. Put the public key into the NATS server's authorization as that user's `nkey`: on a
+   `gcp:NatsHub` user (see [The hub's users](docs/nats-hub.md#the-hubs-users)), or with `hasSeed`
+   set in an authorization (see [NATS authorization](#nats-authorization)). It is public, so it may
+   sit in the stack's configuration in plain text.
 5. Verify that the secret serves the seed of that key:
 
    ```sh
@@ -1046,27 +1071,119 @@ from, a secret of the same name in another account.
    example/envoy/nats-nkey-seed-example-host-a AWSCURRENT (version <version id>) derives <the public key>: yes
    ```
 
+On Secret Manager the steps are the same. Declare the secret with no secret version:
+
+```yaml
+resources:
+  nats-seed-example-host-a:
+    type: gcp:secretmanager:Secret
+    properties:
+      project: example-project
+      secretId: envoy-nats-seed-example-host-a
+      replication:
+        auto: {}
+```
+
+and name it in full in each command:
+
+```sh
+envoy-infra seed check --store gcp-secret-manager --name projects/example-project/secrets/envoy-nats-seed-example-host-a
+envoy-infra seed generate --store gcp-secret-manager --name projects/example-project/secrets/envoy-nats-seed-example-host-a
+envoy-infra seed verify --store gcp-secret-manager --name projects/example-project/secrets/envoy-nats-seed-example-host-a --public-key <the public key generate printed>
+```
+
+```text
+projects/example-project/secrets/envoy-nats-seed-example-host-a: present; latest: no
+public key: U<55 more characters>
+version id: 1
+projects/example-project/secrets/envoy-nats-seed-example-host-a latest (version 1) derives <the public key>: yes
+```
+
+`generate` refuses a secret set to expire, since Secret Manager deletes it with every version when
+its `expire_time` comes, and a secret that holds any version, whatever its state, destroyed ones
+included. Secret Manager's listings and `latest` are eventually consistent with a new version, and
+only an access by version number is not
+([resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)). So
+it refuses, naming the version, when `latest` names one, as
+`refused: <name> already serves version <n> by default (latest) …`, or, for a version that is not
+enabled, `refused: <name> already holds version <n>, which latest names though it is <STATE> …`;
+otherwise when the listing shows any; and, when it shows none, when an access of `versions/1`, the
+number every secret's first version gets, finds a version in any state. Its write reads `versions/1`
+by number once more just before `AddSecretVersion`, and refuses, writing nothing, when another
+`generate` wrote this secret's first version after those checks:
+`refused: add-secret-version <name>: <name>/versions/1 already exists; another generate wrote this
+secret's first version, with another seed; nothing was written, and the public key above is not
+stored`, exit 2, as Secrets Manager's `ResourceExistsException` is. It then reads version 1 back by
+number, which must be the value it wrote, then `versions/latest`, the version Secret Manager serves
+by default, which must be the one it added; while the listing shows no version yet, or `latest`
+names none, it waits as it does on Secrets Manager. A `latest` that names a version it will not
+serve, such as a disabled one, is no wait but an error after writing.
+
+Secret Manager has no conditional add: `AddSecretVersion` takes no request id and no precondition.
+So one window stays open, between a run's read of `versions/1` and its add, a single round trip:
+when two `generate` runs for one secret both read in it before either adds, both adds land, the
+first as version 1 and the other as version 2, which `latest` names and serves. `latest` is the
+most recently created version whatever its state, so disabling or destroying version 2 alone leaves
+no seed served. What each run reports:
+
+- The run whose add landed as version 2 always stops with an error after writing, exit 1, that
+  says what happened (another `generate` wrote version 1 first, so this run's version 2 is the one
+  `latest` serves), what it means (the key the other run printed does not derive the served seed),
+  and the commands that recover: keep this run's seed, by putting the key it printed in the NATS
+  authorization and destroying version 1, or keep the other run's, by copying version 1 to a new
+  version, as below, and destroying version 2; then `check`, and `verify` with the key kept.
+- The run whose add landed as version 1 stops with an error after writing, exit 1, if its read-back
+  sees version 2 (`<name> now holds 2 version(s), not only version 1: another writer raced this
+  one`, or `latest` serving version 2); if version 2 lands after its read-back, it succeeds, and
+  only the other run's message tells you its key is not the one served.
+
+The copy, which pipes the seed between the two commands and prints nothing, is gcloud's own raw
+read of a version:
+
+```sh
+gcloud secrets versions access <name>/versions/1 --format='get(payload.data)' \
+  | tr '_-' '/+' | base64 -d \
+  | gcloud secrets versions add <name> --data-file=-
+```
+
+The store takes that window over closing it with a claim on the secret, such as an
+etag-guarded `UpdateSecret` before the add: the claim would need `secretmanager.secrets.update`,
+beyond the roles below, and a run that died holding it would leave it for someone to clear before
+any later `generate` could write.
+
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.
 
 ### What `check` and `verify` print
 
-`check` reads the secret's metadata and no value. It prints one of:
+`check` reads the secret's metadata and no value. On AWS Secrets Manager it prints one of:
 
 | Line | The secret |
 | --- | --- |
 | `<name>: absent` | does not exist. |
 | `<name>: present, scheduled for deletion (<date>)` | is deleted and waiting out its recovery window. The date is in this machine's time zone, as `2026-11-01 12:00:00+00:00`, with microseconds after the seconds when it has any. |
 | `<name>: present; AWSCURRENT: no` | exists and serves no version by default. `generate` writes to it unless it holds another version, which `check` does not list. |
-| `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. |
+| `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. `generate` refuses it. |
 
-`verify` reads the `AWSCURRENT` version and prints one of:
+On Secret Manager it prints one of:
+
+| Line | The secret |
+| --- | --- |
+| `<name>: absent` | does not exist. |
+| `<name>: present, scheduled for deletion (<date>)` | is set to expire at `<date>`, given as on Secrets Manager: Secret Manager deletes it, with every version, then. `generate` and `verify` refuse it. |
+| `<name>: present; latest: no` | exists, and `latest` names no version: it holds none, or `latest` has not caught up with one just added. `generate` writes to it unless a version is listed, or `versions/1` is found. |
+| `<name>: present; latest: yes (version <n>)` | serves version `<n>`, its newest, by default. `generate` refuses it. |
+| `<name>: present; latest: version <n> is <STATE>` | its newest version, `<n>`, is `DISABLED` or `DESTROYED`. Secret Manager's default, `versions/latest`, names the newest version whatever its state, so the secret serves no value by default, even when an older version is enabled. `generate` refuses it. |
+
+`verify` reads the version the store serves by default, whose label `<label>` is `AWSCURRENT` or
+`latest`, and prints one of:
 
 | Line | Exit |
 | --- | --- |
-| `<name> AWSCURRENT (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
-| `<name> AWSCURRENT (version <id>) derives <key>: no` | 1: it is the seed of another user. |
-| `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
+| `<name> <label> (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
+| `<name> <label> (version <id>) derives <key>: no` | 1: it is the seed of another user. |
+| `<name> <label> (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
+| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked, once the read is refused for that version's state. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal. Before any store opens, the command refuses a flag whose
@@ -1103,18 +1220,28 @@ a split seed decodes as a seed. The refusal names where the value came from, nev
 `refused: <name>: AWS_ENDPOINT_URL: an nkey seed, which is never AWS configuration (not echoed)`
 or `refused: <name>: the shared config's profile "example": source_profile: …`.
 
+The Secret Manager store refuses a seed, before any call, in each variable whose value it, or a
+library it calls, sends in a request, dials as a host or quotes in an error:
+`GOOGLE_OAUTH_ACCESS_TOKEN` (the bearer token), `GOOGLE_APPLICATION_CREDENTIALS` (quoted when the
+file cannot be opened), `GOOGLE_CLOUD_QUOTA_PROJECT` (sent as `x-goog-user-project`),
+`GOOGLE_CLOUD_UNIVERSE_DOMAIN` and `GCE_METADATA_HOST` (hosts it dials), and
+`SECRET_MANAGER_ENDPOINT`. As for the AWS store, a seed is found anywhere in the value: whole,
+inside a path, a token, a host or a project, or percent-encoded, as in an endpoint's path or query.
+The refusal names the variable, as `refused: <name>: GOOGLE_APPLICATION_CREDENTIALS: an nkey user
+seed, which is never Google Cloud configuration (not echoed)`.
+
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Done: `check` printed its line, `generate` wrote the seed, read it back and printed the public key and version id, or `verify` printed that the stored seed derives the key. A result that cannot be printed on stdout is never exit 0. |
-| 1 | `verify` found another key or no seed; or `generate` failed after it began its write, including a version id it could not print, but not a write Secrets Manager refused, which is exit 2. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
-| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the AWS error code, as `refused: describe-secret <name> failed: AccessDeniedException`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. So is the first write Secrets Manager refuses because another `generate` already wrote this secret's first version (`ResourceExistsException`): it comes after the public key is printed, but no version holds that key, and no `version id` line follows: `refused: put-secret-value <name> failed: ResourceExistsException; another generate wrote this secret's first version, with another seed; nothing was written, and the public key above is not stored`. Run `check`, then `verify` with the other run's key. |
+| 1 | `verify` found another key, no seed, or a newest Secret Manager version that is not enabled; or `generate` failed after it began its write, including a version id it could not print, but not a write the store refused, which is exit 2. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
+| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the error's code, AWS's or Secret Manager's gRPC status code, as `refused: describe-secret <name> failed: AccessDeniedException` or `refused: get-secret <name> failed: PermissionDenied`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. So is the first write the store refuses because another `generate` already wrote this secret's first version, Secrets Manager's `ResourceExistsException` or Secret Manager's `versions/1` found just before the add: it comes after the public key is printed, but no version holds that key, and no `version id` line follows: `refused: put-secret-value <name> failed: ResourceExistsException; another generate wrote this secret's first version, with another seed; nothing was written, and the public key above is not stored`, or `refused: add-secret-version <name>: <name>/versions/1 already exists; …` on Secret Manager. Run `check`, then `verify` with the other run's key. |
 
-### The AWS calls each mode makes
+### The calls each mode makes
 
 A run that is not refused makes exactly these calls, in this order, so its credentials need
-exactly these permissions on the secret:
+exactly these permissions on the secret. On AWS Secrets Manager:
 
 | Mode | Calls | Permissions |
 | --- | --- | --- |
@@ -1130,6 +1257,30 @@ A secret encrypted with a customer managed KMS key, rather than `aws/secretsmana
 (`generate`), as [Secrets Manager's encryption](https://docs.aws.amazon.com/secretsmanager/latest/userguide/security-encryption.html)
 describes.
 
+On Secret Manager, where a version call names `versions/latest` unless the table names
+`versions/1`:
+
+| Mode | Calls | Permissions |
+| --- | --- | --- |
+| `check` | `GetSecret`, `GetSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get` |
+| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` answers `FAILED_PRECONDITION`, `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
+| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` on `versions/1`, and again just before `AddSecretVersion`, `AccessSecretVersion` on `versions/1`, then `ListSecretVersions` and `AccessSecretVersion`, with `AccessSecretVersion` on `versions/1` between them when the listing shows no version, again after each pause while Secret Manager has not caught up with the write, and `GetSecretVersion` when the last answers `FAILED_PRECONDITION` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
+
+Each permission is the one the API reference names for its call:
+[GetSecret](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get),
+[GetSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/get),
+[ListSecretVersions](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/list),
+[AddSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/addVersion)
+and [AccessSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access).
+`verify` stops after `GetSecretVersion` when the newest version is not enabled. When
+`AccessSecretVersion` answers `FAILED_PRECONDITION`, the newest version was disabled or destroyed
+since: one `GetSecretVersion` names it, for its `is <STATE>` line, exit 1. Any other failed read is
+refused, exit 2. Of the
+[predefined roles](https://cloud.google.com/secret-manager/docs/access-control), Secret Manager
+Viewer (`roles/secretmanager.viewer`) holds `check`'s permissions, `verify` also needs Secret
+Manager Secret Accessor (`roles/secretmanager.secretAccessor`), and `generate` needs both and Secret
+Manager Secret Version Adder (`roles/secretmanager.secretVersionAdder`).
+
 ## NATS authorization
 
 `core.Authorization` is a NATS server's nkey authorization: the users it knows by public key, what
@@ -1138,7 +1289,9 @@ server's configuration is rendered from it, so it holds public keys only. `aws:N
 it as its `authorization` input, an `aws:Authorization` of `aws:User`s, with the properties below;
 `envoy-infra render nats-start-script` reads the same from its file, keyed the same way. A user's
 `publish` and `subscribe` are each a `nats:Rules`, the one rules type every NATS component takes,
-whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs.
+whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs. `gcp:NatsHub` renders its server's
+from its `users` (see [The hub's users](docs/nats-hub.md#the-hubs-users)); `host:Listener` runs no
+NATS server and takes none.
 
 | Input | What it is |
 | --- | --- |
@@ -1214,6 +1367,53 @@ the rendered block has no cluster authorization, so a route the last three open 
 be unauthenticated, and a server routed to it would see every message its users publish. Each of
 its refusals is a `core.InputError` naming the input it refuses: `authorization`, `configPath`,
 `serverArgs` or `configHeader`.
+
+### Permission sets
+
+`core` also builds the grants Envoy's own clients need from Envoy's own names
+(`packages/envoy/internal/bus` and `packages/envoy/internal/contracts`), so no consumer spells
+Envoy's subjects. Each is a `core.Permissions`, a publish and a subscribe `Rules` that a user takes
+as its `Publish` and `Subscribe`. Below, `<m>` is the machine id with each space as `-`.
+
+`ListenerPermissions(machineID)` is what `envoy-listener` needs as that machine. It publishes to:
+
+- the subjects of the `ENVOY_NOTIFICATIONS` stream (`bus.StreamSubjects()`), the role lanes
+  `notifications.role.>` and every exception lane, `notifications.envoy.exceptions.notifications.>`;
+- the stream's `$JS.API.STREAM.INFO`, `CREATE` and `UPDATE`, its durable consumer
+  `listener-<m>`'s `$JS.API.CONSUMER.INFO` and `CREATE`, the durable's acknowledgements
+  `$JS.ACK.ENVOY_NOTIFICATIONS.listener-<m>.>`, and `$JS.API.INFO`;
+- for each key-value bucket, `envoy_interests`, `envoy_roles`, `envoy_sessions` and
+  `envoy_ci_state`, the calls nats.go's key-value store makes: the info and create of the bucket's
+  stream `KV_<bucket>`, its direct and stream message gets, `$KV.<bucket>.>`, and its watchers'
+  consumer create and delete and their flow-control replies;
+- `$JS.API.STREAM.PURGE.KV_envoy_interests`, which the interest bucket's delete-marker collection
+  sends.
+
+It subscribes to `_INBOX.>`, and to the role lanes in the machine's queue group,
+`notifications.role.> envoy-listener-<m>`.
+
+`SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
+to `_INBOX.>`, for the receipt a role delivery waits for, and `agentstream.*.frames`, and
+subscribes to `notifications.>` and `agentstream.*.control`.
+
+`HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
+session on the host share: in each direction the listener's entries, then each of the session's
+the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. Sharing one user makes the
+host one trust domain: any process that reaches the server as it, a listener's own process or
+any session on the host, holds the whole grant above, host sessions included, since sessions run
+as the Unix user that already reads the host's seed. This repository's listener and a session,
+connected as one user holding it, are checked against real nats-server 2.10 and 2.15.1 servers;
+`AGENTS.md` in this directory says how.
+
+A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
+later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
+a later release.
+
+The listener's set covers a stream it creates, or one a listener of the same names created. A
+stream an older listener created with the role lanes on it is migrated by the listener's start-up
+(`packages/envoy/internal/bus/stream.go`, `migrateRoleLanesOffStream`), which lists the stream's
+consumers, reads and updates every one, and purges the role lanes. The set grants none of those
+calls, so on such a stream, as on a hub given a backup of one, the server refuses the migration.
 
 ## Changing the module
 

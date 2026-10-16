@@ -79,7 +79,7 @@ func rawInterestBucket(t *testing.T, conn *natsgo.Conn) (natsgo.JetStreamContext
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the interest bucket: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestAPassCollectsTheDeleteMarkersAndKeepsEveryLiveKey(t *testing.T) {
 		t.Fatalf("the warm-up line says entries=%v delete_markers=%v, want %d live keys behind %d markers: %v",
 			warmUp["entries"], warmUp["delete_markers"], live, markers, warmUp)
 	}
-	if before := bucketState(t, js, Bucket); before.NumSubjects != markers+live {
+	if before := bucketState(t, js, bus.InterestBucket); before.NumSubjects != markers+live {
 		t.Fatalf("the seeded bucket carries %d subjects, want %d", before.NumSubjects, markers+live)
 	}
 
@@ -195,7 +195,7 @@ func TestAPassCollectsTheDeleteMarkersAndKeepsEveryLiveKey(t *testing.T) {
 	if purged != markers {
 		t.Fatalf("the pass purged %d messages, want the %d delete markers", purged, markers)
 	}
-	after := bucketState(t, js, Bucket)
+	after := bucketState(t, js, bus.InterestBucket)
 	if after.NumSubjects != live {
 		t.Fatalf("after one pass the bucket carries %d subjects, want the %d live keys", after.NumSubjects, live)
 	}
@@ -306,10 +306,10 @@ func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 	registry := openRegistry(t, conn)
 
 	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
-		if err := js.DeleteKeyValue(Bucket); err != nil {
+		if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 			t.Fatalf("delete the interest bucket: %v", err)
 		}
-		recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+		recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 		seedLive(t, recreated, 2)
 	})
 	if err != nil {
@@ -318,7 +318,7 @@ func TestAPassWhoseScanReadAReplacedStreamPurgesNothing(t *testing.T) {
 	if purged != 0 {
 		t.Fatalf("the pass purged %d messages from a replaced stream, want 0", purged)
 	}
-	state := bucketState(t, js, Bucket)
+	state := bucketState(t, js, bus.InterestBucket)
 	if state.NumSubjects != 2 || state.Msgs != 2 {
 		t.Fatalf("the recreated bucket holds %d subjects and %d messages, want its 2 live keys", state.NumSubjects, state.Msgs)
 	}
@@ -338,7 +338,7 @@ func TestAFloorAboveTheStreamsLastSequencePurgesNothing(t *testing.T) {
 	seedLive(t, kv, 3)
 	records := captureJSONLogs(t)
 	registry := openRegistry(t, conn)
-	before := bucketState(t, js, Bucket)
+	before := bucketState(t, js, bus.InterestBucket)
 
 	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
 		pass.floor = before.LastSeq + 1
@@ -349,7 +349,7 @@ func TestAFloorAboveTheStreamsLastSequencePurgesNothing(t *testing.T) {
 	if purged != 0 {
 		t.Fatalf("a floor above the last sequence purged %d messages, want 0", purged)
 	}
-	if state := bucketState(t, js, Bucket); state.Msgs != before.Msgs || state.NumSubjects != before.NumSubjects {
+	if state := bucketState(t, js, bus.InterestBucket); state.Msgs != before.Msgs || state.NumSubjects != before.NumSubjects {
 		t.Fatalf("a floor above the last sequence changed the bucket: %d messages and %d subjects, want %d and %d",
 			state.Msgs, state.NumSubjects, before.Msgs, before.NumSubjects)
 	}
@@ -370,7 +370,7 @@ func TestASequenceSpaceThatMovedBackwardsPurgesNothing(t *testing.T) {
 	seedLive(t, kv, 3)
 	records := captureJSONLogs(t)
 	registry := openRegistry(t, conn)
-	before := bucketState(t, js, Bucket)
+	before := bucketState(t, js, bus.InterestBucket)
 
 	purged, err := collectorOf(registry).pass(js, func(pass *interestPass) {
 		// Read 1 claims a higher last sequence than the stream now reports, which is what a
@@ -383,7 +383,7 @@ func TestASequenceSpaceThatMovedBackwardsPurgesNothing(t *testing.T) {
 	if purged != 0 {
 		t.Fatalf("a sequence space that moved backwards purged %d messages, want 0", purged)
 	}
-	if state := bucketState(t, js, Bucket); state.Msgs != before.Msgs {
+	if state := bucketState(t, js, bus.InterestBucket); state.Msgs != before.Msgs {
 		t.Fatalf("a refused pass changed the bucket: %d messages, want %d", state.Msgs, before.Msgs)
 	}
 	refusal := jsonRecord(t, records(), "interest marker collection refused")
@@ -410,7 +410,7 @@ func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *tes
 	seedLive(t, kv, 2)
 	records := captureJSONLogs(t)
 	registry := openRegistry(t, conn)
-	if original := bucketState(t, js, Bucket); original.FirstSeq != 1 || original.LastSeq != 3 {
+	if original := bucketState(t, js, bus.InterestBucket); original.FirstSeq != 1 || original.LastSeq != 3 {
 		t.Fatalf("the original stream runs %d-%d, want 1-3", original.FirstSeq, original.LastSeq)
 	}
 
@@ -419,10 +419,10 @@ func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *tes
 		if pass.floor != 2 {
 			t.Fatalf("the scan's floor is %d, want 2", pass.floor)
 		}
-		if err := js.DeleteKeyValue(Bucket); err != nil {
+		if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 			t.Fatalf("delete the interest bucket: %v", err)
 		}
-		replacement = seedLive(t, testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage}), 3)
+		replacement = seedLive(t, testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage}), 3)
 	})
 	if err != nil {
 		t.Fatalf("pass: %v", err)
@@ -430,7 +430,7 @@ func TestAPassWhoseStreamWasReplacedFromTheSameFirstSequencePurgesNothing(t *tes
 	if purged != 0 {
 		t.Fatalf("the pass purged %d messages from the replacement stream, want 0", purged)
 	}
-	state := bucketState(t, js, Bucket)
+	state := bucketState(t, js, bus.InterestBucket)
 	if state.FirstSeq != 1 || state.LastSeq != 3 || state.Msgs != 3 {
 		t.Fatalf("the replacement stream runs %d-%d with %d messages after the pass, want its 3 live keys at 1-3",
 			state.FirstSeq, state.LastSeq, state.Msgs)
@@ -463,7 +463,7 @@ func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
 		seedLive(t, kv, 2)
 		records := captureJSONLogs(t)
 		registry := openRegistry(t, conn)
-		if err := js.DeleteKeyValue(Bucket); err != nil {
+		if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 			t.Fatalf("delete the interest bucket: %v", err)
 		}
 		if purged, _ := collectorOf(registry).pass(js, nil); purged != 0 {
@@ -483,7 +483,7 @@ func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
 		records := captureJSONLogs(t)
 		registry := openRegistry(t, conn)
 		purged, _ := collectorOf(registry).pass(js, func(*interestPass) {
-			if err := js.DeleteKeyValue(Bucket); err != nil {
+			if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 				t.Fatalf("delete the interest bucket: %v", err)
 			}
 		})
@@ -506,7 +506,7 @@ func TestAPassThatCannotReadTheStreamSaysWhichReadFailed(t *testing.T) {
 		seedLive(t, kv, 2)
 		records := captureJSONLogs(t)
 		registry := openRegistry(t, conn)
-		gone := purgeThenDelete{JetStreamContext: js, bucket: Bucket}
+		gone := purgeThenDelete{JetStreamContext: js, bucket: bus.InterestBucket}
 		if _, err := collectorOf(registry).pass(gone, nil); err == nil {
 			t.Fatal("a pass whose purged stream could not be read returned no error")
 		}
@@ -567,7 +567,7 @@ func TestAnUndecodableLiveValueIsKept(t *testing.T) {
 	if entry.Revision() != undecodable {
 		t.Fatalf("the undecodable live key is at revision %d, want its stored %d", entry.Revision(), undecodable)
 	}
-	if state := bucketState(t, js, Bucket); state.NumSubjects != 3 {
+	if state := bucketState(t, js, bus.InterestBucket); state.NumSubjects != 3 {
 		t.Fatalf("after the pass the bucket carries %d subjects, want the 3 live keys", state.NumSubjects)
 	}
 }
@@ -582,9 +582,9 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	js, kv := rawInterestBucket(t, conn)
 	seedMarkers(t, kv, 6)
 	seedLive(t, kv, 3)
-	before := bucketState(t, js, Bucket)
+	before := bucketState(t, js, bus.InterestBucket)
 
-	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Replicas: 1, Storage: natsgo.FileStorage})
+	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -603,7 +603,7 @@ func TestAPassWhoseScanTimedOutPurgesNothingAndLeavesTheRegistryHealthy(t *testi
 	if purged != 0 {
 		t.Fatalf("a pass whose scan timed out purged %d messages, want 0", purged)
 	}
-	if state := bucketState(t, js, Bucket); state.Msgs != before.Msgs {
+	if state := bucketState(t, js, bus.InterestBucket); state.Msgs != before.Msgs {
 		t.Fatalf("a refused pass changed the bucket: %d messages, want %d", state.Msgs, before.Msgs)
 	}
 	refusal := jsonRecord(t, records(), "interest marker collection refused")
@@ -636,7 +636,7 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	// Each subtest starts a server of its own (startGrantedServer), whose grant names the purge
 	// subject of the interest bucket.
 	t.Run("a grant that allows it purges, and the trace names the subject", func(t *testing.T) {
-		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + Bucket
+		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + bus.InterestBucket
 		granted := startGrantedServer(t, nil)
 		purged, err := collectorOf(granted.registry).pass(granted.js, nil)
 		if err != nil || purged == 0 {
@@ -657,10 +657,10 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 	})
 
 	t.Run("a grant that denies it purges nothing, warns once and stays healthy", func(t *testing.T) {
-		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + Bucket
+		purgeSubject := "$JS.API.STREAM.PURGE.KV_" + bus.InterestBucket
 		records := captureJSONLogs(t)
 		granted := startGrantedServer(t, []string{purgeSubject})
-		before := bucketState(t, granted.js, Bucket)
+		before := bucketState(t, granted.js, bus.InterestBucket)
 		// The server answers a purge the grant refuses with nothing, so the passes purge through a
 		// context that waits a second; on granted.js each pass would wait out its whole 10 s.
 		// nats.go's PurgeStream ignores a per-call wait, so the bound has to be the context's.
@@ -677,7 +677,7 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 			}
 			t.Logf("pass %d: %v", pass, err)
 		}
-		if state := bucketState(t, granted.js, Bucket); state.Msgs != before.Msgs || state.NumSubjects != before.NumSubjects {
+		if state := bucketState(t, granted.js, bus.InterestBucket); state.Msgs != before.Msgs || state.NumSubjects != before.NumSubjects {
 			t.Fatalf("a refused purge changed the bucket: %d messages and %d subjects, want %d and %d",
 				state.Msgs, state.NumSubjects, before.Msgs, before.NumSubjects)
 		}
@@ -768,7 +768,7 @@ func startGrantedServer(t *testing.T, deny []string) grantedServer {
 		t.Fatalf("jetstream: %v", err)
 	}
 	waitFor(t, 30*time.Second, func() bool { _, err := js.AccountInfo(); return err == nil })
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the interest bucket: %v", err)
 	}

@@ -125,7 +125,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
    changes sends it back to the implementer, and through the tester again.
 6. Once the reviewer approves, the retrospective runs. The merger then confirms the required checks
    and posts `READY` on the issue.
-7. The merger submits the pull request for merge, and it lands under the repository's own rules.
+7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
 8. The implementer drives the change in production and records what it observed on the pull
    request and the issue. The architect signs off, and the issue is Done.
 

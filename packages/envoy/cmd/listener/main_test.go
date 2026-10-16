@@ -18,7 +18,6 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dedupe"
@@ -1946,7 +1945,7 @@ func TestARefusedDurableStopsTheListenerAtOnce(t *testing.T) {
 	if strings.Contains(output.String(), "envoy-listener /v1 open") {
 		t.Fatalf("the listener opened /v1 before it refused the durable:\n%s", output.String())
 	}
-	for _, bucket := range []string{store.Bucket, session.SessionBucket, cistore.Bucket} {
+	for _, bucket := range []string{bus.InterestBucket, bus.SessionBucket, bus.CIStateBucket} {
 		if _, err := client.JS().KeyValue(bucket); !errors.Is(err, natsgo.ErrBucketNotFound) {
 			t.Fatalf("KV bucket %s after the refused start: %v, want not found: the refusal came after the cache warm-ups", bucket, err)
 		}
@@ -4250,7 +4249,7 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open JetStream: %v", err)
 	}
-	if err := js.DeleteKeyValue(store.RoleBucket); err != nil {
+	if err := js.DeleteKeyValue(bus.RoleClaimBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
 
@@ -4352,7 +4351,7 @@ func TestMain(m *testing.M) { os.Exit(testnats.Main(m)) }
 // connected: deleting the bucket's stream makes the watcher's ordered consumer fail to reset.
 func endInterestWatcherWhileConnected(t *testing.T, client *bus.Client, registry *store.Registry) {
 	t.Helper()
-	if err := client.JS().DeleteStream("KV_" + store.Bucket); err != nil {
+	if err := client.JS().DeleteStream("KV_" + bus.InterestBucket); err != nil {
 		t.Fatalf("delete the interest bucket's stream: %v", err)
 	}
 	deadline := time.Now().Add(30 * time.Second)
@@ -4386,7 +4385,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 	endInterestWatcherWhileConnected(t, client, registry)
 	// Rewatch opens the bucket, as the session and CI stores do, and never creates it; the bucket
 	// comes back, empty, and the watcher stays dead until something rebuilds it.
-	if _, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: store.Bucket, Replicas: 1, Storage: natsgo.FileStorage}); err != nil {
+	if _, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage}); err != nil {
 		t.Fatalf("recreate the interest bucket: %v", err)
 	}
 

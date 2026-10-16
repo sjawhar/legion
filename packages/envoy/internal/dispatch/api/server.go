@@ -335,7 +335,7 @@ func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 
 // whileCallerResolves serves a connection that outlives its request, a websocket, only while its
 // caller resolves: on every StreamHeartbeat it resolves the caller again, as the event streams do,
-// and once the caller no longer resolves (a logout, a membership the sign-in pool no longer
+// and once the caller no longer resolves (a logout, a membership the sign-in issuer no longer
 // confirms, a revoked token) it cancels the connection's context, on which the document server and
 // the delivery socket close the socket. The check runs beside the handler, which holds pooled
 // connections of its own while it admits the socket, so it marks a context of its own for the pool

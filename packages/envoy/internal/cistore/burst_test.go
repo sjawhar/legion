@@ -13,6 +13,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
 )
@@ -936,7 +937,7 @@ func TestADeletedBucketFailsAWriteWithinTheBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if err := js.DeleteKeyValue(Bucket); err != nil {
+	if err := js.DeleteKeyValue(bus.CIStateBucket); err != nil {
 		t.Fatalf("delete the bucket: %v", err)
 	}
 	h := head{"example-org", "example-repo", "42", "6666666666666666666666666666666666666666"}

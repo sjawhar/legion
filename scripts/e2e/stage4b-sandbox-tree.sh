@@ -5712,11 +5712,13 @@ jq --arg id "$thread_id" 'map(if .id == $id then .isResolved = false else . end)
   "$evidence/review-threads-at-ready.json" >"$evidence/review-threads-unresolved-negative.json"
 expect_failure unresolved-thread-at-ready threads_all_resolved "$evidence/review-threads-unresolved-negative.json" "$thread_id"
 note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/review-threads-at-ready.json") review threads, 0 unresolved, the reviewer's $thread_id and the bot's $bot_thread_id among them"
-# The hold is an open descriptor (hold_smoke_main): start no background child before
-# release_smoke_main below, or it inherits the descriptor and holds the smoke main past this run's
-# window. `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
+# The daemon submits the READY head's merge itself; await_ready_merge reads the pull request until
+# it merges and never merges it by hand. The hold is an open descriptor (hold_smoke_main): start no
+# background child before release_smoke_main below, or it inherits the descriptor and holds the
+# smoke main past this run's window. `9>&- 7>&-` does not close it: its number is allocated at
+# runtime, not fixed.
 hold_smoke_main
-merge_when_clean "$repo" "$pr_number" --squash --delete-branch
+await_ready_merge "$repo" "$pr_number" --delete-branch
 on_tree "$tree1" wait_for_phase "$tree1" production_check 600
 # Child 4's planner starts its hold now, before the production check completes and the architect
 # signs off on its own, so its turn is in flight when tree 1 closes, and short enough to stay under

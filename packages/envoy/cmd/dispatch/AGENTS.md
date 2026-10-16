@@ -200,23 +200,44 @@ people through `Identity.Login`, which names a person by lowercase email, and
 write identity errors with `identity.WriteError`.
 
 - `DISPATCH_IDENTITY=cookie` is the default. Cookie identity signs people in
-  with Google Workspace through the shared sign-in pool (OpenID Connect
-  authorization code, `internal/oidc/codeflow.go`) and requires all four of
-  `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`,
-  `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`; setting some of
-  them is refused naming the missing ones, and the authorization and token
-  endpoints come from the issuer's discovery document, read at boot under
-  `oidc.DiscoveryTimeout`. Those boot checks, the discovery and the request
-  identity main builds live in `cmd/dispatch/signin.go`. The callback names
-  the person by the email in the pool username (`<provider>_<email>`, the
-  provider one the ID token's `identities` names; `identity.Person`), never by
-  the `email` claim, which a person can write, and signs in only a member of
+  through a Cognito sign-in pool or with Google directly (OpenID Connect
+  authorization code, `internal/oidc/codeflow.go`) and requires `DISPATCH_SIGNIN_ISSUER`,
+  `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one
+  of `DISPATCH_SIGNIN_GROUP` (through the pool) or
+  `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under the issuer
+  `https://accounts.google.com`). `checkSignInSettings` refuses, in this order,
+  both set, some without the others (naming the missing ones), a domain under
+  another issuer, a domain that is not a lowercase DNS name, and a group under
+  Google's issuer; a deployment with the four Cognito settings reaches none of
+  them. The authorization and token endpoints come from the issuer's discovery
+  document, read at boot under `oidc.DiscoveryTimeout`. Those boot checks, the
+  discovery and the request identity main builds live in
+  `cmd/dispatch/signin.go`, and `identity.SignInRule` — an interface with two
+  implementations, `identity.GroupRule` and `identity.DomainRule`, which
+  `signInRule` chooses between once from boot's settings — carries the choice
+  to the router and `identity.Membership`; each implementation's `Person`
+  method reads only its own issuer's claims. Under a group it names the
+  person by the email in the pool username (`<provider>_<email>`, the
+  provider one the ID token's `identities` names), never by the `email`
+  claim, which a person can write, and admits only a member of
   `DISPATCH_SIGNIN_GROUP` (`cognito:groups`); anyone else gets a 403 page
-  naming them. It records the person in `people` with the pool's refresh
-  token, and `identity.Membership` renews that sign-in at least hourly: a
-  refresh the pool refuses, or one whose ID token no longer puts the person in
-  the group, advances their session generation and forgets the token, ending
-  every session they hold. `store.PgPeopleStore` seals that token at rest
+  naming them. Under a domain the code flow, built with the domain
+  (`oidc.NewCodeFlow`'s hosted domain), asks Google for offline access with
+  `prompt=consent` and `hd`, and reads `email`, `email_verified` and `hd`
+  from the verified ID token itself (`readWorkspaceClaims`; `Verify`, shared
+  with pods' tokens and the listener, reads none of them); `DomainRule`'s
+  `Person` admits the lowercased `email` of a token whose
+  `hd` is the domain and whose email is verified, and refuses anyone else with
+  a reason on the 403 page (`ErrNotInDomain`, `ErrEmailNotVerified`,
+  `ErrNoEmail`). The callback records the person in `people` with the issuer's
+  refresh token, and under a domain the Google account's `sub` (`people.sub`,
+  migration 0112): `PgPeopleStore.SignInSubject` ends every session of the address in
+  the transaction that records a `sub` other than the stored one, so a failed
+  revoke records nothing. `identity.Membership` renews that sign-in at least
+  hourly: a refresh the issuer refuses, or one whose ID token no longer passes
+  the rule, names another email, or (under a domain) another `sub`, advances
+  their session generation and forgets the token, ending every session they
+  hold. `store.PgPeopleStore` seals that token at rest
   (`store/refresh_token_seal.go`; the format is in the README's Identity
   section) under a key derived from the session signing key, which main hands
   it with the cookie key (`openPeople`, `signin.go`). A stored value that does
@@ -370,11 +391,11 @@ the table says human only.
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
-| `/auth/start` | GET | public | Start Google sign-in through the sign-in pool; `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, sign in a member of `DISPATCH_SIGNIN_GROUP` (a 403 page naming anyone else), record them in `people` with the refresh token sealed, and issue the session cookie. |
-| `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the pool's own session is left alone. |
+| `/auth/start` | GET | public | Start Google sign-in at the sign-in issuer (the Cognito pool, or Google for `DISPATCH_SIGNIN_DOMAIN`, with offline access, `prompt=consent` and `hd`); `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
+| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `SignInRule.Person` admits (`GroupRule` or `DomainRule`): a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie (`issueSession`). |
+| `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the issuer's own session is left alone. |
 | `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
-| `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no pool exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
+| `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no issuer exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | identity | Read a pull request, an issue or a commit's check runs from GitHub as the GitHub App (above). |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where one is configured (`files`, null otherwise), plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
 | `/api/v1/projects` | GET, POST | user or bearer | List projects (including `open_asks`) or create one from `key` and `name`, whoever asks: a person or an agent session, which names itself in `actor`. A key that is not a project key, an empty name, a name holding a control character (Unicode Cc) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), or a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) is `400 INVALID_PROJECT`; every other format character (an emoji's joiner, a flag's tags, a direction mark, a soft hyphen) and combining mark is allowed beside a visible one; a name over `contracts.ProjectNameMax` (80) UTF-16 units after the trim is `400 CAP_EXCEEDED`; a key that already exists is `409 PROJECT_EXISTS`. |
@@ -453,7 +474,7 @@ the table says human only.
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in pool no longer confirms), so their editor stops receiving and sending the document's edits. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
 | `/ws/delivery` | GET | user or bearer | The Delivery and Pipeline pages' live updates: a subscribe frame names a view; Dispatch answers a snapshot, then only what changed, and a resume with the page's revisions answers what changed since (packages/contracts DeliveryLive*). A `heartbeat` frame goes out every `StreamHeartbeat` (15 s), so a client tells a quiet socket from a dead one. |
 
 ## Dispatch topics

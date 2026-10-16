@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -18,18 +19,153 @@ const (
 	flowClientSecret = "dispatch-client-secret"
 	flowRedirect     = "https://dispatch.example/auth/callback"
 	flowUsername     = "ExampleIdP_a.b+c@d.example"
+	flowDomain       = "example.com"
 )
 
-// newCodeFlowFor starts a code-flow issuer for flowClientID and discovers it.
+// newCodeFlowFor starts a code-flow issuer for flowClientID and discovers it in group mode, the
+// Cognito sign-in pool's.
 func newCodeFlowFor(t *testing.T) (*oidctest.Issuer, *CodeFlow) {
+	t.Helper()
+	return newCodeFlowForDomain(t, "")
+}
+
+// newCodeFlowForDomain starts a code-flow issuer for flowClientID and discovers it for the hosted
+// domain, empty for group mode.
+func newCodeFlowForDomain(t *testing.T, domain string) (*oidctest.Issuer, *CodeFlow) {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), flowClientID, flowClientSecret)
-	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret)
+	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, domain)
 	if err != nil {
 		t.Fatalf("NewCodeFlow(%s): %v", issuer.URL(), err)
 	}
 	return issuer, flow
+}
+
+// googleClaims is a Google ID token's claims for an account of the Workspace domain flowDomain,
+// with emailVerified as its email_verified claim.
+func googleClaims(emailVerified any) map[string]any {
+	return map[string]any{
+		"sub":            "110169484474386276334",
+		"email":          "A.Person@example.com",
+		"email_verified": emailVerified,
+		"hd":             flowDomain,
+	}
+}
+
+// exchange runs one sign-in through flow as the person claims names, and returns its session.
+func exchange(t *testing.T, issuer *oidctest.Issuer, flow *CodeFlow, claims map[string]any) Session {
+	t.Helper()
+	issuer.SignInAs(claims)
+	code, _ := issuer.Authorize(t, flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+	session, err := flow.Exchange(context.Background(), flowRedirect, code, "nonce-1")
+	if err != nil {
+		t.Fatalf("Exchange: %v", err)
+	}
+	return session
+}
+
+// In domain mode the session carries the Google ID token's email, hd and sub, and email_verified
+// as true only for the JSON true or the string "true": any other value or shape is false, never an
+// error, so a token Google shapes differently is refused by the rule rather than failing the read.
+func TestCodeFlowInDomainModeReadsTheWorkspaceClaims(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value any
+		want  bool
+	}{
+		{"true", true, true},
+		{`"true"`, "true", true},
+		{`"false"`, "false", false},
+		{"false", false, false},
+		{"a number", 1, false},
+		{"null", nil, false},
+		{"an object", map[string]any{"value": true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issuer, flow := newCodeFlowForDomain(t, flowDomain)
+			session := exchange(t, issuer, flow, googleClaims(tc.value))
+			claims := session.Claims
+			if claims.Email != "A.Person@example.com" || claims.HostedDomain != flowDomain || claims.Subject != "110169484474386276334" || claims.EmailVerified != tc.want {
+				t.Errorf("claims = %#v, want the email, hd and sub read, and email_verified %t", claims, tc.want)
+			}
+		})
+	}
+	t.Run("an email and hd that are not strings", func(t *testing.T) {
+		issuer, flow := newCodeFlowForDomain(t, flowDomain)
+		claims := googleClaims(true)
+		claims["email"], claims["hd"] = 7, []string{flowDomain}
+		if session := exchange(t, issuer, flow, claims); session.Claims.Email != "" || session.Claims.HostedDomain != "" {
+			t.Errorf("claims = %#v, want no email and no hd", session.Claims)
+		}
+	})
+	t.Run("no email_verified, email or hd", func(t *testing.T) {
+		issuer, flow := newCodeFlowForDomain(t, flowDomain)
+		session := exchange(t, issuer, flow, map[string]any{"sub": "110169484474386276334"})
+		if session.Claims.Email != "" || session.Claims.HostedDomain != "" || session.Claims.EmailVerified {
+			t.Errorf("claims = %#v, want none of the Workspace claims", session.Claims)
+		}
+	})
+}
+
+// A refresh in domain mode reads the claims as Google holds them now, so the hourly confirmation
+// applies the domain rule to the refreshed token.
+func TestCodeFlowRefreshInDomainModeReadsTheCurrentWorkspaceClaims(t *testing.T) {
+	issuer, flow := newCodeFlowForDomain(t, flowDomain)
+	session := exchange(t, issuer, flow, googleClaims(true))
+	issuer.UpdateGrants(func(claims map[string]any) {
+		claims["hd"] = "other.example"
+		claims["email_verified"] = "false"
+	})
+	refreshed, err := flow.Refresh(context.Background(), session.RefreshToken)
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if refreshed.Claims.HostedDomain != "other.example" || refreshed.Claims.EmailVerified || refreshed.Claims.Email != "A.Person@example.com" {
+		t.Errorf("refreshed claims = %#v, want hd other.example and email_verified false", refreshed.Claims)
+	}
+}
+
+// Group mode reads none of the Workspace claims, whatever the token carries: a Cognito ID token's
+// email is one the person can write.
+func TestCodeFlowInGroupModeReadsNoWorkspaceClaims(t *testing.T) {
+	issuer, flow := newCodeFlowFor(t)
+	claims := personClaims("dispatch-members")
+	claims["email_verified"], claims["hd"] = true, flowDomain
+	session := exchange(t, issuer, flow, claims)
+	if session.Claims.Email != "" || session.Claims.EmailVerified || session.Claims.HostedDomain != "" {
+		t.Errorf("claims = %#v, want no Workspace claims in group mode", session.Claims)
+	}
+	if session.Claims.Username != flowUsername || !reflect.DeepEqual(session.Claims.Groups, []string{"dispatch-members"}) {
+		t.Errorf("claims = %#v, want the Cognito username and groups", session.Claims)
+	}
+}
+
+// In domain mode the authorization request asks Google for offline access, so the exchange returns
+// a refresh token, with consent each time, so a second sign-in returns one too, and names the
+// domain as a hint; group mode sends none of the three.
+func TestCodeFlowAuthURLAsksGoogleForOfflineAccessInTheDomain(t *testing.T) {
+	_, domainFlow := newCodeFlowForDomain(t, flowDomain)
+	_, groupFlow := newCodeFlowFor(t)
+	query := func(flow *CodeFlow) url.Values {
+		location, err := url.Parse(flow.AuthURL(flowRedirect, "state-1", "nonce-1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return location.Query()
+	}
+	domain := query(domainFlow)
+	for name, want := range map[string]string{"access_type": "offline", "prompt": "consent", "hd": flowDomain, "client_id": flowClientID, "nonce": "nonce-1", "scope": "openid email profile"} {
+		if got := domain.Get(name); got != want {
+			t.Errorf("domain mode: %s = %q, want %q", name, got, want)
+		}
+	}
+	group := query(groupFlow)
+	for _, name := range []string{"access_type", "prompt", "hd"} {
+		if group.Has(name) {
+			t.Errorf("group mode: the authorization request carries %s=%q", name, group.Get(name))
+		}
+	}
 }
 
 // personClaims is a Cognito ID token's claims for a person signed in through the Google provider:
@@ -212,7 +348,7 @@ func TestCodeFlowRevokeFailsAgainstAnIssuerWithNoRevocationEndpoint(t *testing.T
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), flowClientID, flowClientSecret)
 	issuer.OmitRevocationEndpoint()
-	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret)
+	flow, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, "")
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}
@@ -228,7 +364,7 @@ func TestNewCodeFlowRefusesAnIssuerWithNoCodeFlowEndpoints(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.PublishKey(t, "signing-key")
 	issuer.OmitCodeFlowEndpoints()
-	_, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret)
+	_, err := NewCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, "")
 	if err == nil || !strings.Contains(err.Error(), "token_endpoint") {
 		t.Fatalf("NewCodeFlow against an issuer with no code-flow endpoints: err = %v, want a refusal naming token_endpoint", err)
 	}
@@ -237,7 +373,7 @@ func TestNewCodeFlowRefusesAnIssuerWithNoCodeFlowEndpoints(t *testing.T) {
 func TestDiscoverCodeFlowRefusesAnIssuerWhoseDiscoveryFails(t *testing.T) {
 	issuer := oidctest.New(t)
 	issuer.FailDiscovery(503)
-	_, err := DiscoverCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, time.Second)
+	_, err := DiscoverCodeFlow(context.Background(), issuer.URL(), flowClientID, flowClientSecret, "", time.Second)
 	if err == nil || !strings.Contains(err.Error(), issuer.URL()) {
 		t.Fatalf("DiscoverCodeFlow against a failing issuer: err = %v, want one naming the issuer", err)
 	}
