@@ -180,7 +180,7 @@ package api
 // repository's default branch, `--default-branch <name>`, which it requires: an image whose
 // `legion` was built before 27 exits 2 on the unknown flag in every new issue pod's init container,
 // so the daemon's image probe, which holds the image's pi-legion to this number, refuses such an
-// image at boot instead. (26 is LEGION-694's, open as sjawhar/legion#1999 when this was taken; a
+// image at boot instead. (26 is sjawhar/legion#1999's, open when this was taken; a
 // release declaring 26 carries no `--default-branch`, so this branch takes the number above it, as
 // the collision note says.)
 const DaemonAPIVersion = 27

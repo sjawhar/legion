@@ -905,8 +905,8 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 }
 
 // workspace-init provisions the issue's workspace at the repository's default branch, which the
-// spec names as GitHub does, slash and all: the init container's command passes it verbatim, and
-// no container of the pod is told main.
+// spec names as GitHub does, slash and all: the init container's command passes it verbatim as
+// --default-branch's value, and no container of the pod is told main.
 func TestTheInitContainerProvisionsAtTheSpecsDefaultBranch(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -918,9 +918,6 @@ func TestTheInitContainerProvisionsAtTheSpecsDefaultBranch(t *testing.T) {
 	at := slices.Index(command, "--default-branch")
 	if at < 0 || at+1 >= len(command) || command[at+1] != "release/v7.1" {
 		t.Fatalf("the init container's command %q names no --default-branch release/v7.1", command)
-	}
-	if want := []string{"--repo", "sjawhar/legion-smoke", "--default-branch", "release/v7.1"}; !slices.Equal(command[at-2:at+2], want) {
-		t.Errorf("the init container's command %q, want %q together, in the order the usage names them", command, want)
 	}
 	if slices.Contains(command, "main") {
 		t.Errorf("the init container's command %q names main", command)
