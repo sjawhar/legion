@@ -332,6 +332,16 @@
   name every configured production job and a missing apply step, and the Pipeline card's `job`
   joins the names it follows with `or`.
 
+- **Breaking:** migration 0111 drops `delivery_settings.production_job_name`, with the trigger and
+  function 0109 added to keep it at the first of `production_job_names` through the rollout
+  (LEGION-761). No value is lost: the trigger kept the column equal to the list's first name, and
+  the migration's census counts any row where it did not, so such a row refuses the deploy.
+  Rollback floor: once 0111 has applied, a task older than legion-envoy v13.4.1, the release that
+  added 0109, still boots, but its reads and writes of the delivery settings fail with SQLSTATE
+  42703 (undefined column), since they name `production_job_name`, and so does every delivery page
+  and job that reads the settings first.
+  v13.4.1 and every later release read `production_job_names` alone.
+
 - **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
   `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
   `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
@@ -772,6 +782,35 @@
   workspace build, through `packages/daemon`'s client-go) could close it with 1008, the code for a
   caller that no longer resolves, depending on a race. The published image, built in module mode
   with gorilla v1.5.3, never did. The page reconnects with backoff after either close.
+
+- The delivery live hub arms its one timer for the moment the next view is due, rather than for a
+  wait counted from the moment its worker read the clock (LEGION-690). A wait put the timer late by
+  however long the worker took between that read and the arm, and a test that moved its clock
+  forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
+  timer armed for a moment the clock has already passed fires at once.
+
+- The delivery live hub no longer re-sends a run in which nothing changed (LEGION-690). Each item it
+  sends is revised by a hash of its JSON, and several store reads answered rows tied on their order
+  in whatever order Postgres's plan read them: a run's jobs (no order at all), the pull requests a
+  run shipped and the waiting list (merged in one second), and runs started in one instant. The
+  plan alternates between a sequential scan (the table's row order, where a reconcile pass's
+  unchanged rewrite moves a row last) and an index scan, so a recompute answered a run's
+  `failed_jobs`, `root_failing_job`, `production` or `prs` in another order and the hub sent the
+  run again, whole: in production deltas of 54 to 61 runs, about 110 KB each, whose one change was
+  the order of their `prs`. A run's jobs now come back by when each started, a job that never
+  started last, then by name (`ListRunJobs`, `ListRunJobsForRuns`, sorted in Go per run: an
+  `order by` sorts the whole 28-day read on disk, 82-93 ms against 43-52 ms for the unordered read
+  and 3 ms for the sort), the order `GET /api/v1/delivery/runs/{id}` already listed them in. Pull
+  requests merged together come back by id (`owner/repo#N` in byte order, the page's own order) and
+  runs started together by run id. A run's root failing job and its production job, among jobs
+  finishing together, are the first by name, and a run whose production jobs all failed falls back
+  to the first by start rather than the first listed. The Pipeline page's failing jobs name, as a
+  job's last failing run among runs that completed together, the one with the higher run id rather
+  than whichever was listed last.
+
+- Two production deploys whose jobs complete in the same second are ordered by run id, and the
+  lower run id ships a pull request both could, so the live Delivery hub's sliding window no longer
+  swaps a pull request's `deploy_run` and a run's `prs` with no stored row changed (LEGION-690).
 
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since

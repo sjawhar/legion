@@ -27,12 +27,19 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // which the Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose
 // workspace the daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has
 // no workspace — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the
-// background once Oh My Pi has started (shim.Config.WarmCodegraph), and a stop before the build
-// ends — the launcher's SIGTERM to the role's process group, which ends Oh My Pi and the codegraph
-// child together — ends the warm-up with Oh My Pi: the shim exits only once the build's lease is
-// released, so the role's relaunch is never told a live build holds it. On a relaunch the warm-up
-// runs again: `codegraph status` on the volume's existing index answers complete and nothing runs,
-// or an index an earlier build left partial is repaired as workspace.nextCodegraphStep decides.
+// background once Oh My Pi has started (shim.Config.WarmCodegraph); a build that finishes logs one
+// success line with the build's duration and the time since the role's launch. A stop before the
+// build ends — the launcher's SIGTERM to the role's process group, which ends Oh My Pi and the
+// codegraph child together — ends the warm-up with Oh My Pi: the shim exits only once the build's
+// lease is released, waiting at least shim.MinWarmUpDrain and at most what --stop-grace leaves
+// once the agent's own grace and the stdout drain are spent, so the role's relaunch is never told
+// a live build holds it. From shim.MinStopGrace up the whole stop fits inside the grace, which the
+// daemon's configuration load requires of worker_stop_timeout_seconds under `runtime: kubernetes`
+// (internal/config); this command refuses only a non-positive --stop-grace, since an older daemon
+// may still hand it a smaller one, and flooring the wait is the safe answer there. On a relaunch
+// the warm-up runs again: `codegraph status` on the volume's existing index answers complete and
+// nothing runs, or an index an earlier build left partial is repaired as
+// workspace.nextCodegraphStep decides.
 func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("worker-shim", "usage: legion worker-shim [flags] -- <omp argv…>", stderr)
 	var given workerShimFlags
@@ -40,7 +47,7 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 	flags.StringVar(&given.bootTokenFile, "boot-token-file", "", "the file holding the pane's boot token")
 	flags.StringVar(&given.providerEnvDir, "provider-env-dir", "", "a directory whose files become NAME=contents in OMP's environment only")
 	podSafety := flags.Bool("pod-safety", false, "start OMP on a pod's baseline (internal/podsafety), writing its overlay to LEGION_STATE_DIR")
-	flags.DurationVar(&given.stopGrace, "stop-grace", 0, "how long the runtime gives this shim to exit after its stop signal before killing it (a pod's terminationGracePeriodSeconds, which the launcher passes); the wait for an in-flight CodeGraph warm-up stays inside it; unset is the daemon's default worker_stop_timeout_seconds")
+	flags.DurationVar(&given.stopGrace, "stop-grace", 0, "how long the runtime gives this shim to exit after its stop signal before killing it (a pod's terminationGracePeriodSeconds, which the launcher passes); the wait for an in-flight CodeGraph warm-up stays inside it and is never under 3s, so the daemon refuses a worker_stop_timeout_seconds under 9 for pods; unset is the daemon's default worker_stop_timeout_seconds")
 	flags.BoolVar(&given.warmCodegraph, "warm-codegraph", false, "once Oh My Pi has started, build the CodeGraph index of the workspace LEGION_WORKSPACE names, in the background (a role's shim in an issue pod; never a tmux pane's or the controller's)")
 	flags.StringVar(&given.keyDir, "agent-secrets-key-dir", "", "the pod's tmpfs directory for its agent-secrets key and enrollment id")
 	flags.StringVar(&given.tokenFile, "pod-token-file", "", "the projected service-account token for the secrets broker's audience")

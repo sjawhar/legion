@@ -40,7 +40,7 @@ func awsEnv(t *testing.T, endpoint string) []string {
 	}
 }
 
-// TestVersionPrintsTheStampedRelease: the release job stamps the CLI with
+// TestVersionPrintsTheStampedRelease: release-envoy-infra.yaml's build job stamps the CLI with
 // `-ldflags "-X main.version=<X.Y.Z>"`, so a build stamped that way prints exactly that version
 // and nothing else, without any AWS configuration. Any other build prints 0.0.0-dev, as the plugin
 // does, rather than naming a release it is not.

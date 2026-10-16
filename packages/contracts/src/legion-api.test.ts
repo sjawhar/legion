@@ -274,8 +274,10 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
 // (codegraph among them: the image carries the tooling and a pod's launch loads it with extension
 // discovery on) and withheld rows, and the six live rows unchecked — no session has reported, so
 // the deployment renders each as `unchecked` with its ruling (contract 21) — and the report is
-// never absent from a state. `installed` stays in the schema's enum with no row carrying it here:
-// it was codegraph's until LEGION-629.
+// never absent from a state. `installed` left the status set at contract 25: it was codegraph's
+// until LEGION-629, and no row has carried it since. Each deployment row carries `source`
+// (contract 25): `configuration` (what legion.yaml alone decides) or `boot` (what boot measured);
+// a live row carries none.
 test("the state golden carries the deployment's capability report", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -286,6 +288,7 @@ test("the state golden carries the deployment's capability report", () => {
     detail: "runtime.kubernetes.agent_secrets is not configured",
     decision:
       "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret",
+    source: "configuration",
   });
   expect(rows["resource-limits"]).toEqual({
     name: "resource-limits",
@@ -293,6 +296,7 @@ test("the state golden carries the deployment's capability report", () => {
     detail:
       "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
     configLine: 'capabilities.decided.resource-limits: "<reason>"',
+    source: "configuration",
   });
   expect(rows.codegraph).toEqual({
     name: "codegraph",
@@ -308,6 +312,17 @@ test("the state golden carries the deployment's capability report", () => {
   const statuses = state.capabilities.map((row) => row.status);
   for (const status of ["present", "unchecked", "withheld", "decided", "open"] as const) {
     expect(statuses).toContain(status);
+  }
+  expect(statuses).not.toContain("installed");
+
+  const deploymentRows = [
+    rows.secrets,
+    rows["model-fallback"],
+    rows["resource-limits"],
+    rows["pool-capacity"],
+  ];
+  for (const row of deploymentRows) {
+    expect(["configuration", "boot"]).toContain(row.source ?? "");
   }
 
   const emptied = fixture("state-stage3.json") as { capabilities: unknown[] };

@@ -251,21 +251,24 @@ const legionAgentSecretsLoginView = z.strictObject({
 });
 
 /** `api.CapabilityState` — one row of the deployment's capability report
- * (`capabilities.Deployment.Report`), in the table's order: `present`, `installed` (the image
- * carries the row's tooling, but a pod's agent cannot use it yet; `detail` says why), `unchecked`
- * (no probe has checked an image row, or no session has reported a live row), `withheld` (a
- * ruling, cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open
- * deployment row carrying `configLine`, the `legion.yaml` line that records a decision. A live row
- * (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) is
- * `present` or `open` from the sessions' reports (`legionCapabilityReportView`), and carries no
- * `configLine`; `live` is no status since contract 21. A gap is reported here, never refused
- * (contract 16). */
+ * (`capabilities.Deployment.Report`), in the table's order: `present`, `unchecked` (no probe has
+ * checked an image row, or no session has reported a live row), `withheld` (a ruling, cited in
+ * `detail`), `decided` (the operator's reason in `decision`) or `open`, an open deployment row
+ * carrying `configLine`, the `legion.yaml` line that records a decision. The probe's own table also
+ * prints `missing` and `reported`, which never reach this state (and `installed`, no status since
+ * contract 25: nothing has emitted it since LEGION-629). A live row (`subagents`, `web-search`,
+ * `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) is `present` or `open` from the
+ * sessions' reports (`legionCapabilityReportView`), and carries no `configLine`; `live` is no
+ * status since contract 21. `source` is, on a deployment row, `configuration` (what legion.yaml
+ * alone decides) or `boot` (what boot measured); absent on every other row (contract 25). A gap is
+ * reported here, never refused (contract 16). */
 const legionCapabilityState = z.strictObject({
   name: nonEmptyString,
-  status: z.enum(["present", "installed", "unchecked", "withheld", "decided", "open"]),
+  status: z.enum(["present", "unchecked", "withheld", "decided", "open"]),
   detail: nonEmptyString,
   decision: nonEmptyString.optional(),
   configLine: nonEmptyString.optional(),
+  source: z.enum(["configuration", "boot"]).optional(),
 });
 
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session

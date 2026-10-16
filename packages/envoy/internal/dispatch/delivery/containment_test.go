@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/ordertest"
 )
 
 func TestProductionApplies(t *testing.T) {
@@ -159,6 +161,36 @@ func TestProductionAppliesMatchesEveryListedName(t *testing.T) {
 	}
 }
 
+// TestProductionAppliesDoesNotSetApartASkippedCallerOfEverySuccessfulListedName proves each
+// successful listed job demonstrates its name is real, even when Production.Job selects another
+// listed job as the run's deploy.
+func TestProductionAppliesDoesNotSetApartASkippedCallerOfEverySuccessfulListedName(t *testing.T) {
+	const selectedName, otherName = "production / deploy", "production-apply / deploy"
+	base := time.Date(2026, 10, 15, 3, 0, 0, 0, time.UTC)
+	success := DeliveryRunConclusionSuccess
+	runs := []DeliveryRun{
+		{Repo: "acme/widgets", RunID: 1, HeadCommitAt: base, Conclusion: &success},
+		{Repo: "acme/widgets", RunID: 2, HeadCommitAt: base.Add(time.Hour), Conclusion: &success},
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		// Production.Job selects selectedName, but otherName still succeeded in this run.
+		1: {
+			{Name: selectedName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base)},
+			{Name: otherName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(time.Hour))},
+		},
+		// GitHub lists the skipped call to otherName under its bare caller name.
+		2: {{Name: "production-apply", Conclusion: new(DeliveryJobConclusionSkipped)}},
+	}
+
+	judged := ProductionApplies(runs, jobsByRun, Production{JobNames: []string{selectedName, otherName}})
+	if len(judged.Applies) != 1 || !judged.Applies[0].CompletedAt.Equal(base) {
+		t.Fatalf("applies = %+v, want selectedName's earlier apply", judged.Applies)
+	}
+	if len(judged.Unmatched) != 0 {
+		t.Fatalf("unmatched = %+v, want none: otherName was proven real by run 1", judged.Unmatched)
+	}
+}
+
 // TestProductionAppliesCountsOnlyAJobThatApplied proves the optional apply-step rule distinguishes
 // a stored historical job from a stood-down job and names a configured step that is absent.
 func TestProductionAppliesCountsOnlyAJobThatApplied(t *testing.T) {
@@ -196,6 +228,56 @@ func TestProductionAppliesCountsOnlyAJobThatApplied(t *testing.T) {
 	}
 	if got := production.Conclusion(jobsByRun[2][0]); got == nil || *got != DeliveryJobConclusionSkipped {
 		t.Fatalf("the stood-down job's conclusion = %v, want skipped", got)
+	}
+}
+
+// TestARunsProductionJobIsTheSameInEveryListingOrder: among listed jobs that succeeded in one
+// instant the run's production job is the first by name, and a run with none that succeeded falls
+// back to its first listed job by when each started (a job that never started last, then by name),
+// in every order its jobs are listed in.
+func TestARunsProductionJobIsTheSameInEveryListingOrder(t *testing.T) {
+	const first, second = "production / deploy", "production-apply / deploy"
+	production := Production{JobNames: []string{second, first}}
+	base := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name string
+		jobs []DeliveryRunJob
+		want string
+	}{
+		{
+			name: "two listed jobs succeeded together",
+			jobs: []DeliveryRunJob{
+				{Name: second, StartedAt: new(base), CompletedAt: new(base.Add(time.Hour)), Conclusion: new(DeliveryJobConclusionSuccess)},
+				{Name: first, StartedAt: new(base.Add(time.Minute)), CompletedAt: new(base.Add(time.Hour)), Conclusion: new(DeliveryJobConclusionSuccess)},
+				{Name: "build", StartedAt: new(base), CompletedAt: new(base.Add(time.Minute)), Conclusion: new(DeliveryJobConclusionSuccess)},
+			},
+			want: first,
+		},
+		{
+			name: "no listed job succeeded, both started together",
+			jobs: []DeliveryRunJob{
+				{Name: second, StartedAt: new(base), CompletedAt: new(base.Add(time.Hour)), Conclusion: new(DeliveryJobConclusionFailure)},
+				{Name: first, StartedAt: new(base), CompletedAt: new(base.Add(2 * time.Hour)), Conclusion: new(DeliveryJobConclusionFailure)},
+				{Name: "build", StartedAt: new(base), CompletedAt: new(base.Add(time.Minute)), Conclusion: new(DeliveryJobConclusionSuccess)},
+			},
+			want: first,
+		},
+		{
+			name: "no listed job succeeded, one never started",
+			jobs: []DeliveryRunJob{
+				{Name: first, Conclusion: new(DeliveryJobConclusionSkipped)},
+				{Name: second, StartedAt: new(base), CompletedAt: new(base.Add(time.Hour)), Conclusion: new(DeliveryJobConclusionCancelled)},
+			},
+			want: second,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ordertest.EveryOrder(test.jobs, func(listed []DeliveryRunJob) {
+				if got := production.Job(listed); got == nil || got.Name != test.want {
+					t.Fatalf("Production.Job of jobs listed %q = %+v, want %s", jobNames(listed), got, test.want)
+				}
+			})
+		})
 	}
 }
 
@@ -242,6 +324,59 @@ func TestFirstShippingApply(t *testing.T) {
 		if got != nil {
 			t.Fatalf("expected nil, got %+v", got)
 		}
+	})
+}
+
+// TestAppliesCompletingTogetherShipTheSameInEveryOrder: two production applies whose jobs completed
+// in the same second are ordered by run id, and the lower run id ships a pull request both could,
+// in every order the runs are listed in and every order the applies are handed over in. The live
+// hub narrows the runs it read as a preset window slides, so the input changes length and order
+// with no stored row changed; a pull request's deploy_run and a run's prs must not change with it.
+func TestAppliesCompletingTogetherShipTheSameInEveryOrder(t *testing.T) {
+	const jobName = "production / production-apply"
+	merged := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+	completed := merged.Add(30 * time.Minute)
+	success := DeliveryRunConclusionSuccess
+	runs := []DeliveryRun{
+		{RunID: 9, CreatedAt: new(merged.Add(time.Minute)), StartedAt: merged.Add(time.Minute), Conclusion: &success},
+		{RunID: 7, CreatedAt: new(merged.Add(2 * time.Minute)), StartedAt: merged.Add(2 * time.Minute), Conclusion: &success},
+		{RunID: 8, CreatedAt: new(merged.Add(3 * time.Minute)), StartedAt: merged.Add(3 * time.Minute), Conclusion: &success},
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		9: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(completed)}},
+		7: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(completed)}},
+		8: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(completed.Add(time.Second))}},
+	}
+	production := Production{JobNames: []string{jobName}}
+	runIDs := func(applies []Apply) []int64 {
+		ids := make([]int64, len(applies))
+		for i, apply := range applies {
+			ids[i] = apply.RunID
+		}
+		return ids
+	}
+	t.Run("ProductionApplies", func(t *testing.T) {
+		ordertest.EveryOrder(runs, func(listed []DeliveryRun) {
+			order := make([]int64, len(listed))
+			for i, run := range listed {
+				order[i] = run.RunID
+			}
+			if got := runIDs(ProductionApplies(listed, jobsByRun, production).Applies); !slices.Equal(got, []int64{7, 9, 8}) {
+				t.Fatalf("ProductionApplies of runs listed %v = %v, want [7 9 8]: by completion, then run id", order, got)
+			}
+		})
+	})
+	t.Run("FirstShippingApply", func(t *testing.T) {
+		applies := []Apply{
+			{RunID: 9, CompletedAt: completed, CreatedAt: merged.Add(time.Minute)},
+			{RunID: 7, CompletedAt: completed, CreatedAt: merged.Add(2 * time.Minute)},
+			{RunID: 8, CompletedAt: completed.Add(time.Second), CreatedAt: merged.Add(3 * time.Minute)},
+		}
+		ordertest.EveryOrder(applies, func(listed []Apply) {
+			if got := FirstShippingApply(merged, listed); got == nil || got.RunID != 7 {
+				t.Fatalf("FirstShippingApply of applies listed %v = %+v, want run 7, the lower run id of the two completing first", runIDs(listed), got)
+			}
+		})
 	})
 }
 

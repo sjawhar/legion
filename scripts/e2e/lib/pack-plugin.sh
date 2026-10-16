@@ -17,10 +17,10 @@
 # The sequence runs in the checkout this script lives in, because a copy of the package cannot
 # build: the prepack copies the repository's skills/, and the bundle resolves @legion/* through the
 # workspace root's node_modules (`bun install --frozen-lockfile` at the root first).
-#   1. save package.json, arm the EXIT trap    release.yaml pi_envoy/pi_legion "Point extensions at the packed bundle"
+#   1. save package.json, arm the EXIT trap    release.yaml pi_envoy_build/pi_legion_build "Point extensions at the packed bundle"
 #   2. omp.extensions -> the packed bundle     that step's jq; worker.Dockerfile's `jq '.omp.extensions = …'`
 #   3. bun pm pack; its prepack builds dist/   release.yaml "Pack extension"; the prepack's `bun build`
-#   4. put package.json back                   release.yaml "Restore committed manifest"
+#   4. put package.json back                   this script's own need: the checkout is reused (the build job's tree is discarded)
 # Each source is cited by what it runs, never by line number: the lines move with every edit
 # above them. release.yaml's "Set release version" is not a step here: the tarball carries the
 # checkout's own version. The bundle is the committed manifest's one extension entry,

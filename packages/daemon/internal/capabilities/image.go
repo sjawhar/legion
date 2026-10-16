@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
 	"github.com/sjawhar/legion/daemon/internal/procgroup"
 )
@@ -33,39 +34,12 @@ type Image struct {
 	WorkDir string
 }
 
-// Line is one printed row of the table.
-type Line struct {
-	Name Name
-	// Status is "present", "installed" or "missing" for an image row, "reported" or "withheld"
-	// for the others.
-	Status string
-	// Detail is the row's evidence: what was run and what it answered, who reports a live or a
-	// deployment row, or the ruling that withholds one.
-	Detail string
-}
-
-// The statuses a Line carries.
-const (
-	present = "present"
-	// installed is an image row whose check passed but whose tooling a pod's agent cannot use
-	// yet: the image carries it, and the row's Capability.Awaits says why no worker has it.
-	installed = "installed"
-	missing   = "missing"
-	reported  = "reported"
-	withheld  = "withheld"
-)
-
-// String is the line as the probe prints it, and as the probe pod's log then carries it.
-func (l Line) String() string {
-	return fmt.Sprintf("probe-image: capability %s: %s (%s)", l.Name, l.Status, l.Detail)
-}
-
 // commandTimeout bounds each command a check runs: a `--version` or a `--check` that has not
 // answered in a minute is hanging, not slow, and the probe's own budget is not to be spent on it.
 const commandTimeout = 60 * time.Second
 
-// maxDetail caps a command's quoted output in a Line, so a chatty command cannot push the table
-// past the log tail the daemon reads back.
+// maxDetail caps a command's quoted output in a State's detail, so a chatty command cannot push
+// the table past the log tail the daemon reads back.
 const maxDetail = 300
 
 // imageCheck is one image row's check: its evidence, and whether the capability is present.
@@ -78,49 +52,39 @@ var imageChecks = map[Name]imageCheck{
 }
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
-// image rows present or missing with their evidence — installed, the evidence then the sentence
-// that says why, where the check passed but the row awaits a launch that loads what the image
-// carries (Capability.Awaits) — live rows as reported by each session at its start, deployment
-// rows as reported by the daemon, withheld rows with their ruling. It runs after the launch
-// probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those probes,
-// which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills. err is
-// nil when every image row's check passed; otherwise it names every missing one, so one rebuild
-// of the image fixes them all rather than the first alone: an image lacking what an installed row
-// awaits a launch for is as refused as one lacking anything else. A ctx that ends ends the check
+// image rows present or missing with their evidence, live rows reported as what each session
+// reports at its start and `legion state` renders, deployment rows reported as what the daemon
+// reports from the deployment's configuration, withheld rows with their ruling. It runs after the
+// launch probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those
+// probes, which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills.
+// err is nil when every image row's check passed; otherwise it names every missing one, so one
+// rebuild of the image fixes them all rather than the first alone. A ctx that ends ends the check
 // with an error wrapping ctx's.
-func CheckImage(ctx context.Context, img Image) ([]Line, error) {
-	lines := make([]Line, 0, len(Table))
+func CheckImage(ctx context.Context, img Image) ([]State, error) {
 	var absent []string
-	for _, row := range Table {
-		line := Line{Name: row.Name}
-		switch row.Site {
-		case SiteImage:
+	states, err := render(ctx, renderer{
+		image: func(row Capability) State {
 			detail, ok := imageChecks[row.Name](ctx, img)
-			if ctx.Err() != nil {
-				return lines, fmt.Errorf("capability check: %w", ctx.Err())
-			}
-			line.Status, line.Detail = missing, detail
-			switch {
-			case !ok:
+			if !ok {
 				absent = append(absent, fmt.Sprintf("capability %s is missing: %s", row.Name, detail))
-			case row.Awaits != "":
-				line.Status, line.Detail = installed, detail+"; "+row.Awaits
-			default:
-				line.Status = present
+				return State{Name: row.Name, Status: StatusMissing, Detail: detail}
 			}
-		case SiteLive:
-			line.Status, line.Detail = reported, "each session reports it at start; `legion state` renders it: "+row.Summary
-		case SiteDeployment:
-			line.Status, line.Detail = reported, "the daemon reports it from the deployment's configuration: "+row.Summary
-		case SiteWithheld:
-			line.Status, line.Detail = withheld, withheldDetail(row)
-		}
-		lines = append(lines, line)
+			return State{Name: row.Name, Status: StatusPresent, Detail: detail}
+		},
+		live: func(row Capability) State {
+			return State{Name: row.Name, Status: StatusReported, Detail: "each session reports it at start; `legion state` renders it: " + row.Summary}
+		},
+		deployment: func(row Capability) State {
+			return State{Name: row.Name, Status: StatusReported, Detail: "the daemon reports it from the deployment's configuration: " + row.Summary}
+		},
+	})
+	if err != nil {
+		return states, err
 	}
 	if len(absent) > 0 {
-		return lines, errors.New(strings.Join(absent, "; "))
+		return states, errors.New(strings.Join(absent, "; "))
 	}
-	return lines, nil
+	return states, nil
 }
 
 // ReadModelFallback runs `<Launch> config get retry.modelFallback --json` under img and answers
@@ -188,14 +152,14 @@ func browser(ctx context.Context, img Image) (string, bool) {
 	path, how := envValue(img.Env, "PUPPETEER_EXECUTABLE_PATH"), "PUPPETEER_EXECUTABLE_PATH"
 	switch {
 	case path == "":
-		found, ok := lookPath(img.Env, "chromium")
+		found, ok := lookpath.On(envValue(img.Env, "PATH"), "chromium")
 		if !ok {
 			return "chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable", false
 		}
 		path, how = found, "chromium on PATH"
 	case !strings.Contains(path, "/"):
 		// A bare name: Oh My Pi spawns it, and the spawn looks it up on PATH.
-		found, ok := lookPath(img.Env, path)
+		found, ok := lookpath.On(envValue(img.Env, "PATH"), path)
 		if !ok {
 			return fmt.Sprintf("%s (%s) is not on PATH", path, how), false
 		}
@@ -221,12 +185,10 @@ const codeGraphPlugin = "@bopstack/pi-codegraph"
 
 // codeGraph needs both halves: the CodeGraph CLI on PATH, and its plugin enabled in the profile's
 // plugin lock, where `omp plugin install` recorded it; a CLI without the plugin, or a plugin
-// disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once. Both
-// passing proves the image carries the tool, not that a pod's agent loads it: the row's Awaits
-// says what that still needs, and CheckImage renders it installed.
+// disabled behind the CLI, gives an agent no codegraph tool. Both failures are named at once.
 func codeGraph(_ context.Context, img Image) (string, bool) {
 	var evidence, why []string
-	if path, ok := lookPath(img.Env, "codegraph"); ok {
+	if path, ok := lookpath.On(envValue(img.Env, "PATH"), "codegraph"); ok {
 		evidence = append(evidence, path+" on PATH")
 	} else {
 		why = append(why, "codegraph is not on PATH")
@@ -297,9 +259,10 @@ func toolchain(ctx context.Context, img Image) (string, bool) {
 // onPath is the verdict on every name being on img's PATH: where each found one is, in names'
 // order, and the detail — where each is, or which are not.
 func onPath(img Image, names ...string) ([]string, string, bool) {
+	searchPath := envValue(img.Env, "PATH")
 	var found, absent []string
 	for _, name := range names {
-		if path, ok := lookPath(img.Env, name); ok {
+		if path, ok := lookpath.On(searchPath, name); ok {
 			found = append(found, path)
 		} else {
 			absent = append(absent, name)
@@ -312,24 +275,6 @@ func onPath(img Image, names ...string) ([]string, string, bool) {
 		return found, absent[0] + " is not on PATH", false
 	}
 	return found, strings.Join(absent, ", ") + " are not on PATH", false
-}
-
-// lookPath resolves name on env's PATH, as the pod's Oh My Pi would, rather than on this
-// process's: the checks run where the pod's Oh My Pi runs, but it is the environment the pod
-// baseline and the operator's pod env shaped that decides what a worker finds. An executable is
-// a regular file with an execute bit, as exec.LookPath judges it; a relative PATH element is
-// skipped, as exec.LookPath refuses the result it would give.
-func lookPath(env []string, name string) (string, bool) {
-	for _, dir := range filepath.SplitList(envValue(env, "PATH")) {
-		if !filepath.IsAbs(dir) {
-			continue
-		}
-		path := filepath.Join(dir, name)
-		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
-			return path, true
-		}
-	}
-	return "", false
 }
 
 // envValue is name's value in env, the last assignment winning as it does for the process env

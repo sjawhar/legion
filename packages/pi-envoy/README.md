@@ -95,8 +95,10 @@ that says which skills each ships: it builds this package's one entry, writes th
 stages this package's partition into `dist/skills`. The published manifest exposes `dist/envoy.js`
 for `omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` is its path in both
 a repo checkout after the prepack and the published tarball), while the committed manifest keeps
-the TypeScript entry for repo checkouts. `.github/workflows/release.yaml` (job `pi_envoy`)
-performs that manifest rewrite around `bun pm pack` and restores the committed file before tagging.
+the TypeScript entry for repo checkouts. In `.github/workflows/release.yaml`, the `pi_envoy_build`
+job rewrites the manifest before `bun pm pack` and uploads the tarball (its tree is discarded,
+nothing is restored); the `pi_envoy_publish` job publishes that tarball and commits the version bump
+to the committed manifest, touching `.version` alone.
 Packing with the committed source manifest is refused by the prepack, because such a tarball would
 point OMP at an extension file it does not contain.
 

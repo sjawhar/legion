@@ -24,10 +24,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   resolves the task agents and skills named by the prompts the image's own `legion` embeds
   (`packages/daemon/cmd/legion/probe_image.go`);
 - `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
-  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
-  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two roots a pod names as Oh
-  My Pi's explicit extensions — a role relaunched onto a newer plugin contract in a kept pod loads
-  the generation directory's copies instead, installed from npm at
+  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy_build` and
+  `pi_legion_build` jobs run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two
+  roots a pod names as Oh My Pi's explicit extensions — a role relaunched onto a newer plugin contract
+  in a kept pod loads the generation directory's copies instead, installed from npm at
   `$XDG_STATE_HOME/legion-plugins/g<generation>/node_modules/@sjawhar/{pi-envoy,pi-legion}`
   ("Contract discipline" below) — the Envoy plugin first, with extension discovery on. Neither is linked
   into the OMP profile: a plugin both installed and named by `--extension` loads twice, and the image
@@ -75,15 +75,23 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   [the probe subsection](#the-image-is-probed-before-it-publishes)) requires of the image, each outside
   `HOME` for the same reason: the language servers Oh My Pi's LSP tools start when a working directory
   carries their root markers — `gopls` (built static in the Dockerfile's `go` stage, at
-  `/usr/local/bin/gopls`), `typescript-language-server` and `pyright-langserver`, the latter two npm
-  global packages under `/opt/node/lib/node_modules` with their launchers (and TypeScript's `tsc` and
-  `tsserver`, and the `pyright` CLI) linked at `/usr/local/bin`. TypeScript is pinned to the version
-  this repository's lockfile holds, since `typescript-language-server` runs `tsserver`, which TypeScript
-  7 no longer ships; the server resolves the TypeScript installed beside it unless the repository's own
+  `/usr/local/bin/gopls`), `typescript-language-server` and `pyright-langserver`, the latter two
+  installed under `/opt/language-servers/node_modules` by `npm ci --ignore-scripts` from
+  `packages/daemon/docker/language-servers`'s own `package.json` and `package-lock.json` (the pins live
+  in that `package.json`), with their launchers (and TypeScript's `tsc` and `tsserver`, and the
+  `pyright` CLI) linked at `/usr/local/bin`. TypeScript stays on this repository's own major, since
+  `typescript-language-server` runs `tsserver`, which TypeScript 7 no longer ships; the server resolves
+  the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
   on it), `curl`, `wget`, `jq`, `ssh-keygen` (from `openssh-client`, which also brings `ssh`, `scp` and
-  `sftp`; whether those reach anything is the deployment's NetworkPolicy, not the image's business),
+  `sftp`: they reach no host that `curl`, `wget`, `git`, `python3` and `socat` on the same apt line
+  could not already reach, and what a pod may reach is Legion's ruling, the withheld `network`
+  capability row — dispatch://LEGION-5, the pod is the boundary — a declaration the capability report
+  renders, not a network control this repository ships; the package's setuid
+  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
+  and the build's final step refuses an image where any file under `/usr/lib/openssh` or
+  `/usr/bin/ssh-agent` carries one),
   and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
@@ -93,11 +101,15 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
   probe checks (it runs that executable), not something to refuse. `jq` and `ssh-keygen` are real
   binaries so a worker's subprocesses — `bun test`, a script, a subagent's shell — find them, where the
-  harness's `jq` builtin reaches only the bash tool. `uv` still installs each project's own Python, from its
-  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
-  Sandbox pod that is on the issue's volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
-  elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
-  own eval, not a project's interpreter.
+  harness's `jq` builtin reaches only the bash tool. A subprocess's `jq` is therefore the image's
+  `/usr/bin/jq`, trixie's, while the bash tool's own `jq` stays the harness's builtin, a different
+  engine (jaq), so an expression is checked with the engine the script will run
+  (`docs/solutions/legion/worker-pane-shell-gotchas.md`, "The bash tool's `jq` is jaq"). `uv` still
+  installs each project's own Python, from its `.python-version` or `requires-python`, the first time
+  the project runs (`uv sync`, `uv run`): in a Sandbox pod that is on the issue's volume
+  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
+  `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's own eval, not a project's
+  interpreter.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -127,6 +139,12 @@ wait for the role's launcher before any init container runs: `worker_boot_timeou
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
 "Liveness rules" below); a launch whose launcher has not connected by then fails and is counted.
+The image probe's own wait is derived from the same key: each attempt's budget is
+`slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
+60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
+— so the capacity stop below (under "The image is probed before it publishes") always has room,
+within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. The boot log
+names the derived bound when it applies, and so does `legion start --check-config`.
 Oh My Pi's boot after it fits the registration deadline,
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals` (360 s by default). The
 stage 4a harness's `image-probe` and `root-ready` checks (`scripts/e2e/README.md`) are where a
@@ -158,7 +176,7 @@ profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubec
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
-(`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
+(`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value; the mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My Pi settings — the probe pod's log says why — and the daemon's report shows the row open).
 An image row the image carries prints `present` with its evidence (`codegraph`'s: the CLI on PATH and
 the plugin enabled in the profile's lock, which a pod's launch loads with extension discovery on). A live row prints
 `reported` (``each session reports it at start; `legion state` renders it: <summary>``: the probe
@@ -207,8 +225,8 @@ Where the digest is published:
   `<legion version>` worker-image tag.
 
 Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
-PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion` job
-released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
+PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
+job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
 inspecting one does not print a worker-image digest.
@@ -257,9 +275,10 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `legion` job on every `main` push that touches any file the image builds from, (2) on every head of a pull
-request against `main` whose diff touches any of those files — building the PR head and publishing `sha-`
-only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. The
+the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
+from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
+the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
+workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,
@@ -290,10 +309,13 @@ host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is n
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps the `legion` job's recorded outputs) or by pushing the branch again. A whole-run rerun of a
-`release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a `legion-v` tag, re-executes
-`legion`, which releases that tag again: the image is rebuilt, the `<legion version>` tag moves to the rebuild's
-digest, and the release body's "Worker image" names that digest.
+(`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A
+whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
+`legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
+rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
+that digest. `release-envoy-listener.yaml` is the exception to `--failed`: when its `release_publish` fails at
+"Confirm the version" because another run took the tag first, only a whole-run re-run (`gh run rerun <run-id>`
+without `--failed`) heals it, since `release_build` must compute the version again and re-stamp the binaries.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
@@ -1382,6 +1404,8 @@ configuration and its own boot, since no image or pod can show them:
 - `model-fallback`: the pod's Oh My Pi has `retry.modelFallback` true, as the probe's OK line's
   `model-fallback` mark reports it; under tmux the plugin gate reads the host's Oh My Pi once the gate
   has passed. The example overlay turns it on ([Operator configuration](#operator-configuration)).
+  The mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My
+  Pi settings (the probe pod's log says why), and the daemon's report shows the row open.
 - `resource-limits`: every workflow role — and the controller's, under `controller: daemon` —
   reserves CPU and memory (`config.RoleResources.Reserved`: `runtime.kubernetes.resources.<role>`
   or the daemon's default, each both request and limit, [Issue sizing](#issue-sizing-one-reservation-per-pod)),
@@ -1469,9 +1493,12 @@ daemon sees), as `capability <name> is open: <detail>; to record a decision, add
 capabilities.decided.<name>: "<reason>"` on a deployment row and `capability <name> is open: pod
 <sandbox>/<container> (<role>, <issue>): <fact>` — the row's rendered detail — on a live one.
 `legion state --json`: under `capabilities` every row as `{name, status, detail, decision?,
-configLine?}`, `status` one of `present`, `installed`, `unchecked`, `withheld`, `decided` or
-`open` (daemon API contract 16 added the list and contract 21 dropped `live` from it; the image
-rows are `present` once the probe passed and `unchecked` before it or under tmux), and under each
+configLine?, source?}`, `status` one of `present`, `unchecked`, `withheld`, `decided` or `open`
+(daemon API contract 16 added the list, contract 21 dropped `live` from it and contract 25 dropped
+`installed`, which nothing has emitted since LEGION-629; the image rows are `present` once the
+probe passed and `unchecked` before it or under tmux), `source` (`configuration` or `boot`, contract
+25) on a deployment row alone — what legion.yaml alone decides or what boot measured — never on a
+live row, and under each
 claim's `capabilities` (`issues.<KEY>.architect` and `issues.<KEY>.workers.<role>.claim`) that
 claim's latest report — `measuredAt`, `incarnation`, `ok` (the names its checks passed) and
 `open[{name, detail}]` — whatever process sent it; compare its `incarnation` with the claim's
@@ -1519,7 +1546,10 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
 3. Each role container runs `legion launcher --connect tcp://<advertise_host, or bind with none
    set>:<worker_stream_port> --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1
    of that role, starting and stopping the role's `legion worker-shim` (Oh My Pi) child on the
-   daemon's command, never a worker process of its own.
+   daemon's command, never a worker process of its own. Its log has one line for each connection
+   the daemon accepted, `launcher: connected to the daemon at <address> as launcher <id> (sandbox
+   <name>, role <role>, pod <uid>)`, and one for each connection that ended, `launcher: daemon
+   connection: <why>; reconnecting`, so a connected launcher reads apart from one still dialing.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (20Gi by default) and `storage_class`, labelled
@@ -1606,16 +1636,23 @@ not a prompt. Six role shims share one workspace, so the warm-up holds a lease a
 `.codegraph/legion-warm.lock` for its run — an exclusive create whose holder refreshes its mtime
 every 10 s, taken over once it is 60 s stale, the takeover itself under a second exclusive create
 beside it so two shims that both read one stale lease never both build — and a shim that finds the
-lease held leaves the build to its holder. A stop mid-build — the launcher's one SIGTERM to
-the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim exits only
-once the warm-up has released its lease, inside the pod's `terminationGracePeriodSeconds`
-(`worker_stop_timeout_seconds`, which the launcher passes the shim as `--stop-grace`), so the
-relaunch is never told a live build holds the workspace; it runs the warm-up again, and `status` on
-the volume's existing index answers complete, so nothing runs, or reports the index the stop left
-partial, which `codegraph index` repairs. The tester's `affected` and
-the reviewer's `impact`/`callers` queries answer once `codegraph status --json` reports
-`index.state: "complete"`; before that a role falls back to grep, as its prompt says. The init
-containers never call `codegraph`.
+lease held leaves the build to its holder. When a build finishes, the shim's warm-up logs one line in
+the role container's log, `codegraph warm-up for <workspace> built the index: codegraph init took
+<duration>, done <duration> after launch` — the build's own duration and the time since the role's
+launch (`codegraph index` in place of `init` for a repair) — which stage 4b's `repository-tools`
+checkpoint reads (`kubectl logs <pod> --all-containers`). A stop mid-build — the launcher's one
+SIGTERM to the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim
+exits only once the warm-up has released its lease: it waits for that release at least 3 s and at
+most what the pod's `terminationGracePeriodSeconds` (`worker_stop_timeout_seconds`, which the
+launcher passes the shim as `--stop-grace`) leaves once the agent's 5 s grace and the 1 s stdout
+drain are spent (4 s with the default 10 s). The whole stop fits inside the grace from 9 s up, so the
+daemon refuses a smaller `worker_stop_timeout_seconds` under `runtime: kubernetes` at configuration
+load (`legion start --check-config` says so, quoting the key and the floor), and the relaunch is
+never told a live build holds the workspace; it runs the warm-up again, and `status` on the volume's
+existing index answers complete, so nothing runs, or reports the index the stop left partial, which
+`codegraph index` repairs. The tester's `affected` and the reviewer's `impact`/`callers` queries
+answer once `codegraph status --json` reports `index.state: "complete"`; before that a role falls
+back to grep, as its prompt says. The init containers never call `codegraph`.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;
@@ -1911,8 +1948,11 @@ A pool with no room for the probe pod itself does not refuse the boot. The probe
 `Pending` with `PodScheduled=False Unschedulable`; once it has been so for longer than
 `worker_boot_timeout_seconds` — the same bound the liveness rules give an issue pod, long enough
 for Karpenter to add a node when the pool's limits allow one, so a cold pool scaling up is not
-read as full — the attempt ends waiting on capacity (`stuck`, `internal/runtime/sandbox/probe.go`),
-its Sandbox deleted, and the daemon logs `boot probe is waiting on capacity; running it again` with
+read as full — the attempt ends waiting on capacity (`stuck`, `internal/runtime/sandbox/probe.go`).
+That stop can always fire within the attempt: the attempt's own budget is derived from
+`worker_boot_timeout_seconds` whenever `slow_command_timeout_seconds` would otherwise leave it less
+room (`ProbeBudget`, "Image size and pull time" above), so the attempt outlives the boot timeout by
+construction. Ending the attempt, its Sandbox deleted, the daemon logs `boot probe is waiting on capacity; running it again` with
 `probe=worker image`, the pod's name and the scheduler's own reason in `detail` (`probe pod
 legion-probe-<project>-<digest12> is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu …`)
 and `retryIn`, the probe's longest interval, 5 min. It then creates the probe Sandbox again, as many
@@ -2243,6 +2283,37 @@ and is charged no launch failure. A pod log read is the exception: it is bounded
 its wait on the limiter included, since client-go bounds a log stream per attempt and not across
 its retries.
 
+An API server under load answers some requests overloaded or failed instead of acting on them: API
+Priority and Fairness's 429, once client-go's own Retry-After retries ran out, and any 5xx, such as
+the 500 etcd's throttle reaches a client as (`rpc error: code = ResourceExhausted desc =
+etcdserver: throttle: too many requests`). Such an answer to one of a launch's requests refused
+nothing the launch did, so the runtime sends that request again after a jittered backoff (250 ms,
+doubling to 8 s) rather than failing the launch, and the launch goes on from that request once the
+server answers it. Each request waits so for up to a boot timeout from its first overloaded
+answer, or until the launch step it belongs to ends when that comes first, so a try under a long
+throttle can take several boot timeouts, one per request it sends. Two of a launch's waits send a
+request of their own, and that request ends with the wait's budget: the wait for a Sandbox being
+deleted, and the read confirming the old pod is gone. A failed launch's suspension of
+its Sandbox waits the server out for at most 30 s. Each throttled request logs `sandbox runtime:
+the API server answered a launch's request overloaded; sending it again after a backoff` once,
+naming it, and `… it had answered overloaded` once the server answers, with how many overloaded
+answers it waited out. No launch failure is charged while it waits. A request the server still
+answers overloaded at its deadline fails the launch with that answer, which says how often and
+how long it was waited out, and the failure is charged as any other is.
+
+The rule an operator sees: a 429, a 5xx, or a timeout the server itself reports is waited out; a
+refusal of the request (a 403, a 409, a 422, an admission webhook's denial) and no answer at all
+(the client's own timeout, a connection that never reached the server) fail the launch, charged.
+`serverBusy` in `internal/runtime/sandbox/busy.go` is the one place that decides it. A write sent
+again may have been applied the first time: a Secret create refused as already existing, or an
+update refused as a conflict, is read and written once more, and a fenced relabel of the Sandbox
+refused as invalid is read again, failing the try when the Sandbox has not changed since. While
+the API server refuses the informers' own lists or watches as overloaded, a launch waiting for its
+role launcher waits on, within its deadline, until the informers list and watch again. Only a
+launch's requests wait the server out; a sweep, a claim's suspension or a hello's credential read
+fails on the answer and is tried again by its own caller. A charged launch failure is followed by
+the supervisor's launch backoff ([Supervision](site/src/content/docs/legion/concepts.md#supervision)).
+
 A role's launcher credential is read once however often its launcher says hello. The read is
 single-flight per Secret of a Sandbox and outlives the hello that began it: the hello waits for it
 up to 30 s and is then refused, and the launcher's next hello, a second later, joins the same read
@@ -2493,17 +2564,24 @@ issue's pod (every role container of it alike) and the image probe's.
 - **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
   directory of their own (for example `~/.local/state/legion-model-config`), which
   `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
-  ConfigMap `legion-operator-route` in namespace `legion`, its only writer. To change a role's
-  model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
-  Pods started after that use it; a running pod keeps the files it started with until it restarts,
-  since both are mounted by `subPath`, which the kubelet never refreshes. The example overlay also
-  turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried on another
-  model; which model is the repository's `retry.fallbackChains` to name): the probe pod reads the
-  effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its
-  OK line's `model-fallback` mark, and the daemon reports the `model-fallback` capability open while
-  a deployment's copy turns it off — a report, not a refusal; a `capabilities.decided.model-fallback:
-  "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability
-  report](#the-deployments-capability-report)).
+  ConfigMap `legion-operator-route` in namespace `legion`, with a server-side apply under its own
+  field manager that forces conflicts: it takes the two keys over from any tool that wrote them
+  before and names that tool's field manager on stderr. A tool that still declares the ConfigMap
+  acts at its own next apply: a forced one writes its copy back, and one without force fails on any
+  key whose value differs and leaves the operator's copy; either way, stop it declaring the
+  ConfigMap first.
+  To change a role's model, edit its line under `modelRoles` in that `overlay.yml` and run the same
+  command again. Pods started after that use it; a running pod keeps the files it started with until
+  it restarts, since both are mounted by `subPath`, which the kubelet never refreshes. The example
+  overlay also turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried
+  on another model; which model is the repository's `retry.fallbackChains` to name): the probe pod
+  reads the effective value under the operator's configuration
+  (`omp config get retry.modelFallback`) onto its OK line's `model-fallback` mark (`unread` when it
+  could not read it: the probe pod's log says
+  why), and the daemon reports the `model-fallback` capability open while a deployment's copy
+  turns it off or the probe could not read it — a report, not a refusal; a
+  `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to
+  keep it off ([The deployment's capability report](#the-deployments-capability-report)).
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only

@@ -8,6 +8,8 @@
 package capabilities
 
 import (
+	"context"
+	"fmt"
 	"regexp"
 	"slices"
 	"strings"
@@ -72,39 +74,67 @@ type Capability struct {
 	// Ruling is the dispatch://LEGION-<n> a withheld row cites; for a live row, the issue whose
 	// check proves it (never ""); "" otherwise.
 	Ruling string
-	// Awaits is, on an image row whose tooling the image carries but a pod's agent cannot use yet,
-	// the sentence that says so and names the issue whose landing changes that; "" otherwise. The
-	// report's job is to name what a worker lacks, so a tool the image carries but no pod loads is
-	// not present: CheckImage and Deployment.Report render such a row installed, with this sentence
-	// after the evidence, rather than present. No row awaits at present: CodeGraph did, until
-	// LEGION-629 turned extension discovery on in the pod's launch (runtime/sandbox/manifest.go,
-	// agentArgv), so the profile's plugin now loads in every pod.
-	Awaits string
 }
 
 // Table is every capability, in the order the probe prints them: the declared list, printed
 // whole. Image rows are checked by CheckImage; the others are rendered as what they are.
 var Table = []Capability{
-	{Subagents, SiteLive, "dispatches task subagents, each on the model its role configures", "dispatch://LEGION-663", ""},
-	{EvalJS, SiteImage, "evaluates JavaScript in Oh My Pi's own runtime", "", ""},
-	{EvalPython, SiteImage, "evaluates Python through the interpreter `omp setup python` manages", "", ""},
-	{Browser, SiteImage, "drives a headless Chromium through the browser tools", "", ""},
-	{LSP, SiteImage, "reads diagnostics and symbols from the Go, TypeScript and Python language servers", "", ""},
-	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", "", ""},
-	{WebSearch, SiteLive, "searches the web through the web-search tool", "dispatch://LEGION-663", ""},
-	{Skills, SiteImage, "loads the skills Legion's prompts name", "", ""},
-	{MCP, SiteLive, "reaches the MCP servers the deployment configures", "dispatch://LEGION-663", ""},
-	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-629", ""},
-	{DispatchEnvoyTools, SiteLive, "reaches Dispatch through the `dispatch` command and Envoy through the pi-envoy tools", "dispatch://LEGION-663", ""},
-	{GitHub, SiteLive, "reads and writes GitHub through its plain `gh` and `git` on its role's App token file", "dispatch://LEGION-631", ""},
-	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", "", ""},
-	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", "", ""},
-	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun, uv, kubectl, jq and ssh-keygen", "", ""},
-	{ResourceLimits, SiteDeployment, "runs within the CPU and memory the deployment's pod resources give it", "", ""},
-	{PoolCapacity, SiteDeployment, "starts in a Legion pool with room for the image probe's reservation at boot", "", ""},
-	{Network, SiteWithheld, "reaches beyond the pod's own network: the pod is the boundary", "dispatch://LEGION-5", ""},
-	{OperatorSetup, SiteWithheld, "installs or configures its own dependencies in the pod: Legion owns its dependencies", "dispatch://LEGION-200", ""},
-	{ProductionIdentities, SiteWithheld, "acts under a production identity of its own", "dispatch://LEGION-551, dispatch://LEGION-205", ""},
+	{Name: Subagents, Site: SiteLive, Summary: "dispatches task subagents, each on the model its role configures", Ruling: "dispatch://LEGION-663"},
+	{Name: EvalJS, Site: SiteImage, Summary: "evaluates JavaScript in Oh My Pi's own runtime"},
+	{Name: EvalPython, Site: SiteImage, Summary: "evaluates Python through the interpreter `omp setup python` manages"},
+	{Name: Browser, Site: SiteImage, Summary: "drives a headless Chromium through the browser tools"},
+	{Name: LSP, Site: SiteImage, Summary: "reads diagnostics and symbols from the Go, TypeScript and Python language servers"},
+	{Name: CodeGraph, Site: SiteImage, Summary: "queries the CodeGraph index for affected tests, impact and callers"},
+	{Name: WebSearch, Site: SiteLive, Summary: "searches the web through the web-search tool", Ruling: "dispatch://LEGION-663"},
+	{Name: Skills, Site: SiteImage, Summary: "loads the skills Legion's prompts name"},
+	{Name: MCP, Site: SiteLive, Summary: "reaches the MCP servers the deployment configures", Ruling: "dispatch://LEGION-663"},
+	{Name: RepositoryExtensions, Site: SiteLive, Summary: "loads the Oh My Pi extensions the repository it works carries", Ruling: "dispatch://LEGION-629"},
+	{Name: DispatchEnvoyTools, Site: SiteLive, Summary: "reaches Dispatch through the `dispatch` command and Envoy through the pi-envoy tools", Ruling: "dispatch://LEGION-663"},
+	{Name: GitHub, Site: SiteLive, Summary: "reads and writes GitHub through its plain `gh` and `git` on its role's App token file", Ruling: "dispatch://LEGION-631"},
+	{Name: Secrets, Site: SiteDeployment, Summary: "reads the secrets the deployment grants its pod generation through the agent-secrets broker"},
+	{Name: ModelFallback, Site: SiteDeployment, Summary: "falls back to another model when its own is unavailable (retry.modelFallback)"},
+	{Name: Toolchain, Site: SiteImage, Summary: "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun, uv, kubectl, jq and ssh-keygen"},
+	{Name: ResourceLimits, Site: SiteDeployment, Summary: "runs within the CPU and memory the deployment's pod resources give it"},
+	{Name: PoolCapacity, Site: SiteDeployment, Summary: "starts in a Legion pool with room for the image probe's reservation at boot"},
+	{Name: Network, Site: SiteWithheld, Summary: "reaches beyond the pod's own network: the pod is the boundary", Ruling: "dispatch://LEGION-5"},
+	{Name: OperatorSetup, Site: SiteWithheld, Summary: "installs or configures its own dependencies in the pod: Legion owns its dependencies", Ruling: "dispatch://LEGION-200"},
+	{Name: ProductionIdentities, Site: SiteWithheld, Summary: "acts under a production identity of its own", Ruling: "dispatch://LEGION-551, dispatch://LEGION-205"},
+}
+
+// renderer renders one row of Table at each site but SiteWithheld, which render renders itself:
+// every withheld row's state is the same shape wherever Table is walked, so it lives in one place.
+type renderer struct {
+	image      func(row Capability) State
+	live       func(row Capability) State
+	deployment func(row Capability) State
+}
+
+// render renders every row of Table, in its order, dispatching each to r's function for its site;
+// a withheld row renders itself: State{Name, StatusWithheld, the ruling and the summary}. CheckImage
+// and Deployment.Report are its two callers, each with the renderer that gives a row's state as
+// that surface knows it. A ctx that ends ends the walk — the rows rendered so far, and an error
+// wrapping ctx's — since an image row's rendering runs commands under it; Report's renderers run
+// none and pass a context that never ends.
+func render(ctx context.Context, r renderer) ([]State, error) {
+	states := make([]State, 0, len(Table))
+	for _, row := range Table {
+		var state State
+		switch row.Site {
+		case SiteImage:
+			state = r.image(row)
+		case SiteLive:
+			state = r.live(row)
+		case SiteDeployment:
+			state = r.deployment(row)
+		case SiteWithheld:
+			state = State{Name: row.Name, Status: StatusWithheld, Detail: withheldDetail(row)}
+		}
+		if err := ctx.Err(); err != nil {
+			return states, fmt.Errorf("capability check: %w", err)
+		}
+		states = append(states, state)
+	}
+	return states, nil
 }
 
 // Decidable is the SiteDeployment names in Table order: what a legion.yaml decided line may name,

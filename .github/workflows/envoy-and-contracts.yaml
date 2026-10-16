@@ -533,7 +533,7 @@ jobs:
       - name: Test pi-envoy
         run: bun run test
         working-directory: packages/pi-envoy
-      # The release's pack (release.yaml's pi_envoy job), which is also this job's build: the
+      # The release's pack (release.yaml's pi_envoy_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
       # license cannot be determined) and stages this plugin's four skills. The listing shows the
@@ -594,7 +594,7 @@ jobs:
       - name: Test pi-legion
         run: bun run test
         working-directory: packages/pi-legion
-      # The release's pack (release.yaml's pi_legion job), which is also this job's build: the
+      # The release's pack (release.yaml's pi_legion_build job), which is also this job's build: the
       # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
       # legion.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
       # license cannot be determined) and stages this plugin's eight skills. The listing shows the
