@@ -75,10 +75,12 @@ const (
 	jobCheckTimeout = 10 * time.Second
 )
 
-// jobClock is the time JobIntake schedules by; a test hands it a clock it moves itself.
+// jobClock is the time JobIntake schedules by; a test hands it a clock it moves itself. Its timer
+// calls f once the clock reaches at, at once when it already has, so a clock that moves between the
+// read and the arm fires the timer all the same (api's hubClock has the same shape).
 type jobClock interface {
 	Now() time.Time
-	AfterFunc(d time.Duration, f func()) jobTimer
+	At(at time.Time, f func()) jobTimer
 }
 
 type jobTimer interface{ Stop() bool }
@@ -87,7 +89,7 @@ type realJobClock struct{}
 
 func (realJobClock) Now() time.Time { return time.Now() }
 
-func (realJobClock) AfterFunc(d time.Duration, f func()) jobTimer { return time.AfterFunc(d, f) }
+func (realJobClock) At(at time.Time, f func()) jobTimer { return time.AfterFunc(time.Until(at), f) }
 
 // newJobIntake builds a JobIntake on natsClient, a connected client StartIntakes opens for it alone,
 // scheduling its reads by clock.
@@ -213,7 +215,7 @@ func (j *JobIntake) schedule(key runKey, production Production) {
 	if limit := run.first.Add(jobMaxWait); limit.Before(due) {
 		due = limit
 	}
-	run.timer = j.clock.AfterFunc(due.Sub(now), func() { j.fire(key, run) })
+	run.timer = j.clock.At(due, func() { j.fire(key, run) })
 }
 
 // fire ends a run's burst and reads its jobs once a read slot is free (reads). An event that

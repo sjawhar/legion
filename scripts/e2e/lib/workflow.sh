@@ -7,7 +7,8 @@
 # Sourced, never run. The caller sets
 #   work           the run's scratch directory, holding the files the lib reads: legion, the Go
 #                  daemon binary it asks for state; legion.yaml, the daemon's configuration, which
-#                  says where the daemon answers; dispatch-auth-header, the curl header line
+#                  says where the daemon answers and which GitHub Apps its roles act as
+#                  (read_app_logins); dispatch-auth-header, the curl header line
 #                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as (dispatch_get's
 #                  reads, and dispatch_agent's writes in a stand-in session's name); and
 #                  dispatch-human-header, the one the proof human's writes (dispatch_human) are sent
@@ -271,6 +272,45 @@ drive_gate() {
   wait_for_worker "$issue" planner
 }
 
+# ---- Legion's role Apps ---------------------------------------------------------------------------
+
+workflow_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# read_app_logins sets implement_app_login and review_app_login to the bot login GitHub gives each
+# role App the run's $work/legion.yaml configures, `<slug>[bot]` as REST names it, read by
+# lib/app-logins.ts from GET /app under the App's own key, as the daemon reads its own at boot. A
+# proof names no App: an App renamed on GitHub changes what this reads and no script, and a name
+# another App takes over later is never mistaken for Legion's. A stage proof calls it once, after it
+# first writes legion.yaml and before any check reads role_app, and the check fails, naming what
+# lib/app-logins.ts could not read, rather than leave a login empty.
+implement_app_login=
+review_app_login=
+read_app_logins() {
+  local logins
+  logins=$(bun "$workflow_lib/app-logins.ts" "$work/legion.yaml") ||
+    fail "lib/app-logins.ts could not read the Legion role Apps' bot logins from GitHub (its reason is above)"
+  implement_app_login=$(jq -er .implement <<<"$logins") || fail "lib/app-logins.ts printed no implement App login: $logins"
+  review_app_login=$(jq -er .review <<<"$logins") || fail "lib/app-logins.ts printed no review App login: $logins"
+  note "the implement App acts on GitHub as $implement_app_login and the review App as $review_app_login (GET /app)"
+}
+# role_app ROLE prints the bot login of the App ROLE acts as, as REST names it: the implement App's
+# for the implementer and the merger, the review App's for every other role. role_app_slug ROLE
+# prints the bare slug GraphQL names that bot by (`author { login }` drops the `[bot]`). Each fails,
+# saying so, before read_app_logins has run.
+role_app() {
+  local login
+  case "$1" in implementer | merger) login=$implement_app_login ;; *) login=$review_app_login ;; esac
+  [ -n "$login" ] || {
+    echo "role_app: no App login for $1: read_app_logins has not run" >&2
+    return 1
+  }
+  printf '%s' "$login"
+}
+role_app_slug() {
+  local login
+  login=$(role_app "$1") || return 1
+  printf '%s' "${login%"[bot]"}"
+}
+
 # ---- the proof human on the smoke repository ------------------------------------------------------
 
 # The proof human is the devbox's ordinary gh acting as the sjawhar-agent App, which the dotfiles gh
@@ -311,9 +351,10 @@ pull_request_product_files() {
 # the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
 # as the final approval is, rather than posted from the proof's own gh.
 request_changes_as_reviewer() {
-  local issue=$1 round=$2 body=$3
-  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as legion-reviewer[bot] with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
-  until_true 300 "legion-reviewer[bot]'s round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
+  local issue=$1 round=$2 body=$3 app
+  app=$(role_app reviewer) || return 1
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
+  until_true 300 "$app's round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
 }
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
 # reviews on the proof's pull request.
@@ -338,12 +379,14 @@ round_correction_pushed() {
 }
 
 # review_app_reviews FILTER FIELD prints FIELD of each review the review App posted on the proof's
-# pull request that FILTER, a jq condition, selects. REST names the review App's account
-# legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`) drops the suffix, and a user could hold
-# the bare name.
+# pull request that FILTER, a jq condition, selects. REST names the review App's account by its bot
+# login, role_app's `<slug>[bot]`; GraphQL (`gh pr view --json reviews`) drops the suffix, and a
+# user could hold the bare name.
 review_app_reviews() {
+  local app
+  app=$(role_app reviewer) || return 1
   timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and ($1)) | .$2"
+    --jq ".[] | select(.user.login == \"$app\" and ($1)) | .$2"
 }
 # reviewer_approved_head: the review App approved the pull request's current head.
 reviewer_approved_head() {
@@ -366,9 +409,10 @@ reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].w
 # which retro's last commit then removes. The merge carries the run's retro learnings onto the
 # smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
-  local issue=$1
+  local issue=$1 app
+  app=$(role_app reviewer) || return 1
   send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo as your role says, taking the round's steps in the order it gives, and complete the reviewer handoff. This is the round's last review."
-  until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+  until_true 300 "$app approval of pull request #$pr_number at its head" reviewer_approved_head
 }
 # The smoke repository's main is shared by every proof on this box, and a proof merge leaves what it
 # carries there until clean_smoke_main removes it. Another run's merge in that window
@@ -742,7 +786,6 @@ handoff_fact_commit() {
   [ "$(review_round "$1")" = "$4" ] || return 0
   role_handoff "$1" "$2"
 }
-role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
 # assert_handoff_committer ISSUE ROLE PHASE ROUND: the pushed commit carrying the handoff that the
 # role's `handoff_complete` reported is authored and committed by the role's own App, read from the
 # issue's workspace (the role pushed it from there, so its clone holds the commit), so no other
@@ -767,13 +810,14 @@ assert_handoff_committer() {
 # resolves it), so the thread's author is read back and anything but a bot outside Legion's Apps is
 # refused, naming it.
 post_bot_thread() {
-  local head posted id login type
+  local head posted id login type implement review
+  implement=$(role_app implementer) && review=$(role_app reviewer) || return 1
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
   posted=$(jq -cn --arg head "$head" --arg path "$smoke_file" \
     '{commit_id:$head, path:$path, subject_type:"file", body:"Stage 3 proof bot: is this file change needed?"}' |
     timeout 60 gh api --method POST "repos/$repo/pulls/$pr_number/comments" --input - --jq '"\(.node_id) \(.user.login) \(.user.type)"') || return 1
   read -r id login type <<<"$posted"
-  if [ "$type" != Bot ] || [ "$login" = "$(role_app implementer)" ] || [ "$login" = "$(role_app reviewer)" ]; then
+  if [ "$type" != Bot ] || [ "$login" = "$implement" ] || [ "$login" = "$review" ]; then
     echo "the thread was opened by $login ($type), not a bot account outside Legion's role Apps: the devbox gh is not acting as its App" >&2
     return 1
   fi
@@ -802,14 +846,15 @@ bot_thread_node_id() {
         reviewThreads(first: 100) { nodes { id comments(first: 1) { nodes { id } } } } } } }' \
     --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") | .id" | grep .
 }
-# bot_thread_resolved COMMENT AUTHOR: the bot's thread is resolved and carries a reply by AUTHOR
-# (legion-implementer, which answered it; legion-reviewer, which adjudicated it and named it to
-# the implementer). Only the pull request author's App resolves, so the resolver is not read; no
-# word of the reply is read either: nothing resolves a thread on a magic form.
+# bot_thread_resolved COMMENT ROLE: the bot's thread is resolved and carries a reply by ROLE's App
+# (role_app_slug: the implementer's, which answered it; the reviewer's, which adjudicated it and
+# named it to the implementer). Only the pull request author's App resolves, so the resolver is not
+# read; no word of the reply is read either: nothing resolves a thread on a magic form.
 bot_thread_resolved() {
-  local replies
+  local replies author
+  author=$(role_app_slug "$2") || return 1
   replies=$(bot_thread_replies "$1") || return 1
-  [ "$(head -1 <<<"$replies")" = true ] && grep -q "^$2"$'\t' <<<"$replies"
+  [ "$(head -1 <<<"$replies")" = true ] && grep -q "^$author"$'\t' <<<"$replies"
 }
 # review_threads prints every review thread on the proof's pull request as one JSON array: each
 # thread's node id, its isResolved, and each comment's author (GraphQL names an App by its bare
@@ -835,25 +880,31 @@ review_threads() {
 # selector does not rely on that) is never picked: only its requested-changes review names the
 # correction, so only the thread that review opened is the one a correction answers.
 reviewer_thread() {
-  local threads
+  local threads author
+  author=$(role_app_slug reviewer) || return 1
   threads=$(review_threads) || return 1
-  jq -er '[.[] | select(.comments[0].author == "legion-reviewer" and .comments[0].reviewState == "CHANGES_REQUESTED")] as $mine
+  jq -er --arg author "$author" '[.[] | select(.comments[0].author == $author and .comments[0].reviewState == "CHANGES_REQUESTED")] as $mine
     | if ($mine | length) == 1 then $mine[0].id else error("the Legion reviewer opened \($mine | length) CHANGES_REQUESTED review threads, want exactly one") end' <<<"$threads"
 }
 # review_thread ID prints that thread, as review_threads prints each.
 review_thread() { review_threads | jq -ce --arg id "$1" '.[] | select(.id == $id)'; }
-# thread_resolved_by FILE AUTHOR: the thread FILE holds (review_thread's output) is resolved and its
-# newest submitted comment is AUTHOR's: the implementer's `Fixed in <commit>` reply before its own
-# resolution, or the reviewer's answer on a re-review that left the resolution standing.
+# thread_resolved_by FILE ROLE: the thread FILE holds (review_thread's output) is resolved and its
+# newest submitted comment is ROLE's App's (role_app_slug): the implementer's `Fixed in <commit>`
+# reply before its own resolution, or the reviewer's answer on a re-review that left the resolution
+# standing.
 thread_resolved_by() {
-  jq -e --arg author "$2" '.isResolved == true
+  local author
+  author=$(role_app_slug "$2") || return 1
+  jq -e --arg author "$author" '.isResolved == true
     and ([.comments[] | select(.state == "SUBMITTED")] | last | .author == $author)' "$1" >/dev/null
 }
-# thread_resolved_with_reply FILE AUTHOR: the thread FILE holds is resolved and carries a submitted
-# reply by AUTHOR somewhere after its opening comment: the bot's thread the reviewer answered and
-# the implementer, told its id, resolved without a reply of its own.
+# thread_resolved_with_reply FILE ROLE: the thread FILE holds is resolved and carries a submitted
+# reply by ROLE's App (role_app_slug) somewhere after its opening comment: the bot's thread the
+# reviewer answered and the implementer, told its id, resolved without a reply of its own.
 thread_resolved_with_reply() {
-  jq -e --arg author "$2" '.isResolved == true
+  local author
+  author=$(role_app_slug "$2") || return 1
+  jq -e --arg author "$author" '.isResolved == true
     and any(.comments[1:][]; .state == "SUBMITTED" and .author == $author)' "$1" >/dev/null
 }
 # threads_all_resolved FILE ID: every review thread FILE holds (review_threads' output) is resolved,
@@ -866,11 +917,12 @@ threads_all_resolved() {
 # ROUND handoff, the head its own handoff push made. The Go reviewer prompt orders the round so: an
 # approval of a head the handoff push then replaces is of a head the pull request no longer has.
 assert_review_of_own_handoff() {
-  local handoff reviewed
+  local handoff reviewed app
+  app=$(role_app reviewer) || return 1
   handoff=$(handoff_fact_commit "$1" reviewer reviewing "$2")
   [ -n "$handoff" ] || fail "$1 has no reviewer reviewing round $2 handoff fact"
   reviewed=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and .state == \"$3\") | .commit_id" | tail -1) ||
+    --jq ".[] | select(.user.login == \"$app\" and .state == \"$3\") | .commit_id" | tail -1) ||
     fail "read the reviews on pull request #$pr_number"
   [ "$reviewed" = "$handoff" ] || fail "the reviewer's round $2 $3 review names $reviewed, not $handoff, the head its handoff push made"
   note "the reviewer's round $2 $3 review names $handoff, the head its own handoff push made"

@@ -3737,7 +3737,7 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		runSelfHealthMonitor(ctx, logger, probe, nil, nil, nil, time.Millisecond, 3)
+		runSelfHealthMonitor(ctx, logger, probe, nil, nil, nil, nil, time.Millisecond, 3)
 		close(done)
 	}()
 
@@ -3754,6 +3754,211 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("monitor did not stop after shutdown")
+	}
+}
+
+// TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection is the sustained disconnection this
+// threshold exists for: isUnrecoverableSelfHealthFailure reads every failure as transient while
+// NATS is disconnected, by design, so the rebuild path never runs and terminalFailures never
+// advances, and disconnectedFailureThreshold is the one bound on that state: a connection that
+// never recovers on its own (a broken tunnel nats.go keeps retrying without ever reaching the
+// server) ends in a restart rather than a listener logging this WARN forever. The bound is
+// exactly twenty probes, ten minutes at the
+// production interval.
+func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T) {
+	stuck := errors.New("nats: outbound buffer limit exceeded")
+	var probes atomic.Int32
+	probe := func() error { probes.Add(1); return stuck }
+	// Mirrors isUnrecoverableSelfHealthFailure's own rule while disconnected: never terminal, so
+	// rebuild must never run for this failure.
+	isUnrecoverable := func(error) bool { return false }
+	connected := func() bool { return false }
+	var rebuilds atomic.Int32
+	rebuild := func() error { rebuilds.Add(1); return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminatedAt := make(chan int32, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, connected, rebuild,
+			func() { terminatedAt <- probes.Load() }, time.Millisecond, 3)
+	}()
+	select {
+	case got := <-terminatedAt:
+		if got != 20 {
+			t.Fatalf("the monitor terminated after %d disconnected probes, want exactly 20", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor never terminated a disconnected probe that never recovered")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the monitor did not return after terminating")
+	}
+	if got := rebuilds.Load(); got != 0 {
+		t.Fatalf("rebuilds = %d, want 0: a disconnected client is never rebuilt", got)
+	}
+}
+
+// TestRunSelfHealthMonitor_CountsADisconnectedProbeAfterARebuild guards the probe the monitor runs
+// right after a successful rebuild: when NATS drops during it, that probe is the first of the
+// twenty, so a connected terminal failure, a rebuild, and then a disconnection that never recovers
+// end in a restart after exactly twenty disconnected probes, not twenty-one.
+func TestRunSelfHealthMonitor_CountsADisconnectedProbeAfterARebuild(t *testing.T) {
+	terminal := errors.New("interest watcher stopped")
+	outage := errors.New("interest kv: nats: outbound buffer limit exceeded")
+	var calls, disconnectedProbes atomic.Int32
+	var disconnected atomic.Bool
+	probe := func() error {
+		if calls.Add(1) == 1 {
+			return terminal
+		}
+		// The probe right after the rebuild, and every one after it, reads NATS as gone.
+		disconnected.Store(true)
+		disconnectedProbes.Add(1)
+		return outage
+	}
+	var rebuilds atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminatedAt := make(chan int32, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe,
+			func(err error) bool { return errors.Is(err, terminal) },
+			func() bool { return !disconnected.Load() },
+			func() error { rebuilds.Add(1); return nil },
+			// A terminal bound well past twenty, so only the disconnected bound can end the run.
+			func() { terminatedAt <- disconnectedProbes.Load() }, time.Millisecond, 100)
+	}()
+	select {
+	case got := <-terminatedAt:
+		if got != 20 {
+			t.Fatalf("the monitor terminated after %d disconnected probes, the post-rebuild probe among them, want exactly 20", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor never terminated a disconnection that began on the probe after a rebuild")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the monitor did not return after terminating")
+	}
+	if got := rebuilds.Load(); got != 1 {
+		t.Fatalf("rebuilds = %d, want 1", got)
+	}
+}
+
+// TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailure guards
+// disconnectedFailureThreshold's scope: it counts only failures while connected reads false, never
+// an unclassified failure the client reads while still connected (a JetStream deadline isUnrecoverable
+// does not recognise, say). Past disconnectedFailureThreshold consecutive connected failures, the
+// monitor must still be running: mixing the two counts would terminate a listener whose NATS is up
+// over a fault that never touches the disconnected path at all.
+func TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailure(t *testing.T) {
+	var probeCalls atomic.Int32
+	probe := func() error {
+		probeCalls.Add(1)
+		return errors.New("interest kv: context deadline exceeded")
+	}
+	isUnrecoverable := func(error) bool { return false }
+	connected := func() bool { return true }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, connected, nil,
+			func() { terminated <- struct{}{} }, time.Millisecond, 3)
+	}()
+	deadline := time.After(2 * time.Second)
+	for probeCalls.Load() < disconnectedFailureThreshold*2 {
+		select {
+		case <-terminated:
+			t.Fatalf("the monitor terminated after %d connected, non-terminal failures: the disconnected threshold must not count these", probeCalls.Load())
+		case <-deadline:
+			t.Fatalf("probe calls = %d, want at least %d", probeCalls.Load(), disconnectedFailureThreshold*2)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not stop after shutdown")
+	}
+}
+
+// TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoveries guards the resets
+// of disconnectedFailureThreshold's count: brief outages, each shorter than the bound and each
+// ended by a probe that reads connected (a healthy probe, or a failure while connected), never add
+// up to a restart, however many of them a listener rides out, since each connected probe starts
+// the count again.
+func TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoveries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// between is the probe result that ends each outage: nil is a healthy probe, an error is a
+		// failure read while connected.
+		between error
+	}{
+		{name: "a healthy probe ends each outage", between: nil},
+		{name: "a failure while connected ends each outage", between: errors.New("interest kv: context deadline exceeded")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outage := errors.New("interest kv: nats: outbound buffer limit exceeded")
+			const outages = 3
+			cycle := disconnectedFailureThreshold // threshold-1 disconnected failures, then one connected probe
+			var calls atomic.Int32
+			var disconnected atomic.Bool
+			finished := make(chan struct{})
+			probe := func() error {
+				n := int(calls.Add(1))
+				if n > outages*cycle {
+					disconnected.Store(false)
+					select {
+					case finished <- struct{}{}:
+					default:
+					}
+					return nil
+				}
+				if n%cycle == 0 {
+					disconnected.Store(false)
+					return tc.between
+				}
+				disconnected.Store(true)
+				return outage
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			terminated := make(chan struct{}, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				runSelfHealthMonitor(ctx, logging.New("test"), probe,
+					func(error) bool { return false },
+					func() bool { return !disconnected.Load() },
+					nil,
+					func() { terminated <- struct{}{} }, time.Millisecond, 3)
+			}()
+			select {
+			case <-finished:
+			case <-terminated:
+				t.Fatalf("the monitor terminated after %d probes: %d outages of %d disconnected failures each, every one ended by a connected probe, must not add up to the bound",
+					calls.Load(), outages, disconnectedFailureThreshold-1)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("probe calls = %d, want more than %d", calls.Load(), outages*cycle)
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("monitor did not stop after shutdown")
+			}
+		})
 	}
 }
 
@@ -3784,6 +3989,7 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	monitorUntilRecovered(t, "the registry on the live connection", 5*time.Second, time.Millisecond,
 		registry.Ping,
 		func(err error) bool { return errors.Is(err, natsgo.ErrConnectionClosed) },
+		client.Connected,
 		func() error {
 			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "interest", cache: registry}})
 		},
@@ -3848,6 +4054,7 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 		func(err error) bool {
 			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "session", cache: sessions}})
 		},
+		client.Connected,
 		func() error {
 			rebuilds.Add(1)
 			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "session", cache: sessions}})
@@ -3902,7 +4109,7 @@ func TestRunSelfHealthMonitor_KeepsRunningThroughFaultsEachRebuildRepairs(t *tes
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSelfHealthMonitor(ctx, logging.New("test"), probe, isTerminal, rebuild,
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isTerminal, func() bool { return true }, rebuild,
 			func() { terminated <- struct{}{} }, interval, 3)
 	}()
 
@@ -3976,6 +4183,7 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 				runSelfHealthMonitor(ctx, logging.NewWithWriter("test", &logs),
 					probe,
 					func(err error) bool { return errors.Is(err, stuck) },
+					func() bool { return true },
 					rebuild,
 					func() { terminated <- struct{}{} },
 					time.Millisecond,
@@ -4057,6 +4265,7 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 		runSelfHealthMonitor(ctx, logging.New("test"),
 			func() error { return checkSelfHealth(caches, nil) },
 			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
+			client.Connected,
 			func() error {
 				rebuilds.Add(1)
 				return rewatchListenerKVWatchers(client.Conn, caches)
@@ -4082,9 +4291,9 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 }
 
 // monitorUntilRecovered runs the self-health monitor with the listener's threshold of three over
-// probe, isUnrecoverable and rebuild, until a probe passes. It fails the test when the monitor
-// terminates first or nothing recovers within wait, naming what should have recovered.
-func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Duration, probe func() error, isUnrecoverable func(error) bool, rebuild func() error) {
+// probe, isUnrecoverable, connected and rebuild, until a probe passes. It fails the test when the
+// monitor terminates first or nothing recovers within wait, naming what should have recovered.
+func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Duration, probe func() error, isUnrecoverable func(error) bool, connected func() bool, rebuild func() error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -4107,6 +4316,7 @@ func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Durati
 				return err
 			},
 			isUnrecoverable,
+			connected,
 			rebuild,
 			func() { terminated <- struct{}{} },
 			interval,
@@ -4185,6 +4395,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		func(err error) bool {
 			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "interest", cache: registry}})
 		},
+		client.Connected,
 		func() error {
 			return rebuildListenerDependencies(client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
 		},

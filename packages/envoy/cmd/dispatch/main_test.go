@@ -897,8 +897,10 @@ func TestCensusSubcommandExitsOneWhenAPendingMigrationsCensusCountsRows(t *testi
 	if _, err := database.Pool.Exec(ctx, `
 		alter table asks drop constraint asks_approval_kind_check;
 		delete from schema_migrations where version >= 53;
-		-- The template already applied 0068, which dropped users; a database at 52 still has it.
+		-- The template already applied 0068, which dropped users, and 0111, which dropped
+		-- delivery_settings.production_job_name; a database at 52 still has both.
 		create table users (login text primary key);
+		alter table delivery_settings add column production_job_name text;
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U');

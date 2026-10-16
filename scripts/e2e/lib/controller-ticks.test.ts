@@ -3,11 +3,12 @@ import { runJq } from "./run-jq";
 
 // lib/controller-ticks.jq, as stage4b-sandbox-tree.sh's controller checkpoint loads it: the
 // openCapabilities list read from a tick delivery pi-envoy rendered as TOON, the ticks of a
-// controller session read from its transcript, and the verdict that every tick names the open rows
-// of the daemon running now. The finding the verdict holds: three `legion start`s run between boot
-// and the controller checkpoint, each re-probes the image, and pool-capacity is each probe's own
-// verdict, so a run that scaled the pool at boot and found it warm at the restarts carries
-// ["secrets"] on its ticks against boot's two rows.
+// controller session read from its transcript, and the verdict that judges each tick alone against
+// the two lists the deployment can open. The finding behind the per-tick verdict: three `legion
+// start`s run between boot and the controller checkpoint, each re-probes the image, and
+// pool-capacity is each probe's own verdict, so one session's ticks can carry
+// ["secrets", "pool-capacity"] and ["secrets"] both, and a snapshot of the running daemon's open rows
+// would hold only while nothing restarts it or opens a live row before the read.
 const lib = import.meta.dir;
 // jq runs PROGRAM with the module on the include path over STDIN: JSON, or, when RAW, one string
 // read as the script reads a session or a delivery (`jq -R -s`).
@@ -75,34 +76,41 @@ describe("controller_ticks($tick)", () => {
   });
 });
 
-describe("ticks_name_open($open): every tick names the running daemon's open rows", () => {
-  const verdict = (ticks: string[][], open: string[]) =>
-    jq(`ticks_name_open(${JSON.stringify(open)})`, JSON.stringify(ticks.map((open) => ({ open }))));
+describe("ticks_name_deployment_open: each tick names one of the two lists the deployment can open", () => {
+  const verdict = (ticks: string[][]) =>
+    jq("ticks_name_deployment_open", JSON.stringify(ticks.map((open) => ({ open }))));
 
-  test("a warm pool: ticks and the daemon both name secrets alone", () => {
-    expect(verdict([["secrets"], ["secrets"]], ["secrets"])).toBe(true);
+  test("a warm pool: secrets alone", () => {
+    expect(verdict([["secrets"]])).toBe(true);
   });
 
-  test("a cold pool healed at a later start: the ticks are the running daemon's rows, not boot's", () => {
-    expect(verdict([["secrets"]], ["secrets"])).toBe(true);
-    expect(verdict([["secrets"]], ["secrets", "pool-capacity"])).toBe(false);
+  test("a cold pool: secrets and pool-capacity, in either order", () => {
+    expect(verdict([["secrets", "pool-capacity"]])).toBe(true);
+    expect(verdict([["pool-capacity", "secrets"]])).toBe(true);
   });
 
-  test("a pool still cold: both rows, in either order", () => {
-    expect(verdict([["pool-capacity", "secrets"]], ["secrets", "pool-capacity"])).toBe(true);
+  test("a pool cold at one start and warm at the next: both arms in one session", () => {
+    expect(verdict([["secrets", "pool-capacity"], ["secrets"]])).toBe(true);
   });
 
-  test("one divergent tick among agreeing ones", () => {
-    expect(verdict([["secrets"], ["secrets", "pool-capacity"], ["secrets"]], ["secrets"])).toBe(
-      false
-    );
+  test("a tick that does not name secrets", () => {
+    expect(verdict([["pool-capacity"]])).toBe(false);
+    expect(verdict([[]])).toBe(false);
   });
 
-  test("open rows that no longer name secrets", () => {
-    expect(verdict([["pool-capacity"]], ["pool-capacity"])).toBe(false);
+  test("a tick naming a row the deployment cannot open", () => {
+    expect(verdict([["secrets", "model-fallback"]])).toBe(false);
+  });
+
+  test("a tick naming a live row", () => {
+    expect(verdict([["secrets", "web-search"]])).toBe(false);
+  });
+
+  test("one bad tick fails the session", () => {
+    expect(verdict([["secrets"], ["secrets", "model-fallback"]])).toBe(false);
   });
 
   test("no ticks", () => {
-    expect(verdict([], ["secrets"])).toBe(false);
+    expect(verdict([])).toBe(false);
   });
 });
