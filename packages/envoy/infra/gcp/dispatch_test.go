@@ -1,12 +1,14 @@
 package gcp_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/nats-io/nkeys"
 	gcpsdk "github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp"
 	randomsdk "github.com/pulumi/pulumi-random/sdk/v4/go/random"
+	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
 
@@ -192,4 +194,55 @@ func TestDispatchRenderingsMatchGoldens(t *testing.T) {
 	settings, err := gcp.ResolveDispatch(dispatchArgs())
 	require.NoError(t, err)
 	require.Equal(t, readGolden(t, "dispatch-serve.golden"), settings.ServeConfig)
+}
+
+func normalizedProperty(value resource.PropertyValue) any {
+	switch {
+	case value.IsSecret():
+		return "<secret>"
+	case value.IsComputed():
+		return "<unknown>"
+	case value.IsNull():
+		return nil
+	case value.IsBool():
+		return value.BoolValue()
+	case value.IsNumber():
+		return value.NumberValue()
+	case value.IsString():
+		return value.StringValue()
+	case value.IsArray():
+		values := value.ArrayValue()
+		out := make([]any, len(values))
+		for i, item := range values {
+			out[i] = normalizedProperty(item)
+		}
+		return out
+	case value.IsObject():
+		out := map[string]any{}
+		for key, item := range value.ObjectValue() {
+			out[string(key)] = normalizedProperty(item)
+		}
+		return out
+	case value.IsOutput():
+		output := value.OutputValue()
+		if output.Secret {
+			return "<secret>"
+		}
+		if !output.Known {
+			return "<unknown>"
+		}
+		return normalizedProperty(output.Element)
+	default:
+		panic(value.TypeString())
+	}
+}
+
+func TestDispatchPodMatchesGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	deployment := m.One(t, "kubernetes:apps/v1:Deployment")
+	template := deployment.Inputs["spec"].ObjectValue()["template"]
+	got, err := json.MarshalIndent(normalizedProperty(template), "", "  ")
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "dispatch-pod.golden"), string(got)+"\n")
 }
