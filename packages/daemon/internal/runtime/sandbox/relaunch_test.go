@@ -1772,3 +1772,91 @@ func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(
 		t.Fatalf("the launch left its sandbox %s after an ambiguous Running patch", mode)
 	}
 }
+
+// relabelSandbox is a Sandbox an issue's old tree left, Suspended and labelled with that tree, which
+// a launch of the issue in testTree relabels (ensureSandbox); answer answers each relabel patch sent,
+// counted from 1.
+func relabelSandbox(t *testing.T, answer func(sent int32, a k8stesting.Action) (bool, k8sruntime.Object, error)) (*rig, *atomic.Int32) {
+	t.Helper()
+	name := SandboxName(workerToken)
+	old := map[string]string{labelProject: testProject, labelTree: "LEGION-100", labelIssue: testTree}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-moved", modeSuspended, old)})
+	var sent atomic.Int32
+	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if !strings.Contains(string(a.(k8stesting.PatchAction).GetPatch()), labelPatchPath(labelTree)) {
+			return false, nil, nil
+		}
+		return answer(sent.Add(1), a)
+	})
+	return g, &sent
+}
+
+// fenceRefused is the API server's answer to a JSON patch whose test operation failed.
+func fenceRefused(name string) error {
+	return apierrors.NewInvalid(sandboxGVR.GroupVersion().WithKind("Sandbox").GroupKind(), name, nil)
+}
+
+// A relabel the server applied and answered timed out is sent again, and its own fence refuses the
+// resend, since the resourceVersion it tests has moved: the launch reads the Sandbox again, finds it
+// relabelled, and goes on.
+func TestARelabelTheServerAppliedButAnsweredTimedOutGoesOn(t *testing.T) {
+	var g *rig
+	g, sent := relabelSandbox(t, func(sent int32, a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if sent > 1 {
+			return true, nil, fenceRefused(SandboxName(workerToken))
+		}
+		if _, _, err := k8stesting.ObjectReaction(generationTracker{g.dyn.Tracker()})(a); err != nil {
+			t.Errorf("apply the relabel: %v", err)
+		}
+		return true, nil, apierrors.NewTimeoutError("the request did not complete in time", 0)
+	})
+	g.spawn(workerSpec(t))
+	if got := g.sandbox(SandboxName(workerToken)).Labels[labelTree]; got != testTree {
+		t.Fatalf("the Sandbox is labelled for tree %q after the launch, want %q", got, testTree)
+	}
+	if got := sent.Load(); got != 2 {
+		t.Fatalf("the relabel was sent %d times, want twice: once applied and answered 504, once refused by its fence", got)
+	}
+}
+
+// A relabel the server refuses as invalid for a reason of its own, which another read does not
+// change, fails the try after one patch: the Sandbox read again still holds the resourceVersion the
+// refused patch tested.
+func TestALastingRefusalOfTheRelabelFailsTheTryAfterOnePatch(t *testing.T) {
+	g, sent := relabelSandbox(t, func(int32, k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, fenceRefused(SandboxName(workerToken))
+	})
+	g.launcher(workerToken)
+	if _, err := g.r.Spawn(g.ctx, workerSpec(t)); err == nil || !strings.Contains(err.Error(), "relabel sandbox") {
+		t.Fatalf("Spawn through a lasting refusal of the relabel = %v, want the refusal", err)
+	}
+	if got := sent.Load(); got != 1 {
+		t.Fatalf("the relabel was sent %d times, want once", got)
+	}
+}
+
+// A request inside a launch's wait ends with the wait's budget: the old pod stays in the store for
+// most of awaitPodGone's budget, then the confirming read of it is answered overloaded, and the wait
+// still ends at its budget rather than a boot timeout after that read began.
+func TestARequestInsideALaunchsWaitEndsWithTheWaitsBudget(t *testing.T) {
+	const boot = time.Second
+	name := SandboxName(workerToken)
+	labels := map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
+	g := newRig(t, []k8sruntime.Object{
+		sandboxObject(t, name, "uid-waited", modeSuspended, labels),
+		podObject(name, "uid-old-pod", "uid-waited", labels, runningStatus()),
+	}, withoutController(), withOptions(func(o *Options) { o.BootTimeout = boot }))
+	g.kube.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, apierrors.NewInternalError(errors.New(etcdThrottle))
+	})
+	time.AfterFunc(boot*7/10, func() { _ = g.kube.Tracker().Delete(podsGVR, testNamespace, name) })
+	start := time.Now()
+	_, err := g.r.awaitPodGone(launching(g.ctx), g.sandbox(name))
+	took := time.Since(start)
+	if err == nil {
+		t.Fatal("awaitPodGone through a read answered overloaded throughout = nil, want it to end with an error")
+	}
+	if took > boot*13/10 {
+		t.Fatalf("awaitPodGone took %s, past its %s budget: %v", took, boot, err)
+	}
+}
