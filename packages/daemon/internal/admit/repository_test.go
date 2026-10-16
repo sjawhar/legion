@@ -1,6 +1,7 @@
 package admit
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"strings"
@@ -16,6 +17,36 @@ import (
 
 func rootTodo(key string, seq int64, resolved string) intake.DispatchIssue {
 	return intake.DispatchIssue{Key: key, Seq: seq, Type: "issue.updated", Status: "todo", Title: key, Rank: "A", HandedOver: handed, ResolvedRepo: resolved}
+}
+
+// Admission never records a root from a retained event whose repository nobody read
+// (ResolvedRepoMissing): the event is refused, so it is retried once the consumer's preparation
+// reads it, and the root is not admitted on a guess. A recorded root's retained event is applied
+// with the record's repository.
+func TestARetainedRootEventIsNeverAdmittedWithoutItsRepository(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	retained := rootTodo("LEGION-208", 1, "")
+	retained.ResolvedRepoMissing = true
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "retained", retained, admission.engine, admission); err == nil ||
+		!strings.Contains(err.Error(), "predates Dispatch's resolved_repo") {
+		t.Fatalf("applying a retained root event = %v, want it refused for retry", err)
+	}
+	if got := maybeIssue(t, pool, "LEGION-208"); got != nil {
+		t.Fatalf("LEGION-208 recorded as %#v, want it not admitted", got)
+	}
+	apply(t, pool, admission, "root-todo", rootTodo("LEGION-208", 2, "acme/widgets"), admission.engine)
+	edited := rootTodo("LEGION-208", 3, "")
+	edited.Title, edited.ResolvedRepoMissing = "renamed", true
+	apply(t, pool, admission, "retained-rename", edited, admission.engine)
+	if got := issue(t, pool, "LEGION-208"); got.Repo != "acme/widgets" || got.Title != "renamed" {
+		t.Fatalf("LEGION-208 = %#v, want the retained rename applied on acme/widgets", got)
+	}
+	for _, effect := range effects(t, pool) {
+		if post, ok := effect.payload.(record.MessagePost); ok {
+			t.Fatalf("a repository note was posted: %q", post.Body)
+		}
+	}
 }
 
 // A root handed to Legion in todo is recorded on the repository it resolves to, at that

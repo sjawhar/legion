@@ -366,16 +366,9 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context) ([]ghrepo.Repos
 // minted for (adoptIdentity). An issue the workflow does not record, such as an operator's claim,
 // works no repository: the zero repository and no error.
 func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghrepo.Repository, string, error) {
-	var issue *record.Issue
-	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		var err error
-		issue, err = w.records.Issue(ctx, tx, key)
-		return err
-	}); err != nil {
-		return ghrepo.Repository{}, "", fmt.Errorf("read the record of %s: %w", key, err)
-	}
-	if issue == nil {
-		return ghrepo.Repository{}, "", nil
+	issue, err := w.recordOf(ctx, key)
+	if err != nil || issue == nil {
+		return ghrepo.Repository{}, "", err
 	}
 	repo, err := ghrepo.Parse("the repository of "+key, issue.Repo)
 	if err != nil {
@@ -384,26 +377,62 @@ func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghre
 	return repo, issue.DefaultBranch, nil
 }
 
-// prepareRepository readies, before a Dispatch issue event in todo is applied, what the workflow
-// reads in memory when it records the issue (ResolveRepository): a left-out repository's Apps are
+// recordOf is key's issue record, nil when the workflow does not record it.
+func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Issue, error) {
+	var issue *record.Issue
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = w.records.Issue(ctx, tx, key)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("read the record of %s: %w", key, err)
+	}
+	return issue, nil
+}
+
+// prepareRepository readies a Dispatch issue event before it is applied (intake's
+// ConsumerSpec.PrepareRepository), and is the event to apply. An issue's repository is its record's
+// once recorded, so a recorded issue's event asks nothing of Dispatch or GitHub: a retained event
+// that names no repository (ResolvedRepoMissing) takes the record's, and one naming another is
+// applied as it is, for the workflow to keep the record's and say so. For an issue not yet
+// recorded, a retained event's repository is read from Dispatch's issue detail, a read that fails
+// leaving the event to be retried; then, for an event in todo, what the workflow reads in memory
+// when it records the issue (ResolveRepository) is readied: a left-out repository's Apps are
 // checked again when an issue on it comes up for admission (handed to Legion, or a child of a
 // tree), and a served repository's default branch is read when the read Legion holds is older
-// than its TTL. An event in any other status records nothing, and asks GitHub nothing.
-func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) error {
+// than its TTL. An unrecorded issue's event in any other status asks GitHub nothing.
+func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
+	recorded, err := w.recordOf(ctx, issue.Key)
+	if err != nil {
+		return issue, err
+	}
+	if recorded != nil {
+		if issue.ResolvedRepoMissing {
+			issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
+		}
+		return issue, nil
+	}
+	if issue.ResolvedRepoMissing {
+		detail, err := w.dispatch.GetIssue(ctx, issue.Key)
+		if err != nil {
+			return issue, fmt.Errorf("read the repository Dispatch resolves for %s, which its event %d predates: %w", issue.Key, issue.Seq, err)
+		}
+		issue.ResolvedRepo, issue.ResolvedRepoMissing = detail.ResolvedRepo, false
+	}
 	if issue.Status != "todo" || issue.ResolvedRepo == "" {
-		return nil
+		return issue, nil
 	}
 	if _, _, leftOut := w.repositories.lookup(issue.ResolvedRepo); leftOut && (issue.HandedOver || issue.Parent != "") {
 		if err := w.refreshMapping(ctx); err != nil {
-			return fmt.Errorf("check the left-out repository %s again: %w", issue.ResolvedRepo, err)
+			return issue, fmt.Errorf("check the left-out repository %s again: %w", issue.ResolvedRepo, err)
 		}
 	}
 	mapped, refusal, _ := w.repositories.lookup(issue.ResolvedRepo)
 	if refusal != "" {
-		return nil
+		return issue, nil
 	}
-	_, err := w.defaultBranches.Named(ctx, mapped.Repo)
-	return err
+	_, err = w.defaultBranches.Named(ctx, mapped.Repo)
+	return issue, err
 }
 
 // ResolveRepository answers the workflow (workflow.Repositories) from memory: the served

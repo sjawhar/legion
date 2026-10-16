@@ -1283,7 +1283,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
-	var prepare func(context.Context, intake.DispatchIssue) error
+	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
 	var githubAPI string
 	var repos *repositories
 	if workflow != nil {

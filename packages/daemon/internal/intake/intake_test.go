@@ -298,19 +298,29 @@ func TestADispatchIssueEventResolvesHandedOverFromItsLabels(t *testing.T) {
 	}
 }
 
-// Every issue event of a Dispatch that resolves an issue's repository carries resolved_repo (null
-// for none), and the daemon's admission and its record depend on it. An event without the field
-// is from a Dispatch older than the one this daemon needs, and is refused rather than read as
-// resolving to none.
-func TestADispatchIssueEventWithoutResolvedRepoIsRefused(t *testing.T) {
+// An event JetStream retained from before Dispatch resolved an issue's repository carries no
+// resolved_repo. It is never refused: it carries its actor and sequence, which the workflow's
+// fences read, so it decodes with ResolvedRepoMissing set, its repository empty and every other
+// field as the event says. The consumer's PrepareRepository fills the repository before the fact
+// is applied. A null resolved_repo is a Dispatch that resolves the issue to none.
+func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t *testing.T) {
 	original := string(capturedIssueUpdatedEnvelope(t))
 	older := strings.Replace(original, `\"repo\":null,\"resolved_repo\":\"sjawhar/legion\",`, "", 1)
 	if older == original {
 		t.Fatal("captured issue.updated fixture carries no resolved_repo to remove")
 	}
-	_, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(older))
-	if err == nil || !strings.Contains(err.Error(), "resolved_repo") {
-		t.Fatalf("decode of an event without resolved_repo = %v, want it refused naming resolved_repo", err)
+	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(older))
+	if err != nil {
+		t.Fatalf("decode of an event without resolved_repo = %v, want it decoded", err)
+	}
+	want := DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU", ResolvedRepoMissing: true}
+	if !reflect.DeepEqual(decoded.Fact, want) {
+		t.Fatalf("fact = %#v, want %#v", decoded.Fact, want)
+	}
+	none := strings.Replace(original, `\"resolved_repo\":\"sjawhar/legion\"`, `\"resolved_repo\":null`, 1)
+	decoded, err = decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", capturedRepositories, []byte(none))
+	if err != nil || decoded.Fact.(DispatchIssue).ResolvedRepoMissing || decoded.Fact.(DispatchIssue).ResolvedRepo != "" {
+		t.Fatalf("decode of an event resolving to none = %#v, %v; want an empty repository, not missing", decoded.Fact, err)
 	}
 }
 
@@ -434,7 +444,9 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 
 // The consumer has the daemon prepare an issue event's resolved repository before the fact is
 // applied (ConsumerSpec.PrepareRepository): the workflow performs no I/O, so what it reads of the
-// repository is read here, and a failed read is retried rather than applied without it.
+// repository is read here, and a failed read is retried rather than applied without it. The fact
+// the preparation returns is the one applied: a retained event's missing repository is filled
+// there.
 func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
@@ -442,16 +454,26 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	spec := consumerSpec(&lockedBuffer{})
 	var mu sync.Mutex
 	var prepared []string
-	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue) error {
+	var applied []DispatchIssue
+	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue) (DispatchIssue, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		prepared = append(prepared, issue.Key+" "+issue.ResolvedRepo)
 		if len(prepared) == 1 {
-			return errors.New("GitHub is slow")
+			return issue, errors.New("GitHub is slow")
 		}
-		return nil
+		issue.ResolvedRepo = "acme/widgets"
+		return issue, nil
 	}
-	stop := startConsume(t, js, spec, pool, writeHandler("prepared", nil))
+	record := handlerFunc(func(ctx context.Context, tx pgx.Tx, fact Fact) (Result, error) {
+		if issue, ok := fact.(DispatchIssue); ok {
+			mu.Lock()
+			applied = append(applied, issue)
+			mu.Unlock()
+		}
+		return Result{}, nil
+	})
+	stop := startConsume(t, js, spec, pool, writeHandler("prepared", nil), record)
 	defer stop()
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
@@ -461,6 +483,9 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	defer mu.Unlock()
 	if want := []string{"CAPTURE-3 sjawhar/legion", "CAPTURE-3 sjawhar/legion"}; !reflect.DeepEqual(prepared, want) {
 		t.Fatalf("prepared %v, want %v (a failed preparation, then the retry)", prepared, want)
+	}
+	if len(applied) != 1 || applied[0].ResolvedRepo != "acme/widgets" {
+		t.Fatalf("applied %#v, want the prepared fact", applied)
 	}
 }
 
