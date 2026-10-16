@@ -787,6 +787,7 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
     {
       capabilities: [],
       dir: "/w",
+      host: "m",
       last_activity: null,
       last_seen: Date.now(),
       machine_id: "m",
