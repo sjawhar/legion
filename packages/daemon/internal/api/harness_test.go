@@ -96,6 +96,8 @@ func (stillClock) Now() time.Time { return time.Date(2026, 9, 22, 12, 0, 0, 0, t
 
 func (stillClock) AfterFunc(time.Duration, func()) supervise.Cancel { return stopped{} }
 
+func (stillClock) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
 type stopped struct{}
 
 func (stopped) Stop() bool { return true }

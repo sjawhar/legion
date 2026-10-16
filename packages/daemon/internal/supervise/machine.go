@@ -228,6 +228,8 @@ type Specs interface {
 type Clock interface {
 	Now() time.Time
 	AfterFunc(d time.Duration, f func()) Cancel
+	// Sleep waits d, or returns ctx's error once ctx ends first.
+	Sleep(ctx context.Context, d time.Duration) error
 }
 
 // Cancel stops a scheduled callback.
@@ -239,6 +241,8 @@ type RealClock struct{}
 func (RealClock) Now() time.Time { return time.Now() }
 
 func (RealClock) AfterFunc(d time.Duration, f func()) Cancel { return time.AfterFunc(d, f) }
+
+func (RealClock) Sleep(ctx context.Context, d time.Duration) error { return backoff.Sleep(ctx, d) }
 
 // Timeouts are every wait a machine times.
 type Timeouts struct {
@@ -908,7 +912,7 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 func (m *Machine) backOff(ctx context.Context) error {
 	wait := backoff.Wait(m.deps.Timeouts.LaunchBackoff, m.claim.Budgets.LaunchFailures)
 	m.log.Info("supervise: waiting before the next launch", "after", wait, "launchFailures", m.claim.Budgets.LaunchFailures)
-	if err := backoff.Sleep(ctx, wait); err != nil {
+	if err := m.deps.Clock.Sleep(ctx, wait); err != nil {
 		m.log.Info("supervise: the wait before the next launch was cut short; its context ended", "error", err)
 		return err
 	}

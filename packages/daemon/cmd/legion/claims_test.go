@@ -44,6 +44,8 @@ func (stillTime) Now() time.Time { return time.Date(2026, 9, 22, 12, 0, 0, 0, ti
 
 func (stillTime) AfterFunc(time.Duration, func()) supervise.Cancel { return neverFires{} }
 
+func (stillTime) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
 type neverFires struct{}
 
 func (neverFires) Stop() bool { return true }
