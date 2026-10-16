@@ -39774,42 +39774,127 @@ function sessionDispatchSettings(file2, env, options) {
 var SLACK_BOT_TOKEN_SECRET = "LEGION_SLACK_BOT_TOKEN";
 var SLACK_POST_API_URL_VARIABLE = "SLACK_POST_API_URL";
 var POST_TIMEOUT_MS = 30000;
+var SLACK_ERROR_CODES = [
+  "access_denied",
+  "accesslimited",
+  "account_inactive",
+  "agent_prompt_display_not_allowed",
+  "app_access_restricted",
+  "as_user_not_supported",
+  "attachment_payload_limit_exceeded",
+  "cannot_reply_to_message",
+  "channel_not_found",
+  "deprecated_endpoint",
+  "draft_already_deleted",
+  "draft_already_sent",
+  "draft_has_conflict",
+  "draft_not_found",
+  "duplicate_channel_not_found",
+  "duplicate_message_not_found",
+  "ekm_access_denied",
+  "enterprise_is_restricted",
+  "fatal_error",
+  "internal_error",
+  "invalid_arg_name",
+  "invalid_arguments",
+  "invalid_array_arg",
+  "invalid_auth",
+  "invalid_blocks",
+  "invalid_blocks_format",
+  "invalid_charset",
+  "invalid_form_data",
+  "invalid_metadata_format",
+  "invalid_metadata_schema",
+  "invalid_post_type",
+  "is_archived",
+  "markdown_text_conflict",
+  "message_limit_exceeded",
+  "messages_tab_disabled",
+  "metadata_must_be_sent_from_app",
+  "metadata_too_large",
+  "method_deprecated",
+  "missing_file_data",
+  "missing_post_type",
+  "missing_scope",
+  "msg_blocks_too_long",
+  "no_permission",
+  "no_text",
+  "not_allowed_token_type",
+  "not_authed",
+  "not_in_channel",
+  "org_login_required",
+  "rate_limited",
+  "ratelimited",
+  "request_timeout",
+  "restricted_action",
+  "restricted_action_non_threadable_channel",
+  "restricted_action_read_only_channel",
+  "restricted_action_thread_locked",
+  "restricted_action_thread_only_channel",
+  "send_on_behalf_not_allowed",
+  "service_unavailable",
+  "slack_connect_canvas_sharing_blocked",
+  "slack_connect_file_link_sharing_blocked",
+  "slack_connect_lists_sharing_blocked",
+  "team_access_not_granted",
+  "team_added_to_org",
+  "team_not_found",
+  "token_expired",
+  "token_revoked",
+  "too_many_attachments",
+  "too_many_contact_cards",
+  "two_factor_setup_required"
+];
 var POSTER = `
-const out = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-const input = JSON.parse(await Bun.stdin.text());
-const token = process.env.LEGION_SLACK_BOT_TOKEN;
-if (!token) {
-  out({ invalid: "the poster's environment carries no LEGION_SLACK_BOT_TOKEN" });
-  process.exit(0);
-}
-const base = (process.env.SLACK_POST_API_URL || "https://slack.com/api").replace(/\\/+$/, "");
-let status = 0;
-let raw = "";
+const codes = ${JSON.stringify(Object.fromEntries(SLACK_ERROR_CODES.map((code) => [code, true])))};
+const token = process.env.LEGION_SLACK_BOT_TOKEN || "";
+const out = (value) => {
+  let line = JSON.stringify(value);
+  if (token !== "") line = line.split(token).join("[redacted]");
+  process.stdout.write(line + "\\n");
+};
+let sent = false;
 try {
-  const response = await fetch(base + "/chat.postMessage", {
-    method: "POST",
-    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel: input.channel, thread_ts: input.thread_ts, text: input.text }),
-    signal: AbortSignal.timeout(10000),
-  });
-  status = response.status;
-  raw = await response.text();
-} catch (error) {
-  out({ unanswered: String((error && error.message) || error) });
-  process.exit(0);
-}
-let answer;
-try {
-  answer = JSON.parse(raw);
-} catch {}
-if (!answer || typeof answer.ok !== "boolean") {
-  out({ invalid: "HTTP " + status + " with a body that is not Slack's JSON: " + raw.slice(0, 200) });
-} else if (!answer.ok) {
-  out({ refused: String(answer.error) });
-} else if (typeof answer.ts !== "string") {
-  out({ invalid: "ok with no ts" });
-} else {
-  out({ ts: answer.ts, channel: typeof answer.channel === "string" ? answer.channel : input.channel });
+  const input = JSON.parse(await Bun.stdin.text());
+  if (token === "") {
+    out({ invalid: "the poster's environment carries no LEGION_SLACK_BOT_TOKEN" });
+    process.exit(0);
+  }
+  const base = (process.env.SLACK_POST_API_URL || "https://slack.com/api").replace(/\\/+$/, "");
+  let status = 0;
+  let raw = "";
+  try {
+    sent = true;
+    const response = await fetch(base + "/chat.postMessage", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ channel: input.channel, thread_ts: input.thread_ts, text: input.text }),
+      signal: AbortSignal.timeout(10000),
+    });
+    status = response.status;
+    raw = await response.text();
+  } catch {
+    out({ unanswered: true });
+    process.exit(0);
+  }
+  let answer;
+  try {
+    answer = JSON.parse(raw);
+  } catch {}
+  if (!answer || typeof answer !== "object" || typeof answer.ok !== "boolean") {
+    out({ invalid: "HTTP " + Number(status) + " with a body that is not Slack's JSON" });
+  } else if (!answer.ok) {
+    out({ refused: typeof answer.error === "string" && Object.hasOwn(codes, answer.error) ? answer.error : null });
+  } else if (
+    typeof answer.ts !== "string" || !/^[0-9]{1,12}\\.[0-9]{1,8}$/.test(answer.ts) ||
+    (answer.channel !== undefined && (typeof answer.channel !== "string" || !/^[CDG][A-Z0-9]{1,30}$/.test(answer.channel)))
+  ) {
+    out({ invalid: "ok with a ts or channel that is not Slack's" });
+  } else {
+    out({ ts: answer.ts, channel: answer.channel === undefined ? input.channel : answer.channel });
+  }
+} catch {
+  out(sent ? { unanswered: true } : { invalid: "a reply the poster could not read" });
 }
 `;
 var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
@@ -39850,12 +39935,15 @@ async function postSlackReply(reply, options = {}) {
       }
       throw new Error(`the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
     }
-    throw new Error(`slack_post's poster exited ${code} without an answer${said === "" ? "" : ` (${said})`}: ${MAY_HAVE_POSTED}`);
+    throw new Error(`slack_post's poster exited ${code} without an answer: ${MAY_HAVE_POSTED}`);
+  }
+  if (line.refused === null) {
+    throw new Error("Slack refused chat.postMessage with an error code slack_post does not pass on");
   }
   if (line.refused !== undefined)
     throw new Error(`Slack refused chat.postMessage: ${line.refused}`);
   if (line.unanswered !== undefined) {
-    throw new Error(`Slack did not answer chat.postMessage (${line.unanswered}): ${MAY_HAVE_POSTED}`);
+    throw new Error(`Slack did not answer chat.postMessage: ${MAY_HAVE_POSTED}`);
   }
   if (line.ts === undefined) {
     throw new Error(`chat.postMessage answered ${line.invalid ?? "nothing"}: ${MAY_HAVE_POSTED}`);

@@ -56,6 +56,34 @@ function fakeSlack(answer: unknown): { readonly url: string; readonly calls: Sla
   return { url: `http://127.0.0.1:${server.port}/api`, calls };
 }
 
+/** A hostile stand-in for Slack's Web API: every answer carries back the Authorization header it
+ * was sent, as `answer` builds it from that header. Returns its URL and how many posts it saw. */
+function reflectingSlack(answer: (authorization: string) => Response): {
+  readonly url: string;
+  readonly posts: () => number;
+} {
+  let posts = 0;
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    fetch(request) {
+      posts += 1;
+      return answer(request.headers.get("authorization") ?? "");
+    },
+  });
+  cleanups.push(() => server.stop(true));
+  return { url: `http://127.0.0.1:${server.port}/api`, posts: () => posts };
+}
+
+/** What postSlackReply hands its caller, the session's tool result: its answer or its error. */
+async function outcome(env: Record<string, string>): Promise<string> {
+  try {
+    return JSON.stringify(await postSlackReply(reply, { env }));
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 /** An environment whose PATH finds the fake broker client first, and the file it writes its
  * arguments to. */
 function brokerEnvironment(mode: string, slackURL: string) {
@@ -180,5 +208,55 @@ describe("postSlackReply", () => {
     await expect(postSlackReply(reply, { env })).rejects.toThrow(
       "agent-secrets is not on PATH: slack_post takes the bot token from the secrets broker, which this session is not enrolled with; nothing was posted"
     );
+  });
+
+  // The token lives in the poster alone. An answer that carries it back, whatever field it rides
+  // in, never reaches the session: the poster passes on only Slack's own error codes and a ts and
+  // channel shaped as Slack's, never a body, and redacts the token from all it prints.
+  describe("never hands the session the token an answer carries back", () => {
+    const cases: [string, (authorization: string) => Response, string][] = [
+      [
+        "in an error page",
+        (authorization) =>
+          new Response(`<html>bad gateway ${authorization}</html>`, { status: 502 }),
+        "chat.postMessage answered HTTP 502 with a body that is not Slack's JSON: the reply may have been posted",
+      ],
+      [
+        "as Slack's error code",
+        (authorization) => Response.json({ ok: false, error: authorization }),
+        "Slack refused chat.postMessage with an error code slack_post does not pass on",
+      ],
+      [
+        "as the posted ts",
+        (authorization) => Response.json({ ok: true, channel: "C00000000", ts: authorization }),
+        "chat.postMessage answered ok with a ts or channel that is not Slack's: the reply may have been posted",
+      ],
+      [
+        "as the posted channel",
+        (authorization) =>
+          Response.json({ ok: true, channel: authorization, ts: "1700000000.000200" }),
+        "chat.postMessage answered ok with a ts or channel that is not Slack's: the reply may have been posted",
+      ],
+    ];
+    for (const [name, answer, want] of cases) {
+      test(name, async () => {
+        const slack = reflectingSlack(answer);
+        const { env } = brokerEnvironment("granted", slack.url);
+
+        const said = await outcome(env);
+
+        expect(slack.posts()).toBe(1);
+        expect(said).not.toContain("xoxb-granted");
+        expect(said).toContain(want);
+      });
+    }
+  });
+
+  test("a Slack error code it knows comes back as Slack spelled it", async () => {
+    for (const code of ["channel_not_found", "is_archived", "ratelimited", "invalid_auth"]) {
+      const slack = fakeSlack({ ok: false, error: code });
+      const { env } = brokerEnvironment("granted", slack.url);
+      expect(await outcome(env)).toBe(`Slack refused chat.postMessage: ${code}`);
+    }
   });
 });
