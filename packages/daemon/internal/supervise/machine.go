@@ -261,7 +261,7 @@ type Timeouts struct {
 	// failure, doubled for each failure charged since the claim was last ready, and jittered
 	// (backoff.Wait): a launch the runtime refused, and a process relaunched after its charge
 	// (relaunchAfterFailure) — one that died, or was retired at its registration deadline. The
-	// shipped daemon's is 2 s, so the tries of a three-failure budget span three seconds at least.
+	// daemon sets it to its launchBackoffFirst.
 	LaunchBackoff time.Duration
 }
 
