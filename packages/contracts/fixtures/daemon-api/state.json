@@ -211,12 +211,14 @@
       "name": "secrets",
       "status": "decided",
       "detail": "runtime.kubernetes.agent_secrets is not configured",
-      "decision": "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"
+      "decision": "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret",
+      "source": "configuration"
     },
     {
       "name": "model-fallback",
       "status": "present",
-      "detail": "retry.modelFallback is true under the pod's Oh My Pi settings (read by the probe)"
+      "detail": "retry.modelFallback is true under the pod's Oh My Pi settings (read by the probe)",
+      "source": "boot"
     },
     {
       "name": "toolchain",
@@ -227,12 +229,14 @@
       "name": "resource-limits",
       "status": "open",
       "detail": "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
-      "configLine": "capabilities.decided.resource-limits: \"\u003creason\u003e\""
+      "configLine": "capabilities.decided.resource-limits: \"\u003creason\u003e\"",
+      "source": "configuration"
     },
     {
       "name": "pool-capacity",
       "status": "present",
-      "detail": "the image probe pod scheduled at its first attempt"
+      "detail": "the image probe pod scheduled at its first attempt",
+      "source": "boot"
     },
     {
       "name": "network",

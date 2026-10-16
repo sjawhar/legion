@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
+  `machine_id` for a session whose plugin predates the field) rather than the listener that
+  registered it, so filtering by machine finds a session on its own machine again even when every
+  session shares one listener.
+
 - A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
   profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and

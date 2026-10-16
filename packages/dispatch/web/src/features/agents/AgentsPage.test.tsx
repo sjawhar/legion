@@ -31,6 +31,7 @@ const agents = [
   {
     capabilities: ["aside", "btw"],
     dir: "/workspaces/planner",
+    host: "build-host",
     last_activity: new Date(now - 60_000).toISOString(),
     last_seen: now - 30_000,
     machine_id: "build-host",
@@ -42,6 +43,7 @@ const agents = [
   {
     capabilities: ["aside"],
     dir: "/workspaces/reviewer",
+    host: "review-host",
     last_activity: new Date(now - 10 * 60_000).toISOString(),
     last_seen: now - 5 * 60_000,
     machine_id: "review-host",
@@ -456,13 +458,13 @@ test("partitionAgents splits live sessions with a Dispatch signal, silent live s
 test("matchesFilters keeps a session whose title, directory, machine, session id or issue key together hold every searched word, in any case", () => {
   const alpha = session({
     dir: "/workspaces/alpha",
-    machine_id: "alpha-host",
+    host: "alpha-host",
     session_id: "alpha-session",
     title: "Scrum planning",
   });
   const beta = session({
     dir: "/workspaces/beta",
-    machine_id: "beta-host",
+    host: "beta-host",
     session_id: "beta-session",
     title: "Beta",
   });
@@ -478,7 +480,7 @@ test("matchesFilters keeps a session whose title, directory, machine, session id
   expect(matches(alpha, "alpha core-9", ["CORE-9"])).toBe(true);
   expect(matches(beta, "alpha core-9", ["CORE-9"])).toBe(false);
 
-  // Case-insensitive, by machine id; a word absent from every field excludes the session even
+  // Case-insensitive, by host; a word absent from every field excludes the session even
   // when the others match.
   expect(matches(alpha, "ALPHA-HOST")).toBe(true);
   expect(matches(alpha, "alpha gamma")).toBe(false);
@@ -490,7 +492,7 @@ test("matchesFilters keeps a session whose title, directory, machine, session id
 
 test("matchesFilters narrows by machine and role exactly, free text besides", () => {
   const planner = session({
-    machine_id: "build-host",
+    host: "build-host",
     roles: ["planner"],
     session_id: "planner-session",
     title: "Planner",
@@ -1677,6 +1679,7 @@ test("a root targeted-message retry on the Agents page checks the role's current
   const newReviewer: Agent = {
     capabilities: ["btw"],
     dir: "/workspaces/reviewer",
+    host: "review-host",
     last_activity: new Date(now - 60_000).toISOString(),
     last_seen: now - 30_000,
     machine_id: "review-host",
@@ -1753,6 +1756,7 @@ test("a reply's targeted-message retry on the Agents page checks the thread's cu
   const newReviewer: Agent = {
     capabilities: ["btw"],
     dir: "/workspaces/reviewer",
+    host: "review-host",
     last_activity: new Date(now - 60_000).toISOString(),
     last_seen: now - 30_000,
     machine_id: "review-host",

@@ -47,7 +47,15 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // mtime to now, and warmLeaseStale is how old that mtime may be before another process reads the
 // holder as dead and takes the lease over: six missed heartbeats, so a holder stalled through one
 // slow tick or a filesystem hiccup keeps its lease, while a dead one leaves a lease that a warm-up
-// within the minute still reads as live and skips, and the first one after that takes over. A
+// within the minute still reads as live and skips, and the first one after that takes over. The
+// heartbeat is token-guarded (refreshWarmLease): each tick refreshes the lease only while it still
+// carries this holder's token, so a holder stalled past warmLeaseStale and taken over refreshes
+// nothing of its successor's lease — its heartbeat stops at the first tick that reads the
+// successor's token, and a dead holder's lease is never kept alive by a stalled one's ticks. A
+// tick that cannot read the lease at all (a takeover's remove-and-create caught between its two
+// steps, a hiccup of the volume) refreshes nothing and the heartbeat goes on: a missed tick is
+// what the six-tick budget is for, and a heartbeat ended there would let a live build's lease go
+// stale under it, a sibling take it over and a second build run on the same workspace. A
 // holder releases its lease on every exit it can see: the warm-up's deferred release runs once its
 // codegraph child has ended, and the one process that runs a warm-up and may exit before it, a
 // role's shim, ends the warm-up and waits for that release before it exits (WarmCodegraphIndex),
@@ -93,14 +101,16 @@ var indexed sync.Map
 // warm-up is still running in this process does nothing, and one running in another process is
 // what the lease settles (warmLeaseHeartbeat). The daemon's host provisioning for tmux panes
 // (internal/daemon/outbox.go) calls it: the daemon outlives any build. The pod init container
-// builds no index: it runs on the pod's registration path and its goroutines die with it.
+// builds no index: it runs on the pod's registration path and its goroutines die with it. The
+// daemon's tmux path warms a workspace right after provisioning it, so now is that launch, the
+// instant the success line reports its build against.
 func WarmCodegraphIndexInBackground(dir string) {
 	if _, busy := warming.LoadOrStore(dir, struct{}{}); busy {
 		return
 	}
 	go func() {
 		defer warming.Delete(dir)
-		WarmCodegraphIndex(context.Background(), dir)
+		WarmCodegraphIndex(context.Background(), dir, time.Now())
 	}()
 }
 
@@ -112,9 +122,12 @@ func WarmCodegraphIndexInBackground(dir string) {
 // so a stop mid-build — the launcher's SIGTERM to the role's whole process group, which ends Oh My
 // Pi and the codegraph child at once — never leaves the lease behind for the role's relaunch to
 // read as a live build. The index such a stop leaves partial is repaired by the next warm-up
-// (nextCodegraphStep: initialized, not complete, no live CodeGraph lock → `index`).
-func WarmCodegraphIndex(ctx context.Context, dir string) {
-	warmCodegraphIndex(ctx, dir)
+// (nextCodegraphStep: initialized, not complete, no live CodeGraph lock → `index`). launched is
+// the instant the caller's process started — a role shim's Run — which the one line a built index
+// logs reports the build against, beside the build's own duration, so a pod's log says how long
+// after the role's launch its index was ready.
+func WarmCodegraphIndex(ctx context.Context, dir string, launched time.Time) {
+	warmCodegraphIndex(ctx, dir, launched)
 }
 
 // warmCodegraphIndex builds a workspace's codegraph index before any worker needs it: the tester's
@@ -144,7 +157,7 @@ func WarmCodegraphIndex(ctx context.Context, dir string) {
 // DO_NOT_TRACK=1 disables both CodeGraph's telemetry and its update check (its bundled docs rank
 // DO_NOT_TRACK above CODEGRAPH_TELEMETRY above stored config above default-on), so an automatic,
 // non-opt-in warm-up never phones home.
-func warmCodegraphIndex(ctx context.Context, dir string) {
+func warmCodegraphIndex(ctx context.Context, dir string, launched time.Time) {
 	codegraphPath, err := exec.LookPath("codegraph")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up skipped for %s: %s\n", dir, err)
@@ -204,7 +217,9 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 		}
 		subcommand = "index"
 	}
+	buildStarted := time.Now()
 	result, err := runCodegraph(ctx, codegraphPath, dir, subcommand)
+	built := time.Since(buildStarted)
 	if ctx.Err() != nil {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s ended with its process before `codegraph %s` finished; the next launch's warm-up repairs the index\n", dir, subcommand)
 		return
@@ -215,7 +230,9 @@ func warmCodegraphIndex(ctx context.Context, dir string) {
 	}
 	if result.exitCode != 0 {
 		fmt.Fprintf(os.Stderr, "[legion] codegraph %s failed for %s (exit %d): %s\n", subcommand, dir, result.exitCode, strings.TrimSpace(result.stderr))
+		return
 	}
+	fmt.Fprintf(os.Stderr, "[legion] codegraph warm-up for %s built the index: codegraph %s took %s, done %s after launch\n", dir, subcommand, built.Round(time.Millisecond), time.Since(launched).Round(time.Millisecond))
 }
 
 // warmLeaseStep is a seam for the lease's own tests, nil otherwise: it is called with the name of
@@ -256,7 +273,7 @@ func acquireWarmLease(dir, path string) (release func(), held bool) {
 				_ = os.Remove(path)
 				return failed(err)
 			}
-			return holdWarmLease(path, token), true
+			return holdWarmLease(path, token, warmLeaseHeartbeat), true
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return failed(err)
@@ -326,36 +343,78 @@ func takeOverWarmLease(path string) (bool, error) {
 	return false, nil
 }
 
-// holdWarmLease keeps the lease at path fresh, its mtime set to now every warmLeaseHeartbeat so a
-// live holder's lease is never read as stale, until release. release stops the heartbeat and
-// removes the file, but only while it still holds this holder's token: the lease of a holder
-// stalled past warmLeaseStale and taken over belongs to its successor by then, and the stalled
-// holder must not remove it from under the successor's build. The token, written at the create,
-// is the lease's identity — never its inode, which the tree volume (v9fs) hands a successor's
-// file created at the same path, so os.SameFile would call the successor's lease this holder's.
-func holdWarmLease(path, token string) (release func()) {
+// holdWarmLease keeps the lease at path fresh, its mtime set to now every heartbeat so a live
+// holder's lease is never read as stale, until release. The heartbeat, like the release, knows the
+// lease by its token: each tick refreshes the file only while it still carries this holder's token
+// (refreshWarmLease). The first tick that reads another token ends the heartbeat for good, the
+// build itself running on; one that cannot read the lease refreshes nothing and tries again at the
+// next tick. The lease of a holder stalled past warmLeaseStale and taken over belongs to its
+// successor by then: a stalled holder's ticks refreshing it would keep the successor's lease fresh
+// past the successor's own death, a dead holder's lease that nothing ever takes over. release
+// stops the heartbeat and removes the file, but only while it still holds this holder's token: the
+// stalled holder must not remove it from under the successor's build. The token, written at the
+// create, is the lease's identity — never its inode, which the tree volume (v9fs) hands a
+// successor's file created at the same path, so os.SameFile would call the successor's lease this
+// holder's.
+func holdWarmLease(path, token string, heartbeat time.Duration) (release func()) {
 	stop := make(chan struct{})
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		ticker := time.NewTicker(warmLeaseHeartbeat)
+		ticker := time.NewTicker(heartbeat)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-stop:
 				return
-			case now := <-ticker.C:
-				_ = os.Chtimes(path, now, now)
+			case <-ticker.C:
+				if !refreshWarmLease(path, token) {
+					return
+				}
 			}
 		}
 	}()
 	return func() {
 		close(stop)
 		<-stopped
-		if current, err := os.ReadFile(path); err == nil && string(current) == token {
+		if warmLeaseHasToken(path, token) {
 			_ = os.Remove(path)
 		}
 	}
+}
+
+// refreshWarmLease is one heartbeat tick, and reports whether the heartbeat goes on. It reads the
+// lease at path. One carrying token, this holder's, has its mtime set to now (true). One carrying
+// another token is a successor's, taken over once this holder stalled past warmLeaseStale: this
+// holder's heartbeat is over for good (false), the build itself running on, and nothing of the
+// successor's lease is touched. One that cannot be read gets no refresh and is read again at the
+// next tick (true): a read error is no proof the lease is gone, since a takeover's remove-and-create
+// is two steps and a tick between them finds no file at the path, and the tree volume's 9p can fail
+// a read outright (EIO) while the lease is still this holder's. The stale budget is six ticks
+// (warmLeaseStale): a heartbeat ended at the first unreadable tick would let a live build's lease
+// age past that, a sibling take it over and a second `codegraph init` run on the same workspace.
+// The time written is taken here, at the call, never the tick's own value: a tick delivered late
+// would otherwise set an mtime already old, and a lease kept fresh must say when it was last known
+// live.
+func refreshWarmLease(path, token string) bool {
+	current, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	if string(current) != token {
+		return false
+	}
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
+	return true
+}
+
+// warmLeaseHasToken reports whether the lease at path still carries token, this holder's: the one
+// question the release asks before removing the file. A lease that cannot be read is nobody's to
+// remove.
+func warmLeaseHasToken(path, token string) bool {
+	current, err := os.ReadFile(path)
+	return err == nil && string(current) == token
 }
 
 // codegraphStep is the single next codegraph subcommand nextCodegraphStep decides, or none.

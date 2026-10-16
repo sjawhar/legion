@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/envoy/infra/provider"
 )
 
-var version = "0.0.0-dev" // -ldflags "-X main.version=<X.Y.Z>" in the release job
+var version = "0.0.0-dev" // -ldflags "-X main.version=<X.Y.Z>" in release-envoy-infra.yaml's build job
 
 func main() {
 	prov, err := provider.New()

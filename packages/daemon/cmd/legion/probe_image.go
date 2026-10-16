@@ -36,9 +36,12 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // image-site capability of the list every worker is held to (LEGION-578), with the whole table
 // printed, one line per capability, before anything else — so the probe pod's log reads as the
 // declared list — and a missing one named on stderr, exit 1, after the table. Then it reads
-// whether the image's Oh My Pi falls back to another model (capabilities.ReadModelFallback) and,
-// when every one passes, prints bootprobe.OKLine with the capabilities and model-fallback marks;
-// a failure is the probe's message, exit 1, so a broken image never publishes. Unlike the
+// whether the image's Oh My Pi falls back to another model (capabilities.ReadModelFallback): a
+// failure to read it is not a refusal — the probe writes the failure to stderr and carries on
+// with the mark bootprobe.ModelFallbackUnread, so the deployment's capability report shows that
+// row open rather than the probe's own line going missing. When every check passes, it prints
+// bootprobe.OKLine with the capabilities and model-fallback marks; a failed capability is the
+// probe's message, exit 1, so a broken image never publishes. Unlike the
 // TypeScript command, the contract is always checked:
 // with none named, against this binary's own DaemonAPIVersion, which the plugin packed from the
 // same commit must declare. The load probe also holds every task agent the
@@ -178,8 +181,8 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	modelFallback, err := capabilities.ReadModelFallback(ctx, img)
 	if err != nil {
-		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
-		return 1
+		fmt.Fprintf(stderr, "legion probe-image: model-fallback not read; the deployment's capability report shows the row open: %v\n", err)
+		modelFallback = bootprobe.ModelFallbackUnread
 	}
 	agentModels := bootprobe.AgentModelsResolved
 	if *skipAgentModels {

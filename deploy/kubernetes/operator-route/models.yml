@@ -9,8 +9,8 @@
 # the first refusal. `auth: apiKey` makes these models plain API-key callers: without it Oh My Pi
 # sends an anthropic-messages custom model in its Claude Code OAuth shape.
 #
-# The models carry the gateway's current names. Each entry gives Oh My Pi the metadata for the
-# model the gateway serves; overlay.yml chooses each role's.
+# The models carry the standard names every other agent calls. Each entry gives Oh My Pi the
+# metadata for the model the gateway serves; overlay.yml chooses each role's.
 #
 # The live harnesses run on this file, each putting LEGION_E2E_MODEL_GATEWAY_URL in place of the
 # placeholder in its own copy.
@@ -23,36 +23,77 @@ providers:
     headers:
       X-Api-Key: "!cat /var/run/operator/token"
     models:
-      - id: claude-fable-5-1-legion
-        name: Claude Fable 5.1 (Legion gateway)
-        reasoning: true
-        input: [text, image]
-        contextWindow: 1000000
-        maxTokens: 128000
-        cost: {input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5}
-      - id: claude-fable-5-legion
-        name: Claude Fable 5 (Legion gateway)
+      - id: claude-fable-5
+        name: Claude Fable 5
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5}
-      - id: claude-opus-5-legion
-        name: Claude Opus 5 (Legion gateway)
+      - id: claude-fable-5-1
+        name: Claude Fable 5.1
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5}
+      - id: claude-opus-4-8
+        name: Claude Opus 4.8
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
+      - id: claude-opus-5
+        name: Claude Opus 5
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
+      - id: claude-sonnet-5
+        name: Claude Sonnet 5
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5}
+      # The gateway's -legion aliases of the same five models, which Legion's pods called before
+      # the standard names. They are catalogue entries only: no role and no enabledModels entry in
+      # overlay.yml names them. They stay so that a session started on one before the switch
+      # resumes on its own model, since Oh My Pi resumes a session on its model only when it finds
+      # that model's id, which for an alias only this file supplies; they go when the gateway
+      # retires the aliases.
+      - id: claude-fable-5-legion
+        name: Claude Fable 5 (-legion alias)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5}
+      - id: claude-fable-5-1-legion
+        name: Claude Fable 5.1 (-legion alias)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5}
       - id: claude-opus-4-8-legion
-        name: Claude Opus 4.8 (Legion gateway)
+        name: Claude Opus 4.8 (-legion alias)
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
+      - id: claude-opus-5-legion
+        name: Claude Opus 5 (-legion alias)
         reasoning: true
         input: [text, image]
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
       - id: claude-sonnet-5-legion
-        name: Claude Sonnet 5 (Legion gateway)
+        name: Claude Sonnet 5 (-legion alias)
         reasoning: true
         input: [text, image]
         contextWindow: 1000000

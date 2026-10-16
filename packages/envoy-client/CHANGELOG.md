@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `subscribe` sends `host` (`machineID()`: `ENVOY_MACHINE_ID`, falling back to the kernel
+  hostname) on every call, including the registration heartbeat's re-subscribe: where the
+  session process actually runs, which the listener now stores separately from the registering
+  listener's own `machine_id`. `SessionInfo` and `RoleInfo` gain an optional `host`.
+
 - Every text that says when to request approval again states the carried approval (LEGION-573):
   a human's own answer to a decision block carries their approval to the version it writes when
   that answer is the whole change since the version they approved, so nothing is requested for
@@ -288,6 +293,12 @@
   (LEGION-208).
 
 ### Fixed
+
+- `dispatch issue-update --clear-external-links` actually clears every external link instead of
+  re-sending the issue's existing set unchanged: `dispatch_issue_update`'s executor now replaces
+  the set with nothing when the request names an explicit empty list, instead of merging it with
+  zero new links. A non-empty list still merges by URL, so linking a pull request still keeps
+  every earlier link.
 
 - `dispatch_open_asks` links an issue ask by its item route, `/issues/<KEY>/asks/<id>`, which
   `dispatchRefFromUrl` reads back as the ask; the link it printed before named the issue alone

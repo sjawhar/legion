@@ -53,17 +53,18 @@ naming the input. So the cloud-config is known at preview.
 The hub refuses these before it registers anything, with an error naming the input:
 
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
-  whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in an
-  input the hub carries into the user data, a child or a refusal: `hostname`, a tag, `zone`,
-  `machineType`, `diskType`, an image, or a user's `machineId`. The error names the input by its
-  path and never its value, as `users[0].machineId: an nkey user seed, which is never an input of
-  the hub (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another
-  resource, so a seed in any of them fails the preview or update once it resolves, with the same
-  error, before any child is registered with it: a NATS seed passed as the Tailscale key is refused
-  before a Secret Manager version holds it, and the error never carries the secret. A seed in a
-  user's `name` or a rule entry is refused by the authorization, as
-  [The hub's users](#the-hubs-users) says, and a seed as a user's `nkey` is refused as an `nkey`
-  that is no public key, without quoting it;
+  whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in the
+  hub's own name or an input it carries into the user data, a child or a refusal: `hostname`, a
+  tag, `zone`, `machineType`, `diskType`, an image, or a user's `machineId`. The error names the
+  input by its path and never its value, as `users[0].machineId: an nkey user seed, which is
+  never an input of the hub (not echoed)`, and a seed in the hub's own name as
+  `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed (not echoed)`. `network`,
+  `subnetwork` and `tailnetAuthKey` may come from another resource, so a seed in any of them
+  fails the preview or update once it resolves, with the same error, before any child is
+  registered with it: a NATS seed passed as the Tailscale key is refused before a Secret Manager
+  version holds it, and the error never carries the secret. A seed in a user's `name` or a rule
+  entry is refused by the authorization, as [The hub's users](#the-hubs-users) says, and a seed
+  as a user's `nkey` is refused as an `nkey` that is no public key, without quoting it;
 - a `hostname` outside the rule above;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;

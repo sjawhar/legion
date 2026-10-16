@@ -27,7 +27,7 @@ so its head carries no trailer.
 
 ## GitHub attribution
 
-Everything you post — check runs, PR comments — is attributed to the review App (`legion-reviewer[bot]` in Legion's own deployment).
+Everything you post — check runs, PR comments — is attributed to the review App's bot account, the login your pane's `JJ_USER` names.
 
 ## Test handoff
 

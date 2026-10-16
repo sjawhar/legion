@@ -6,7 +6,7 @@ package buildversion
 
 import "runtime/debug"
 
-// tag is the release tag, stamped only by the release job of
+// tag is the release tag, stamped only by the release_build job of
 // .github/workflows/release-envoy-listener.yaml:
 //
 //	-ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=legion-envoy-vX.Y.Z"

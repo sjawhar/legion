@@ -665,6 +665,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "omp_launch_prefix is not used when runtime is kubernetes: every pod runs the worker image's Oh My Pi; remove omp_launch_prefix",
 		},
 		{
+			name: "worker_stop_timeout_seconds under the stop the pod's lease release needs",
+			body: "worker_stop_timeout_seconds: 8\n" + kubernetesFile,
+			want: "worker_stop_timeout_seconds must be at least 9 when runtime is kubernetes: a role's stop gives its agent 5s to exit, drains its output for 1s and waits 3s for the CodeGraph warm-up to release its lease (5s + 1s + 3s = 9s)",
+		},
+		{
 			name: "the pod block is not a mapping",
 			body: kubernetesFile + "    pod: [env]\n",
 			want: "runtime.kubernetes.pod must be a mapping",
@@ -803,6 +808,30 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			}
 			if err.Error() != tc.want {
 				t.Errorf("LoadForValidation error =\n%q\nwant\n%q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+// The floor is shim.MinStopGrace exactly, and only a pod's: `worker_stop_timeout_seconds: 9` loads
+// under `runtime: kubernetes`, and the tmux runtime, whose shims get neither --stop-grace nor
+// --warm-codegraph, loads a smaller one as it always has.
+func TestLoadForValidationAcceptsTheStopTimeoutFloorAndTmuxBelowIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want time.Duration
+	}{
+		{"kubernetes at the floor", "worker_stop_timeout_seconds: 9\n" + kubernetesFile, 9 * time.Second},
+		{"tmux under it", minimalFile + "worker_stop_timeout_seconds: 8\n", 8 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			if err != nil {
+				t.Fatalf("LoadForValidation: %v", err)
+			}
+			if cfg.WorkerStopTimeout != tc.want {
+				t.Errorf("WorkerStopTimeout = %s, want %s", cfg.WorkerStopTimeout, tc.want)
 			}
 		})
 	}

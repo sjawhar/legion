@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // hubRig is a delivery hub on the API test server: the handler a test writes through, the store
@@ -50,16 +51,20 @@ func newClockedHubRig(t *testing.T, clock *fakeHubClock) *hubRig {
 
 // fakeHubClock is the real clock moved forward by Advance: Now is the wall clock plus every
 // advance so far, and a timer fires once the wall clock plus the advance reaches its moment, so a
-// test moves the hub past a threshold or a midnight without waiting for it. A clock from
-// newStillHubClock stands still between advances instead: Now is its start plus the advances. Its
-// timers still fire on the wall clock as well, but the hub's one timer only wakes its worker, which
-// compares each view's due moment with Now (deliveryHub.work, runDue), so how long the test's own
-// writes take decides nothing.
+// test moves the hub past a threshold or a midnight without waiting for it. A timer armed for a
+// moment the clock has already reached fires at once, however far an Advance moved it before the
+// arm. A clock from newStillHubClock stands still between advances instead: Now is its start plus
+// the advances. Its timers still fire on the wall clock as well, but the hub's one timer only wakes
+// its worker, which compares each view's due moment with Now (deliveryHub.work, runDue), so how
+// long the test's own writes take decides nothing.
 type fakeHubClock struct {
 	mu     sync.Mutex
 	still  time.Time
 	offset time.Duration
 	timers []*fakeHubTimer
+	// beforeArm, when set, runs at each arm, before the timer is placed, until it answers true: a
+	// test's Advance landing between the worker's read of the clock and its arm.
+	beforeArm func() bool
 }
 
 type fakeHubTimer struct {
@@ -86,13 +91,28 @@ func (c *fakeHubClock) Now() time.Time {
 	return c.nowLocked()
 }
 
-func (c *fakeHubClock) AfterFunc(d time.Duration, f func()) hubTimer {
+func (c *fakeHubClock) At(at time.Time, f func()) hubTimer {
+	c.mu.Lock()
+	hook := c.beforeArm
+	c.mu.Unlock()
+	cleared := hook != nil && hook()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	timer := &fakeHubTimer{clock: c, at: c.nowLocked().Add(d), f: f}
-	timer.real = time.AfterFunc(d, timer.fire)
+	if cleared {
+		c.beforeArm = nil
+	}
+	timer := &fakeHubTimer{clock: c, at: at, f: f}
+	timer.real = time.AfterFunc(at.Sub(c.nowLocked()), timer.fire)
 	c.timers = append(c.timers, timer)
 	return timer
+}
+
+// onArm runs f inside each of the hub's arms of its timer, before the timer is placed, until f
+// answers true.
+func (c *fakeHubClock) onArm(f func() bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.beforeArm = f
 }
 
 func (t *fakeHubTimer) fire() {
@@ -1201,6 +1221,52 @@ func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing
 	}
 }
 
+// TestAHubClockMovedBetweenTheWorkersReadAndItsArmStillFiresItsTimer moves the clock past midnight
+// inside the worker's arm of its timer, after the worker has read the clock and before the timer is
+// placed, where a test's Advance can land when the race detector slows the worker. It moves it at
+// the first arm once the view holds its answer with no wake left pending (the subscribe's mark
+// leaves one the worker's first pass never takes), so only the timer can wake the worker: the
+// expiry the clock already passed is due, so the timer fires and the expiry's delta follows.
+func TestAHubClockMovedBetweenTheWorkersReadAndItsArmStillFiresItsTimer(t *testing.T) {
+	clock := &fakeHubClock{}
+	rig := newClockedHubRig(t, clock)
+	seedHubSettings(t, rig.database)
+	clock.onArm(func() bool {
+		rig.hub.mu.Lock()
+		ready := len(rig.hub.views) == 1 && len(rig.hub.wakeWork) == 0
+		for _, view := range rig.hub.views {
+			ready = ready && view.body != nil && !view.dirty && !view.computing && !view.expiry.IsZero()
+		}
+		rig.hub.mu.Unlock()
+		if ready {
+			now := clock.Now()
+			clock.Advance(nextUTCMidnight(now).Sub(now) + time.Second)
+		}
+		return ready
+	})
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
+	conn.snapshot(t, 5*time.Second, "p")
+
+	delta := conn.delta(t, 3*time.Second, "p")
+	rig.waitFor(t, 0, time.Second, "the expiry's recompute", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseExpiry
+	})
+	var days []string
+	if err := json.Unmarshal(delta.Set["days"], &days); err != nil {
+		t.Fatalf("decode the delta's days %s: %v", delta.Set["days"], err)
+	}
+	var want struct {
+		Days []string `json:"days"`
+	}
+	if err := json.Unmarshal(getBody(t, rig.handler, "/api/v1/delivery/pipeline?at="+clock.Now().Format(time.RFC3339Nano)), &want); err != nil {
+		t.Fatalf("decode GET /pipeline: %v", err)
+	}
+	if !slices.Equal(days, want.Days) {
+		t.Fatalf("after midnight the delta's days = %v, GET /pipeline answers %v", days, want.Days)
+	}
+}
+
 func TestAPresetRecomputeWhereOnlyTheWindowMovedSendsNothing(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
@@ -1394,6 +1460,70 @@ func TestAReconcilePassThatFindsNothingNewSendsNothing(t *testing.T) {
 		t.Fatalf("record the pass: %v", err)
 	}
 	conn.none(t, 5*time.Second, "a reconcile pass that found nothing new")
+}
+
+// TestARecomputeAfterTiedRowsAreWrittenAgainSendsNothing: a reconcile pass writes a failed run's
+// jobs and the pull requests a deploy shipped again as they were, which logs no change but puts each
+// row's new version after the rest of its table. The jobs started and finished together and the
+// pull requests merged in one second, so an order neither read decides would come back changed on
+// the next recompute, here one for a change no view shows, and the hub would send both runs again.
+// The hub reads on a sequential scan, the plan that answers rows as they lie.
+func TestARecomputeAfterTiedRowsAreWrittenAgainSendsNothing(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	deps.Store = &store.Store{Pool: storetest.Planned(t, database.Pool, storetest.SequentialScan)}
+	rig := hubOn(t, handler, database, deps, deliveryHubClock{}, nil)
+	seedHubSettings(t, rig.database)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	merged := now.Add(-30 * time.Hour)
+	prs := []delivery.DeliveryPullRequest{hubPR(1, merged), hubPR(2, merged), hubPR(3, merged)}
+	for _, pr := range prs {
+		upsertPR(t, rig.database, pr)
+	}
+	upsertDeploy(t, rig.database, 101, now.Add(-29*time.Hour), now.Add(-28*time.Hour))
+
+	started, finished := now.Add(-27*time.Hour), now.Add(-26*time.Hour)
+	failure, jobFailure, jobSkipped := delivery.DeliveryRunConclusionFailure, delivery.DeliveryJobConclusionFailure, delivery.DeliveryJobConclusionSkipped
+	if err := delivery.UpsertRun(ctx, rig.database.Pool, delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 102, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha102",
+		HeadCommitAt: started, StartedAt: started, CompletedAt: &finished, Conclusion: &failure,
+		URL: "https://github.com/acme/widgets/actions/runs/102", HeadBranch: new("main"), Event: new("push"),
+	}); err != nil {
+		t.Fatalf("upsert failed run 102: %v", err)
+	}
+	// GitHub's listing order, which is neither the start order nor the name order.
+	jobs := []delivery.DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 102, Name: "test / unit", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobFailure},
+		{Repo: "acme/widgets", RunID: 102, Name: "lint", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobFailure},
+		{Repo: "acme/widgets", RunID: 102, Name: "build", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobFailure},
+		{Repo: "acme/widgets", RunID: 102, Name: "release / release", Conclusion: &jobSkipped},
+	}
+	if err := delivery.UpsertRunJobs(ctx, rig.database.Pool, "acme/widgets", 102, jobs, true); err != nil {
+		t.Fatalf("upsert run 102's jobs: %v", err)
+	}
+	// A pull request of another repository, merged before the window: a change to it recomputes
+	// the view and changes nothing it shows.
+	other := hubPR(9, now.Add(-30*24*time.Hour))
+	other.Repo, other.URL = "acme/other", "https://github.com/acme/other/pull/9"
+	upsertPR(t, rig.database, other)
+
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
+	conn.snapshot(t, 5*time.Second, "p")
+
+	// The pass writes the first-listed job and pull request again as they were.
+	if err := delivery.UpsertRunJobs(ctx, rig.database.Pool, "acme/widgets", 102, jobs[:1], true); err != nil {
+		t.Fatalf("upsert run 102's first job again: %v", err)
+	}
+	upsertPR(t, rig.database, prs[0])
+	start := rig.mark()
+	other.Title = "feat: a title no view shows"
+	upsertPR(t, rig.database, other)
+	rig.waitFor(t, start, 3*time.Second, "the recompute of the change", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseChange
+	})
+	conn.none(t, time.Second, "a recompute after tied rows were written again unchanged")
 }
 
 func TestIdenticalViewsShareOneRecompute(t *testing.T) {

@@ -6,8 +6,9 @@ package api
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
-// `mainEnvironment`) — and the environment of a pod's `workspace-init provision` container
-// (`initEnvironment`), which the image's own `legion` reads. The installed plugin declares the
+// `mainEnvironment`) — and the command line and environment of a pod's `workspace-init provision`
+// container (`initContainers` in `internal/runtime/sandbox/podkind.go`, and `initEnvironment`),
+// which the image's own `legion` reads. The installed plugin declares the
 // number it was built against as `legion.daemonApiVersion` in its `package.json`, and the boot
 // gate (`internal/daemon/bootgate.go`) refuses to start unless the two are equal.
 //
@@ -165,4 +166,21 @@ package api
 // controller locator (api.ControllerLocator), always emitted, 0 meaning no contract recorded; the
 // stale-caller refusals (409 naming both contracts). A 23 plugin's strict reader refuses a state
 // whose views carry the field, so the boot gate and legion probe-image refuse the mixed pair.
-const DaemonAPIVersion = 24
+//
+// 25: LEGION-636 -- `source` on a deployment row of `api.State.capabilities`, "configuration"
+// (what legion.yaml alone decides) or "boot" (what boot measured), always emitted there; absent on
+// every other row. `installed` leaves the status set: no row has awaited a pod launch since
+// LEGION-629 turned extension discovery on in the pod's launch, so no daemon has emitted it since,
+// and the field that rendered it (capabilities.Capability.Awaits) is gone. The probe's OK line
+// gains a third `model-fallback` mark, `unread`, when the probe could not read `retry.modelFallback`.
+// A 24 plugin's strict reader refuses a state whose deployment rows carry `source`, so the boot
+// gate and `legion probe-image` refuse the mixed pair.
+//
+// 27: sjawhar/legion#1986 (the base branch) -- a pod's `workspace-init provision` command names the
+// repository's default branch, `--default-branch <name>`, which it requires: an image whose
+// `legion` was built before 27 exits 2 on the unknown flag in every new issue pod's init container,
+// so the daemon's image probe, which holds the image's pi-legion to this number, refuses such an
+// image at boot instead. (26 is sjawhar/legion#1999's, open when this was taken; a
+// release declaring 26 carries no `--default-branch`, so this branch takes the number above it, as
+// the collision note says.)
+const DaemonAPIVersion = 27

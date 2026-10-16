@@ -66,39 +66,6 @@ jobs:
       - name: Determine next version
         id: version
         run: |
-          # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
-          # HEAD, where the range below would be empty and skip the release it never finished.
-          # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
-          # not envoy-infra-vX.Y.Z): publish's "Tag release" accepts its own tag at this commit and
-          # its "Create GitHub release" reuses a published release and publishes a draft one. The
-          # workflow tags the commit it checked out and commits no bump, so `tagged` takes no
-          # package directory.
-          TAGGED=$(.github/scripts/release-push.sh tagged envoy-infra-v)
-          if [ -n "$TAGGED" ]; then
-            {
-              echo "version=${TAGGED#envoy-infra-v}"
-              echo "skip=false"
-            } >> "$GITHUB_OUTPUT"
-            echo "Releasing $TAGGED, already at HEAD"
-            exit 0
-          fi
-
-          PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
-          if [ -z "$PREV_TAG" ]; then
-            # The first release is 0.1.0, as the listener's first was: the history of the paths
-            # below predates the plugin, and its breaking commits say nothing about its API.
-            VERSION="0.1.0"
-            {
-              echo "version=$VERSION"
-              echo "skip=false"
-            } >> "$GITHUB_OUTPUT"
-            echo "First release: envoy-infra-v${VERSION}"
-            exit 0
-          fi
-          # release-bump.sh refuses a previous version that is not X.Y.Z, since the newest tag's name
-          # is whatever its pusher chose.
-          PREV_VERSION="${PREV_TAG#envoy-infra-v}"
-
           # The paths a version is cut from, as the build defines them: every directory of the
           # workspace's own modules (the main modules of packages/envoy/infra/go.work) that the
           # plugin or the command compiles in (every command under ./cmd/), for each target
@@ -142,36 +109,23 @@ jobs:
           echo "A version is cut from commits to:"
           printf '  %s\n' "${paths[@]}"
 
-          # The notices script and the target list are runtime inputs of the archives, so any change
-          # to one needs a new tag rather than a CI-only rebuild. release-bump.sh reads a
-          # --patch-path only when it is also one of the paths after --.
-          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
+          # release-push.sh version releases again a tag an earlier attempt pushed for this commit
+          # (`tagged`, which refuses a tag that is not envoy-infra-vX.Y.Z): publish's "Tag release"
+          # accepts its own tag at this commit and its "Create GitHub release" reuses a published
+          # release and publishes a draft one. The workflow tags the commit it checked out and
+          # commits no bump, so no package directory is given. Otherwise it bumps from the newest
+          # envoy-infra-v* tag. The notices script and the target list are runtime inputs of the
+          # archives, so any change to one needs a new tag rather than a CI-only rebuild.
+          # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
+          .github/scripts/release-push.sh version envoy-infra-v \
             --patch-path scripts/go-third-party-notices.sh --patch-path .github/envoy-infra-targets.json \
-            -- "${paths[@]}")
-
-          if [ "$VERSION" = "empty" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No commits in the envoy-infra plugin's or command's paths since $PREV_TAG"
-            exit 0
-          fi
-          if [ "$VERSION" = "none" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice title=No release published::No version-bumping commits since $PREV_TAG"
-            echo "**No release published** — No version-bumping commits since $PREV_TAG" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          {
-            echo "version=$VERSION"
-            echo "skip=false"
-          } >> "$GITHUB_OUTPUT"
-          echo "Bumping $PREV_TAG -> envoy-infra-v${VERSION}"
+            -- "${paths[@]}" >> "$GITHUB_OUTPUT"
       # The module's vet, both live-test tags included, and its unit tests, before anything is
       # built: envoy-and-contracts.yaml's envoy-infra-go job, which runs them on a pull request, is
       # not a required check, so the release checks the behaviour it publishes itself, as
-      # release-envoy-listener.yaml runs its container smoke test inside its release job before it
-      # publishes. Vet compiles the live tests without running them; the unit tests start no
-      # container, so this job needs no Docker.
+      # release-envoy-listener.yaml runs its container smoke test in its docker job before
+      # release_publish publishes. Vet compiles the live tests without running them; the unit tests
+      # start no container, so this job needs no Docker.
       - name: Vet envoy-infra, its live-test tags included
         if: steps.version.outputs.skip != 'true'
         run: go -C packages/envoy/infra vet -tags pulumilive,natslive ./...
@@ -254,6 +208,8 @@ jobs:
           name: envoy-infra-assets
           path: assets/
           if-no-files-found: error
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
 
   # Checks what build hands over, writes SHA256SUMS, tags the commit, attests build's archives and
   # releases them. It runs no Go, no Pulumi CLI, no plugin and no command, only release-push.sh, jq,
@@ -261,7 +217,10 @@ jobs:
   # code build runs.
   publish:
     needs: build
-    if: needs.build.outputs.skip != 'true'
+    # build carries an `if:` (main only), so this condition runs on `always()` and tests build's
+    # result, else GitHub's implicit `success()` would skip it with build whatever the skip output
+    # says; a skipped build gives `result == 'skipped'`, false.
+    if: always() && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
@@ -270,6 +229,8 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+    # No cache is restored in a job that holds a credential.
+    cache-mode: none
     steps:
       # For release-push.sh and the tag, with every tag (the existing-tag check below reads them).
       # No credential is left in the checkout: the deploy key reaches the "Tag release" step alone.
