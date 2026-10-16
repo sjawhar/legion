@@ -295,6 +295,14 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		}
 	}
 
+	// The control: the gh under test, run directly with acme's directory, sends acme's token. A gh
+	// on PATH that does not — a wrapper of the machine's own that routes credentials elsewhere —
+	// is no real gh to prove the wrapper against, and LEGION_GH_PATH names the real one.
+	run(nil, gh, "api", "repos/acme/widgets")
+	if control := proxy.take(); len(control) == 0 || control[0].auth != "token "+tokens["acme"] {
+		t.Skipf("%s sent %+v for acme's directory: it does not read GH_CONFIG_DIR; set LEGION_GH_PATH to the real gh", gh, control)
+	}
+
 	ghEnv := []string{testMainEnv + "=1"}
 	for _, tc := range []struct {
 		env   []string
