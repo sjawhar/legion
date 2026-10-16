@@ -19,6 +19,14 @@ func TestCloudConfigMatchesTheGoldenByteForByte(t *testing.T) {
 	require.Equal(t, readGolden(t, "cloud-config.golden"), text)
 }
 
+func TestCloudConfigWithoutListenerOrSessionUserMatchesTheGoldenByteForByte(t *testing.T) {
+	args := exampleArgs()
+	args.Listener, args.SessionUser = nil, nil
+	_, text, err := gcp.CloudConfigOf(args)
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "cloud-config-without-listener-or-session-user.golden"), text)
+}
+
 // cloud-init reads the user data as a cloud-config only when its first line is #cloud-config,
 // and YAML reads that line as a comment, so the rest is the document itself.
 func TestCloudConfigParsesBackIntoTheSameDocument(t *testing.T) {
