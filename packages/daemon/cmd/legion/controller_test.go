@@ -1237,8 +1237,8 @@ func TestControllerStartWritesTheControllersGitHubCredentialUnderGh(t *testing.T
 			t.Fatalf("%s's config.yml = %q, %v, want %q", owner, cfg, err, ghconfig.Config)
 		}
 	}
-	if got, err := ghconfig.ReadDefault(ghDir); err != nil || got != "acme" {
-		t.Errorf("the bundle's default = %q, %v, want acme", got, err)
+	if entries, err := os.ReadDir(ghDir); err != nil || len(entries) != 2 || entries[0].Name() != "acme" || entries[1].Name() != "sjawhar" {
+		t.Errorf("the gh directory holds %v (%v), want the two owners' directories alone", entries, err)
 	}
 	env := c.env()
 	if env["GH_CONFIG_DIR"] != filepath.Join(ghDir, "acme") || env["LEGION_GH_OWNERS_DIR"] != ghDir || env["LEGION_GH_PATH"] != c.gh {
@@ -1457,8 +1457,9 @@ func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
 
 // The real gh the controller's `legion gh` runs is the operator's LEGION_GH_PATH when set, and
 // otherwise the first gh on the operator's PATH that is not this state directory's own wrapper. A
-// start that finds none, or a relative LEGION_GH_PATH, is refused before the daemon is asked for
-// anything.
+// start that finds none, and a LEGION_GH_PATH that is relative, absent, or no executable file, is
+// refused naming it before the daemon is asked for anything: a mint would replace the running
+// controller's capability with one whose gh cannot run.
 func TestControllerStartResolvesTheRealGh(t *testing.T) {
 	t.Run("on PATH, past the controller's own wrapper", func(t *testing.T) {
 		d := newControllerDaemon(t)
@@ -1484,19 +1485,28 @@ func TestControllerStartResolvesTheRealGh(t *testing.T) {
 			t.Errorf("LEGION_GH_PATH = %q, want the gh on PATH past the wrapper, %s", got, real)
 		}
 	})
-	for name, value := range map[string]string{"no gh at all": "", "a relative LEGION_GH_PATH": "gh"} {
-		t.Run(name, func(t *testing.T) {
+	notExecutable := filepath.Join(t.TempDir(), "gh")
+	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, value, want string }{
+		{"no gh at all", "", "gh is not on PATH"},
+		{"a relative LEGION_GH_PATH", "gh", `LEGION_GH_PATH "gh" is not an absolute path`},
+		{"an absent LEGION_GH_PATH", "/nonexistent/gh", `LEGION_GH_PATH "/nonexistent/gh"`},
+		{"a LEGION_GH_PATH that is no executable", notExecutable, `LEGION_GH_PATH "` + notExecutable + `" is not an executable file`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			d := newControllerDaemon(t)
 			c := newControllerStart(t, d, controllerOptions{})
-			if value == "" {
+			if tc.value == "" {
 				unsetenv(t, "LEGION_GH_PATH")
 				t.Setenv("PATH", t.TempDir())
 			} else {
-				t.Setenv("LEGION_GH_PATH", value)
+				t.Setenv("LEGION_GH_PATH", tc.value)
 			}
 			code, _, errb := c.run()
-			if code != 1 || !strings.Contains(errb, "gh") || (value == "" && !strings.Contains(errb, "gh is not on PATH")) {
-				t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal naming gh", code, errb)
+			if code != 1 || !strings.Contains(errb, tc.want) {
+				t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal containing %q", code, errb, tc.want)
 			}
 			c.wantNoSecretRequest()
 		})

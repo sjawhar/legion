@@ -189,6 +189,10 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 	case errors.Is(err, appauth.ErrNoOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
 		return
+	case errors.Is(err, appauth.ErrOwnerOutsideProject):
+		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_OUTSIDE_PROJECT", "default", strings.ToLower(req.Default))
+		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
+		return
 	case err != nil:
 		s.log.Error("api: mint the controller's GitHub App tokens", "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")

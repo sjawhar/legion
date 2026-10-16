@@ -317,7 +317,7 @@ func TestNewRefusesAProviderKeyEveryPaneCarries(t *testing.T) {
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 				EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
 			})
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("New = %v, want %q", err, tc.want)
@@ -351,7 +351,7 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 				EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
 				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
-				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH,
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir, GitHubCredential: staticCredential, GH: fakeGH, RepositoryOwner: acmeOwner,
 			}
 			if tc.dispatch {
 				opts.DispatchURL = "http://127.0.0.1:18766"

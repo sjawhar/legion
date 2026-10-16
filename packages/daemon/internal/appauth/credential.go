@@ -17,28 +17,38 @@ import (
 // with no repository, and a caller that names none.
 var ErrNoOwner = errors.New("no GitHub owner to mint an App lease for")
 
+// ErrOwnerOutsideProject is GitHubCredential's refusal of a controller asked for a default owner
+// that is not one of the project's.
+var ErrOwnerOutsideProject = errors.New("is not an owner of the project's repositories")
+
 // GitHubCredential is the one function every role's gh files come from (runtime.GitHubCredential)
 // over tokens: a bundle with a directory for every owner of the project (owners, lowercased, and
 // owner when it is outside them) — the role's App's lease for owner, the one the role writes to,
 // and that App's read-only lease (Tokens.ReadToken) for every other — each rendered as gh's
 // hosts.yml and config.yml, named for the App and its expiry so a log can say whose token it
-// wrote, owner's directory the default. The controller writes to no owner: every owner is
-// read-only, owner's directory the default when it names one (a refresh asks for the default the
-// controller's launch recorded, which its GH_CONFIG_DIR names) and the first owner, sorted,
-// otherwise. The runtimes, and the controller route `legion controller start` fetches, call it; a
-// Manager holds every lease and re-mints it as it nears its expiry, so a launch and every refresh
+// wrote, owner's directory the default. A role's owner is its issue's repository's, which the
+// daemon's own record names. The controller writes to no owner: every owner is read-only, owner's
+// directory the default when it names one (a refresh asks for the default the controller's launch
+// recorded, which its GH_CONFIG_DIR names) and the first owner, sorted, otherwise; an owner outside
+// the project is refused (ErrOwnerOutsideProject) before anything is minted, since the controller
+// asks for its default over the API and a default is no authority to read another owner's
+// repositories. The runtimes, and the controller route `legion controller start` fetches, call it;
+// a Manager holds every lease and re-mints it as it nears its expiry, so a launch and every refresh
 // ask GitHub only when a lease turns over.
 func GitHubCredential(tokens Tokens, owners func() []string) runtime.GitHubCredential {
 	return func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
 		appRole := AppRoleFor(role)
 		owner = strings.ToLower(owner)
 		writer := owner
-		if role == claim.RoleController {
-			writer = ""
-		}
 		all := map[string]bool{}
 		for _, o := range owners() {
 			all[strings.ToLower(o)] = true
+		}
+		if role == claim.RoleController {
+			writer = ""
+			if owner != "" && !all[owner] {
+				return ghconfig.Bundle{}, fmt.Errorf("the controller's default owner %q %w", owner, ErrOwnerOutsideProject)
+			}
 		}
 		if owner != "" {
 			all[owner] = true

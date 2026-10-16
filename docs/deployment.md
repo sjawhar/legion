@@ -119,12 +119,15 @@ requests and metadata for every other owner — names the issue owner's director
 and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
 empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
 from its cached leases (the log lines `tmux runtime: github credential written` and `github
-credential refreshed`, with the claim, role, App, `expiresAt` and the owners written). `legion gh`
-runs the real gh with `GH_CONFIG_DIR` at the directory of the owner the command names (`GH_REPO`,
-`-R`/`--repo`, a `repos/<owner>/…` path of `gh api`, a `https://github.com/<owner>/…` URL, or `gh
-repo <command> <owner>/<repo>`), and at the issue owner's otherwise. The shared clone's
-`credential.helper` is `!legion git-credential` with `credential.useHttpPath` on, so a pane's `git`
-and `jj git push` read the hosts.yml of the owner in the path git asks about. A box whose login
+credential refreshed`, with the claim, role, App, `expiresAt` and the owners written); a pane it
+adopted after a restart is refreshed for the owner the daemon records for its claim, never one read
+from the pane's directory. `legion gh` runs the real gh with `GH_CONFIG_DIR` at the directory of the
+owner the command names, resolved as gh resolves it (a `repos/<owner>/…` endpoint of `gh api`, a
+pull request or issue URL over `-R`/`--repo`, `-R` over `GH_REPO`, `gh repo <command>
+<owner>/<repo>`), at the issue owner's when it names none, and refuses a command naming an owner
+the bundle holds no directory for. The shared clone's `credential.helper` is `!legion
+git-credential` with `credential.useHttpPath` on, so a pane's `git` and `jj git push` read the
+hosts.yml of the owner in the path git asks about and nothing else. A box whose login
 `PATH` heads with a `gh` wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in
 the shell that starts the daemon, or `LEGION_GH_PATH` naming it, or every pane's `gh` acts as whoever
 the wrapper routes to.

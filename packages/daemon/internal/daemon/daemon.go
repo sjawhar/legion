@@ -703,16 +703,19 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh bundle (gitHubCredential), one directory for each of
-// owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools), the one each
-// pane's `legion gh` runs; a daemon with no GitHub Apps hands the runtime none, and its panes hold
-// no gh files. The private server's environment is scrubbed before anything is launched on it.
+// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), one directory
+// for each of owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools),
+// the one each pane's `legion gh` runs, and the owner of each claim's repository the issue's record
+// names (store.ClaimRepositoryOwner), which a pane adopted after a restart holds its write token
+// for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh files. The
+// private server's environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
 			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners), gh
+			opts.RepositoryOwner = st.ClaimRepositoryOwner
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -1498,6 +1501,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	return state, nil
 }
+
 
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
 // over identity, minted for the owner of the repository the claim's issue's record names

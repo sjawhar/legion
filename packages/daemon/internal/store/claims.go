@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -143,6 +144,24 @@ func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bo
 		return false, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
 	}
 	return exists, nil
+}
+
+// ClaimRepositoryOwner is the owner of the repository token's issue's record names, as GitHub
+// spells it: what a tmux pane adopted after a restart holds its write token for
+// (tmux.Options.RepositoryOwner), read from the daemon's own record and nothing a pane can write.
+// It is "" for a claim whose issue the workflow does not record (an operator's claim), a record
+// not yet filled with its repository, and a token no claim holds.
+func (s *Store) ClaimRepositoryOwner(ctx context.Context, token claim.Token) (string, error) {
+	var repo string
+	err := s.pool.QueryRow(ctx, `select i.repo from claims c join issues i on i.key = c.issue where c.token = $1`, string(token)).Scan(&repo)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the repository of claim %s: %w", token, err)
+	}
+	owner, _, _ := strings.Cut(repo, "/")
+	return owner, nil
 }
 
 // claimMayRun is the stored claim that may still hold a process: one in a state that runs, or one

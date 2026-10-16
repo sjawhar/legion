@@ -18,10 +18,12 @@ import (
 const realGitHubProofEnabled = "LEGION_REAL_GITHUB"
 
 // TestRealGitHubCredentialSurface keeps the Stage 3 credential proof beside the real Apps it
-// drives: each role's App token reaches a plain gh and git as the gh files the daemon renders
-// (internal/ghconfig). It is intentionally gated: CI has no Legion App keys, whereas the devbox
-// command is a release gate and Task 3.14 reuses the same proof rather than rebuilding an ad-hoc
-// rig.
+// drives: each role's App token, rendered as the gh files the daemon writes (internal/ghconfig),
+// is whose login a plain gh reports, and a git clone through gh's own credential helper reads
+// those files. It is the lower-level proof of the rendered files against real GitHub; the helper a
+// shared clone runs, `legion git-credential`, and the `legion gh` wrapper are proven against the
+// real gh and git in cmd/legion (TestRealGhAndGitSendTheTargetOwnersToken). It is intentionally
+// gated: CI has no Legion App keys, whereas the devbox command is a release gate.
 func TestRealGitHubCredentialSurface(t *testing.T) {
 	if os.Getenv(realGitHubProofEnabled) != "1" {
 		t.Skip("set LEGION_REAL_GITHUB=1 to run the real GitHub App credential proof")

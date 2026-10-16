@@ -44,6 +44,26 @@ func TestShellPrefixResolvesLegionsLauncherAheadOfAnRcsDirectories(t *testing.T)
 	}
 }
 
+// The worker image's gh (packages/daemon/docker/gh, COPY'd to /opt/legion/bin/gh) is the script
+// Install writes for the image's legion, so a pod's gh and a pane's are one wrapper.
+func TestTheImagesGhIsTheWrapperInstallWrites(t *testing.T) {
+	root := t.TempDir()
+	if err := Install(root, "/opt/legion/bin/legion"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	want, err := os.ReadFile(filepath.Join(LauncherDir(root), "gh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.ReadFile(filepath.Join("..", "..", "..", "docker", "gh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(image) != string(want) {
+		t.Fatalf("packages/daemon/docker/gh = %q, want the wrapper Install writes for /opt/legion/bin/legion, %q", image, want)
+	}
+}
+
 // Install puts two private 0700 scripts in a 0700 bin under root and nothing else: the launcher,
 // which execs the installing legion, and gh, which execs its `legion gh` (the wrapper that picks
 // the owner's gh directory).
