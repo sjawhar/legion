@@ -774,35 +774,52 @@ func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
 	}
 }
 
-// Reopening a pull request must not pull a ready_merge row forward past GitHub's rate-limit
-// deadline. A duplicate enqueue reuses the durable row and leaves its next_at unchanged.
-func TestReadyMergeEnqueueDoesNotExpediteAnExistingRow(t *testing.T) {
-	ctx := context.Background()
-	store := emptyStore(t)
-	if _, err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-	now := time.Now().UTC()
-	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now.Add(3*time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	row.LastError = "GitHub GraphQL: API rate limit exceeded"
-	if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, row) }); err != nil {
-		t.Fatalf("enqueue rate-limited row: %v", err)
-	}
-	reopened, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, reopened) }); err != nil {
-		t.Fatalf("enqueue reopen: %v", err)
-	}
-	var nextAt time.Time
-	if err := store.pool.QueryRow(ctx, `select next_at from outbox where kind = 'ready_merge'`).Scan(&nextAt); err != nil {
-		t.Fatalf("read ready merge: %v", err)
-	}
-	if want := row.NextAt.Truncate(time.Microsecond); !nextAt.Equal(want) {
-		t.Fatalf("reopened READY merge next_at = %s, want preserved rate-limit deadline %s", nextAt, want)
+// A duplicate ready_merge enqueue (a reopen at READY's head) reuses the durable row. It keeps the
+// row's next_at, so a reopen never pulls the row forward past GitHub's rate-limit deadline, and
+// restarts its attempts. A row a worker holds is taken from that worker: its lease token no longer
+// matches, so the worker, which read the record before the reopen, can neither finish nor retry it,
+// and the row decides again once the lease expires. A row no worker holds stays unleased.
+func TestReadyMergeEnqueueReusesTheRowAndTakesItFromItsWorker(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased %t", leased), func(t *testing.T) {
+			ctx := context.Background()
+			store := emptyStore(t)
+			if _, err := store.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			now := time.Now().UTC()
+			row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now.Add(3*time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			row.Attempts, row.LastError = 7, "GitHub GraphQL: API rate limit exceeded"
+			if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, row) }); err != nil {
+				t.Fatalf("enqueue rate-limited row: %v", err)
+			}
+			if leased {
+				if _, err := store.pool.Exec(ctx, `update outbox set lease_token = 'worker', lease_until = $1 where kind = 'ready_merge'`, now.Add(30*time.Second)); err != nil {
+					t.Fatalf("lease the row: %v", err)
+				}
+			}
+			reopened, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, reopened) }); err != nil {
+				t.Fatalf("enqueue reopen: %v", err)
+			}
+			var rows, attempts int
+			var nextAt time.Time
+			var token string
+			if err := store.pool.QueryRow(ctx, `select count(*), max(attempts), max(next_at), max(lease_token) from outbox where kind = 'ready_merge'`).Scan(&rows, &attempts, &nextAt, &token); err != nil {
+				t.Fatalf("read ready merge: %v", err)
+			}
+			if want := row.NextAt.Truncate(time.Microsecond); rows != 1 || attempts != 0 || !nextAt.Equal(want) {
+				t.Fatalf("reopened READY merge rows %d, attempts %d, next_at %s; want one row, attempts 0, the rate-limit deadline %s kept", rows, attempts, nextAt, want)
+			}
+			if leased == (token == "") || token == "worker" {
+				t.Fatalf("reopened READY merge lease token %q; leased %t wants it taken from the worker", token, leased)
+			}
+		})
 	}
 }

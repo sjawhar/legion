@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -26,13 +28,15 @@ import (
 // answers it as done while leaving auto-merge enabled, refuseSubmit answers an enable or merge with
 // GitHub's refusal, refuseType is that GraphQL error's type, movedOnRefuse is the head a push moves
 // the pull request to as GitHub refuses it, and submitStatus answers an enable or merge with that
-// HTTP status instead.
+// HTTP status instead. updated is the pull request's updatedAt as its JSON value, GitHub's last
+// change to it: updatedAt by default, `null` for an answer that carries none.
 type github struct {
 	mu                             sync.Mutex
 	notFound                       string
 	state                          string
 	head                           string
 	mergeState                     string
+	updated                        string
 	queueRequired, autoMergeOK     bool
 	armed, queued                  bool
 	requeue, failDisable, stuckArm bool
@@ -41,6 +45,9 @@ type github struct {
 	submitStatus                   int
 	mutations                      []string
 }
+
+// updatedAt is the fake pull request's default last change on GitHub.
+const updatedAt = "2026-10-16T05:00:00Z"
 
 func (g *github) serve(t *testing.T) string {
 	t.Helper()
@@ -114,15 +121,18 @@ func (g *github) serve(t *testing.T) string {
 			if g.queued {
 				entry = `{"enqueuedAt":"2026-10-11T12:05:00Z"}`
 			}
-			state, mergeState := g.state, g.mergeState
+			state, mergeState, updated := g.state, g.mergeState, g.updated
 			if state == "" {
 				state = "OPEN"
 			}
 			if mergeState == "" {
 				mergeState = "BLOCKED"
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
-				g.autoMergeOK, state, g.head, mergeState, g.queueRequired, autoMerge, entry)
+			if updated == "" {
+				updated = strconv.Quote(updatedAt)
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":%t,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%s,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
+				g.autoMergeOK, state, g.head, mergeState, updated, g.queueRequired, autoMerge, entry)
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -285,6 +295,38 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 				t.Fatalf("mutations %v, want %v", g.mutations, tc.want)
 			}
 		})
+	}
+}
+
+// A Lagging submission carries GitHub's last change to the pull request from the same read, and it
+// is stalled only once that change has stood longer than LagBound, on GitHub's own clock: a
+// disagreement GitHub made a moment ago is a webhook still on its way.
+func TestALaggingSubmissionStallsOnlyOnGitHubsOwnClock(t *testing.T) {
+	g := &github{state: "CLOSED", head: "head", mergeState: "UNKNOWN"}
+	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+	var lagging *Lagging
+	if !errors.As(err, &lagging) {
+		t.Fatalf("Submit = %v, want Lagging", err)
+	}
+	changed, _ := time.Parse(time.RFC3339, updatedAt)
+	if !lagging.Since.Equal(changed) {
+		t.Fatalf("Lagging since %s, want GitHub's updatedAt %s", lagging.Since, changed)
+	}
+	if lagging.Stalled(changed.Add(LagBound)) || !lagging.Stalled(changed.Add(LagBound+time.Second)) {
+		t.Fatalf("Lagging stalled at the bound or not past it (bound %s from %s)", LagBound, changed)
+	}
+}
+
+// GitHub always answers a pull request's updatedAt. A read without one is not GitHub's answer, so
+// Submit fails it loudly rather than judging a disagreement against no clock at all.
+func TestSubmitFailsAReadWithoutUpdatedAt(t *testing.T) {
+	g := &github{state: "CLOSED", head: "head", mergeState: "UNKNOWN", updated: "null"}
+	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+	var lagging *Lagging
+	if err == nil || errors.Is(err, wait.ErrWaiting) || errors.As(err, &lagging) || !strings.Contains(err.Error(), "updatedAt") {
+		t.Fatalf("Submit without updatedAt = %v, want a failure naming updatedAt", err)
 	}
 }
 

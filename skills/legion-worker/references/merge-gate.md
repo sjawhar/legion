@@ -138,8 +138,10 @@ reviewing until you finish.
   retry would meet again (squash merges disabled, a permission the App lacks) ends the row and is
   told to the architect once (`merge-refused`), with GitHub's message. While the record still
   awaits READY's head, GitHub showing the pull request closed or at another head is a webhook not
-  yet applied, so the row waits for the two to agree, and one that outlasts the row's retries ends
-  it and is told to the architect once (`merge-stalled`). Any other failure retries.
+  yet applied, so the row waits for the two to agree. Only once GitHub's last change to the pull
+  request is more than 10 minutes old, however long the row waited before, does the row end and
+  tell the architect once (`merge-stalled`). A reopen at READY's head reuses the row and takes it
+  from a run that read the record before the reopen. Any other failure retries.
   No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull
   request touches a path the project's `merge.by_hand` names), READY stands but the daemon submits
   nothing: the merger tells the architect the note and the head, and a person merges under the

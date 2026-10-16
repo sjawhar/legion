@@ -299,50 +299,95 @@ func TestAWaitingREADYMergeWarnsOnlyWhenItWaitsOnSomeone(t *testing.T) {
 // A ready_merge row ends as stale only on the record's word. While the record still awaits READY's
 // head on an open pull request, GitHub showing the pull request closed or at another head is a
 // webhook the record has not applied yet, or a GitHub read behind the record: the row waits and
-// decides again. So a reopen landing while the row reads the close leaves the merge submitted on
-// the next run, and a close the record has applied ends the row quietly, the architect already told
-// of the close. A disagreement that outlasts waitWarnAttempts runs ends the row and tells the
-// architect once (merge-stalled), so the row never waits unseen forever.
+// decides again. A reopen at READY's head takes the row back from any worker that read the record
+// before it, so it is never lost: one landing while the row reads the close, however long the row
+// waited before, or between the row's record read and its finish, leaves the merge submitted on the
+// next run. A close the record has applied ends the row quietly, the architect already told of the
+// close. The bound is GitHub's own clock, never the row's retries: a disagreement ends the row only
+// once GitHub's last change to the pull request has stood longer than ghautomerge.LagBound, far
+// longer than a webhook takes, and then tells the architect once (merge-stalled). So one
+// disagreement after a long routine wait never ends it.
 func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
-	t.Run("a reopen lands while the row reads the close", func(t *testing.T) {
+	for _, waited := range []int{0, waitWarnAttempts} {
+		t.Run(fmt.Sprintf("a reopen lands while a row that waited %d times reads the close", waited), func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY.with(func(s *readyMergeSeed) { s.pr = record.PullRequestClosed }))
+			github := newMergeGitHub(t, func(read int) string {
+				if read > 1 {
+					return pullJSON("OPEN", "ready-head", "CLEAN")
+				}
+				// The reopen's transaction commits as GitHub answers the row's read of the close.
+				reopen(t, pool, records)
+				return pullJSON("CLOSED", "ready-head", "UNKNOWN")
+			}, mergedAnswer)
+			now := time.Now().UTC()
+			row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+			row.Attempts = waited
+			enqueueOutbox(t, pool, records, row)
+			clock := now
+			runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("first RunOnce: %v", err)
+			}
+			assertMergeRows(t, pool, 1, "merge-stalled", 0)
+			clock = clock.Add(time.Minute)
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("second RunOnce: %v", err)
+			}
+			assertMergeRows(t, pool, 0, "merge-stalled", 0)
+			if merges, _ := github.merged(); merges != 1 {
+				t.Fatalf("merges %d, want READY's merge submitted once the reopen reached both", merges)
+			}
+		})
+	}
+	t.Run("a reopen lands between the row's record read and its finish", func(t *testing.T) {
 		pool := isolatedOutboxPool(t)
 		records := record.NewStore()
 		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY.with(func(s *readyMergeSeed) { s.pr = record.PullRequestClosed }))
-		github := newMergeGitHub(t, func(read int) string {
-			if read > 1 {
-				return pullJSON("OPEN", "ready-head", "CLEAN")
-			}
-			// The reopen's transaction commits as GitHub answers the row's read of the close.
-			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-				if err := records.PutPullRequest(context.Background(), tx, readyPullRequest("LEGION-208", record.PullRequestOpen)); err != nil {
-					return err
-				}
-				row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())
-				if err != nil {
-					return err
-				}
-				return records.Enqueue(context.Background(), tx, row)
-			}); err != nil {
-				t.Errorf("apply the reopen: %v", err)
-			}
-			return pullJSON("CLOSED", "ready-head", "UNKNOWN")
-		}, mergedAnswer)
+		github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, mergedAnswer)
 		now := time.Now().UTC()
 		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
 		clock := now
-		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
-		if err := runner.RunOnce(context.Background()); err != nil {
+		reopening := &reopensBeforeFinish{Store: records, t: t, pool: pool}
+		if err := mergeRunner(pool, reopening, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
 			t.Fatalf("first RunOnce: %v", err)
+		}
+		if !reopening.reopened {
+			t.Fatal("the row finished without the reopen landing first")
 		}
 		assertMergeRows(t, pool, 1, "merge-stalled", 0)
 		clock = clock.Add(time.Minute)
-		if err := runner.RunOnce(context.Background()); err != nil {
+		if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
 			t.Fatalf("second RunOnce: %v", err)
 		}
 		assertMergeRows(t, pool, 0, "merge-stalled", 0)
 		if merges, _ := github.merged(); merges != 1 {
-			t.Fatalf("merges %d, want READY's merge submitted once the reopen reached both", merges)
+			t.Fatalf("merges %d, want READY's merge submitted after the reopen", merges)
 		}
+	})
+	t.Run("one disagreement after a long routine wait", func(t *testing.T) {
+		pool := isolatedOutboxPool(t)
+		records := record.NewStore()
+		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+		now := time.Now().UTC()
+		clock := now
+		github := newMergeGitHub(t, func(read int) string {
+			if read <= waitWarnAttempts {
+				return pullJSON("OPEN", "ready-head", "BLOCKED")
+			}
+			// A close GitHub made just now, whose webhook has not reached the record.
+			return pullJSONAt("CLOSED", "ready-head", "UNKNOWN", clock)
+		}, mergedAnswer)
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+		for run := 0; run <= waitWarnAttempts; run++ {
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce %d: %v", run, err)
+			}
+			clock = clock.Add(2 * time.Minute)
+		}
+		assertMergeRows(t, pool, 1, "merge-stalled", 0)
 	})
 	t.Run("GitHub and the record both hold the pull request closed", func(t *testing.T) {
 		github := newMergeGitHub(t, func(int) string { return pullJSON("CLOSED", "ready-head", "UNKNOWN") }, mergedAnswer)
@@ -355,14 +400,16 @@ func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
 		}
 		assertMergeRows(t, pool, 0, "merge-stalled", 0)
 	})
-	t.Run("the disagreement outlasts its bound", func(t *testing.T) {
-		github := newMergeGitHub(t, func(int) string { return pullJSON("CLOSED", "ready-head", "UNKNOWN") }, mergedAnswer)
+	t.Run("a disagreement that has stood on GitHub past the bound", func(t *testing.T) {
+		now := time.Now().UTC()
+		closed := now.Add(-9 * time.Minute)
+		github := newMergeGitHub(t, func(int) string { return pullJSONAt("CLOSED", "ready-head", "UNKNOWN", closed) }, mergedAnswer)
 		pool := isolatedOutboxPool(t)
 		records := record.NewStore()
 		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
-		now := time.Now().UTC()
+		// However many times the row tried before, only GitHub's clock bounds the disagreement.
 		row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-		row.Attempts = waitWarnAttempts - 1
+		row.Attempts = 100
 		enqueueOutbox(t, pool, records, row)
 		clock := now
 		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
@@ -370,15 +417,93 @@ func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
 			t.Fatalf("first RunOnce: %v", err)
 		}
 		assertMergeRows(t, pool, 1, "merge-stalled", 0)
-		clock = clock.Add(time.Hour)
+		clock = clock.Add(2 * time.Minute)
 		if err := runner.RunOnce(context.Background()); err != nil {
 			t.Fatalf("second RunOnce: %v", err)
 		}
 		reasons := assertMergeRows(t, pool, 0, "merge-stalled", 1)
-		if !strings.Contains(reasons[0], "#42 CLOSED") || !strings.Contains(reasons[0], "ready-head") {
-			t.Fatalf("merge-stalled reason %q, want it to name the closed pull request and READY's head", reasons[0])
+		for _, want := range []string{"#42 CLOSED", "ready-head", closed.Format(time.RFC3339)} {
+			if !strings.Contains(reasons[0], want) {
+				t.Fatalf("merge-stalled reason %q, want it to name %q", reasons[0], want)
+			}
+		}
+		for _, unwanted := range []string{"tries", "waiting for the two to agree"} {
+			if strings.Contains(reasons[0], unwanted) {
+				t.Fatalf("merge-stalled reason %q, want no %q", reasons[0], unwanted)
+			}
 		}
 	})
+}
+
+// A reopen at READY's head that lands while a worker is recording GitHub's permanent refusal takes
+// the row from that worker: the worker's notice rolls back with its finish, and the run that holds
+// the row afterwards tells the architect, so the refusal is told once.
+func TestAReopenDuringAPermanentRefusalTellsTheArchitectOnce(t *testing.T) {
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer("Squash merges are not allowed on this repository."))
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	now := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+	clock := now
+	reopening := &reopensBeforeFinish{Store: records, t: t, pool: pool}
+	if err := mergeRunner(pool, reopening, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	if !reopening.reopened {
+		t.Fatal("the refusal finished without the reopen landing first")
+	}
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	clock = clock.Add(time.Minute)
+	if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	assertMergeRows(t, pool, 0, "merge-refused", 1)
+}
+
+// reopen applies a reopen of LEGION-208's pull request at READY's head as the workflow does: the
+// record holds it open, and READY's merge is queued again (queueReadyMerge).
+func reopen(t *testing.T, pool *pgxpool.Pool, records record.Store) {
+	t.Helper()
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		if err := records.PutPullRequest(context.Background(), tx, readyPullRequest("LEGION-208", record.PullRequestOpen)); err != nil {
+			return err
+		}
+		row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())
+		if err != nil {
+			return err
+		}
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Errorf("apply the reopen: %v", err)
+	}
+}
+
+// reopensBeforeFinish is a record store whose first finish of a row, plain or lease-owned, lets a
+// reopen at READY's head (reopen) commit first, as one landing after the row's worker read the
+// record and before that worker finishes the row.
+type reopensBeforeFinish struct {
+	record.Store
+	t        *testing.T
+	pool     *pgxpool.Pool
+	reopened bool
+}
+
+func (s *reopensBeforeFinish) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	s.reopenOnce()
+	return s.Store.FinishOutbox(ctx, tx, id, leaseToken)
+}
+
+func (s *reopensBeforeFinish) FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	s.reopenOnce()
+	return s.Store.FinishLeasedOutbox(ctx, tx, id, leaseToken)
+}
+
+func (s *reopensBeforeFinish) reopenOnce() {
+	if !s.reopened {
+		s.reopened = true
+		reopen(s.t, s.pool, s.Store)
+	}
 }
 
 // A rate-limited ready_merge waits as long as GitHub asks, longer than the outbox's own backoff,
@@ -483,6 +608,35 @@ func TestARateLimitDefersOnlyTheRowsThatSpendItsBudget(t *testing.T) {
 				t.Fatalf("the deferred row waits until %s with last error %q; want no earlier than %s, naming row %d", nextAt, lastError, now.Add(tc.wait), firstID)
 			}
 		})
+	}
+}
+
+// The REST core and GraphQL budgets are exhausted independently, so a batch remembers each limit it
+// met: a REST core limit met after a GraphQL one leaves the GraphQL limit standing, and a disarm
+// behind both is deferred rather than sent against an exhausted budget.
+func TestARateLimitedBatchRemembersEveryBudgetItExhausted(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
+	primary := func(resource string) map[string]string {
+		return map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset, "X-RateLimit-Resource": resource}
+	}
+	github := newBudgetGitHub(t, primary("core"), primary("graphql"))
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.IssueBranch{Generation: 1}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.AutoMergeDisable{Number: 43}, now))
+	if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return now }).RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if !github.calledFor("LEGION-208") || !github.calledFor("LEGION-210") {
+		t.Fatal("the READY merge and the issue branch, each the first of its budget, did not run")
+	}
+	if github.calledFor("LEGION-209") {
+		t.Fatal("the disarm called GraphQL in the batch whose first row met GraphQL's limit")
 	}
 }
 
@@ -621,10 +775,17 @@ func refusedAnswer(message string) func(http.ResponseWriter) {
 }
 
 // pullJSON is ghautomerge's read of acme/widgets#42 as GitHub answers it in a repository that allows
-// no auto-merge: the pull request in state at head, in mergeState, with nothing armed.
+// no auto-merge: the pull request in state at head, in mergeState, with nothing armed, GitHub's last
+// change to it made just now (pullJSONAt).
 func pullJSON(state, head, mergeState string) string {
-	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
-		state, head, mergeState)
+	return pullJSONAt(state, head, mergeState, time.Now())
+}
+
+// pullJSONAt is pullJSON with GitHub's last change to the pull request (its updatedAt) made at
+// updated.
+func pullJSONAt(state, head, mergeState string, updated time.Time) string {
+	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
+		state, head, mergeState, updated.UTC().Format(time.RFC3339))
 }
 
 // armedPullJSON is a disarm's read of an open pull request at head, its auto-merge enabled while

@@ -53,8 +53,8 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // it, and GitHub's merge state and rules decide which. A repository that allows no auto-merge leaves
 // the row waiting until GitHub reports the pull request mergeable, and a READY the record has left
 // ends the row. A refusal a retry would meet again (ghautomerge.Refused) and a disagreement with the
-// record that outlasts its bound (ghautomerge.Lagging) end it too, the architect told
-// (permanentRefusal, finishRefused); every other failure retries.
+// record that has stood on GitHub longer than ghautomerge.LagBound (ghautomerge.Lagging.Stalled) end
+// it too, the architect told (permanentRefusal, finishRefused); every other failure retries.
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
@@ -80,14 +80,15 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 }
 
 // readyMergeEnded is the architect's notice of a READY merge row ended without a merge by cause:
-// GitHub's refusal, a retry meeting it again (merge-refused), or GitHub still showing the pull
-// request closed or at another head than the record awaits after the row's last try
-// (merge-stalled).
-func readyMergeEnded(row record.OutboxRow, cause error) record.Notice {
+// GitHub's refusal, which a retry would meet again (merge-refused), or GitHub showing the pull
+// request closed or at another head than the record awaits since a change older than
+// ghautomerge.LagBound, a webhook the daemon never received (merge-stalled).
+func readyMergeEnded(cause error) record.Notice {
 	var lagging *ghautomerge.Lagging
 	if errors.As(cause, &lagging) {
 		return record.Notice{Kind: "merge-stalled", Role: claim.RoleArchitect,
-			Reason: fmt.Sprintf("the daemon stopped submitting READY's merge after %d tries: %v", row.Attempts+1, lagging)}
+			Reason: fmt.Sprintf("GitHub has shown pull request #%d %s at %s since %s, longer than %s, while the record awaits its merge at READY's head %s: the daemon never received that change's webhook, so it stopped submitting READY's merge",
+				lagging.Number, lagging.State, lagging.GitHubHead, lagging.Since.UTC().Format(time.RFC3339), ghautomerge.LagBound, lagging.Head)}
 	}
 	return record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: cause.Error()}
 }

@@ -46,8 +46,7 @@ const (
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
 	// operator should look. A READY merge only GitHub's own rules hold back
-	// (ghautomerge.Unmergeable.Routine) stays debug at every attempt, and one GitHub and the record
-	// still disagree about (ghautomerge.Lagging) ends here (permanentRefusal).
+	// (ghautomerge.Unmergeable.Routine) stays debug at every attempt.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
@@ -156,19 +155,22 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("claim due outbox rows: %w", err)
 	}
-	// limited is the GitHub rate limit a row of this batch met: the batch's later rows that spend
-	// its budget wait it out (rateLimit.spentBy) rather than meet it again.
-	var limited *rateLimit
+	// limited is every GitHub rate limit a row of this batch met, by the budget it exhausted: the
+	// batch's later rows that spend one of those budgets wait it out (githubBudgets) rather than meet
+	// it again.
+	limited := map[githubrest.Budget]rateLimit{}
 	for _, row := range rows {
-		if limited.spentBy(row.Kind) {
-			if err := r.retry(ctx, row, fmt.Errorf("deferred behind row %d's GitHub rate limit: %w", limited.row, limited.err)); err != nil {
+		if limit, ok := exhausted(limited, row.Kind); ok {
+			if err := r.retry(ctx, row, fmt.Errorf("deferred behind row %d's GitHub rate limit: %w", limit.row, limit.err)); err != nil {
 				r.log.Error("outbox row deferral not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
 			}
 			continue
 		}
 		if err := r.execute(ctx, row); err != nil {
 			if after, budget := githubrest.RetryAfter(err); after > 0 {
-				limited = &rateLimit{row: row.ID, budget: budget, err: err}
+				if _, met := limited[budget]; !met {
+					limited[budget] = rateLimit{row: row.ID, err: err}
+				}
 			}
 			if errors.Is(err, wait.ErrWaiting) {
 				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
@@ -188,7 +190,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 			}
-			if permanentRefusal(row, err) {
+			if permanentRefusal(row, err, r.now().UTC()) {
 				if err := r.finishRefused(ctx, row, err); err != nil {
 					r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
 				}
@@ -217,7 +219,8 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 
 // finishRefused finishes a row whose failure no retry repairs (permanentRefusal), its follow-up in
 // the same transaction and only while the row's lease still holds (FinishLeasedOutbox), so a worker
-// whose lease expired commits nothing beside the one that holds the row now.
+// whose lease expired, or was taken by a reopen (record's readyMergeConflict), commits nothing
+// beside the one that holds the row now.
 //
 // A status row Dispatch refused finishes so it no longer holds its issue's later writes back. A
 // hand-over's row drops its fence with it: the write that would hand the child to Legion never
@@ -230,27 +233,36 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 	if err != nil {
 		return fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 	}
-	write, _ := payload.(record.StatusWrite)
-	var notice *record.OutboxRow
-	if _, merge := payload.(record.ReadyMerge); merge {
-		told, err := record.NewOutboxRow(row.Issue, readyMergeEnded(row, cause), r.now().UTC())
+	// follow is what the transaction does beside the finish, and told the line logged once it commits.
+	var follow func(pgx.Tx) error
+	var told func()
+	switch value := payload.(type) {
+	case record.StatusWrite:
+		refusal, _ := dispatch.PermanentRefusal(cause)
+		r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
+			"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", cause)
+		if value.HandOver {
+			follow = func(tx pgx.Tx) error {
+				return r.records.DeleteHandoverAt(ctx, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
+			}
+			told = func() {
+				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
+					"row", row.ID, "issue", row.Issue, "tree", value.HandOverTree, "linger", value.HandOverLinger)
+			}
+		}
+	case record.ReadyMerge:
+		notice, err := record.NewOutboxRow(row.Issue, readyMergeEnded(cause), r.now().UTC())
 		if err != nil {
 			return err
 		}
-		notice = &told
-	}
-	if refusal, refused := dispatch.PermanentRefusal(cause); refused {
-		r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
-			"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", cause)
+		follow = func(tx pgx.Tx) error { return r.records.Enqueue(ctx, tx, notice) }
+		told = func() {
+			r.log.Error("outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
+		}
 	}
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		if write.HandOver {
-			if err := r.records.DeleteHandoverAt(ctx, tx, row.Issue, write.HandOverTree, write.HandOverLinger); err != nil {
-				return err
-			}
-		}
-		if notice != nil {
-			if err := r.records.Enqueue(ctx, tx, *notice); err != nil {
+		if follow != nil {
+			if err := follow(tx); err != nil {
 				return err
 			}
 		}
@@ -258,12 +270,8 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 	}); err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
 	}
-	switch {
-	case write.HandOver:
-		r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
-			"row", row.ID, "issue", row.Issue, "tree", write.HandOverTree, "linger", write.HandOverLinger)
-	case notice != nil:
-		r.log.Error("outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
+	if told != nil {
+		told()
 	}
 	return nil
 }
@@ -284,34 +292,30 @@ func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) e
 	return nil
 }
 
-// rateLimit is a GitHub rate limit a row of a batch met: the row, the budget the limit spent, and
-// the row's error.
+// rateLimit is the GitHub rate limit a row of a batch met: the row and its error.
 type rateLimit struct {
-	row    int64
-	budget githubrest.Budget
-	err    error
+	row int64
+	err error
 }
 
-// spentBy says whether a row of kind spends the budget l exhausted, and so would meet the same
-// limit: the implement App's GraphQL calls (a disarm, a READY merge) spend GraphQL's budget, its
-// REST calls (an issue branch's create) the REST core's, and GitHub's secondary limit covers both.
-// A nil l is no limit.
-func (l *rateLimit) spentBy(kind record.OutboxKind) bool {
-	if l == nil {
-		return false
+// githubBudgets is the GitHub budgets a row of each kind spends, as the implement App: its REST
+// calls (an issue branch's create) the REST core's, its GraphQL calls (a disarm, a READY merge)
+// GraphQL's, and every call GitHub's secondary limit. A kind it does not name calls no GitHub API.
+var githubBudgets = map[record.OutboxKind][]githubrest.Budget{
+	record.OutboxKindIssueBranch:      {githubrest.BudgetCore, githubrest.BudgetSecondary},
+	record.OutboxKindAutoMergeDisable: {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
+	record.OutboxKindReadyMerge:       {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
+}
+
+// exhausted is the limit in limited of a budget a row of kind spends, and whether there is one: that
+// row would meet the same limit.
+func exhausted(limited map[githubrest.Budget]rateLimit, kind record.OutboxKind) (rateLimit, bool) {
+	for _, budget := range githubBudgets[kind] {
+		if limit, ok := limited[budget]; ok {
+			return limit, true
+		}
 	}
-	graphQL := kind == record.OutboxKindAutoMergeDisable || kind == record.OutboxKindReadyMerge
-	rest := kind == record.OutboxKindIssueBranch
-	switch l.budget {
-	case githubrest.BudgetSecondary:
-		return graphQL || rest
-	case githubrest.BudgetGraphQL:
-		return graphQL
-	case githubrest.BudgetCore:
-		return rest
-	default:
-		return false
-	}
+	return rateLimit{}, false
 }
 
 func retryBackoff(attempts int) time.Duration {
@@ -328,9 +332,9 @@ func retryBackoff(attempts int) time.Duration {
 // (finishRefused) rather than retried: a Dispatch status write Dispatch refuses the same way every
 // time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it, and
 // a READY merge GitHub refuses where it still stands (ghautomerge.Refused), or whose pull request
-// GitHub still shows closed or at another head than the record awaits after waitWarnAttempts runs
-// (ghautomerge.Lagging).
-func permanentRefusal(row record.OutboxRow, err error) bool {
+// GitHub has shown closed or at another head than the record awaits for longer than
+// ghautomerge.LagBound at now (ghautomerge.Lagging.Stalled).
+func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
 	switch row.Kind {
 	case record.OutboxKindDispatchStatus:
 		_, permanent := dispatch.PermanentRefusal(err)
@@ -338,7 +342,7 @@ func permanentRefusal(row record.OutboxRow, err error) bool {
 	case record.OutboxKindReadyMerge:
 		var refused *ghautomerge.Refused
 		var lagging *ghautomerge.Lagging
-		return errors.As(err, &refused) || errors.As(err, &lagging) && row.Attempts >= waitWarnAttempts
+		return errors.As(err, &refused) || errors.As(err, &lagging) && lagging.Stalled(now)
 	default:
 		return false
 	}

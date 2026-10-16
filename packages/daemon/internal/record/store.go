@@ -517,12 +517,15 @@ func (s *Postgres) DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
 // readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:
-// the unique partial index 0044 turns the race between a reopen and a retry into one row, and a
-// duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included. Its
-// target is that partial index, which holds ready_merge rows alone, so no other kind's insert
-// conflicts on it.
+// the unique partial index 0044 turns the race between a reopen and a retry into one row. A
+// duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included,
+// restarts its attempts, and takes the row from any worker holding it: that worker read the record
+// before the reopen, so its finish and retry, each matched on its lease token, must touch nothing,
+// and the row decides again on the new record once the lease expires. Its target is that partial
+// index, which holds ready_merge rows alone, so no other kind's insert conflicts on it.
 const readyMergeConflict = `
-	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do nothing`
+	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do update set attempts = 0,
+		lease_token = case when outbox.lease_token = '' then '' else gen_random_uuid()::text end`
 
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
 	if !json.Valid(row.Payload) {

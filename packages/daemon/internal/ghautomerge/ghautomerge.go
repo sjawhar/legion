@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -30,7 +31,7 @@ const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $numbe
   repository(owner: $owner, name: $name) {
     autoMergeAllowed
     pullRequest(number: $number) {
-      id state headRefOid mergeStateStatus isMergeQueueEnabled
+      id state headRefOid mergeStateStatus updatedAt isMergeQueueEnabled
       autoMergeRequest { enabledAt } mergeQueueEntry { enqueuedAt }
     }
   }
@@ -140,7 +141,8 @@ func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 //
 // Only the record ends a submission as Stale. While it still awaits head, a pull request GitHub
 // shows closed or at another head is a wait (Lagging): the webhook that moves the record has not
-// been applied yet, or GitHub's read is the one behind, and the next run decides again.
+// been applied yet, or GitHub's read is the one behind, and the next run decides again. GitHub
+// always answers updatedAt, so a read without it fails rather than leaving the wait unbounded.
 //
 // A mutation GitHub refuses is read again: when GitHub still stands where it refused it (the same
 // open pull request at head, nothing armed, the same submission chosen), a retry would meet the
@@ -165,8 +167,10 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	switch {
 	case kept != head:
 		return Stale, nil
+	case !pull.openAt(head) && pull.UpdatedAt.IsZero():
+		return "", fmt.Errorf("GitHub's read of pull request #%d of %s carries no updatedAt to bound its disagreement with the record", number, repo)
 	case !pull.openAt(head):
-		return "", &Lagging{Number: number, Head: head, State: pull.State, GitHubHead: pull.HeadRefOid}
+		return "", &Lagging{Number: number, Head: head, State: pull.State, GitHubHead: pull.HeadRefOid, Since: pull.UpdatedAt}
 	case pull.armed():
 		return Already, nil
 	}
@@ -222,12 +226,19 @@ func (r *Refused) Error() string {
 		r.Action, r.Number, r.Head, r.Message)
 }
 
+// LagBound is how long GitHub's last change to a pull request stands before a disagreement with the
+// record is a webhook the daemon never received rather than one still on its way: far longer than
+// GitHub takes to deliver one.
+const LagBound = 10 * time.Minute
+
 // Lagging is GitHub showing pull request Number in State at GitHubHead while the record still awaits
 // its merge at READY's Head: a close or a push whose webhook the record has not applied yet, or a
-// GitHub read behind the record. It is a wait (wait.ErrWaiting): the next run reads both again.
+// GitHub read behind the record. Since is GitHub's last change to the pull request, from the same
+// read. It is a wait (wait.ErrWaiting): the next run reads both again, until it is Stalled.
 type Lagging struct {
 	Number                  int
 	Head, State, GitHubHead string
+	Since                   time.Time
 }
 
 func (l *Lagging) Error() string {
@@ -236,6 +247,10 @@ func (l *Lagging) Error() string {
 }
 
 func (l *Lagging) Is(target error) bool { return target == wait.ErrWaiting }
+
+// Stalled says whether at now the disagreement has stood on GitHub longer than LagBound: GitHub's
+// own clock bounds it, never how often the row has tried.
+func (l *Lagging) Stalled(now time.Time) bool { return now.Sub(l.Since) > LagBound }
 
 // Unmergeable is GitHub reporting pull request Number of Repo in merge State at READY's Head, not
 // mergeable yet, in a repository that allows no auto-merge: Submit merges it once GitHub reports it
@@ -300,13 +315,14 @@ type repository struct {
 }
 
 // pullRequest is what Disarm and Submit read of a pull request: its node id, state, head, merge
-// state, whether its base requires a merge queue, and whether auto-merge is enabled and it sits
-// in a merge queue.
+// state, GitHub's last change to it, whether its base requires a merge queue, and whether auto-merge
+// is enabled and it sits in a merge queue.
 type pullRequest struct {
 	ID                  string    `json:"id"`
 	State               string    `json:"state"`
 	HeadRefOid          string    `json:"headRefOid"`
 	MergeStateStatus    string    `json:"mergeStateStatus"`
+	UpdatedAt           time.Time `json:"updatedAt"`
 	IsMergeQueueEnabled bool      `json:"isMergeQueueEnabled"`
 	AutoMergeRequest    *struct{} `json:"autoMergeRequest"`
 	MergeQueueEntry     *struct{} `json:"mergeQueueEntry"`

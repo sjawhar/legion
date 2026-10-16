@@ -212,9 +212,13 @@ and checks decide when it merges; Legion bypasses none, and a review only a pers
 for. READY accepts a head whose required checks are still running, and refuses one whose required
 check failed or never reported. The row reads GitHub, then the record, and submits nothing once the
 record shows the issue has left that READY or applied a close; while the record still awaits it, a
-pull request GitHub shows closed or at another head waits for the two to agree, and a disagreement
-that outlasts the row's retries ends it and tells the architect once (`merge-stalled`). A refusal
-GitHub would repeat on a retry ends the row and is told to the architect once (`merge-refused`).
+pull request GitHub shows closed or at another head waits for the two to agree. The bound is
+GitHub's own clock: once GitHub's last change to the pull request (its `updatedAt`) is more than 10
+minutes old, a webhook never arrived, so the row ends and tells the architect once
+(`merge-stalled`); routine waits and rate-limit deferrals never count toward it. A reopen at READY's
+head reuses that row and takes it from any worker still holding it, so the merge is never lost. A
+refusal GitHub would repeat on a retry ends the row and is told to the architect once
+(`merge-refused`).
 GitHub checks the expected head only when auto-merge is enabled, and arming is right only for an
 awaiting issue's READY head, so the daemon queues an `auto_merge_disable` outbox row on every other
 push or reopen, when a child is set back to

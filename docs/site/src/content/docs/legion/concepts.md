@@ -241,9 +241,11 @@ when it merges, rules Legion neither reads nor changes nor bypasses, and a perso
 first. The submission reads GitHub, then the record, when it runs, and submits nothing once the
 record shows the issue left that `READY` or the pull request closed. While the record still awaits
 the `READY` head, GitHub showing the pull request closed or at another head means one of them has
-not caught up: the submission waits, and if the two still disagree after its retries it ends and
-tells the architect. A refusal GitHub would repeat on a retry ends the submission and is told to
-the architect too. GitHub checks the expected head only when
+not caught up: the submission waits. It ends and tells the architect only once GitHub's last change
+to the pull request is more than 10 minutes old, far longer than a webhook takes to arrive, however
+long the submission waited before. A reopen at the `READY` head takes the submission back from a
+run that read the record before the reopen, so it is never lost. A refusal GitHub would repeat on a
+retry ends the submission and is told to the architect too. GitHub checks the expected head only when
 auto-merge is enabled, so an arm outliving its `READY` would merge an unreviewed head. Arming is right
 only for the `READY` head of an issue awaiting its merge, so the daemon queues a disarm on every
 other push or reopen, when a child is set back to `todo`, and when an issue leaves the workflow. The
