@@ -46,8 +46,9 @@ import (
 // container ever holds the implement App's token, which is what lets the reviewer's approval count
 // and the daemon's fix-attempt counting read a push's App from the App that made it. A plant that
 // a tree agent's own git triggers after provisioning runs under that agent's role: its clone's
-// helper is `gh auth git-credential` (workspace.GitHubCredentialHelper), which answers from the
-// GH_CONFIG_DIR of the process running it, and here, with none, answers nothing (exit 1).
+// helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
+// files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with
+// none, answers nothing (exit 1).
 //
 // Provisioning also pins its git and jj — no hook, the git boot resolved, https alone, a credential
 // scoped to github.com, no working-copy snapshot in a credentialed fetch; internal/workspace's

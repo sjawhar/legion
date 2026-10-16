@@ -97,16 +97,15 @@ type realCommandResult struct {
 	code   int
 }
 
-// realGh is the real GitHub CLI the proof runs: the gh on PATH, unless it is an older Legion pane's
-// shim (`<state_dir>/worker-bin/gh`), in which case the CLI it stood in front of at
-// /usr/local/bin/gh, as internal/ghconfig's own gh-backed test picks it.
+// realGh is the real GitHub CLI the proof runs: LEGION_GH_PATH when the test runs in a Legion pane
+// or pod, whose `gh` on PATH is the `legion gh` wrapper in front of it, and otherwise the gh on
+// PATH, as internal/ghconfig's own gh-backed test picks it.
 func realGh(t *testing.T) string {
 	t.Helper()
-	path, err := exec.LookPath("gh")
-	if err == nil && filepath.Base(filepath.Dir(path)) != "worker-bin" {
+	if path := os.Getenv("LEGION_GH_PATH"); path != "" {
 		return path
 	}
-	if path, err := exec.LookPath("/usr/local/bin/gh"); err == nil {
+	if path, err := exec.LookPath("gh"); err == nil {
 		return path
 	}
 	t.Fatal("no real gh on this machine: the proof needs one to read the rendered files")

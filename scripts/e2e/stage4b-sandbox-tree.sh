@@ -1866,7 +1866,7 @@ shape_problems() {
         | "container \($c.name) mounts \(.name) under /var/run/legion/gh"),
       (if $s.shareProcessNamespace == true then "shareProcessNamespace is set" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init")] | .[] | (.command | index("--credential-helper")) as $i
-        | if $i == null or .command[$i + 1] != "!gh auth git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !gh auth git-credential" else empty end),
+        | if $i == null or .command[$i + 1] != "!legion git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !legion git-credential" else empty end),
       # Every container reserves the cpu and memory of its role, request and limit alike, and its
       # ephemeral-storage bound, request under limit; the pod is Guaranteed and asks nothing of its
       # placement.

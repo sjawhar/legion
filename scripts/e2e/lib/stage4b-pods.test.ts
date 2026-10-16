@@ -259,13 +259,12 @@ describe("the pod shape's gh credential rule", () => {
     departed.spec.volumes.find((v: { name: string }) => v.name === "gh-tester").secret.items.pop();
     departed.spec.shareProcessNamespace = true;
     const init = departed.spec.initContainers.find((c: Container) => c.name === "workspace-init");
-    init.command[init.command.indexOf("--credential-helper") + 1] =
-      "!/opt/legion/bin/legion credential";
+    init.command[init.command.indexOf("--credential-helper") + 1] = "!gh auth git-credential";
     expect(ghProblems(departed)).toEqual([
       'gh-tester projects [{"key":"github-hosts","path":"hosts.yml"}], not hosts.yml and config.yml',
       "gh-merger projects Secret other, not the role Secret legion-legion-legion-208-merger-boot its launcher token comes from",
       "shareProcessNamespace is set",
-      "the --credential-helper of workspace-init is !/opt/legion/bin/legion credential, not !gh auth git-credential",
+      "the --credential-helper of workspace-init is !gh auth git-credential, not !legion git-credential",
     ]);
   });
 });

@@ -683,7 +683,7 @@
               "--root",
               "/legion",
               "--credential-helper",
-              "!gh auth git-credential",
+              "!legion git-credential",
               "--feed",
               "/var/run/legion/feed"
             ],

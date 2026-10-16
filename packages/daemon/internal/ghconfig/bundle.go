@@ -21,6 +21,9 @@ type Bundle struct {
 // hyphen. A login is a path segment under a bundle's root, so nothing else is one.
 var ownerLogin = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
+// IsOwner says whether owner is a lowercased GitHub login, and so a directory a bundle may hold.
+func IsOwner(owner string) bool { return ownerLogin.MatchString(owner) }
+
 // OwnerDir is the directory an owner's two gh files live in under a bundle root: <root>/<owner>.
 func OwnerDir(root, owner string) string { return filepath.Join(root, owner) }
 
@@ -41,11 +44,11 @@ func (b Bundle) Validate() error {
 		return errors.New("gh bundle names no default owner")
 	}
 	for _, owner := range b.OwnerNames() {
-		if !ownerLogin.MatchString(owner) {
+		if !IsOwner(owner) {
 			return fmt.Errorf("gh bundle owner %q is not a lowercased GitHub login", owner)
 		}
 	}
-	if !ownerLogin.MatchString(b.Default) {
+	if !IsOwner(b.Default) {
 		return fmt.Errorf("gh bundle default owner %q is not a lowercased GitHub login", b.Default)
 	}
 	if _, ok := b.Owners[b.Default]; !ok {
