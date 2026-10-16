@@ -56,7 +56,7 @@ jobs:
       - name: Check every remote action is pinned to a commit SHA
         run: .github/scripts/check-action-pins.sh
 
-      - name: Check no file names the private deployment repository, company, or internal host
+      - name: Check no file names the private deployment repository, company, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh
 
       - name: Check no current file names the pre-split Oh My Pi plugin
