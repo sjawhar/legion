@@ -26,10 +26,13 @@ import (
 // and the secret.
 //
 // check makes one call, Describe, and verify two, Describe and Current, so reading a secret needs
-// no grant beyond its metadata and its value. Only generate counts versions.
+// no grant beyond its metadata and its value; a Current that finds its default version unserved may
+// read that version's metadata once more to report it as Unserved. Only generate counts versions.
 type Store interface {
+	// Label names the version the store serves by default, in check's and verify's lines.
+	Label() string
 	// Describe reports, from the secret's metadata alone, whether it exists, whether it is
-	// scheduled for deletion and when, and which version the store serves by default.
+	// scheduled for deletion and when, and which version the store names as its default.
 	Describe(ctx context.Context, name string) (Description, error)
 	// Versions counts every version the secret holds, deprecated ones included.
 	Versions(ctx context.Context, name string) (int, error)
@@ -40,17 +43,34 @@ type Store interface {
 	// overlapping generate runs both write and the second's seed is served (testStoreContract).
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
-	// clears it once read. When the store serves no version, the error matches ErrNotServed.
+	// clears it once read. When the store finds no version to serve, the error matches
+	// ErrNotServed; when it names one it will not serve, the error is an *Unserved.
 	Current(ctx context.Context, name string) (version string, value []byte, err error)
 }
 
-// Description is what a store's metadata says of a secret. CurrentVersion is read only for a
-// secret that exists and is not scheduled for deletion.
+// Version is the version a store names as its default: ID, the store's id for it, and State, ""
+// when the store serves it, otherwise the state that keeps it from being served, as Secret
+// Manager's versions/latest names the newest version even when it is DISABLED or DESTROYED.
+type Version struct{ ID, State string }
+
+// Description is what a store's metadata says of a secret. Default is read only for a secret that
+// exists and is not scheduled for deletion.
 type Description struct {
 	Exists, ScheduledForDeletion bool
 	DeletionDate                 string
-	CurrentVersion               string // "" when the store serves none
+	Default                      *Version // nil when the store names no version as its default
 }
+
+// Unserved is a Store's Current error when the version the store names as its default is one it
+// will not serve, as a version disabled after Describe read it is: Version is that version, with
+// its State. Its text is the failed read's own.
+type Unserved struct {
+	Version Version
+	Err     error
+}
+
+func (e *Unserved) Error() string { return e.Err.Error() }
+func (e *Unserved) Unwrap() error { return e.Err }
 
 // ErrRefused is every refusal's: nothing was written, so fixing the precondition its message names
 // and running again is safe. The command exits 2.
@@ -59,22 +79,25 @@ type Description struct {
 // is checked before anything else is done. The command exits 1 on them, and on ErrMismatch.
 var ErrRefused = errors.New("seed: refused")
 
-// ErrMismatch is Verify's when the value the store serves by default is no user seed or derives
-// another public key. The command exits 1.
+// ErrMismatch is Verify's when the version the store serves by default does not confirm the public
+// key: its value is no user seed or derives another key, or the store does not serve the newest
+// version it names. The command exits 1.
 var ErrMismatch = errors.New("seed: the stored value does not derive the public key")
 
-// ErrNotServed is matched by a Store's Current error when the store serves no version of the
-// secret by default, as it may for a moment after a write.
+// ErrNotServed is matched by a Store's Current error when the store finds no version of the secret
+// to serve by default, as it may for a moment after a write. A version the store finds and will not
+// serve, such as a disabled newest version on Secret Manager, is a failure of its own.
 var ErrNotServed = errors.New("seed: the store serves no version")
 
-// readBackWaits are the pauses generate takes, in turn, while the store does not yet show the
-// version it wrote: Secrets Manager's reads are eventually consistent, so a listing or a read right
-// after a write can miss it.
-var readBackWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+// notServed is a store's error that reads as its own and matches ErrNotServed.
+type notServed struct{ error }
 
-// defaultLabel names the version a store serves by default in Check's and Verify's lines: Secrets
-// Manager's staging label.
-const defaultLabel = awsCurrent
+func (notServed) Is(target error) bool { return target == ErrNotServed }
+
+// readBackWaits are the pauses generate takes, in turn, while the store does not yet show the
+// version it wrote: both stores' reads are eventually consistent, Secrets Manager's and Secret
+// Manager's listings and its latest alias, so a listing or a read right after a write can miss it.
+var readBackWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
 type refusal struct{ msg string }
 
@@ -95,9 +118,23 @@ func afterWritef(format string, args ...any) error {
 	return &afterWrite{msg: fmt.Sprintf(format, args...)}
 }
 
-// Check returns the report line for the secret: absent, scheduled for deletion, or present with or
-// without a version the store serves by default. It reads no value.
+// seededName refuses a secret's name that holds an nkey seed (bus.HoldsSeed), naming no part of it:
+// every line, refusal and error after a write that a mode or a store makes quotes the name, and the
+// exported API, unlike the command, takes the name as its caller gives it. Check, Generate, Verify
+// and each store's methods call it first.
+func seededName(name string) error {
+	if bus.HoldsSeed(name) {
+		return refuse("the secret's name holds an nkey seed, which is never a secret's name (not echoed)")
+	}
+	return nil
+}
+
+// Check returns the report line for the secret: absent, scheduled for deletion, or present with the
+// version the store names as its default, in that store's label. It reads no value.
 func Check(ctx context.Context, s Store, name string) (string, error) {
+	if err := seededName(name); err != nil {
+		return "", err
+	}
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", refuse("%v", err)
@@ -107,10 +144,20 @@ func Check(ctx context.Context, s Store, name string) (string, error) {
 		return name + ": absent", nil
 	case d.ScheduledForDeletion:
 		return fmt.Sprintf("%s: present, scheduled for deletion (%s)", name, d.DeletionDate), nil
-	case d.CurrentVersion == "":
-		return fmt.Sprintf("%s: present; %s: no", name, defaultLabel), nil
 	}
-	return fmt.Sprintf("%s: present; %s: yes (version %s)", name, defaultLabel, d.CurrentVersion), nil
+	return defaultLine(name, s.Label(), d.Default), nil
+}
+
+// defaultLine is Check's line for a secret that exists: that the store names no default version,
+// the version it names, or that version and the state that keeps the store from serving it.
+func defaultLine(name, label string, v *Version) string {
+	switch {
+	case v == nil:
+		return fmt.Sprintf("%s: present; %s: no", name, label)
+	case v.State != "":
+		return fmt.Sprintf("%s: present; %s: version %s is %s", name, label, v.ID, v.State)
+	}
+	return fmt.Sprintf("%s: present; %s: yes (version %s)", name, label, v.ID)
 }
 
 // existing refuses a secret that is absent or scheduled for deletion.
@@ -124,23 +171,49 @@ func existing(d Description, name string) error {
 	return nil
 }
 
+// pythonDate is t in loc as Python's str prints a datetime: microseconds only when there are some,
+// then the offset as ±hh:mm. check prints a deletion date in this form.
+func pythonDate(t time.Time, loc *time.Location) string {
+	t = t.In(loc)
+	text := t.Format("2006-01-02 15:04:05")
+	if micro := t.Nanosecond() / 1000; micro != 0 {
+		text += fmt.Sprintf(".%06d", micro)
+	}
+	return text + t.Format("-07:00")
+}
+
 // Generate makes an nkey user and writes its seed as the secret's first version: it refuses a
 // secret that is absent, scheduled for deletion, served by default or holding any version, so it
-// never replaces a seed a client may already read. It calls announce with the public key just
-// before Put is called, so the command prints the key before anything is written; when announce
-// fails, Generate refuses and writes nothing, since a seed whose public key nobody saw could be
-// checked by no one. It then lists the versions again, to check the secret holds that version
-// alone, and reads back the version served by default, which must be that version and derive the
-// public key it returns. Once Put has been called, every return carries the public key, and the
-// version id when Put answered one: a version may exist, and verify needs the key to check it. A
-// Put the store refuses wrote nothing, and its error matches ErrRefused.
+// never replaces a seed a client may already read. A version the store names as its default,
+// whatever its state, is refused before the versions are listed; the listing then counts the rest,
+// destroyed and disabled ones included. It calls announce with the public key just before Put is
+// called, so the command prints the key before anything is written; when announce fails, Generate
+// refuses and writes nothing, since a seed whose public key nobody saw could be checked by no one.
+// After the write it lists the versions again, to check the secret holds that version alone, and
+// reads back the version served by default, which must be that version and derive the public key
+// it returns. Once Put has been called, every return carries the public key, and the version id
+// when Put answered one: a version may exist, and verify needs the key to check it. A Put the
+// store refuses wrote nothing, and its error matches ErrRefused.
 func Generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error) {
+	if err := seededName(name); err != nil {
+		return "", "", err
+	}
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", "", refuse("%v", err)
 	}
 	if err := existing(d, name); err != nil {
 		return "", "", err
+	}
+	if v := d.Default; v != nil {
+		// The listing below is eventually consistent; the default the metadata names is a witness
+		// it cannot miss, so it is refused first, served or not.
+		what := fmt.Sprintf("serves version %s by default (%s)", v.ID, s.Label())
+		if v.State != "" {
+			what = fmt.Sprintf("holds version %s, which %s names though it is %s", v.ID, s.Label(), v.State)
+		}
+		return "", "", refuse("%s already %s. generate writes only a secret's first version, so it never replaces a "+
+			"seed a client may already read; use check or verify", name, what)
 	}
 	held, err := s.Versions(ctx, name)
 	if err != nil {
@@ -149,12 +222,6 @@ func Generate(ctx context.Context, s Store, name string, announce func(publicKey
 	if held > 0 {
 		return "", "", refuse("%s already holds %d version(s). generate writes only a secret's first version, so it "+
 			"never replaces a seed a client may already read; use check or verify", name, held)
-	}
-	if d.CurrentVersion != "" {
-		// The listing is eventually consistent; DescribeSecret's default version is a witness too.
-		return "", "", refuse("%s already serves version %s by default (%s), though its versions listing shows none. "+
-			"generate writes only a secret's first version, so it never replaces a seed a client may already read; "+
-			"use check or verify", name, d.CurrentVersion, defaultLabel)
 	}
 	user, err := nkeys.CreateUser()
 	if err != nil {
@@ -244,9 +311,14 @@ func readBack(ctx context.Context, s Store, name, version string) (read string, 
 }
 
 // Verify returns the line saying whether the seed the store serves by default derives
-// publicKey, with ErrMismatch when it does not or is no user seed. publicKey is never echoed unless
-// it is a user public key: a seed pasted there by mistake must not reach the terminal twice.
+// publicKey, with ErrMismatch when it does not or is no user seed. A default version the store does
+// not serve fails with Check's line for it: before any value is read when Describe names it so, and
+// after the read when Current answers it as Unserved. publicKey is never echoed unless it is a user
+// public key: a seed pasted there by mistake must not reach the terminal twice.
 func Verify(ctx context.Context, s Store, name, publicKey string) (string, error) {
+	if err := seededName(name); err != nil {
+		return "", err
+	}
 	if !core.IsUserPublicKey(publicKey) {
 		return "", refuse("%s: --public-key is not an nkey user public key (U and 55 base32 characters with a valid checksum)", name)
 	}
@@ -257,29 +329,47 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 	if err := existing(d, name); err != nil {
 		return "", err
 	}
-	if d.CurrentVersion == "" {
-		return "", refuse("%s has no %s version; nothing to verify", name, defaultLabel)
+	label := s.Label()
+	switch {
+	case d.Default == nil:
+		return "", refuse("%s has no %s version; nothing to verify", name, label)
+	case d.Default.State != "":
+		return defaultLine(name, label, d.Default), ErrMismatch
 	}
 	version, stored, err := s.Current(ctx, name)
 	if err != nil {
+		var unserved *Unserved
+		if errors.As(err, &unserved) {
+			return defaultLine(name, label, &unserved.Version), ErrMismatch
+		}
 		return "", refuse("%v", err)
 	}
 	defer clear(stored)
 	derived, err := core.UserSeedPublicKey(stored)
 	if err != nil {
-		return fmt.Sprintf("%s %s (version %s) is not an nkey user seed: %v", name, defaultLabel, version, err), ErrMismatch
+		return fmt.Sprintf("%s %s (version %s) is not an nkey user seed: %v", name, label, version, err), ErrMismatch
 	}
 	if derived != publicKey {
-		return fmt.Sprintf("%s %s (version %s) derives %s: no", name, defaultLabel, version, publicKey), ErrMismatch
+		return fmt.Sprintf("%s %s (version %s) derives %s: no", name, label, version, publicKey), ErrMismatch
 	}
-	return fmt.Sprintf("%s %s (version %s) derives %s: yes", name, defaultLabel, version, publicKey), nil
+	return fmt.Sprintf("%s %s (version %s) derives %s: yes", name, label, version, publicKey), nil
 }
 
-// Stores opens each store the command's --store names: in region when it is not "", and, when
-// account is not "" (--expect-account), refusing with ErrRefused unless the store's credentials are
-// that account's, with no call before that check but the one reading them. The store then holds
-// each secret it describes to that account as well.
-type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
+// StoreType is one value of the command's --store. Open opens the store: in region when it is not
+// "", and, when account is not "" (--expect-account), refusing with ErrRefused unless the store's
+// credentials are that account's, with no call before that check but the one reading them; the
+// store then holds each secret it describes to that account as well. A store that has no regions
+// or accounts refuses a region or an account. CheckName, when set, refuses before Open a --name the
+// store cannot hold, without quoting it: the refusal of an open names the secret, and a seed may
+// have been pasted there. Help is what the command's usage says of the store and its flags.
+type StoreType struct {
+	Open      func(ctx context.Context, region, account string) (Store, error)
+	CheckName func(name string) error
+	Help      string
+}
+
+// Stores are the store types the command's --store names, by that name.
+type Stores map[string]StoreType
 
 // mode is one of the command's modes. It prints its result on stdout and returns its error; a
 // result it cannot print is an error too, so the command never exits 0 having said nothing.
@@ -341,7 +431,7 @@ func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer
 	return err
 }
 
-const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
+const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret> [--region <r>] [--expect-account <id>] [--public-key U…]
 
   check     whether the secret exists and which version its store serves by default
   generate  make an nkey user, write its seed as the secret's first version, and print its
@@ -349,8 +439,9 @@ const usageText = `usage: envoy-infra seed {check|generate|verify} --store <stor
   verify    whether the seed the store serves by default derives --public-key
 
 The seed is never an argument, an output or a log line. Exit codes: 0 done (verify: the seed
-derives the key); 1 verify found another key or no seed, or generate failed after its write,
-so check the secret before anything else; 2 refused before any write, or a usage error.
+derives the key); 1 verify found another key, no seed or a default version its store does not
+serve, or generate failed after its write, so check the secret before anything else; 2 refused
+before any write, or a usage error.
 
 `
 
@@ -365,15 +456,20 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	fs.Usage = func() {}
 	var store, name, region, account, publicKey string
 	fs.StringVar(&store, "store", "", "the secret store: "+strings.Join(names, ", "))
-	fs.StringVar(&name, "name", "", "the secret's id")
-	fs.StringVar(&region, "region", "", "the store's region (default: the one its configuration names)")
-	fs.StringVar(&account, "expect-account", "", "refuse, before any other call, unless the credentials are this account's")
+	fs.StringVar(&name, "name", "", "the secret, named as its store names it (below)")
+	fs.StringVar(&region, "region", "", "the store's region, for a store that has regions (below)")
+	fs.StringVar(&account, "expect-account", "", "refuse, before any other call, unless the credentials are this account's, "+
+		"for a store that has accounts (below)")
 	fs.StringVar(&publicKey, "public-key", "", "verify only: the U… public key the stored seed must derive")
 	printUsage := func() {
 		fmt.Fprint(stderr, usageText)
 		fs.SetOutput(stderr)
 		fs.PrintDefaults()
 		fs.SetOutput(io.Discard)
+		fmt.Fprintln(stderr, "\nStores:")
+		for _, n := range names {
+			fmt.Fprintf(stderr, "  %s\n    \t%s\n", n, stores[n].Help)
+		}
 	}
 	usage := func(problem string) int {
 		fmt.Fprintf(stderr, "envoy-infra seed: %s\n", problem)
@@ -424,7 +520,7 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("unexpected arguments after the flags")
 	case store == "":
 		return usage("--store is required")
-	case stores[store] == nil:
+	case stores[store].Open == nil:
 		return usage("--store is one of: " + strings.Join(names, ", "))
 	case name == "":
 		return usage("--name is required")
@@ -440,8 +536,13 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return exitCode(stderr, refuse("%s: stdout is the null device, where the public key would be lost (a closed stdout "+
 			"is one too: Go opens it on %s); send stdout somewhere you can read. Nothing was written", name, os.DevNull))
 	}
+	if check := stores[store].CheckName; check != nil {
+		if err := check(name); err != nil {
+			return exitCode(stderr, refuse("%v", err))
+		}
+	}
 
-	s, err := stores[store](ctx, region, account)
+	s, err := stores[store].Open(ctx, region, account)
 	if err != nil {
 		return exitCode(stderr, refuse("%s: %v", name, err))
 	}

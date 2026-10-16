@@ -9,13 +9,17 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
@@ -673,7 +677,7 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 // check, and a database that ran 0031 through 0038 before 0029 and 0030 applies those two last, so
 // a queued close suspension must survive them and both kinds must stand at the end in either
 // order. Migrations from 0039 on ship only in binaries that carry 0030, and Migrate applies in
-// ascending order, so none can run before it: 0039 sets the list after every kind it names.
+// ascending order, so none can run before it: 0043 sets the list after every kind it names.
 func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
 	all, err := migrations.All()
 	if err != nil {
@@ -681,7 +685,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}
 	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
 		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish,
-		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch, record.OutboxKindAutoMergeDisable}
+		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch, record.OutboxKindAutoMergeDisable, record.OutboxKindReadyMerge}
 	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
 	for _, tc := range []struct {
 		name  string
@@ -724,6 +728,330 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 				if _, err := store.pool.Exec(ctx, insert, string(kind)); err != nil {
 					t.Errorf("an outbox row of kind %s: %v", kind, err)
 				}
+			}
+		})
+	}
+}
+
+// A database can have ready_merge rows from 0043 when 0044 arrives. Its dedup index must migrate
+// those rows instead of refusing the upgrade: it keeps the earliest unleased next_at, breaking a
+// tie on id, and drops any leased duplicate when an unleased row exists.
+func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 43)
+	now := time.Now().UTC()
+	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+		values ('ready_merge', 'LEGION-208', '{"number":42,"head":"ready-head"}', 0, $1, '', $2, $3) returning id`
+	var later, earliest, leased int64
+	if err := store.pool.QueryRow(ctx, insert, now.Add(2*time.Minute), "", nil).Scan(&later); err != nil {
+		t.Fatalf("insert later row: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert, now.Add(time.Minute), "", nil).Scan(&earliest); err != nil {
+		t.Fatalf("insert earliest row: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert, now, "mid-lease", now.Add(time.Hour)).Scan(&leased); err != nil {
+		t.Fatalf("insert leased row: %v", err)
+	}
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through ready-merge dedup: %v", err)
+	}
+	var id int64
+	var nextAt time.Time
+	if err := store.pool.QueryRow(ctx, `select id, next_at from outbox where kind = 'ready_merge'`).Scan(&id, &nextAt); err != nil {
+		t.Fatalf("read surviving READY merge: %v", err)
+	}
+	wantNext := now.Add(time.Minute).Truncate(time.Microsecond)
+	if id != earliest || !nextAt.Equal(wantNext) {
+		t.Fatalf("surviving READY merge = id %d at %s, want unleased earliest id %d at %s (later %d leased %d)", id, nextAt, earliest, wantNext, later, leased)
+	}
+}
+
+// 0044 can run while a daemon still on 0043 works the outbox. A ready_merge row that daemon commits
+// while the dedup waits would be one the dedup's snapshot never saw, and would fail the unique index
+// and with it the upgrade. A worker claiming the duplicate the dedup deletes locks it and then
+// writes its lease (record's ClaimDue), and a lock that let the dedup start between the two would
+// leave the lease write waiting on the migration while the migration waits on the worker's row. The
+// migration locks the outbox before its dedup so that the worker's claim finishes, the writer waits
+// for the index and meets it (unique_violation), and the upgrade succeeds.
+func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 43)
+	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
+		values ('ready_merge', 'LEGION-208', '{"number":42,"head":"ready-head"}', 0, $1, '', '') -- concurrent enqueue`
+	now := time.Now().UTC()
+	var duplicate int64
+	if _, err := store.pool.Exec(ctx, insert, now); err != nil {
+		t.Fatalf("insert the row the dedup keeps: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert+"\nreturning id", now.Add(time.Minute)).Scan(&duplicate); err != nil {
+		t.Fatalf("insert the duplicate the dedup deletes: %v", err)
+	}
+	// A worker claims the duplicate as ClaimDue does: it locks the row, and writes its lease later.
+	worker, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the worker: %v", err)
+	}
+	defer func() { _ = worker.Rollback(ctx) }()
+	if _, err := worker.Exec(ctx, "select id from outbox where id = $1 for update", duplicate); err != nil {
+		t.Fatalf("lock the duplicate: %v", err)
+	}
+	migrated := make(chan error, 1)
+	go func() {
+		_, err := store.Migrate(ctx)
+		migrated <- err
+	}()
+	// pg_stat_activity keeps a statement's first kilobyte, so the migration is matched by its name.
+	waitForALockWait(t, store, "0044_ready_merge_dedup", nil)
+	enqueued := make(chan error, 1)
+	go func() {
+		_, err := store.pool.Exec(ctx, insert, now.Add(2*time.Minute))
+		enqueued <- err
+	}()
+	enqueue := waitForALockWait(t, store, "-- concurrent enqueue", enqueued)
+	if _, err := worker.Exec(ctx, "update outbox set lease_token = $2, lease_until = $3 where id = $1", duplicate, "worker", now.Add(30*time.Second)); err != nil {
+		t.Fatalf("write the worker's lease while the migration waits: %v", err)
+	}
+	if err := worker.Commit(ctx); err != nil {
+		t.Fatalf("finish the worker's claim: %v", err)
+	}
+	if err := <-migrated; err != nil {
+		t.Fatalf("migrate while a writer enqueues: %v", err)
+	}
+	if enqueue == nil {
+		enqueue = <-enqueued
+	}
+	var refused *pgconn.PgError
+	if !errors.As(enqueue, &refused) || refused.Code != "23505" {
+		t.Fatalf("the concurrent enqueue = %v, want it held off until the unique index refuses it", enqueue)
+	}
+	var rows int
+	if err := store.pool.QueryRow(ctx, `select count(*) from outbox where kind = 'ready_merge'`).Scan(&rows); err != nil {
+		t.Fatalf("count ready_merge rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("ready_merge rows %d, want one", rows)
+	}
+}
+
+// An issue already awaiting its merge when the daemon is upgraded to the release that submits READY
+// merges reached awaiting_merge before any ready_merge row existed, and the workflow queues one only
+// as an issue reaches awaiting_merge or its pull request reopens. The upgrade queues it once: for
+// each issue awaiting its merge at its merger's READY head, in the workflow, on an open pull
+// request, in a tree that does not linger, and with no ready_merge row already. A READY a person
+// merges (its by-hand note), a closed pull request, an issue that left the workflow, a lingering
+// tree and an issue in another phase get none, and an existing row is kept as it is.
+func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
+	seed := func(t *testing.T, store *Store) {
+		t.Helper()
+		ctx, records := context.Background(), record.NewStore()
+		until, root := time.Now().Add(time.Hour), "LEGION-212"
+		awaiting := func(key, status string) record.Issue {
+			return record.Issue{Key: key, Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 1, Status: status, Rank: "U"}
+		}
+		lingering := awaiting("LEGION-213", "retro")
+		lingering.Tree, lingering.Parent = root, &root
+		merging := awaiting("LEGION-214", "retro")
+		merging.Phase = phase.Merging
+		if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error {
+			for _, seeded := range []struct {
+				issue     record.Issue
+				mergeNote string
+				pr        record.PullRequestState
+			}{
+				{awaiting("LEGION-208", "retro"), "", record.PullRequestOpen},
+				{awaiting("LEGION-209", "retro"), "MANUAL_MERGE_REQUIRED: pull request #43 matches a by_hand merge rule; do not auto-arm it", record.PullRequestOpen},
+				{awaiting("LEGION-210", "retro"), "", record.PullRequestClosed},
+				{awaiting("LEGION-211", "done"), "", record.PullRequestOpen},
+				{record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", Rank: "T", LingerUntil: &until}, "", ""},
+				{lingering, "", record.PullRequestOpen},
+				{merging, "", record.PullRequestOpen},
+			} {
+				if err := records.PutIssue(ctx, tx, seeded.issue); err != nil {
+					return err
+				}
+				if seeded.pr == "" {
+					continue
+				}
+				if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: seeded.issue.Key, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head", MergeNote: seeded.mergeNote}); err != nil {
+					return err
+				}
+				number, _ := strconv.Atoi(strings.TrimPrefix(seeded.issue.Key, "LEGION-"))
+				if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: seeded.pr, Issue: seeded.issue.Key, Repo: "acme/widgets", Number: number,
+					Branch: "legion/" + seeded.issue.Key, HeadSHA: "ready-head", Failing: []string{}}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("seed the issues: %v", err)
+		}
+	}
+	readyMerges := func(t *testing.T, store *Store) []string {
+		t.Helper()
+		rows, err := store.pool.Query(context.Background(), `select id, issue, payload->>'number', payload->>'head', attempts from outbox where kind = 'ready_merge' order by id`)
+		if err != nil {
+			t.Fatalf("read ready_merge rows: %v", err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var id int64
+			var issue, number, head string
+			var attempts int
+			if err := rows.Scan(&id, &issue, &number, &head, &attempts); err != nil {
+				t.Fatalf("scan a ready_merge row: %v", err)
+			}
+			got = append(got, fmt.Sprintf("row %d %s #%s at %s attempts %d", id, issue, number, head, attempts))
+		}
+		return got
+	}
+	t.Run("from schema 42", func(t *testing.T) {
+		store := emptyStore(t)
+		migrateThrough(t, store, 42)
+		seed(t, store)
+		if _, err := store.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		got := readyMerges(t, store)
+		if len(got) != 1 || !strings.HasSuffix(got[0], " LEGION-208 #208 at ready-head attempts 0") {
+			t.Fatalf("READY merges after the upgrade %q, want LEGION-208's alone", got)
+		}
+	})
+	t.Run("an existing row is kept", func(t *testing.T) {
+		store := emptyStore(t)
+		migrateThrough(t, store, 44)
+		seed(t, store)
+		if _, err := store.pool.Exec(context.Background(), `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
+			values ('ready_merge', 'LEGION-208', '{"number":208,"head":"ready-head"}', 3, now(), 'waiting', '')`); err != nil {
+			t.Fatalf("queue the existing row: %v", err)
+		}
+		before := readyMerges(t, store)
+		if _, err := store.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		if got := readyMerges(t, store); !slices.Equal(got, before) {
+			t.Fatalf("READY merges after the upgrade %q, want the existing row alone, unchanged: %q", got, before)
+		}
+	})
+	// A daemon still on 0043 or 0044 can enqueue the same READY merge while 0045 runs. Its row, not
+	// committed yet, is one the backfill's check for an existing row cannot see, so the backfill's
+	// insert waits on it at the unique index; once the writer commits, the backfill keeps the
+	// writer's row and inserts nothing, and the upgrade succeeds.
+	t.Run("a live writer's uncommitted row", func(t *testing.T) {
+		ctx := context.Background()
+		store := emptyStore(t)
+		migrateThrough(t, store, 44)
+		seed(t, store)
+		writer, err := store.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin the writer: %v", err)
+		}
+		defer func() { _ = writer.Rollback(ctx) }()
+		row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 208, Head: "ready-head"}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		row.Attempts = 2
+		if err := record.NewStore().Enqueue(ctx, writer, row); err != nil {
+			t.Fatalf("the writer's enqueue: %v", err)
+		}
+		migrated := make(chan error, 1)
+		go func() {
+			_, err := store.Migrate(ctx)
+			migrated <- err
+		}()
+		// pg_stat_activity keeps a statement's first kilobyte, so the migration is matched by its name.
+		if err := waitForALockWait(t, store, "0045_ready_merge_backfill", migrated); err != nil {
+			t.Fatalf("the backfill did not wait on the writer's row: %v", err)
+		}
+		if err := writer.Commit(ctx); err != nil {
+			t.Fatalf("commit the writer's row: %v", err)
+		}
+		if err := <-migrated; err != nil {
+			t.Fatalf("migrate while a writer enqueues: %v", err)
+		}
+		if got := readyMerges(t, store); len(got) != 1 || !strings.HasSuffix(got[0], " LEGION-208 #208 at ready-head attempts 2") {
+			t.Fatalf("READY merges after the upgrade %q, want the writer's row alone", got)
+		}
+	})
+}
+
+// waitForALockWait waits until another backend running a statement that contains marker waits on a
+// lock, and returns nil; or, when done reports that statement's end first, returns its error.
+func waitForALockWait(t *testing.T, store *Store, marker string, done <-chan error) error {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			if err == nil {
+				return errors.New("finished without waiting on a lock")
+			}
+			return err
+		default:
+		}
+		var waiting bool
+		if err := store.pool.QueryRow(context.Background(), `select exists (select 1 from pg_stat_activity
+			where pid <> pg_backend_pid() and wait_event_type = 'Lock' and strpos(query, $1) > 0)`, marker).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no statement containing %q waited on a lock", marker)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A duplicate ready_merge enqueue (a reopen at READY's head) reuses the durable row. It keeps the
+// row's next_at, so a reopen never pulls the row forward past GitHub's rate-limit deadline, and
+// restarts its attempts. A row a worker holds is taken from that worker: its lease token no longer
+// matches, so the worker, which read the record before the reopen, can neither finish nor retry it,
+// and the row decides again once the lease expires. A row no worker holds stays unleased.
+func TestReadyMergeEnqueueReusesTheRowAndTakesItFromItsWorker(t *testing.T) {
+	for _, leased := range []bool{false, true} {
+		t.Run(fmt.Sprintf("leased %t", leased), func(t *testing.T) {
+			ctx := context.Background()
+			store := emptyStore(t)
+			if _, err := store.Migrate(ctx); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+			now := time.Now().UTC()
+			row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now.Add(3*time.Minute))
+			if err != nil {
+				t.Fatal(err)
+			}
+			row.Attempts, row.LastError = 7, "GitHub GraphQL: API rate limit exceeded"
+			if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, row) }); err != nil {
+				t.Fatalf("enqueue rate-limited row: %v", err)
+			}
+			if leased {
+				if _, err := store.pool.Exec(ctx, `update outbox set lease_token = 'worker', lease_until = $1 where kind = 'ready_merge'`, now.Add(30*time.Second)); err != nil {
+					t.Fatalf("lease the row: %v", err)
+				}
+			}
+			reopened, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, reopened) }); err != nil {
+				t.Fatalf("enqueue reopen: %v", err)
+			}
+			var rows, attempts int
+			var nextAt time.Time
+			var token string
+			if err := store.pool.QueryRow(ctx, `select count(*), max(attempts), max(next_at), max(lease_token) from outbox where kind = 'ready_merge'`).Scan(&rows, &attempts, &nextAt, &token); err != nil {
+				t.Fatalf("read ready merge: %v", err)
+			}
+			if want := row.NextAt.Truncate(time.Microsecond); rows != 1 || attempts != 0 || !nextAt.Equal(want) {
+				t.Fatalf("reopened READY merge rows %d, attempts %d, next_at %s; want one row, attempts 0, the rate-limit deadline %s kept", rows, attempts, nextAt, want)
+			}
+			if leased == (token == "") || token == "worker" {
+				t.Fatalf("reopened READY merge lease token %q; leased %t wants it taken from the worker", token, leased)
 			}
 		})
 	}

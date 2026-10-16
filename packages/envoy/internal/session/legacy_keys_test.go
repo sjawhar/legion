@@ -10,6 +10,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -22,11 +23,11 @@ func TestASessionRegistryOverKeysAnEarlierListenerStoredServesAndDeletesThem(t *
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	raw, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: SessionBucket, TTL: 10 * time.Second, Storage: natsgo.FileStorage})
+	raw, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.SessionBucket, TTL: 10 * time.Second, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create session bucket: %v", err)
 	}
-	readable, unreadable := testnats.LegacyKeys(SessionBucket, "s")
+	readable, unreadable := testnats.LegacyKeys(bus.SessionBucket, "s")
 	for _, sessionID := range []string{"ses_ordinary", readable, unreadable} {
 		entry, err := json.Marshal(SessionEntry{Port: 13381, MachineID: "earlier", UpdatedAt: time.Now().UnixMilli()})
 		if err != nil {

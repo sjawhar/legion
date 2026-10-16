@@ -14078,7 +14078,7 @@ var dispatchToolSpecs = [
       status: "done",
       reason: "Shipped in owner/repo#7; verified on the production dashboard."
     },
-    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, or attach it to " + "architecture components. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. external_links are " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "and a reopening status (any status but done); everything else, priority included, waits " + "for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
+    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, or attach it to " + "architecture components. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
@@ -14086,7 +14086,7 @@ var dispatchToolSpecs = [
       title: z2.string({ min: 1, max: ISSUE_TITLE_MAX }).describe("Replacement title, at most 1,000 characters.").optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).nullable().optional().describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
-      external_links: z2.array(z2.string({ min: 1 })).describe("URLs to link; merged into the issue's existing external links by URL.").optional(),
+      external_links: z2.array(z2.string({ min: 1 })).describe("URLs to link; a non-empty list merges into the issue's existing external links by URL, an empty list removes every link instead.").optional(),
       route: z2.string().describe("Route the issue to role:<name> or session:<id>; an empty string clears it.").optional(),
       parent: z2.string().describe("Parent issue key in the same project; an empty string clears the parent.").optional(),
       blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
@@ -17567,6 +17567,7 @@ async function executeDispatchTool(input) {
       }
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
+      const sentLinks = requestedLinks === undefined ? undefined : requestedLinks.length === 0 ? [] : [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))];
       let after;
       try {
         after = await client.updateIssue(issueKey, {
@@ -17578,7 +17579,7 @@ async function executeDispatchTool(input) {
           ...parent === undefined ? {} : { parent: parent === "" ? null : parent },
           ...blockedBy === undefined ? {} : { blocked_by: blockedBy },
           ...components === undefined ? {} : { components },
-          ...requestedLinks === undefined ? {} : { external_links: [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))] },
+          ...sentLinks === undefined ? {} : { external_links: sentLinks },
           actor
         });
       } catch (error48) {
@@ -17600,7 +17601,7 @@ async function executeDispatchTool(input) {
         ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
         ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
         ...requestedLinks === undefined ? [] : [
-          newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
+          requestedLinks.length === 0 ? "external links cleared" : newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
         ],
         ...route === undefined ? [] : [after.route === null ? "route cleared" : `route ${after.route}`],
         ...parent === undefined ? [] : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`],

@@ -49,7 +49,7 @@ and the checks that branch requires (its rulesets and its branch protection), th
 - **A node pool for Legion.** Every pod selects nodes labelled `legion.dev/pool=legion` and
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
-- **One reservation per pod, no affinity.** Every container of a Legion pod reserves cpu and memory
+- **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod reserves cpu and memory
   with its request equal to its limit, so every pod is `Guaranteed`, and bounds its ephemeral
   storage — the node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go
   and Bun caches a build fills — with a per-role limit over a smaller request. A role's reservation
@@ -72,8 +72,9 @@ and the checks that branch requires (its rulesets and its branch protection), th
   reaching `DiskPressure` where another tree's pod can go; the 1Gi request reserves almost no disk,
   so a node's root volume can be oversubscribed by the pods' limits — an operator who knows the
   root volume raises `ephemeral_storage_request` toward a role's expected use so the scheduler
-  reserves disk and places no pod a full node could not hold. No pod carries an affinity: each
-  issue pod owns its volume, so the scheduler places it wherever the pool has room and Karpenter
+  reserves disk and places no pod a full node could not hold. Legion sets no affinity on a pod (GKE
+  Autopilot adds its own to an issue or controller pod): each issue pod owns its volume, so the
+  scheduler places it wherever the pool has room and Karpenter
   adds nodes under the pool's limits. Concurrent issue pods are bounded by what the pool's
   `limits.cpu` and `limits.memory` leave for pods of that sum (two per 8-vCPU floor node, about 80
   at `limits.cpu: 256`, or `limits.memory` / 19 GiB when that is smaller) once the probe pod and,

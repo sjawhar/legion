@@ -328,14 +328,16 @@ export const dispatchToolSpecs = [
       "route, set or clear its parent, replace the issues it is blocked by, or attach it to " +
       "architecture components. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
-      "Legion the daemon moves it. external_links are " +
+      "Legion the daemon moves it. A non-empty external_links is " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
-      "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " +
+      "keeps every earlier link; an empty external_links removes every link instead. components " +
+      "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
       "artifacts; reason goes only with status done. A closed issue takes only rank, components, " +
-      "and a reopening status (any status but done); everything else, priority included, waits " +
-      "for the reopen. " +
+      "a reopening status (any status but done), and an external_links write that adds no new " +
+      "link (so a link can move to the issue that replaced it); everything else, priority " +
+      "included, waits for the reopen. " +
       "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
       "settable here. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
@@ -369,7 +371,9 @@ export const dispatchToolSpecs = [
         .describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
       external_links: z
         .array(z.string({ min: 1 }))
-        .describe("URLs to link; merged into the issue's existing external links by URL.")
+        .describe(
+          "URLs to link; a non-empty list merges into the issue's existing external links by URL, an empty list removes every link instead."
+        )
         .optional(),
       route: z
         .string()

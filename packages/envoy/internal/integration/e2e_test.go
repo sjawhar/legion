@@ -475,7 +475,7 @@ func TestE2E_InterestReaperCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	kv, err := js.KeyValue(store.Bucket)
+	kv, err := js.KeyValue(bus.InterestBucket)
 	if err != nil {
 		t.Fatalf("open kv bucket: %v", err)
 	}

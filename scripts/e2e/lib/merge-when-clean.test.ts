@@ -3,10 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// merge_when_clean (lib/workflow.sh) against a fake gh first on PATH. The proof reads the pull
-// request's state first and merges by hand only when the merger armed nothing; under the merger
-// prompt (packages/daemon/internal/prompts/roles/merger.md, step 4) a pull request the merger
-// already submitted — merged, auto-merge armed, or in the merge queue — is the expected read.
+// merge_when_clean and await_ready_merge (lib/workflow.sh) against a fake gh first on PATH.
+// merge_when_clean is the proof human's merge of a pull request no accepted READY covers: it reads
+// the pull request's state first and merges by hand only when nothing is armed. await_ready_merge
+// waits for the merge the daemon submits on an accepted READY and never merges by hand.
 //
 // The fake answers the merge record's GraphQL query from FAKE_GH_DIR/answers/<n>, one answer per
 // read in the order the proof reads (the last answer repeats), each the nine lines the query's
@@ -55,7 +55,7 @@ esac
 // The stage scripts' shell options, ERR trap and check helpers, then the lib, then the call and
 // its record.
 const prelude = `set -Eeuo pipefail
-check=ordinary-human-squash-merge
+check=daemon-merge
 note() { printf '   %s\\n' "$*"; }
 fail() { printf 'FAIL %s: %s\\n' "$check" "$*" >&2; exit 1; }
 trap 'printf "FAIL %s: line %s exited %s: %s\\n" "$check" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
@@ -106,7 +106,13 @@ const queued = (position: number, state: string): PullRequest => ({
   queue: { position, state },
 });
 
-type Fake = { readFail?: number; mergeFail?: string; branchGone?: boolean; bound?: number };
+type Fake = {
+  readFail?: number;
+  mergeFail?: string;
+  branchGone?: boolean;
+  bound?: number;
+  fn?: "merge_when_clean" | "await_ready_merge";
+};
 let runs = 0;
 function run(reads: PullRequest[], flags = "--squash --delete-branch", fake: Fake = {}) {
   const state = join(dir, `run-${++runs}`);
@@ -116,7 +122,7 @@ function run(reads: PullRequest[], flags = "--squash --delete-branch", fake: Fak
   }
   writeFileSync(join(state, "answers", "count"), String(reads.length));
   writeFileSync(join(state, "calls"), "");
-  const script = `${prelude}merge_when_clean "$repo" 7 ${flags}${record}`;
+  const script = `${prelude}${fake.fn ?? "merge_when_clean"} "$repo" 7 ${flags}${record}`;
   const result = Bun.spawnSync(["bash", "-c", script], {
     env: {
       PATH: `${bin}:${process.env.PATH}`,
@@ -162,17 +168,17 @@ describe("merge_when_clean", () => {
     );
   });
 
-  test("a pull request already merged is the merger's submission: no hand merge, the branch deleted", () => {
+  test("a pull request already merged is the daemon's submission: no hand merge, the branch deleted", () => {
     const r = run([merged]);
     expect(r.status).toBe(0);
     expect(r.merges).toHaveLength(0);
-    expect(r.by).toBe("the merger's submission");
+    expect(r.by).toBe("the daemon's submission");
     expect(r.commit).toBe(mergeCommit);
     expect(r.deletes).toEqual([
       `api -X DELETE repos/sjawhar/legion-smoke/git/refs/heads/${branch}`,
     ]);
     expect(r.stdout).toContain(
-      `sjawhar/legion-smoke#7 merged by the merger's submission at ${mergeCommit}`
+      `sjawhar/legion-smoke#7 merged by the daemon's submission at ${mergeCommit}`
     );
     expect(r.stdout).toContain(`deleted sjawhar/legion-smoke's branch ${branch}`);
   });
@@ -185,7 +191,7 @@ describe("merge_when_clean", () => {
     expect(r.stderr).toBe("");
   });
 
-  test("without --delete-branch the merger's merged pull request keeps its branch", () => {
+  test("without --delete-branch the daemon's merged pull request keeps its branch", () => {
     const r = run([merged], "--squash");
     expect(r.status).toBe(0);
     expect(r.merges).toHaveLength(0);
@@ -197,12 +203,12 @@ describe("merge_when_clean", () => {
     expect(r.status).toBe(0);
     expect(r.reads).toHaveLength(4);
     expect(r.merges).toHaveLength(0);
-    expect(r.by).toBe("the merger's submission");
+    expect(r.by).toBe("the daemon's submission");
     expect(r.commit).toBe(mergeCommit);
     expect(r.deletes).toHaveLength(1);
     const armed = r.stdout
       .split("\n")
-      .filter((l) => l.includes("armed by the merger's submission"));
+      .filter((l) => l.includes("armed by the daemon's submission"));
     expect(armed).toHaveLength(1);
     expect(armed[0]).toContain(
       `(auto-merge enabled at ${enabledAt} (SQUASH); mergeStateStatus BLOCKED): no hand merge`
@@ -214,7 +220,7 @@ describe("merge_when_clean", () => {
     expect(r.status).toBe(0);
     expect(r.reads).toHaveLength(3);
     expect(r.merges).toHaveLength(0);
-    expect(r.by).toBe("the merger's submission");
+    expect(r.by).toBe("the daemon's submission");
     expect(r.commit).toBe(mergeCommit);
     expect(r.stdout).toContain(
       "(merge queue position 2, AWAITING_CHECKS; mergeStateStatus BLOCKED)"
@@ -240,14 +246,14 @@ describe("merge_when_clean", () => {
     );
   });
 
-  test("the race: a hand merge refused as already merged is the merger's outcome", () => {
+  test("the race: a hand merge refused as already merged is the daemon's outcome", () => {
     const r = run([clean, merged], "--squash --delete-branch", {
       mergeFail: "! Pull request sjawhar/legion-smoke#7 was already merged",
     });
     expect(r.status).toBe(0);
     expect(r.merges).toHaveLength(1);
     expect(r.reads).toHaveLength(2);
-    expect(r.by).toBe("the merger's submission");
+    expect(r.by).toBe("the daemon's submission");
     expect(r.commit).toBe(mergeCommit);
     expect(r.deletes).toHaveLength(1);
     expect(r.stdout).toContain("the hand merge of sjawhar/legion-smoke#7 was refused");
@@ -258,7 +264,7 @@ describe("merge_when_clean", () => {
     const r = run([clean, blocked], "--squash --delete-branch", { mergeFail: "gh: HTTP 405" });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(
-      "FAIL ordinary-human-squash-merge: sjawhar/legion-smoke#7 is not merged: it reads OPEN, mergeStateStatus BLOCKED, merge commit none"
+      "FAIL daemon-merge: sjawhar/legion-smoke#7 is not merged: it reads OPEN, mergeStateStatus BLOCKED, merge commit none"
     );
     expect(r.by).toBeUndefined();
   });
@@ -269,7 +275,7 @@ describe("merge_when_clean", () => {
     expect(r.merges).toHaveLength(0);
     expect(r.deletes).toHaveLength(0);
     expect(r.stderr).toMatch(
-      /^FAIL ordinary-human-squash-merge: timed out after \ds \(\d+ polls\) waiting for sjawhar\/legion-smoke#7 to merge: it reads OPEN, mergeStateStatus BLOCKED, nothing armed; unsettled checks: \[\{"name":"gate"/
+      /^FAIL daemon-merge: timed out after \ds \(\d+ polls\) waiting for sjawhar\/legion-smoke#7 to merge: it reads OPEN, mergeStateStatus BLOCKED, nothing armed; unsettled checks: \[\{"name":"gate"/
     );
     expect(r.stderr.trimEnd().split("\n")).toHaveLength(1);
   });
@@ -297,8 +303,44 @@ describe("merge_when_clean", () => {
     const r = run([{ state: "CLOSED", mergeStateStatus: "UNKNOWN" }]);
     expect(r.status).toBe(1);
     expect(r.reads).toHaveLength(1);
-    expect(r.stderr).toBe(
-      "FAIL ordinary-human-squash-merge: sjawhar/legion-smoke#7 was closed without a merge\n"
-    );
+    expect(r.merges).toHaveLength(0);
+  });
+});
+
+describe("await_ready_merge", () => {
+  const fn = "await_ready_merge" as const;
+
+  test("waits through BLOCKED for the daemon's merge, never merging by hand", () => {
+    const r = run([blocked, blocked, merged], "--delete-branch", { fn });
+    expect(r.status).toBe(0);
+    expect(r.reads).toHaveLength(3);
+    expect(r.merges).toHaveLength(0);
+    expect(r.commit).toBe(mergeCommit);
+    expect(r.deletes).toEqual([
+      `api -X DELETE repos/sjawhar/legion-smoke/git/refs/heads/${branch}`,
+    ]);
+  });
+
+  test("CLEAN with nothing armed is still the daemon's to merge: no hand merge, a timeout names it", () => {
+    const r = run([clean], "--delete-branch", { fn, bound: 1 });
+    expect(r.status).toBe(1);
+    expect(r.merges).toHaveLength(0);
+    expect(r.deletes).toHaveLength(0);
+    expect(r.stderr).toContain("timed out after");
+    expect(r.stderr).toContain("mergeStateStatus CLEAN");
+  });
+
+  test("without --delete-branch the merged pull request keeps its branch", () => {
+    const r = run([merged], "", { fn });
+    expect(r.status).toBe(0);
+    expect(r.deletes).toHaveLength(0);
+  });
+
+  test("a pull request closed without a merge fails at once", () => {
+    const r = run([{ state: "CLOSED", mergeStateStatus: "UNKNOWN" }], "--delete-branch", { fn });
+    expect(r.status).toBe(1);
+    expect(r.reads).toHaveLength(1);
+    expect(r.merges).toHaveLength(0);
+    expect(r.deletes).toHaveLength(0);
   });
 });

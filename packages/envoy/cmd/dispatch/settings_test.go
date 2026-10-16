@@ -390,14 +390,33 @@ func startSignIn(t *testing.T, handler http.Handler) *httptest.ResponseRecorder 
 // callback, whose answer it returns.
 func poolSignIn(t *testing.T, handler http.Handler, pool *oidctest.Issuer, groups ...string) *httptest.ResponseRecorder {
 	t.Helper()
-	pool.SignInAs(map[string]any{
+	return codeFlowSignIn(t, handler, pool, map[string]any{
 		"sub":              "person-subject",
 		"cognito:username": "ExampleIdP_alice@example.com",
 		"cognito:groups":   groups,
 		"identities":       []map[string]any{{"providerName": "ExampleIdP"}},
 	})
+}
+
+// googleSignIn runs a whole sign-in through handler against issuer standing in for Google, as a
+// verified account alice@example.com whose Workspace domain is hd.
+func googleSignIn(t *testing.T, handler http.Handler, issuer *oidctest.Issuer, hd string) *httptest.ResponseRecorder {
+	t.Helper()
+	return codeFlowSignIn(t, handler, issuer, map[string]any{
+		"sub":            "google-subject",
+		"email":          "alice@example.com",
+		"email_verified": true,
+		"hd":             hd,
+	})
+}
+
+// codeFlowSignIn runs a whole sign-in through handler against issuer as the person claims names:
+// start, the issuer's sign-in, and the callback, whose answer it returns.
+func codeFlowSignIn(t *testing.T, handler http.Handler, issuer *oidctest.Issuer, claims map[string]any) *httptest.ResponseRecorder {
+	t.Helper()
+	issuer.SignInAs(claims)
 	start := startSignIn(t, handler)
-	code, state := pool.Authorize(t, start.Header().Get("Location"))
+	code, state := issuer.Authorize(t, start.Header().Get("Location"))
 	callback := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/callback?code="+url.QueryEscape(code)+"&state="+url.QueryEscape(state), nil)
 	for _, cookie := range start.Result().Cookies() {
 		callback.AddCookie(cookie)
@@ -405,6 +424,38 @@ func poolSignIn(t *testing.T, handler http.Handler, pool *oidctest.Issuer, group
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, callback)
 	return response
+}
+
+// whoamiAfter answers GET /auth/whoami from handler carrying the session cookie signIn set.
+func whoamiAfter(handler http.Handler, signIn *httptest.ResponseRecorder) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
+	for _, cookie := range signIn.Result().Cookies() {
+		if cookie.Name == "dsession" {
+			request.AddCookie(cookie)
+		}
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	return response
+}
+
+// ageConfirmation dates email's last confirmation two hours back, so their next request finds it
+// older than the hour.
+func ageConfirmation(t *testing.T, people auth.PeopleStore, email string) {
+	t.Helper()
+	membership, found, err := people.Membership(context.Background(), email)
+	if err != nil || !found || membership.RefreshToken == "" {
+		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
+	}
+	if membership.Subject != "" {
+		if err := people.ConfirmSubject(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := people.Confirm(context.Background(), email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // sessionCookieSet reports whether response set Dispatch's session cookie.
@@ -546,8 +597,9 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("SignInIssuer = %q", boot.SignInIssuer)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
-			// Cookie identity is Google sign-in: with none of the four, the server refuses to start.
-			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_ISSUER")
+			// Cookie identity is Google sign-in: with none of the sign-in settings, the server refuses to start.
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""},
+				"cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required")
 			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
 			t.Run("router", func(t *testing.T) {
 				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
@@ -598,7 +650,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot.SignInGroup != "table-group" {
 				t.Errorf("SignInGroup = %q", boot.SignInGroup)
 			}
-			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP missing")
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN missing")
 			// The group the router's sign-in admits: a member signs in, anyone else is refused. Past
 			// the hour, the membership check main attaches to cookie identity renews the member's
 			// sign-in with the pool against the same group, and signs out a person the pool no
@@ -613,37 +665,62 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				if response := poolSignIn(t, handler, pool, "dispatch-members"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
 					t.Errorf("a person outside table-group: the callback answered %d %s, want 403 and no session", response.Code, response.Body.String())
 				}
-				whoami := func() *httptest.ResponseRecorder {
-					request := httptest.NewRequest(http.MethodGet, "http://dispatch.test/auth/whoami", nil)
-					for _, cookie := range member.Result().Cookies() {
-						if cookie.Name == "dsession" {
-							request.AddCookie(cookie)
-						}
-					}
-					response := httptest.NewRecorder()
-					handler.ServeHTTP(response, request)
-					return response
-				}
-				// ageConfirmation dates the member's last confirmation two hours back, so their next
-				// request finds it older than the hour.
-				ageConfirmation := func() {
-					t.Helper()
-					membership, found, err := people.Membership(context.Background(), "alice@example.com")
-					if err != nil || !found || membership.RefreshToken == "" {
-						t.Fatalf("the member's membership: %+v, found %t, %v; want a refresh token", membership, found, err)
-					}
-					if err := people.Confirm(context.Background(), "alice@example.com", membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
-						t.Fatal(err)
-					}
-				}
-				ageConfirmation()
-				if response := whoami(); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+				ageConfirmation(t, people, "alice@example.com")
+				if response := whoamiAfter(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
 					t.Errorf("a member of table-group past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh", response.Code, response.Body.String(), pool.Refreshes())
 				}
-				ageConfirmation()
+				ageConfirmation(t, people, "alice@example.com")
 				pool.UpdateGrants(func(claims map[string]any) { claims["cognito:groups"] = []string{"other-group"} })
-				if response := whoami(); response.Code != http.StatusUnauthorized {
+				if response := whoamiAfter(handler, member); response.Code != http.StatusUnauthorized {
 					t.Errorf("a member the pool dropped from table-group, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
+				}
+			})
+		},
+		"DISPATCH_SIGNIN_DOMAIN": func(t *testing.T) {
+			google := map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com", "DISPATCH_SIGNIN_GROUP": ""}
+			domain := func(value string) map[string]string {
+				overrides := map[string]string{"DISPATCH_SIGNIN_DOMAIN": value}
+				for name, value := range google {
+					overrides[name] = value
+				}
+				return overrides
+			}
+			boot := resolveWith(t, domain(" example.com "))
+			if boot.SignInDomain != "example.com" || boot.SignInGroup != "" {
+				t.Errorf("SignInDomain = %q, SignInGroup = %q", boot.SignInDomain, boot.SignInGroup)
+			}
+			refusedWith(t, domain("Example.com"), "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got a value of 11 characters")
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set")
+			// The domain the code flow main discovers names to Google and the router's sign-in
+			// admits, against a fake issuer in Google's place so no test calls Google: the domain
+			// resolved under Google's issuer. An account of the domain signs in, anyone else is
+			// refused, and past the hour the membership check main attaches to cookie identity
+			// renews the member's sign-in against the same domain, and signs out an account that
+			// left it.
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot.SignInIssuer = pool.URL()
+			t.Run("router", func(t *testing.T) {
+				people := peopleStore(t)
+				handler := signInRouter(t, boot, people)
+				location, err := url.Parse(startSignIn(t, handler).Header().Get("Location"))
+				if err != nil || location.Query().Get("hd") != "example.com" || location.Query().Get("access_type") != "offline" {
+					t.Errorf("DISPATCH_SIGNIN_DOMAIN=example.com: GET /auth/start redirected to %v (%v), want hd example.com with offline access", location, err)
+				}
+				member := googleSignIn(t, handler, pool, "example.com")
+				if member.Code != http.StatusFound || !sessionCookieSet(member) {
+					t.Fatalf("an account of example.com: the callback answered %d %s, want a signed-in redirect", member.Code, member.Body.String())
+				}
+				if response := googleSignIn(t, handler, pool, "other.example"); response.Code != http.StatusForbidden || sessionCookieSet(response) {
+					t.Errorf("an account of other.example: the callback answered %d %s, want 403 and no session", response.Code, response.Body.String())
+				}
+				ageConfirmation(t, people, "alice@example.com")
+				if response := whoamiAfter(handler, member); response.Code != http.StatusOK || pool.Refreshes() != 1 {
+					t.Errorf("an account of example.com past the hour: whoami answered %d %s after %d refreshes, want 200 after one refresh", response.Code, response.Body.String(), pool.Refreshes())
+				}
+				ageConfirmation(t, people, "alice@example.com")
+				pool.UpdateGrants(func(claims map[string]any) { claims["hd"] = "other.example" })
+				if response := whoamiAfter(handler, member); response.Code != http.StatusUnauthorized {
+					t.Errorf("an account that left example.com, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
 				}
 			})
 		},

@@ -149,7 +149,7 @@ cleanup() {
   # stands. The status stays the failure's either way, since the checkpoints after it never ran.
   [ -n "${ok:-}" ] || [ "$check" != smoke-main-clean ] || [ -n "$audit_failed" ] ||
     [ -s "$evidence/pane-endpoint-violation.txt" ] || [[ $status =~ ^(129|130|143)$ ]] ||
-    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its human merge and sign-off included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
+    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its daemon merge and sign-off included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
   return 0
 }
 trap cleanup EXIT
@@ -895,17 +895,16 @@ primary_issue() {
   note "READY refused at unapproved spec version $new_version, the stand-in architect's decision block; the human's answer carried his approval of version $uploaded_version forward to version $carried_version (review by user $proof_human_user, reason $(jq -r .reason <<<"$carried_review")), no approval request was opened, and the carried approval advanced awaiting_merge without another READY"
   pass
 
-  begin ordinary-human-squash-merge
-  # This is intentionally the devbox's ordinary gh as the proof human (the dotfiles shim, acting as the
-  # sjawhar-agent App). Legion's Apps are neither invoked nor able to merge. merge_when_clean reads the
-  # pull request's state first and merges by hand only when the merger armed nothing: under this
-  # branch's merger prompt the merger submits the merge itself on its READY, so a pull request already
-  # merged, enqueued or auto-merge armed is the expected read here. The smoke main is held
-  # from here until smoke-main-clean has emptied it (hold_smoke_main), on an open descriptor: start
-  # no background child before release_smoke_main, or it inherits the descriptor and holds the smoke
-  # main past this run's window.
+  begin daemon-merge
+  # The daemon submits the merge of the READY head itself once it accepts READY, as the implement
+  # App. sjawhar/legion-smoke allows no auto-merge, so the daemon merges it once GitHub reports it
+  # mergeable under the `gate` ruleset; await_ready_merge only reads the pull request and never
+  # merges it by hand, so a merge here is the daemon's. The smoke main is held from here until
+  # smoke-main-clean has emptied it (hold_smoke_main), on an open descriptor: start no background
+  # child before release_smoke_main, or it inherits the descriptor and holds the smoke main past
+  # this run's window.
   hold_smoke_main
-  merge_when_clean "$repo" "$pr_number" --squash --delete-branch
+  await_ready_merge "$repo" "$pr_number" --delete-branch
   wait_for_phase "$root_issue" production_check 300
   # The resumed implementer's task names production_check, and it may record the check before the
   # proof's instruction reaches it; its completion is observed, not its instruction.

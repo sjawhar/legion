@@ -216,8 +216,9 @@ Legion uses GitHub's own review mechanisms rather than labels:
 ## READY and the merge
 
 When the reviewer has approved and retro is done, the merger checks that the pull request's head is
-the approved one (plus only retro's notes), that every check the base branch requires has passed,
-and that every workflow its rulesets require has a run on the head that succeeded.
+the approved one (plus only retro's notes), that no check the base branch requires has failed or is
+missing on it, and that no workflow its rulesets require has failed or has no run on the head; a
+required check or workflow still running is no reason to wait.
 It then sends **READY**, which the daemon posts on the Dispatch issue as one message:
 
 ```text
@@ -229,19 +230,33 @@ role (`merge_queue_role`) that gets the same packet. Its optional `merge.by_hand
 paths keep matching pull requests out of auto-merge: the daemon accepts their `READY` and tells the
 merger that a person merges it under the repository's rules, and the packet it posts on the issue,
 and publishes to that role, starts with that `MANUAL_MERGE_REQUIRED:` note, its `Merge:` line
-replaced, so nobody it reaches arms it. Otherwise, the moment the
-daemon accepts READY, the merger submits the pull request with
-`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`: a repository with a
-merge queue enqueues it, one without arms auto-merge, and the repository's own required reviews and
-checks decide when it merges — rules Legion neither reads nor changes. If the head moves before the
-command, the head match refuses it; the merger builds and sends a new `READY` packet. GitHub checks
-the head match only when auto-merge is enabled, so an arm outliving its `READY` would merge an
-unreviewed head. Arming is right only for the `READY` head of an issue awaiting its merge, so the
-daemon queues a disarm on every other push or reopen, when a child is set back to `todo`, and when
-an issue leaves the workflow. The disarm reads GitHub, then the record: it keeps the arm only while
-the issue awaits its merge at its `READY` head and that `READY` is not by hand, and otherwise disables
-auto-merge and takes the pull request out of a merge queue, as the implement App. The daemon
-refuses a `READY` until any such disarm has finished. `READY` is
+replaced, so nobody it reaches arms it. A by-hand READY refuses `READY_DISARM_PENDING` while an
+earlier auto-merge disarm remains unfinished, preventing a stale ordinary arm from merging this
+person-only head. Ordinary READY does not wait for the disarm. Otherwise, the moment the daemon
+accepts READY it submits
+the merge itself, as the implement App, with the `READY` head as GitHub's expected head: a base with
+a merge queue enqueues it; otherwise a pull request GitHub already reports mergeable merges at once,
+one in a repository that allows auto-merge is armed, and in a repository that allows neither the
+daemon waits until GitHub reports the pull request mergeable — a required check passing, a required
+review a person gives — and then merges it. An arm or a queue entry is not the end: the submission
+keeps reading GitHub until GitHub reports the pull request merged at the `READY` head, and submits
+again when the arm or entry is gone while the record still awaits that head, as when a disarm sent
+before `READY` lands late. The repository's own required reviews and checks decide
+when it merges, rules Legion neither reads nor changes nor bypasses, and a person may still merge it
+first. The submission reads GitHub, then the record, when it runs, and submits nothing once the
+record shows the issue left that `READY` or the pull request closed. While the record still awaits
+the `READY` head, GitHub showing the pull request closed or at another head means one of them has
+not caught up: the submission waits. It ends and tells the architect only once GitHub's last change
+to the pull request is more than 10 minutes old, far longer than a webhook takes to arrive, however
+long the submission waited before. A reopen at the `READY` head takes the submission back from a
+run that read the record before the reopen, so it is never lost. A refusal GitHub would repeat on a
+retry ends the submission and is told to the architect too. GitHub checks the expected head only when
+auto-merge is enabled, so an arm outliving its `READY` would merge an unreviewed head. Arming is right
+only for the `READY` head of an issue awaiting its merge, so the daemon queues a disarm on every
+other push or reopen, when a child is set back to `todo`, and when an issue leaves the workflow. The
+disarm reads GitHub, then the record: it keeps the arm only while the issue awaits its merge at its
+`READY` head and that `READY` is not by hand, and otherwise disables auto-merge and takes the pull
+request out of a merge queue, as the implement App. `READY` is
 withdrawn when a push or reopen moves the head past the one `READY` named, when the head's own CI
 turns red, or when it starts conflicting with its base: the
 issue goes back to `implementing`, the architect is told, and the daemon disarms the pull request
