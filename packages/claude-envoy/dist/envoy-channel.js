@@ -40039,6 +40039,7 @@ var InterestWireSchema = exports_external.object({
 var SessionWireSchema = exports_external.object({
   session_id: exports_external.string(),
   machine_id: exports_external.string(),
+  host: exports_external.string().optional(),
   dir: exports_external.string(),
   port: exports_external.number().int(),
   title: exports_external.string(),
@@ -40051,6 +40052,7 @@ var SessionWireSchema = exports_external.object({
 var RoleWireSchema = exports_external.object({
   role: exports_external.string(),
   holder: exports_external.string(),
+  host: exports_external.string().optional(),
   last_seen: exports_external.number().int()
 });
 var RoleHeldWireSchema = exports_external.object({
@@ -40166,7 +40168,8 @@ function createEnvoyClient(config2) {
       title: input.title,
       ...input.capabilities === undefined ? {} : { capabilities: input.capabilities },
       driving: input.driving,
-      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed }
+      ...input.selfSubscribed === undefined ? {} : { self_subscribed: input.selfSubscribed },
+      host: machineID()
     }))),
     unsubscribe: async (input) => {
       await post("/v1/interests/unsubscribe", {
@@ -43334,7 +43337,7 @@ async function executeEnvoyTool(runtime, name, input) {
         ...args.dir === undefined ? {} : { directory: args.dir },
         ...args.title === undefined ? {} : { title: args.title }
       });
-      return args.machine ? sessions.filter((session) => session.machine_id === args.machine) : sessions;
+      return args.machine ? sessions.filter((session) => (session.host ?? session.machine_id) === args.machine) : sessions;
     }
     case EnvoyToolOperation.setRole: {
       const args = parseArguments(spec, input);

@@ -133,8 +133,8 @@ merger.
    they derive nothing, skip steps 2 to 4 and go on to the push.
 2. Compute it the way they say, for the paths the pull request changes at your head, the files
    GitHub lists on it:
-   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <head>)' --to <head> --name-only`
-   lists them, `<base>` the pull request's base branch and `<head>` your removal commit. Where a
+   `base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head>)" --to <head> --name-only`
+   lists them, `base` the pull request's base branch as a jj string literal (never a name pasted between quotes) and `<head>` your removal commit. Where a
    line affirms work, such as a checklist completed for a class of path, do that work for the
    paths your commits add before you write the line: the line is a claim. That work may change
    files under `docs/solutions/` only, folded into your docs commit before the push, since

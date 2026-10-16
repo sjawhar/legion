@@ -887,11 +887,13 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 // independent-provision: a new tree's root and its child, spawned at once, each get an issue pod of
 // their own: a Sandbox with one `issue` claim template, a PersistentVolumeClaim of its own selected
 // by the issue's label and Bound, a clone with no lock beside it and a jj workspace of that issue
-// alone, each clone passing git fsck. Nothing orders the two provisions: each works on its own
-// volume. Its negative control is the other issue's workspace: the root's pod cannot list the
-// child's workspace directory, which exists in the child's pod, and the child's pod cannot list the
-// root's. Which node each pod lands on is not checked: no pod asks for or keeps off another pod's
-// node (LEGION-632), and what a pod asks of its node is the `resources` check's.
+// alone, standing at the repository's default branch as GitHub names it (its init log names the
+// branch, and the workspace's @- is the clone's <default branch>@origin), each clone passing git
+// fsck. Nothing orders the two provisions: each works on its own volume. Its negative control is
+// the other issue's workspace: the root's pod cannot list the child's workspace directory, which
+// exists in the child's pod, and the child's pod cannot list the root's. Which node each pod lands
+// on is not checked: no pod asks for or keeps off another pod's node (LEGION-632), and what a pod
+// asks of its node is the `resources` check's.
 func (r *liveRig) checkIndependentProvision() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -922,9 +924,9 @@ func (r *liveRig) checkIndependentProvision() error {
 			return err
 		}
 		dir, _ := workspace.Location(TreeRoot, r.env.repo, c.issue)
-		want := "workspace-init: " + dir.Dir + " on " + dir.Bookmark
+		want := "workspace-init: " + dir.Dir + " on " + dir.Bookmark + " from " + r.defaultBranch + "\n"
 		if !strings.Contains(log, want) {
-			return fmt.Errorf("%s's init log lacks %q: %s", c.name, want, strings.TrimSpace(log))
+			return fmt.Errorf("%s's init log lacks %q: %s", c.name, strings.TrimSpace(want), strings.TrimSpace(log))
 		}
 		s, err := r.getSandbox(name)
 		if err != nil {
@@ -960,11 +962,25 @@ func (r *liveRig) checkIndependentProvision() error {
 		if !strings.Contains(workspaces, strings.ToLower(c.issue)+":") || strings.Contains(workspaces, strings.ToLower(other.issue)+":") {
 			return fmt.Errorf("%s's clone lists workspaces %q, want %s's own and not %s's", c.name, oneLine(workspaces), strings.ToLower(c.issue), strings.ToLower(other.issue))
 		}
+		parent, err := r.exec(c, "jj", "-R", dir.Dir, "log", "-r", "@-", "--no-graph", "-T", "commit_id", "--ignore-working-copy")
+		if err != nil {
+			return err
+		}
+		// git reads a ref name literally, where a jj revset would parse it: the colocated clone's
+		// refs/remotes/origin/<default branch> is the commit jj's <default branch>@origin names.
+		head, err := r.exec(c, "git", "--git-dir="+clone+"/.git", "rev-parse", "--verify", "refs/remotes/origin/"+r.defaultBranch+"^{commit}")
+		if err != nil {
+			return err
+		}
+		if parent, head = strings.TrimSpace(parent), strings.TrimSpace(head); parent == "" || parent != head {
+			return fmt.Errorf("%s's workspace @- is %q, want the default branch %s's head %q", c.name, parent, r.defaultBranch, head)
+		}
+		note("operator", "%s: workspace @- %s = default_branch %s @ %s", c.name, parent, r.defaultBranch, head)
 		fsck, err := r.exec(c, "git", "--git-dir="+clone+"/.git", "fsck", "--connectivity-only", "--no-progress")
 		if err != nil {
 			return fmt.Errorf("git fsck of %s's clone: %w", c.name, err)
 		}
-		note("runtime", "%s: init log %q; Sandbox %s owns one claim template %s", c.name, want, name, issueVolume)
+		note("runtime", "%s: init log %q; Sandbox %s owns one claim template %s", c.name, strings.TrimSpace(want), name, issueVolume)
 		note("operator", "%s: PVC %s (by %s=%s): Bound; exec ls -A %s: %v; jj workspace list: %s; git fsck --connectivity-only: ok %s",
 			c.name, IssueClaimName(c.token), labelIssue, labelValue(c.issue), filepath.Dir(clone), entries, oneLine(workspaces), oneLine(fsck))
 	}

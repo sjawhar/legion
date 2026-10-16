@@ -158,7 +158,7 @@ export function AgentConversationPage(): ReactNode {
           </span>
         ) : (
           <span className={`min-w-0 truncate text-xs ${textMutedOnCanvas}`}>
-            {agent.machine_id} · {agent.dir}
+            {agent.host} · {agent.dir}
           </span>
         )}
         <label className={`ml-auto flex items-center gap-2 text-xs ${textMutedOnCanvas}`}>

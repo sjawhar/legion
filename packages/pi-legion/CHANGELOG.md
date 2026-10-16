@@ -45,6 +45,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
+  names the repository's default branch (`--default-branch <name>`), which every branch and
+  workspace now starts at, whatever its name (`develop`, `release/v7.1`, `release#stable`); an
+  image built before it is refused by the daemon's image probe. Install this release with a
+  `legion` built from the same commit. The `legion-worker` skill's attribution check reads
+  GitHub's `default_branch`, and its conflict merge and fingerprint use the pull request's base
+  branch, instead of assuming `main@origin`; the recreated-workspace notice says a workspace holds
+  the repository's default branch when nothing was pushed.
 - Daemon API contract 25 (LEGION-636): a deployment row of `legion state`'s `capabilities` carries
   `source`, `configuration` (what legion.yaml alone decides) or `boot` (what boot measured);
   `installed` leaves the status set (nothing has emitted it since LEGION-629); the probe's OK line

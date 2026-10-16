@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // hubRig is a delivery hub on the API test server: the handler a test writes through, the store
@@ -1459,6 +1460,70 @@ func TestAReconcilePassThatFindsNothingNewSendsNothing(t *testing.T) {
 		t.Fatalf("record the pass: %v", err)
 	}
 	conn.none(t, 5*time.Second, "a reconcile pass that found nothing new")
+}
+
+// TestARecomputeAfterTiedRowsAreWrittenAgainSendsNothing: a reconcile pass writes a failed run's
+// jobs and the pull requests a deploy shipped again as they were, which logs no change but puts each
+// row's new version after the rest of its table. The jobs started and finished together and the
+// pull requests merged in one second, so an order neither read decides would come back changed on
+// the next recompute, here one for a change no view shows, and the hub would send both runs again.
+// The hub reads on a sequential scan, the plan that answers rows as they lie.
+func TestARecomputeAfterTiedRowsAreWrittenAgainSendsNothing(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	deps.Store = &store.Store{Pool: storetest.Planned(t, database.Pool, storetest.SequentialScan)}
+	rig := hubOn(t, handler, database, deps, deliveryHubClock{}, nil)
+	seedHubSettings(t, rig.database)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	merged := now.Add(-30 * time.Hour)
+	prs := []delivery.DeliveryPullRequest{hubPR(1, merged), hubPR(2, merged), hubPR(3, merged)}
+	for _, pr := range prs {
+		upsertPR(t, rig.database, pr)
+	}
+	upsertDeploy(t, rig.database, 101, now.Add(-29*time.Hour), now.Add(-28*time.Hour))
+
+	started, finished := now.Add(-27*time.Hour), now.Add(-26*time.Hour)
+	failure, jobFailure, jobSkipped := delivery.DeliveryRunConclusionFailure, delivery.DeliveryJobConclusionFailure, delivery.DeliveryJobConclusionSkipped
+	if err := delivery.UpsertRun(ctx, rig.database.Pool, delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 102, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha102",
+		HeadCommitAt: started, StartedAt: started, CompletedAt: &finished, Conclusion: &failure,
+		URL: "https://github.com/acme/widgets/actions/runs/102", HeadBranch: new("main"), Event: new("push"),
+	}); err != nil {
+		t.Fatalf("upsert failed run 102: %v", err)
+	}
+	// GitHub's listing order, which is neither the start order nor the name order.
+	jobs := []delivery.DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 102, Name: "test / unit", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobFailure},
+		{Repo: "acme/widgets", RunID: 102, Name: "lint", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobFailure},
+		{Repo: "acme/widgets", RunID: 102, Name: "build", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobFailure},
+		{Repo: "acme/widgets", RunID: 102, Name: "release / release", Conclusion: &jobSkipped},
+	}
+	if err := delivery.UpsertRunJobs(ctx, rig.database.Pool, "acme/widgets", 102, jobs, true); err != nil {
+		t.Fatalf("upsert run 102's jobs: %v", err)
+	}
+	// A pull request of another repository, merged before the window: a change to it recomputes
+	// the view and changes nothing it shows.
+	other := hubPR(9, now.Add(-30*24*time.Hour))
+	other.Repo, other.URL = "acme/other", "https://github.com/acme/other/pull/9"
+	upsertPR(t, rig.database, other)
+
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
+	conn.snapshot(t, 5*time.Second, "p")
+
+	// The pass writes the first-listed job and pull request again as they were.
+	if err := delivery.UpsertRunJobs(ctx, rig.database.Pool, "acme/widgets", 102, jobs[:1], true); err != nil {
+		t.Fatalf("upsert run 102's first job again: %v", err)
+	}
+	upsertPR(t, rig.database, prs[0])
+	start := rig.mark()
+	other.Title = "feat: a title no view shows"
+	upsertPR(t, rig.database, other)
+	rig.waitFor(t, start, 3*time.Second, "the recompute of the change", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseChange
+	})
+	conn.none(t, time.Second, "a recompute after tied rows were written again unchanged")
 }
 
 func TestIdenticalViewsShareOneRecompute(t *testing.T) {

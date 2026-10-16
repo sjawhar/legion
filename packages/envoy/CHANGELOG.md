@@ -4,6 +4,18 @@
 
 ### Added
 
+- Every live session now carries `host` beside `machine_id`: where the session process actually
+  runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
+  listener happened to register it. Sessions on separate machines registering through one shared
+  listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
+  keeps its routing meaning unchanged (the listener that owns the session's delivery,
+  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
+  session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
+  /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
+  whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
+  own defensive fallback to `machine_id` for a listener that predates the field too.
+
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
@@ -797,6 +809,29 @@
   however long the worker took between that read and the arm, and a test that moved its clock
   forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
   timer armed for a moment the clock has already passed fires at once.
+
+- The delivery live hub no longer re-sends a run in which nothing changed (LEGION-690). Each item it
+  sends is revised by a hash of its JSON, and several store reads answered rows tied on their order
+  in whatever order Postgres's plan read them: a run's jobs (no order at all), the pull requests a
+  run shipped and the waiting list (merged in one second), and runs started in one instant. The
+  plan alternates between a sequential scan (the table's row order, where a reconcile pass's
+  unchanged rewrite moves a row last) and an index scan, so a recompute answered a run's
+  `failed_jobs`, `root_failing_job`, `production` or `prs` in another order and the hub sent the
+  run again, whole: in production deltas of 54 to 61 runs, about 110 KB each, whose one change was
+  the order of their `prs`. A run's jobs now come back by when each started, a job that never
+  started last, then by name (`ListRunJobs`, `ListRunJobsForRuns`, sorted in Go per run: an
+  `order by` sorts the whole 28-day read on disk, 82-93 ms against 43-52 ms for the unordered read
+  and 3 ms for the sort), the order `GET /api/v1/delivery/runs/{id}` already listed them in. Pull
+  requests merged together come back by id (`owner/repo#N` in byte order, the page's own order) and
+  runs started together by run id. A run's root failing job and its production job, among jobs
+  finishing together, are the first by name, and a run whose production jobs all failed falls back
+  to the first by start rather than the first listed. The Pipeline page's failing jobs name, as a
+  job's last failing run among runs that completed together, the one with the higher run id rather
+  than whichever was listed last.
+
+- Two production deploys whose jobs complete in the same second are ordered by run id, and the
+  lower run id ships a pull request both could, so the live Delivery hub's sliding window no longer
+  swaps a pull request's `deploy_run` and a run's `prs` with no stored row changed (LEGION-690).
 
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
