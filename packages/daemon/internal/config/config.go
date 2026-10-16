@@ -33,6 +33,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
 // Runtime is the `runtime` block: its name, and under kubernetes the settled `runtime.kubernetes`
@@ -901,6 +902,17 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {
 			return Config{}, err
+		}
+		// The floor is the pod's lease release: a role's shim waits for its CodeGraph warm-up to
+		// release its lease on the issue volume inside the pod's terminationGracePeriodSeconds,
+		// which is this key (the launcher passes it the shim as --stop-grace), and the whole stop
+		// fits only from shim.MinStopGrace up; a smaller grace would have the launcher kill the
+		// shim with the lease held. Kubernetes-only: the tmux runtime passes its shims neither
+		// --stop-grace nor --warm-codegraph, and the daemon warms tmux workspaces itself.
+		if cfg.WorkerStopTimeout < shim.MinStopGrace {
+			return Config{}, fmt.Errorf("worker_stop_timeout_seconds must be at least %d when runtime is kubernetes: a role's stop gives its agent %s to exit, drains its output for %s and waits %s for the CodeGraph warm-up to release its lease (%s + %s + %s = %s)",
+				int(shim.MinStopGrace/time.Second), shim.DefaultGrace, shim.DrainTimeout, shim.MinWarmUpDrain,
+				shim.DefaultGrace, shim.DrainTimeout, shim.MinWarmUpDrain, shim.MinStopGrace)
 		}
 	}
 	return cfg, nil

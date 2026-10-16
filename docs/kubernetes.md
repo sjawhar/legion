@@ -1620,16 +1620,23 @@ not a prompt. Six role shims share one workspace, so the warm-up holds a lease a
 `.codegraph/legion-warm.lock` for its run — an exclusive create whose holder refreshes its mtime
 every 10 s, taken over once it is 60 s stale, the takeover itself under a second exclusive create
 beside it so two shims that both read one stale lease never both build — and a shim that finds the
-lease held leaves the build to its holder. A stop mid-build — the launcher's one SIGTERM to
-the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim exits only
-once the warm-up has released its lease, inside the pod's `terminationGracePeriodSeconds`
-(`worker_stop_timeout_seconds`, which the launcher passes the shim as `--stop-grace`), so the
-relaunch is never told a live build holds the workspace; it runs the warm-up again, and `status` on
-the volume's existing index answers complete, so nothing runs, or reports the index the stop left
-partial, which `codegraph index` repairs. The tester's `affected` and
-the reviewer's `impact`/`callers` queries answer once `codegraph status --json` reports
-`index.state: "complete"`; before that a role falls back to grep, as its prompt says. The init
-containers never call `codegraph`.
+lease held leaves the build to its holder. When a build finishes, the shim's warm-up logs one line in
+the role container's log, `codegraph warm-up for <workspace> built the index: codegraph init took
+<duration>, done <duration> after launch` — the build's own duration and the time since the role's
+launch (`codegraph index` in place of `init` for a repair) — which stage 4b's `repository-tools`
+checkpoint reads (`kubectl logs <pod> --all-containers`). A stop mid-build — the launcher's one
+SIGTERM to the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim
+exits only once the warm-up has released its lease: it waits for that release at least 3 s and at
+most what the pod's `terminationGracePeriodSeconds` (`worker_stop_timeout_seconds`, which the
+launcher passes the shim as `--stop-grace`) leaves once the agent's 5 s grace and the 1 s stdout
+drain are spent (4 s with the default 10 s). The whole stop fits inside the grace from 9 s up, so the
+daemon refuses a smaller `worker_stop_timeout_seconds` under `runtime: kubernetes` at configuration
+load (`legion start --check-config` says so, quoting the key and the floor), and the relaunch is
+never told a live build holds the workspace; it runs the warm-up again, and `status` on the volume's
+existing index answers complete, so nothing runs, or reports the index the stop left partial, which
+`codegraph index` repairs. The tester's `affected` and the reviewer's `impact`/`callers` queries
+answer once `codegraph status --json` reports `index.state: "complete"`; before that a role falls
+back to grep, as its prompt says. The init containers never call `codegraph`.
 
 Every pod runs:
 - with `runtimeClassName: gvisor`;

@@ -1,11 +1,14 @@
 package workspace
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -51,7 +54,7 @@ func TestWarmCodegraphIndexBuildsAnIndexWhenTheCliIsOnPath(t *testing.T) {
 	stubCodegraph(t, callLog)
 	dir := t.TempDir()
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	if _, err := os.Stat(filepath.Join(dir, ".codegraph", ".codegraph-initialized")); err != nil {
 		t.Fatalf("workspace left uninitialized after warming: %v", err)
 	}
@@ -66,7 +69,7 @@ func TestWarmCodegraphIndexBuildsAnIndexWhenTheCliIsOnPath(t *testing.T) {
 	// Warming the same directory again is a no-op re-index: codegraph runs status again, but
 	// never a second init, since the marker already reports initialized.
 	before := len(strings.Split(strings.TrimSpace(string(calls)), "\n"))
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err = os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log after the second warm-up: %v", err)
@@ -153,7 +156,7 @@ func TestWarmCodegraphIndexNeverFailsWhenTheCliIsMissing(t *testing.T) {
 	// machine (like this one) that has a real `codegraph` on its ordinary PATH.
 	t.Setenv("PATH", t.TempDir())
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	if _, err := os.Stat(filepath.Join(dir, ".codegraph", ".codegraph-initialized")); !os.IsNotExist(err) {
 		t.Fatalf("stat .codegraph/.codegraph-initialized = %v, want it absent with no codegraph on PATH", err)
 	}
@@ -170,7 +173,7 @@ func TestWarmCodegraphIndexGivesCodegraphNoSecretLikeVariable(t *testing.T) {
 	t.Setenv("LEGION_GRANT", "grant-should-never-reach-codegraph")
 	dir := t.TempDir()
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
@@ -211,7 +214,7 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
@@ -250,7 +253,7 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
@@ -279,7 +282,7 @@ func TestWarmCodegraphIndexInitializesAnUntrackedCodegraphDirectoryAgainstTheRea
 		t.Fatal(err)
 	}
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 
 	codegraphPath, err := exec.LookPath("codegraph")
 	if err != nil {
@@ -343,7 +346,7 @@ esac
 		t.Fatal(err)
 	}
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
@@ -404,7 +407,7 @@ esac
 			}
 			t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-			warmCodegraphIndex(context.Background(), dir)
+			warmCodegraphIndex(context.Background(), dir, time.Now())
 			calls, err := os.ReadFile(callLog)
 			if err != nil {
 				t.Fatalf("read codegraph call log: %v", err)
@@ -436,8 +439,8 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	warmCodegraphIndex(context.Background(), dir)
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
@@ -510,7 +513,7 @@ func TestWarmCodegraphIndexHoldsACrossProcessLease(t *testing.T) {
 		dir := t.TempDir()
 		lease := leaseOf(t, dir, 0)
 
-		warmCodegraphIndex(context.Background(), dir)
+		warmCodegraphIndex(context.Background(), dir, time.Now())
 		if calls := stubCalls(t, callLog); calls != nil {
 			t.Fatalf("codegraph calls = %v, want none while another process holds the lease", calls)
 		}
@@ -524,7 +527,7 @@ func TestWarmCodegraphIndexHoldsACrossProcessLease(t *testing.T) {
 		dir := t.TempDir()
 		leaseOf(t, dir, warmLeaseStale+time.Minute)
 
-		warmCodegraphIndex(context.Background(), dir)
+		warmCodegraphIndex(context.Background(), dir, time.Now())
 		if calls := stubCalls(t, callLog); !slices.Equal(calls, []string{"status --json", "init"}) {
 			t.Fatalf("codegraph calls = %v, want status --json then init behind the taken-over lease", calls)
 		}
@@ -537,7 +540,7 @@ func TestWarmCodegraphIndexHoldsACrossProcessLease(t *testing.T) {
 		stubCodegraph(t, callLog)
 		dir := t.TempDir()
 
-		warmCodegraphIndex(context.Background(), dir)
+		warmCodegraphIndex(context.Background(), dir, time.Now())
 		if calls := stubCalls(t, callLog); !slices.Equal(calls, []string{"status --json", "init"}) {
 			t.Fatalf("codegraph calls = %v, want status --json then init", calls)
 		}
@@ -781,6 +784,183 @@ func TestAStalledHoldersReleaseLeavesItsSuccessorsLeaseAtTheSameInode(t *testing
 	}
 }
 
+// TestAStalledHoldersHeartbeatLeavesItsSuccessorsLeaseAtTheSameInode: the heartbeat half of the
+// inode hazard the release test above covers. A holder stalled past warmLeaseStale is taken over,
+// and its successor's fresh lease sits at the same path, with the inode the stalled holder's file
+// had on the tree volume (v9fs). Pre-fix, the stalled holder's tick set the mtime of whatever file
+// was at the path — the successor's lease — so once the successor itself died, its lease was kept
+// fresh forever by a heartbeat that was not its own: a dead holder's lease nothing ever took over.
+// The heartbeat knows its lease by the token it wrote, as the release does: the first tick that
+// reads the successor's token ends it, and the successor's lease ages as if the stalled holder
+// were gone. The control comes first: a heartbeat on its own lease does move the mtime forward.
+func TestAStalledHoldersHeartbeatLeavesItsSuccessorsLeaseAtTheSameInode(t *testing.T) {
+	dir := t.TempDir()
+	lease := filepath.Join(dir, ".codegraph", warmLeaseName)
+	if err := os.Mkdir(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const heartbeat = 10 * time.Millisecond
+	past := time.Now().Add(-30 * time.Second)
+	if err := os.WriteFile(lease, []byte("A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lease, past, past); err != nil {
+		t.Fatal(err)
+	}
+	release := holdWarmLease(lease, "A", heartbeat)
+	waitFor(t, func() bool {
+		info, err := os.Stat(lease)
+		return err == nil && info.ModTime().After(past)
+	}, "A's heartbeat to refresh its own lease")
+
+	// A stalls past the stale threshold and B takes over: B's fresh lease at the path, another
+	// token in it, the inode A's file had. Its mtime is then set 30 s back, so the only thing
+	// that could bring it forward is A's heartbeat refreshing a lease that is not its own.
+	kept := lease + ".kept"
+	for _, err := range []error{os.Link(lease, kept), os.Remove(lease), os.Link(kept, lease), os.Remove(kept)} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(lease, []byte("the-successors-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A tick that read A's token just before that write may still be about to set the mtime; a
+	// few ticks later every tick has read the successor's token instead and the heartbeat is over.
+	time.Sleep(3 * heartbeat)
+	if err := os.Chtimes(lease, past, past); err != nil {
+		t.Fatal(err)
+	}
+	successor, err := os.Stat(lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * heartbeat)
+	current, err := os.Stat(lease)
+	if err != nil {
+		t.Fatalf("the successor's lease after ten of the stalled holder's ticks: %v, want it in place", err)
+	}
+	if !os.SameFile(successor, current) {
+		t.Fatal("the lease at the path is not the successor's after the stalled holder's ticks")
+	}
+	if !current.ModTime().Before(time.Now().Add(-20 * time.Second)) {
+		t.Fatalf("the stalled holder's heartbeat refreshed its successor's lease (mtime %s), want it left as old as it was", current.ModTime())
+	}
+	if body, err := os.ReadFile(lease); err != nil || string(body) != "the-successors-token" {
+		t.Fatalf("the successor's lease reads %q (%v) after the stalled holder's ticks, want its token untouched", body, err)
+	}
+
+	release()
+	if body, err := os.ReadFile(lease); err != nil || string(body) != "the-successors-token" {
+		t.Fatalf("the successor's lease reads %q (%v) after the stalled holder's release, want it still in place with its token", body, err)
+	}
+}
+
+// TestALiveHoldersHeartbeatOutlivesAnUnreadableLease: a tick that cannot read the lease must not
+// end the heartbeat. A takeover's remove-and-create is two steps, so a tick between them finds no
+// file at the path, and the tree volume's 9p can fail a read outright (EIO); the design budgets
+// six missed heartbeats before a lease is stale (warmLeaseStale). A heartbeat ended for good at
+// the first such tick would let a running build's lease age past the minute, a sibling take it
+// over and a second `codegraph init` run on the same workspace. Here the lease is moved away for
+// three ticks and moved back 30 s old: a heartbeat still alive brings its mtime forward again, and
+// the release that follows removes the lease, which carried this holder's token throughout. The
+// control comes first: the heartbeat does refresh the lease before it is moved away.
+func TestALiveHoldersHeartbeatOutlivesAnUnreadableLease(t *testing.T) {
+	dir := t.TempDir()
+	lease := filepath.Join(dir, ".codegraph", warmLeaseName)
+	if err := os.Mkdir(filepath.Dir(lease), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const heartbeat = 10 * time.Millisecond
+	past := time.Now().Add(-30 * time.Second)
+	if err := os.WriteFile(lease, []byte("A"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lease, past, past); err != nil {
+		t.Fatal(err)
+	}
+	release := holdWarmLease(lease, "A", heartbeat)
+	refreshed := func() bool {
+		info, err := os.Stat(lease)
+		return err == nil && info.ModTime().After(past)
+	}
+	waitFor(t, refreshed, "A's heartbeat to refresh its own lease")
+
+	// The lease is unreadable for three ticks — each finds no file at the path — and then back,
+	// 30 s old again, so the only thing that could bring its mtime forward is A's heartbeat.
+	away := lease + ".away"
+	if err := os.Rename(lease, away); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(3 * heartbeat)
+	if err := os.Rename(away, lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(lease, past, past); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, refreshed, "A's heartbeat to refresh its lease again after three ticks that could not read it")
+
+	release()
+	if _, err := os.Stat(lease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat after the release of a lease carrying this holder's token: %v, want it gone", err)
+	}
+}
+
+// TestRefreshWarmLease table-tests the heartbeat's one tick: a lease carrying this holder's token
+// is refreshed to now and the heartbeat goes on (true); one carrying another token — a successor's
+// — is left exactly as old as it was and ends the heartbeat (false); one that cannot be read is
+// nothing to refresh, and nothing is created, but the heartbeat goes on to read it again at the
+// next tick (true).
+func TestRefreshWarmLease(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content string
+		missing bool
+		want    bool
+	}{
+		{"own token: refreshed", "A", false, true},
+		{"another token: left as old as it was", "the-successors-token", false, false},
+		{"no file: nothing to refresh, the heartbeat goes on", "", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lease := filepath.Join(t.TempDir(), warmLeaseName)
+			past := time.Now().Add(-30 * time.Second)
+			if !tc.missing {
+				if err := os.WriteFile(lease, []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(lease, past, past); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := time.Now()
+			if got := refreshWarmLease(lease, "A"); got != tc.want {
+				t.Fatalf("refreshWarmLease = %t, want %t", got, tc.want)
+			}
+			if tc.missing {
+				if _, err := os.Stat(lease); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("stat after refreshing a missing lease: %v, want it still absent", err)
+				}
+				return
+			}
+			info, err := os.Stat(lease)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want && info.ModTime().Before(before.Truncate(time.Second)) {
+				t.Fatalf("mtime %s after refreshing this holder's lease, want about now (%s)", info.ModTime(), before)
+			}
+			if !tc.want && !info.ModTime().Before(time.Now().Add(-20*time.Second)) {
+				t.Fatalf("mtime %s after a tick on a lease that is not this holder's, want it left at %s", info.ModTime(), past)
+			}
+			if body, err := os.ReadFile(lease); err != nil || string(body) != tc.content {
+				t.Fatalf("lease reads %q (%v) after the tick, want %q untouched", body, err, tc.content)
+			}
+		})
+	}
+}
+
 // TestWarmCodegraphIndexStillInitializesAFreshWorkspaceWhenStatusFails: the lease lives under
 // `.codegraph/`, so the warm-up makes that directory before `status` runs, and nextCodegraphStep's
 // fallback for a `status` that failed reads an existing directory as an index to repair. A
@@ -802,7 +982,7 @@ esac
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	warmCodegraphIndex(context.Background(), dir)
+	warmCodegraphIndex(context.Background(), dir, time.Now())
 	calls, err := os.ReadFile(callLog)
 	if err != nil {
 		t.Fatalf("read codegraph call log: %v", err)
@@ -811,6 +991,108 @@ esac
 	if !slices.Equal(lines, []string{"status", "init"}) {
 		t.Fatalf("codegraph calls = %v, want exactly status then init (the lease's directory must not read as an index to repair)", lines)
 	}
+}
+
+// captureStderr swaps os.Stderr — which has no seam — for the write end of a pipe, drained into a
+// buffer, until the returned function is called or the test ends; that function restores
+// os.Stderr, closes the pipe and returns everything written meanwhile. No test in this package
+// runs in parallel, so the swap races no other test's lines.
+func captureStderr(t *testing.T) func() string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	var buf bytes.Buffer
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		_, _ = io.Copy(&buf, r)
+		_ = r.Close()
+	}()
+	restored := false
+	captured := func() string {
+		if !restored {
+			restored = true
+			os.Stderr = saved
+			_ = w.Close()
+			<-drained
+		}
+		return buf.String()
+	}
+	t.Cleanup(func() { captured() })
+	return captured
+}
+
+// TestWarmCodegraphIndexLogsOneSuccessLine: a warm-up whose build ended well logs exactly one line
+// saying so — the subcommand it ran, how long that build took, and how long after the caller's
+// launch the index was ready, what a pod's log needs to say about the role's start. Nothing else
+// in the decision table says it: an index already complete logs no build, and a build that failed
+// keeps its failure line and gets no success line beside it.
+func TestWarmCodegraphIndexLogsOneSuccessLine(t *testing.T) {
+	success := regexp.MustCompile(`(?m)^\[legion\] codegraph warm-up for (.*) built the index: codegraph init took .*, done .* after launch$`)
+	t.Run("a fresh workspace built: one line", func(t *testing.T) {
+		callLog := filepath.Join(t.TempDir(), "calls.log")
+		stubCodegraph(t, callLog)
+		dir := t.TempDir()
+		captured := captureStderr(t)
+
+		warmCodegraphIndex(context.Background(), dir, time.Now())
+		stderr := captured()
+		lines := success.FindAllStringSubmatch(stderr, -1)
+		if len(lines) != 1 {
+			t.Fatalf("success lines = %d, want exactly one in:\n%s", len(lines), stderr)
+		}
+		if lines[0][1] != dir {
+			t.Fatalf("the success line names %q, want the workspace %q:\n%s", lines[0][1], dir, stderr)
+		}
+	})
+	t.Run("an index already complete: no line", func(t *testing.T) {
+		callLog := filepath.Join(t.TempDir(), "calls.log")
+		stubCodegraph(t, callLog)
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, ".codegraph"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".codegraph", ".codegraph-initialized"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		captured := captureStderr(t)
+
+		warmCodegraphIndex(context.Background(), dir, time.Now())
+		if stderr := captured(); success.MatchString(stderr) {
+			t.Fatalf("a warm-up that built nothing logged a success line:\n%s", stderr)
+		}
+		if calls := stubCalls(t, callLog); !slices.Equal(calls, []string{"status --json"}) {
+			t.Fatalf("codegraph calls = %v, want status --json alone on a complete index", calls)
+		}
+	})
+	t.Run("an init that failed: no line", func(t *testing.T) {
+		dir := t.TempDir()
+		binDir := t.TempDir()
+		script := `#!/bin/sh
+case "$1" in
+status) echo '{"initialized":false}' ;;
+init) echo 'no database could be created' >&2; exit 1 ;;
+esac
+`
+		if err := os.WriteFile(filepath.Join(binDir, "codegraph"), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		captured := captureStderr(t)
+
+		warmCodegraphIndex(context.Background(), dir, time.Now())
+		stderr := captured()
+		if success.MatchString(stderr) {
+			t.Fatalf("a warm-up whose init failed logged a success line:\n%s", stderr)
+		}
+		if want := "[legion] codegraph init failed for " + dir + " (exit 1): no database could be created\n"; !strings.Contains(stderr, want) {
+			t.Fatalf("stderr lacks the failure line %q:\n%s", want, stderr)
+		}
+	})
 }
 
 // TestNextCodegraphStep table-tests the pure decision warmCodegraphIndex runs on: a parsed

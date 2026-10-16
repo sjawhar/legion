@@ -3685,10 +3685,44 @@ begin repository-tools
 pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
 fixture_dir=/legion/workspaces/$repo/${tree2,,}
 # The shim warms the index after the agent starts, so the planner's first turn can end before the
-# index is built. codegraph_initialized: the index in the planner's checkout answers initialized.
-codegraph_initialized() { pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -e '.initialized == true' >/dev/null; }
-on_tree "$tree2" until_true 600 "tree 2's CodeGraph index to initialize in $fixture_dir" codegraph_initialized
+# index is built. One of the pod's six role shims wins the warm-up lease and builds while the others
+# skip, so the success line is read from every container of the pod's log, and every container's
+# warm-up lines are kept as codegraph-warm-up.txt, which the fail line names.
+# codegraph_warm_up_lines: every warm-up line every container of tree 2's pod has logged, each
+# prefixed `[pod/<pod>/<container>]` and timestamped, kept as the evidence every read below judges
+# (so a wait that times out leaves the file its fail line names). The match is anchored at the line
+# start, the prefix and the timestamp then the shim's own `[legion] codegraph warm-up for `: an
+# agent's tool arguments (`tool_execution_start <tool> <args>`) go to the same stream and could
+# carry those words, but such a line starts with the frame's own words and never matches.
+codegraph_warm_up_lines() { op logs "$pod" --all-containers --timestamps --prefix | grep -E '^\[pod/[^]]+\] [^ ]+ \[legion\] codegraph warm-up for ' >"$evidence/codegraph-warm-up.txt"; }
+# codegraph_built: a role shim of the pod logged the warm-up's success line, anchored the same way
+# and in the success line's own shape, so no line an agent's tool arguments could carry passes.
+codegraph_built() { codegraph_warm_up_lines && grep -qE '^\[pod/[^]]+\] [^ ]+ \[legion\] codegraph warm-up for .* built the index: codegraph (init|index) took ' "$evidence/codegraph-warm-up.txt"; }
+# warm_up_built_elapsed CREATED reads prefixed, timestamped pod log lines on stdin and prints
+# `<container> <seconds>` for the first success line: the container of its `[pod/<pod>/<container>]`
+# prefix, and the whole seconds from CREATED, the pod's creationTimestamp, to its timestamp. With
+# no success line it prints nothing and returns 1. Past the prefix and the timestamp a shim's line
+# begins `[legion] `, and the pattern is the success line's whole shape from there (a case pattern
+# matches the whole word, so its leading literal anchors it): a line an agent's tool arguments could
+# carry starts with the frame's own words and never matches.
+warm_up_built_elapsed() {
+  local created=$1 prefix stamp rest
+  while read -r prefix stamp rest; do
+    case $rest in '[legion] codegraph warm-up for '*' built the index: codegraph '*' took '*', done '*' after launch') ;; *) continue ;; esac
+    prefix=${prefix%]}
+    printf '%s %s\n' "${prefix##*/}" "$(($(date -u -d "$stamp" +%s) - $(date -u -d "$created" +%s)))"
+    return 0
+  done
+  return 1
+}
+on_tree "$tree2" until_true 600 "a role shim of tree 2's pod to log the CodeGraph warm-up's success line for $fixture_dir" codegraph_built
+created=$(op get pod "$pod" -o jsonpath='{.metadata.creationTimestamp}') || fail "the operator could not read the creationTimestamp of tree 2's pod $pod"
+built=$(warm_up_built_elapsed "$created" <"$evidence/codegraph-warm-up.txt") ||
+  fail "no container of $pod logged the warm-up's success line; its warm-up lines are in $evidence/codegraph-warm-up.txt"
+note "tree 2's CodeGraph index in $fixture_dir was built by the ${built%% *} container's shim, ${built#* } s after the pod's creation ($created): $(grep -F 'built the index' "$evidence/codegraph-warm-up.txt" | head -n 1)"
 codegraph_status=$(pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -c '{initialized, fileCount, nodeCount, edgeCount, languages, state: .index.state}')
+jq -e '.initialized == true and .state == "complete"' <<<"$codegraph_status" >/dev/null ||
+  fail "tree 2's CodeGraph index in $fixture_dir is not complete after its success line: $codegraph_status"
 note "tree 2's CodeGraph index in $fixture_dir: $codegraph_status"
 nonce="repository-tools-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-tools operation, in this repository's checkout: (1) read skill://fixture-omp-skill and skill://fixture-claude-skill with the read tool and quote each one's FIXTURE-SKILL line; (2) with the lsp tool, get its status (the language servers it has for this checkout), then hover Greet in fixture/greet.go, greet in src/greet.ts and greet in fixture_py/greet.py, each on the line that defines it; (3) with the codegraph tool, get its status, then the tests affected by fixture/greet.go, the impact of Greet, and the impact of NoSuchSymbol; (4) reply to this message with one line per step, each starting with $nonce, then wait for the next instruction. Change no file and call no legion operation."
