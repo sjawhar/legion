@@ -708,14 +708,22 @@ func (s *Postgres) EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, i
 	return earlier, nil
 }
 
-// FinishOutbox deletes a row only while leaseToken still owns it. A stale worker must get an error:
-// a compound effect that writes another row and finishes this one rolls its whole transaction back
-// rather than committing the other effect after another worker reclaimed the lease.
+// ErrOutboxLeaseLost is FinishLeasedOutbox finding the row no longer held by the caller's lease:
+// another worker reclaimed it after this lease expired, or it is already gone.
+var ErrOutboxLeaseLost = errors.New("outbox row lease is no longer held")
+
 func (s *Postgres) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	if _, err := tx.Exec(ctx, "delete from outbox where id = $1 and lease_token = $2", id, leaseToken); err != nil {
+		return fmt.Errorf("finish outbox row %d: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Postgres) FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
 	var finished int64
 	err := tx.QueryRow(ctx, "delete from outbox where id = $1 and lease_token = $2 returning id", id, leaseToken).Scan(&finished)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return fmt.Errorf("finish outbox row %d: lease is no longer held", id)
+		return fmt.Errorf("finish outbox row %d: %w", id, ErrOutboxLeaseLost)
 	}
 	if err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", id, err)

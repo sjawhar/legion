@@ -397,7 +397,13 @@ type Store interface {
 	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error)
+	// FinishOutbox deletes row id while leaseToken holds it; a stale lease's finish is a no-op, so
+	// a worker whose lease expired never removes the row its replacement now holds.
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
+	// FinishLeasedOutbox is FinishOutbox for a transaction that writes another effect with the
+	// finish: a stale lease is ErrOutboxLeaseLost, so the caller rolls that effect back rather than
+	// committing it beside the replacement worker's own.
+	FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
 	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)

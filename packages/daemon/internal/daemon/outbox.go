@@ -1156,7 +1156,7 @@ func (r *outbox) finishReadyMergeRefused(ctx context.Context, row record.OutboxR
 		if err := r.records.Enqueue(ctx, tx, notice); err != nil {
 			return err
 		}
-		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
+		return r.records.FinishLeasedOutbox(ctx, tx, row.ID, row.LeaseToken)
 	}); err != nil {
 		return fmt.Errorf("record permanent READY merge refusal for row %d: %w", row.ID, err)
 	}

@@ -263,7 +263,17 @@ func TestAREADYMergeRowTellsTheArchitectOnceWhenGitHubRefusesItForGood(t *testin
 			}
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
 				repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: time.Now}
-			err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now()))
+			now := time.Now().UTC()
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+			var leased []record.OutboxRow
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				var err error
+				leased, err = records.ClaimDue(context.Background(), tx, "LEGION", now, 1, outboxLease)
+				return err
+			}); err != nil || len(leased) != 1 {
+				t.Fatalf("lease the READY merge = %v, %v", leased, err)
+			}
+			err := runner.execute(context.Background(), leased[0])
 			var notices []string
 			rows, qerr := pool.Query(context.Background(), "select payload->>'kind', payload->>'role', payload->>'reason' from outbox where kind = 'notice' and issue = 'LEGION-208'")
 			if qerr != nil {
