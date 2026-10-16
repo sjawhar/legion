@@ -189,10 +189,11 @@ package api
 // agent-secrets flags, as every workflow role's does, so its `slack_post` is granted the Legion
 // daemon service's LEGION_SLACK_BOT_TOKEN; and a project's `slack_channels` (which only
 // `controller: daemon` with the broker may set) reach that controller as LEGION_SLACK_CHANNELS,
-// which the plugin subscribes to while the session holds the controller role, and as the
-// addressing's `Slack channels:` line, which cites the controller skill's Slack reference. A
-// plugin from before 31 subscribes to no channel and ships neither `slack_post` nor the reference,
-// so the boot gate and `legion probe-image` refuse the mixed pair. The controller secret's answer
+// always set (empty for none), which the plugin requires there and subscribes to while the session
+// holds the controller role, and as the addressing's `Slack channels:` line, which cites the
+// controller skill's Slack reference. A plugin from before 31 subscribes to no channel and ships
+// neither `slack_post` nor the reference, so the boot gate and `legion probe-image` refuse the
+// mixed pair. The controller secret's answer
 // is unchanged. (Numbers 26 to 30 were claimed by other open branches when this one took 31;
 // contract numbers increase on main and need not be consecutive.)
 const DaemonAPIVersion = 31

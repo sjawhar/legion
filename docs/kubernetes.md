@@ -3087,11 +3087,15 @@ GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up 
 Autopilot may evict it like any other pod, and it is relaunched and resumes the same session like
 any claim's pod that dies ("The claim", above). Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
-`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, `LEGION_SLACK_CHANNELS` when the project
-names Slack channels (comma-separated; its plugin subscribes to each channel's mention topic while
-the session holds the controller role, registered with no listener, so a resume or relaunch hears
-the channels the launch names and no others; a changed `slack_channels` reaches it at its next
-launch, which `legion claims stop` of the controller brings at once), the launch secrets' `<NAME>_FILE`
+`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, `LEGION_SLACK_CHANNELS`, the project's
+Slack channels comma-separated and empty for none (always set, and refused in
+`runtime.kubernetes.pod.env` and `provider_keys`, so no list but the project's reaches it; its plugin
+subscribes to each channel's mention topic while the session holds the controller role, registered
+with no listener, and a resume first drops any Slack topic an earlier session registered for another
+channel, so a resume or relaunch hears the channels the launch names and no others; a changed
+`slack_channels` reaches it at its next launch, which `legion claims stop` of the controller brings
+at once; `legion controller start` drops an inherited value, and any controller but this one ignores
+it), the launch secrets' `<NAME>_FILE`
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
 (`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role

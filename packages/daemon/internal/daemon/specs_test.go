@@ -151,8 +151,8 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
 		t.Errorf("instructions = %q, want %q", spec.Prompt.DeploymentInstructionsPath, s.instructions)
 	}
-	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
-		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
+	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || !maps.Equal(spec.Env, map[string]string{"LEGION_SLACK_CHANNELS": ""}) || spec.WorkspaceRecoveredFrom != "" {
+		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them but the project's empty Slack channel list", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
 	}
 	if !maps.Equal(spec.Secrets, s.secrets) {
 		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
@@ -161,8 +161,8 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 
 // The daemon's controller is told the project's Slack channels twice: as LEGION_SLACK_CHANNELS,
 // which its plugin subscribes to while the session holds the controller role, and after its design
-// gate policy, as the list its skill answers mentions from. A project with no channel tells it
-// nothing of Slack.
+// gate policy, as the list its skill answers mentions from. A project with no channel gets the
+// variable set empty, so no value it could inherit stands in for the project's, and no prompt line.
 func TestTheControllersLaunchNamesTheProjectsSlackChannels(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
@@ -191,8 +191,8 @@ func TestTheControllersLaunchNamesTheProjectsSlackChannels(t *testing.T) {
 		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 	}
 	none := launch(nil)
-	if _, told := none.Env["LEGION_SLACK_CHANNELS"]; told || none.Prompt.Addressing != DesignGateFragment(config.DesignGateRootIssues) {
-		t.Errorf("with no channel: env %v, addressing %q; want no LEGION_SLACK_CHANNELS and the design gate policy alone", none.Env, none.Prompt.Addressing)
+	if channels, told := none.Env["LEGION_SLACK_CHANNELS"]; !told || channels != "" || none.Prompt.Addressing != DesignGateFragment(config.DesignGateRootIssues) {
+		t.Errorf("with no channel: env %v, addressing %q; want LEGION_SLACK_CHANNELS set empty, the daemon's own word over any inherited value, and the design gate policy alone", none.Env, none.Prompt.Addressing)
 	}
 }
 

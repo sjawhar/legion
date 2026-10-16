@@ -151,9 +151,10 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 // the headless part, the project's design gate policy and Slack channels as its addressing, the
 // deployment instructions and the launch secrets. The channels also reach it as
 // LEGION_SLACK_CHANNELS, comma-separated, which its plugin subscribes to while the session holds
-// the controller role (pi-legion's controller-session.ts); a project with none sets no variable. It
-// has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing.
+// the controller role (pi-legion's controller-session.ts). The variable is always set, empty for a
+// project with none, so the project's own list is the only one the controller can read; the
+// operator's pod may not set it (sandbox.CheckPod). It has no repository and no git identity: the
+// controller works Dispatch, never a checkout, and commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -162,12 +163,8 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
-	env := map[string]string{}
-	if len(s.slackChannels) > 0 {
-		env["LEGION_SLACK_CHANNELS"] = strings.Join(s.slackChannels, ",")
-	}
 	return runtime.SpawnSpec{
-		Env:     env,
+		Env:     map[string]string{"LEGION_SLACK_CHANNELS": strings.Join(s.slackChannels, ",")},
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,
