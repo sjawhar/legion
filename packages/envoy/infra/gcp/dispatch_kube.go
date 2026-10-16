@@ -162,7 +162,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 			Template: corev1.PodTemplateSpecArgs{
 				Metadata: &metav1.ObjectMetaArgs{Labels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
 				Spec: corev1.PodSpecArgs{
-					ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(30),
+					ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(30), EnableServiceLinks: pulumi.Bool(false),
 					InitContainers: corev1.ContainerArray{
 						corev1.ContainerArgs{Name: pulumi.String("tailscale"), Image: pulumi.String(s.images.tailscale), RestartPolicy: pulumi.String("Always"), Resources: resources("100m", "128Mi"), Env: corev1.EnvVarArray{
 							secretEnv("TS_AUTHKEY", authKeyName, "TS_AUTHKEY"),
