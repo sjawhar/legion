@@ -510,21 +510,22 @@ func TestAReplacementGenerationOutlivesTheKilledInstancesTerminatedStatus(t *tes
 // The Secrets hold a launch's credentials when the issue Sandbox is set Running, so no launcher
 // starts on a missing Secret, and the one-generation boot token travels only in the launcher's
 // start command, never in a Secret. A later generation of the role in the same pod sets nothing
-// Running again (decision 6).
+// Running again (decision 6). The repository cache the first launch makes is set Running too, by
+// its own lifecycle (repocache_test.go); only the issue Sandbox's patches are counted here.
 func TestTheSecretsHoldTheLaunchsCredentialsWhenRunningIsPatched(t *testing.T) {
 	g := newRig(t, nil)
 	var mu sync.Mutex
 	var atRunning []string
 	name := SandboxName(workerToken)
 	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
+		if a.(k8stesting.PatchAction).GetName() == name && modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
 			mu.Lock()
 			defer mu.Unlock()
 			provision, role := g.secret(secretName(name)), g.secret(roleSecretName(name, claim.RoleTester))
 			switch {
 			case provision == nil || role == nil:
 				atRunning = append(atRunning, "missing secret")
-			case len(provision.Data[provisionTokenKey]) == 0 || len(role.Data[LauncherTokenFile]) == 0:
+			case len(provision.Data[provisionTokenKey]) == 0 || len(provision.Data[cacheTokenKey]) == 0 || len(role.Data[LauncherTokenFile]) == 0:
 				atRunning = append(atRunning, "incomplete secrets")
 			default:
 				atRunning = append(atRunning, "ok")
@@ -790,13 +791,14 @@ func (d *deadlineTokens) Token(ctx context.Context, owner string) (string, error
 }
 
 // The provisioning token is minted under the pod's launch turn, so its mint is bounded like any
-// other API call: a stalled GitHub connection must not hold the pod's turn for good.
+// other API call: a stalled GitHub connection must not hold the pod's turn for good. So is the
+// repository cache's, which the issue's first launch makes.
 func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 	tokens := &deadlineTokens{}
 	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = tokens }))
 	g.spawn(workerSpec(t))
-	if len(tokens.bounded) != 1 || !tokens.bounded[0] {
-		t.Fatalf("mints bounded: %v, want one with a deadline", tokens.bounded)
+	if len(tokens.bounded) != 2 || slices.Contains(tokens.bounded, false) {
+		t.Fatalf("mints bounded: %v, want the provisioning token's and the cache's, each with a deadline", tokens.bounded)
 	}
 }
 
@@ -1583,13 +1585,15 @@ func (s *supervisedSandboxStore) RetireDelivery(_ context.Context, c supervise.C
 }
 
 // A Running patch the server applied but whose answer never arrived (a client timeout) is as
-// ambiguous as a pod that never came: the launch sets its Sandbox Suspended before returning.
+// ambiguous as a pod that never came: the launch sets its Sandbox Suspended before returning. The
+// repository cache the launch makes first is answered as usual.
 func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(t *testing.T) {
 	g := newRig(t, nil)
 	g.hold.Store(true)
 	applyThenTimeOut := k8stesting.ObjectReaction(g.dyn.Tracker())
 	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if !modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
+		patch := a.(k8stesting.PatchAction)
+		if patch.GetName() != SandboxName(workerToken) || !modePatched(t, string(patch.GetPatch()), modeRunning) {
 			return false, nil, nil
 		}
 		if _, _, err := applyThenTimeOut(a); err != nil {

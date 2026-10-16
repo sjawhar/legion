@@ -291,13 +291,21 @@ test("the state golden carries each issue's repository and the project's mapping
   expect(state.repositories.mapped[0]?.cache).toEqual({
     repo: "acme/widgets",
     sandbox: "legion-legion-cache-acme-widgets-d782c874",
+    state: "ready",
     ready: true,
     address: "http://10.8.1.4:8418",
     head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992",
     lastFetchAt: "2026-10-16T19:20:30Z",
     bytes: 6612345678,
   });
-  expect(state.repositories.mapped[1]?.cache?.healthError).toContain("connection refused");
+  expect(state.repositories.mapped[1]?.cache).toEqual({
+    repo: "zeta/tools",
+    sandbox: "legion-legion-cache-zeta-tools-1b2c3d4e",
+    state: "failing",
+    reason:
+      "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+    ready: false,
+  });
   expect(state.repositories.refused[0]?.reason).toBe(
     "the review App is not installed on acme/gadgets"
   );
@@ -305,6 +313,7 @@ test("the state golden carries each issue's repository and the project's mapping
     {
       repo: "acme/legacy",
       sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d",
+      state: "starting",
       ready: false,
       retainedUntil: "2026-10-23T09:00:00Z",
     },

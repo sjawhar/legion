@@ -279,12 +279,15 @@ const legionCapabilityState = z.strictObject({
 });
 
 /** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
- * Sandbox, whether its pod is Ready and its address then, from its last health read the default
- * branch's `head`, `lastFetchAt` and the `bytes` it serves or the read's `healthError`, and, for a
- * repository the mapping no longer names, `retainedUntil` (contract 30). */
+ * Sandbox, its `state` (`failing` with the kubelet's `reason`), whether its pod is Ready and its
+ * address then, from its last health read the default branch's `head`, `lastFetchAt` and the
+ * `bytes` it serves or the read's `healthError`, and, for a repository the mapping no longer names,
+ * `retainedUntil` (contract 30). */
 const legionCacheView = z.strictObject({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
+  state: z.enum(["starting", "cloning", "ready", "failing"]),
+  reason: nonEmptyString.optional(),
   ready: z.boolean(),
   address: nonEmptyString.optional(),
   head: nonEmptyString.optional(),

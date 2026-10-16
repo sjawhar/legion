@@ -609,6 +609,14 @@
               {
                 "name": "LEGION_PROVISION_TOKEN_FILE",
                 "value": "/var/run/legion/provision/LEGION_PROVISION_TOKEN"
+              },
+              {
+                "name": "LEGION_REPOSITORY_CACHE_URL",
+                "value": "http://legion-legion-cache-sjawhar-legion-smoke-6687cbae.legion.svc:8418"
+              },
+              {
+                "name": "LEGION_REPOSITORY_CACHE_TOKEN_FILE",
+                "value": "/var/run/legion/provision/LEGION_REPOSITORY_CACHE_TOKEN"
               }
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
@@ -778,6 +786,10 @@
                 {
                   "key": "LEGION_PROVISION_TOKEN",
                   "path": "LEGION_PROVISION_TOKEN"
+                },
+                {
+                  "key": "LEGION_REPOSITORY_CACHE_TOKEN",
+                  "path": "LEGION_REPOSITORY_CACHE_TOKEN"
                 }
               ],
               "secretName": "legion-legion-legion-208-boot"

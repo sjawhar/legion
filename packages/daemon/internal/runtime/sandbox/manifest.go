@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -164,10 +165,9 @@ type launch struct {
 	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
 	// controller's is held to one.
 	sessionsInDatabase bool
-	// cache is the issue's repository's cache as the stores showed it when the pod was readied
-	// (issuePod.provision): its fetch container is told the cache's address only while it is Ready
-	// (fetchEnvironment).
-	cache CacheStatus
+	// cacheURL is the address of the issue's repository's cache (cacheURL, set by
+	// issuePod.provision), which its fetch container is told (fetchEnvironment).
+	cacheURL string
 	// gitHubOwners are the owners of the pod's gh bundle, sorted, whose files each role's gh volume
 	// projects, and gitHubDefault the one whose directory is every agent's GH_CONFIG_DIR: the
 	// bundle writeLauncherSecrets mints for a new pod, or, for a pod a launch keeps, the default its
@@ -201,6 +201,8 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != "", gh: r.tools.GH}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}
+	} else {
+		l.cacheURL = r.cacheURL(CacheSandboxName(r.project, spec.Repository))
 	}
 	if spec.ResumeSessionFile != "" {
 		if err := validateSessionPath(spec.ResumeSessionFile); err != nil {
@@ -710,20 +712,18 @@ func uvPythonDir(issue string) string {
 }
 
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
-// provisioning token, and, while the repository's cache is Ready (l.cache), the cache's address,
-// which `fetch` streams the feed from before it asks GitHub for the delta; with no ready cache it
-// clones from GitHub and says so. Its git reads no configuration but its own, so it is told no
-// config home.
+// provisioning token, and, for an issue pod, its repository's cache — its address, which resolves
+// only while the cache is Ready, so the fetch waits for it, and its bearer token's file, from the
+// same Secret — which `fetch` streams a fresh feed from alone before it asks GitHub for the delta.
+// Its git reads no configuration but its own, so it is told no config home.
 func fetchEnvironment(l launch) []corev1.EnvVar {
-	env := []corev1.EnvVar{
+	return []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "TMPDIR", Value: initTempDir},
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+		{Name: "LEGION_REPOSITORY_CACHE_URL", Value: l.cacheURL},
+		{Name: repocache.CacheTokenFileEnv, Value: ProvisionDir + "/" + cacheTokenKey},
 	}
-	if l.cache.Ready {
-		env = append(env, corev1.EnvVar{Name: "LEGION_REPOSITORY_CACHE_URL", Value: l.cache.Address})
-	}
-	return env
 }
 
 // initEnvironment is `workspace-init provision`'s contract (research runtime §2.3), the one

@@ -25,6 +25,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 var cacheRepo = ghrepo.MustParse("acme/widgets")
@@ -184,12 +185,13 @@ func TestCacheIdentityIsTheAnnotationAndTheNameIsNeverParsed(t *testing.T) {
 	}
 }
 
-// A repository's cache is made as an issue pod is: its Sandbox created Suspended, then its Secret
-// written owned by the created Sandbox's uid and holding the implement App's token for the
-// repository's owner, then one patch sets its pod template and Running. The pod runs the cache
-// process alone, ready once /healthz answers, with the token read-only and the volume at
-// CacheRoot, placed as every Legion pod is, and with nothing of an agent's: no providers, no
-// Dispatch. A cache already as it should be is left alone.
+// A repository's cache is made as an issue pod is: its Sandbox created Suspended, with a headless
+// Service, then its Secret written owned by the created Sandbox's uid, holding the implement App's
+// token for the repository's owner and a random bearer token of the cache's own, then one patch
+// sets its pod template and Running. The pod runs the cache process alone, ready once /readyz
+// answers, with both tokens read-only and the volume at CacheRoot, placed as every Legion pod is,
+// and with nothing of an agent's: no providers, no Dispatch. A cache already as it should be is
+// left alone, its bearer token unchanged.
 func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *testing.T) {
 	g := newRig(t, nil)
 	name := CacheSandboxName(testProject, cacheRepo)
@@ -212,16 +214,17 @@ func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Spec.OperatingMode != modeSuspended {
-		t.Errorf("the cache Sandbox was created %q, want Suspended", created.Spec.OperatingMode)
+	if created.Spec.OperatingMode != modeSuspended || created.Spec.Service == nil || !*created.Spec.Service {
+		t.Errorf("the cache Sandbox was created %q with service %v, want Suspended with a Service", created.Spec.OperatingMode, created.Spec.Service)
 	}
 	stored := g.sandbox(name)
 	secret := writes[1].object.(*corev1.Secret)
 	if refs := secret.OwnerReferences; len(refs) != 1 || refs[0].Kind != "Sandbox" || refs[0].Name != name || refs[0].UID != stored.UID {
 		t.Errorf("the cache Secret is owned by %+v, want the Sandbox %s uid %s", refs, name, stored.UID)
 	}
-	if got := string(secret.Data[provisionTokenKey]); got != "ghs_provision_acme" || len(secret.Data) != 1 {
-		t.Errorf("the cache Secret holds %v, want %s alone, the implement token for acme", secret.Data, provisionTokenKey)
+	bearer := string(secret.Data[cacheTokenKey])
+	if got := string(secret.Data[provisionTokenKey]); got != "ghs_provision_acme" || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(bearer) || len(secret.Data) != 2 {
+		t.Errorf("the cache Secret holds %v, want the implement token for acme and a 32-byte bearer token", secret.Data)
 	}
 	template := templatePatch(t, writes[2].patch)
 	if template == nil || !modePatched(t, writes[2].patch, modeRunning) {
@@ -235,8 +238,8 @@ func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *
 	if want := []string{"/opt/legion/bin/legion", "workspace-init", "cache", "--repo", "acme/widgets", "--root", CacheRoot, "--listen", ":8418", "--refresh", "10m0s"}; c.Name != cacheContainer || !slices.Equal(c.Command, want) || c.Image != testImage {
 		t.Errorf("the cache container is %s running %q on %s, want %s running %q on %s", c.Name, c.Command, c.Image, cacheContainer, want, testImage)
 	}
-	if p := c.ReadinessProbe; p == nil || p.HTTPGet == nil || p.HTTPGet.Path != "/healthz" || p.HTTPGet.Port.IntValue() != 8418 {
-		t.Errorf("the cache container's readiness probe is %+v, want GET /healthz on 8418", p)
+	if p := c.ReadinessProbe; p == nil || p.HTTPGet == nil || p.HTTPGet.Path != "/readyz" || p.HTTPGet.Port.IntValue() != 8418 || len(p.HTTPGet.HTTPHeaders) != 0 {
+		t.Errorf("the cache container's readiness probe is %+v, want GET /readyz on 8418 with no header", p)
 	}
 	mounts := map[string]corev1.VolumeMount{}
 	for _, m := range c.VolumeMounts {
@@ -252,20 +255,20 @@ func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *
 	for _, e := range c.Env {
 		env[e.Name] = e.Value
 	}
-	if env["LEGION_PROVISION_TOKEN_FILE"] != ProvisionDir+"/"+provisionTokenKey {
-		t.Errorf("LEGION_PROVISION_TOKEN_FILE = %q", env["LEGION_PROVISION_TOKEN_FILE"])
+	if env["LEGION_PROVISION_TOKEN_FILE"] != ProvisionDir+"/"+provisionTokenKey || env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"] != ProvisionDir+"/"+cacheTokenKey {
+		t.Errorf("LEGION_PROVISION_TOKEN_FILE = %q, LEGION_REPOSITORY_CACHE_TOKEN_FILE = %q", env["LEGION_PROVISION_TOKEN_FILE"], env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"])
 	}
-	for name := range env {
-		if strings.HasPrefix(name, "DISPATCH") || strings.HasSuffix(name, "_FILE") && name != "LEGION_PROVISION_TOKEN_FILE" {
-			t.Errorf("the cache container is told %s", name)
+	for name, value := range env {
+		if strings.HasPrefix(name, "DISPATCH") || strings.HasSuffix(name, "_FILE") && name != "LEGION_PROVISION_TOKEN_FILE" && name != "LEGION_REPOSITORY_CACHE_TOKEN_FILE" || value == bearer {
+			t.Errorf("the cache container is told %s=%q", name, value)
 		}
 	}
 	for _, v := range spec.Volumes {
 		if v.Name == providersVolume {
 			t.Errorf("the cache pod mounts the providers Secret")
 		}
-		if v.Name == provisionVolume && (v.Secret == nil || v.Secret.SecretName != cacheSecretName(name)) {
-			t.Errorf("the token volume is %+v, want the cache Secret %s", v, cacheSecretName(name))
+		if v.Name == provisionVolume && (v.Secret == nil || v.Secret.SecretName != cacheSecretName(name) || len(v.Secret.Items) != 2) {
+			t.Errorf("the token volume is %+v, want both keys of the cache Secret %s", v, cacheSecretName(name))
 		}
 		if v.Name == cacheVolume && (v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != cacheVolume+"-"+name) {
 			t.Errorf("the cache volume is %+v, want the claim %s", v, cacheVolume+"-"+name)
@@ -288,6 +291,9 @@ func TestEnsureRepositoryCacheCreatesSuspendedWritesTheSecretThenSetsRunning(t *
 	}
 	if writes := g.sandboxWrites(); len(writes) != 0 {
 		t.Errorf("ensuring a cache as it should be wrote %q", writes)
+	}
+	if again := string(g.secret(cacheSecretName(name)).Data[cacheTokenKey]); again != bearer {
+		t.Errorf("the bearer token moved from %s to %s", bearer, again)
 	}
 }
 
@@ -383,9 +389,9 @@ func jsonEqual(t *testing.T, a, b any) bool {
 	return bytes.Equal(left, right)
 }
 
-// The token refresh brings a cache's Secret back when it is lost, owned by the Sandbox's uid, and
-// replaces one another uid owns, without touching the Sandbox; a Secret holding the fresh lease
-// already is not written.
+// The token refresh brings a cache's Secret back when it is lost, owned by the Sandbox's uid with a
+// new bearer token, and replaces one another uid owns, keeping the bearer token it held, without
+// touching the Sandbox; a Secret holding the fresh lease already is not written.
 func TestRefreshCacheTokensRewritesALostOrForeignSecret(t *testing.T) {
 	g := newRig(t, nil)
 	if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
@@ -400,9 +406,10 @@ func TestRefreshCacheTokensRewritesALostOrForeignSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.r.refreshCacheTokens(g.ctx)
-	if secret := g.secret(cacheSecretName(name)); secret == nil || secret.OwnerReferences[0].UID != s.UID || string(secret.Data[provisionTokenKey]) != "ghs_provision_acme" {
-		t.Fatalf("after a refresh the lost Secret is %+v, want it back owned by %s", secret, s.UID)
+	if secret := g.secret(cacheSecretName(name)); secret == nil || secret.OwnerReferences[0].UID != s.UID || string(secret.Data[provisionTokenKey]) != "ghs_provision_acme" || len(secret.Data[cacheTokenKey]) != 64 {
+		t.Fatalf("after a refresh the lost Secret is %+v, want it back owned by %s with a bearer token", secret, s.UID)
 	}
+	bearer := string(g.secret(cacheSecretName(name)).Data[cacheTokenKey])
 	if after := g.sandbox(name); after.mode() != s.mode() || after.Generation != s.Generation {
 		t.Errorf("the refresh moved the Sandbox from %s/%d to %s/%d", s.mode(), s.Generation, after.mode(), after.Generation)
 	}
@@ -418,8 +425,8 @@ func TestRefreshCacheTokensRewritesALostOrForeignSecret(t *testing.T) {
 	if writes := g.sandboxWrites(); !slices.Equal(writes, []string{"delete secrets " + cacheSecretName(name), "create secrets " + cacheSecretName(name)}) {
 		t.Errorf("the refresh of a foreign Secret wrote %q, want it replaced", writes)
 	}
-	if secret := g.secret(cacheSecretName(name)); secret.OwnerReferences[0].UID != s.UID {
-		t.Errorf("the replaced Secret is owned by %s, want %s", secret.OwnerReferences[0].UID, s.UID)
+	if secret := g.secret(cacheSecretName(name)); secret.OwnerReferences[0].UID != s.UID || string(secret.Data[cacheTokenKey]) != bearer {
+		t.Errorf("the replaced Secret is owned by %s holding %q, want %s holding %q", secret.OwnerReferences[0].UID, secret.Data[cacheTokenKey], s.UID, bearer)
 	}
 
 	g.clearActions()
@@ -464,6 +471,64 @@ func TestRepositoryCacheReadsReadiness(t *testing.T) {
 	}
 	if n := strings.Count(logs.String(), "acme/sprockets"); n != 1 {
 		t.Errorf("the occupied name was logged %d times, want once:\n%s", n, logs)
+	}
+}
+
+// crashLooping is pod with its cache container waiting to restart after failing four times.
+func crashLooping(pod *corev1.Pod) *corev1.Pod {
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: cacheContainer, RestartCount: 4,
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff", Message: "back-off 5m0s restarting failed container"}},
+	}}
+	return pod
+}
+
+// A cache's state, as legion state shows it and a failed fetch names it: starting while its pod
+// is absent or not yet running, cloning while its container runs and it is not ready, ready once
+// its readiness probe passes, and failing, with the kubelet's reason, while its container waits to
+// restart or its image cannot be pulled.
+func TestRepositoryCacheReadsItsState(t *testing.T) {
+	g := newRig(t, []k8sruntime.Object{cacheObject(t, cacheRepo, "uid-cache", modeRunning, "")})
+	name := CacheSandboxName(testProject, cacheRepo)
+	state := func() (string, string) {
+		status, _ := g.r.RepositoryCache(cacheRepo)
+		return status.State, status.Reason
+	}
+	if got, _ := state(); got != cacheStarting {
+		t.Fatalf("a cache with no pod is %q, want %q", got, cacheStarting)
+	}
+	pod := cachePod(cacheRepo, "uid-cache-pod", "uid-cache", testImage, corev1.PodPending)
+	if err := g.kube.Tracker().Add(pod); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("the pending pod", func() bool { return g.r.storedPod(name) != nil })
+	if got, _ := state(); got != cacheStarting {
+		t.Errorf("a cache whose pod is pending is %q, want %q", got, cacheStarting)
+	}
+	for _, tc := range []struct {
+		edit   func(*corev1.Pod)
+		state  string
+		reason string
+	}{
+		{func(p *corev1.Pod) {
+			p.Status.Phase = corev1.PodRunning
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: cacheContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+		}, cacheCloning, ""},
+		{func(p *corev1.Pod) { crashLooping(p) }, cacheFailing, "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)"},
+		{func(p *corev1.Pod) {
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: cacheContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff", Message: "pull access denied"}}}}
+		}, cacheFailing, "container cache ImagePullBackOff: pull access denied (restarted 0 times)"},
+		{func(p *corev1.Pod) {
+			p.Status.PodIP = "10.0.0.5"
+			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: cacheContainer, Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
+			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+		}, cacheReady, ""},
+	} {
+		g.update(g.pod(name), tc.edit)
+		g.eventually("the cache "+tc.state, func() bool { got, _ := state(); return got == tc.state })
+		if _, reason := state(); reason != tc.reason {
+			t.Errorf("the cache %s says %q, want %q", tc.state, reason, tc.reason)
+		}
 	}
 }
 
@@ -775,28 +840,45 @@ func (g *rig) fetchEnv(name string) map[string]string {
 	return env
 }
 
-// An issue pod's fetch container is told its repository's cache, LEGION_REPOSITORY_CACHE_URL, only
-// while that cache's pod is Ready; otherwise it is told nothing and clones from GitHub.
-func TestTheFetchIsToldTheCacheOnlyWhileItIsReady(t *testing.T) {
+// Every issue pod's fetch container is told its repository's cache — its Service's name, which
+// resolves while the cache's pod is Ready and not before, so the fetch waits on it — and the cache's
+// bearer token, as a file projected from the issue pod's own provisioning Secret, never an
+// environment value. A launch makes the cache when the repository has none yet. The token reaches
+// the fetch container alone, and is the cache's own.
+func TestAnIssuePodsFetchIsToldItsRepositorysCacheAndItsToken(t *testing.T) {
 	g := newRig(t, nil)
 	repo := rootSpec(t).Repository
-	if err := g.r.EnsureRepositoryCache(g.ctx, repo); err != nil {
-		t.Fatal(err)
-	}
+	loc := g.spawn(rootSpec(t))
 	cache := CacheSandboxName(testProject, repo)
-	g.eventually("the cache pod", func() bool { return g.r.storedPod(cache) != nil })
-	loc := g.spawn(childSpec(t))
-	if url, set := g.fetchEnv(loc.Sandbox.Name)["LEGION_REPOSITORY_CACHE_URL"]; set {
-		t.Fatalf("a launch while the cache is not ready told the fetch %q", url)
+	if g.sandbox(cache) == nil {
+		t.Fatalf("launching an issue of %s made no cache", repo)
 	}
-	g.update(g.pod(cache), func(p *corev1.Pod) {
-		p.Status.PodIP = "10.0.0.5"
-		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-	})
-	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(repo); return status.Ready })
-	loc = g.spawn(rootSpec(t))
-	if url := g.fetchEnv(loc.Sandbox.Name)["LEGION_REPOSITORY_CACHE_URL"]; url != "http://10.0.0.5:8418" {
-		t.Fatalf("a launch while the cache is ready told the fetch %q, want http://10.0.0.5:8418", url)
+	bearer := string(g.secret(cacheSecretName(cache)).Data[cacheTokenKey])
+	env := g.fetchEnv(loc.Sandbox.Name)
+	if want := "http://" + cache + "." + testNamespace + ".svc:8418"; env["LEGION_REPOSITORY_CACHE_URL"] != want {
+		t.Errorf("the fetch is told LEGION_REPOSITORY_CACHE_URL=%q, want %q", env["LEGION_REPOSITORY_CACHE_URL"], want)
+	}
+	if env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"] != ProvisionDir+"/"+cacheTokenKey {
+		t.Errorf("the fetch is told LEGION_REPOSITORY_CACHE_TOKEN_FILE=%q", env["LEGION_REPOSITORY_CACHE_TOKEN_FILE"])
+	}
+	if issueSecret := g.secret(secretName(loc.Sandbox.Name)); issueSecret == nil || string(issueSecret.Data[cacheTokenKey]) != bearer || bearer == "" {
+		t.Errorf("the issue pod's provisioning Secret holds %v, want the cache's bearer %q", issueSecret, bearer)
+	}
+	spec := g.sandbox(loc.Sandbox.Name).Spec.PodTemplate.Spec
+	for _, v := range spec.Volumes {
+		if v.Name == provisionVolume && (v.Secret == nil || !slices.ContainsFunc(v.Secret.Items, func(k corev1.KeyToPath) bool { return k.Key == cacheTokenKey })) {
+			t.Errorf("the provisioning volume %+v projects no cache token", v)
+		}
+	}
+	for _, c := range append(slices.Clone(spec.InitContainers), spec.Containers...) {
+		for _, e := range c.Env {
+			if e.Value == bearer {
+				t.Errorf("container %s is told the cache's token in %s", c.Name, e.Name)
+			}
+		}
+		if c.Name != fetchContainer && slices.ContainsFunc(c.VolumeMounts, func(m corev1.VolumeMount) bool { return m.Name == provisionVolume }) {
+			t.Errorf("container %s mounts the provisioning Secret", c.Name)
+		}
 	}
 }
 
@@ -806,11 +888,15 @@ func TestTheFetchIsToldTheCacheOnlyWhileItIsReady(t *testing.T) {
 // of a repository no longer mapped carries when the sweep retires it.
 func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 	fetched := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+	var presented atomic.Value
+	presented.Store("")
 	served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" {
 			http.NotFound(w, r)
 			return
 		}
+		presented.Store(r.Header.Get("Authorization"))
+		w.Header().Set(workspace.CacheRepositoryHeader, "acme/widgets")
 		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: "acme/widgets", Head: "0123abcd", LastFetchAt: fetched, Bytes: 6612345678})
 	}))
 	t.Cleanup(served.Close)
@@ -856,6 +942,9 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 		t.Fatalf("RepositoryCaches before a health read = %+v, want two caches and nothing read", before)
 	}
 	g.r.readCacheHealth(g.ctx)
+	if want := "Bearer " + string(g.secret(cacheSecretName(CacheSandboxName(testProject, cacheRepo))).Data[cacheTokenKey]); presented.Load() != want {
+		t.Errorf("the health read presented %q, want the cache's own %q", presented.Load(), want)
+	}
 	caches := g.r.RepositoryCaches()
 	if len(caches) != 2 || caches[0].Repo != gadgets || caches[1].Repo != cacheRepo {
 		t.Fatalf("RepositoryCaches = %+v, want acme/gadgets then acme/widgets", caches)

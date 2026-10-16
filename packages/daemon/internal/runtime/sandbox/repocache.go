@@ -2,11 +2,14 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // A repository cache is the third kind of Sandbox the runtime makes, beside the issue pods and the
@@ -54,13 +58,16 @@ func (c RepositoryCache) check() error {
 }
 
 // CacheStatus is a repository's cache as the runtime's stores show it: the repository, exactly as
-// the cache's annotation names it; its Sandbox; whether its pod has passed its readiness probe, and
-// its address then; once the repository has left the mapping, until when the sweep keeps it; and,
-// from RepositoryCaches alone, the pod's last health read: what its /healthz answered (Health), or
-// why it could not be read (HealthError), both empty when it was not Ready to be read.
+// the cache's annotation names it; its Sandbox; its State (starting, cloning, ready or failing),
+// with the kubelet's Reason while it is failing; whether its pod has passed its readiness probe,
+// and its address then; once the repository has left the mapping, until when the sweep keeps it;
+// and, from RepositoryCaches alone, the pod's last health read: what its /healthz answered
+// (Health), or why it could not be read (HealthError), both empty when it was not Ready to be read.
 type CacheStatus struct {
 	Repo          ghrepo.Repository
 	Sandbox       string
+	State         string
+	Reason        string
 	Ready         bool
 	Address       string
 	RetainedUntil time.Time
@@ -86,9 +93,10 @@ func (r *Runtime) cacheLabels() map[string]string {
 }
 
 // cacheManifest is repo's Sandbox as it is created: Suspended, as sandboxManifest creates every
-// Sandbox, so no pod starts before its Secret exists; owning one claim template, cacheVolume, of
-// the configured size, on the issue volumes' class; carrying the cache labels and the repository's
-// annotation, as its pod template does.
+// Sandbox, so no pod starts before its Secret exists; with a headless Service of its name
+// (cacheURL), which resolves to the pod only while it is Ready; owning one claim template,
+// cacheVolume, of the configured size, on the issue volumes' class; carrying the cache labels and
+// the repository's annotation, as its pod template does.
 func (r *Runtime) cacheManifest(repo ghrepo.Repository) sandbox {
 	name := CacheSandboxName(r.project, repo)
 	storageClass := r.storageClass
@@ -99,7 +107,7 @@ func (r *Runtime) cacheManifest(repo ghrepo.Repository) sandbox {
 			Annotations: map[string]string{annotationCacheRepo: repo.String()},
 		},
 		Spec: sandboxSpec{
-			PodTemplate: r.cachePodTemplate(name, repo), OperatingMode: modeSuspended,
+			PodTemplate: r.cachePodTemplate(name, repo), OperatingMode: modeSuspended, Service: new(true),
 			VolumeClaimTemplates: []volumeClaimTemplate{{
 				Metadata: volumeClaimMetadata{Name: cacheVolume, Labels: r.cacheLabels()},
 				Spec: corev1.PersistentVolumeClaimSpec{
@@ -116,11 +124,13 @@ func (r *Runtime) cacheManifest(repo ghrepo.Repository) sandbox {
 
 // cachePodTemplate is a cache's pod: one container, cacheContainer, running `legion workspace-init
 // cache` on the runtime's image, on the Legion pool under gVisor with the workers' pod security and
-// the probe's placement, mounting its volume at CacheRoot and its Secret's token read-only as
-// workspace-fetch mounts the issue pod's (LEGION_PROVISION_TOKEN_FILE), with a memory TMPDIR for
-// the fetch's one-shot credential and a readinessProbe of GET /healthz on repocache.Port. Restarted
-// Always. It carries no model-route volume, provider key, operator mount or Dispatch variable: the
-// process reads GitHub and serves pods, nothing else.
+// the probe's placement, mounting its volume at CacheRoot and its Secret's two tokens read-only —
+// the provisioning token, as workspace-fetch mounts the issue pod's (LEGION_PROVISION_TOKEN_FILE),
+// and the bearer token its clients present (LEGION_REPOSITORY_CACHE_TOKEN_FILE) — with a memory
+// TMPDIR for the fetch's one-shot credential and a readinessProbe of GET /readyz on
+// repocache.Port, which needs no token. Restarted Always. It carries no model-route volume,
+// provider key, operator mount or Dispatch variable: the process reads GitHub and serves pods,
+// nothing else.
 func (r *Runtime) cachePodTemplate(name string, repo ghrepo.Repository) podTemplate {
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
 	container := corev1.Container{
@@ -134,11 +144,12 @@ func (r *Runtime) cachePodTemplate(name string, repo ghrepo.Repository) podTempl
 			{Name: "PATH", Value: imagePath},
 			{Name: "TMPDIR", Value: initTempDir},
 			{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+			{Name: repocache.CacheTokenFileEnv, Value: ProvisionDir + "/" + cacheTokenKey},
 		},
 		WorkingDir: CacheRoot,
 		Ports:      []corev1.ContainerPort{{Name: cacheContainer, ContainerPort: repocache.Port, Protocol: corev1.ProtocolTCP}},
 		ReadinessProbe: &corev1.Probe{
-			ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(repocache.Port)}},
+			ProbeHandler:  corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/readyz", Port: intstr.FromInt32(repocache.Port)}},
 			PeriodSeconds: 10, TimeoutSeconds: 5, FailureThreshold: 3,
 		},
 		VolumeMounts: []corev1.VolumeMount{
@@ -172,7 +183,10 @@ func (r *Runtime) cachePodTemplate(name string, repo ghrepo.Repository) podTempl
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: cacheClaimName(name)},
 				}},
 				{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-					SecretName: cacheSecretName(name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
+					SecretName: cacheSecretName(name),
+					Items: []corev1.KeyToPath{
+						{Key: provisionTokenKey, Path: provisionTokenKey}, {Key: cacheTokenKey, Path: cacheTokenKey},
+					},
 					DefaultMode: new(int32(0o440)),
 				}}},
 				{Name: tempVolume, VolumeSource: memory},
@@ -316,10 +330,11 @@ func (r *Runtime) ensureCacheSandbox(ctx context.Context, name string, repo ghre
 }
 
 // writeCacheSecret brings s's Secret, cacheSecretName, to the implement App's token for repo's
-// owner (Options.Tokens), left alone when it already holds that token under the cache's labels,
+// owner (Options.Tokens) and the cache's bearer token: the one the Secret holds already, else 32
+// random bytes, hex. It is left alone when it already holds both under the cache's labels,
 // annotation and owner, and otherwise written through upsertSecret: created when absent, updated
 // in place when s owns it, replaced when another uid owns it (a Secret an earlier Sandbox of the
-// name left).
+// name left). The bearer token is kept for the runtime's own reads (cacheBearer).
 func (r *Runtime) writeCacheSecret(ctx context.Context, s *sandbox, repo ghrepo.Repository) error {
 	minting, cancel := call(ctx)
 	token, err := r.tokens.Token(minting, repo.Owner())
@@ -327,21 +342,61 @@ func (r *Runtime) writeCacheSecret(ctx context.Context, s *sandbox, repo ghrepo.
 	if err != nil {
 		return fmt.Errorf("mint the token for %s: %w", repo.Owner(), err)
 	}
+	existing, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, cacheSecretName(s.Name), metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	bearer := ""
+	if err == nil {
+		bearer = string(existing.Data[cacheTokenKey])
+	}
+	if !cacheBearerShape.MatchString(bearer) {
+		random := make([]byte, 32)
+		if _, err := rand.Read(random); err != nil {
+			return fmt.Errorf("make the repository cache's bearer token: %w", err)
+		}
+		bearer = hex.EncodeToString(random)
+	}
 	want := corev1.Secret{
 		ObjectMeta: r.cacheSecretMeta(s, repo),
 		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{provisionTokenKey: []byte(token)},
-	}
-	existing, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, want.Name, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
+		Data:       map[string][]byte{provisionTokenKey: []byte(token), cacheTokenKey: []byte(bearer)},
 	}
 	if err == nil && ownedBySandbox(existing.OwnerReferences, s.UID) && len(existing.OwnerReferences) == 1 &&
 		maps.EqualFunc(existing.Data, want.Data, func(a, b []byte) bool { return string(a) == string(b) }) &&
 		maps.Equal(existing.Labels, want.Labels) && existing.Annotations[annotationCacheRepo] == repo.String() {
+		r.keepCacheBearer(s.Name, bearer)
 		return nil
 	}
-	return r.upsertSecret(ctx, want)
+	if err := r.upsertSecret(ctx, want); err != nil {
+		return err
+	}
+	r.keepCacheBearer(s.Name, bearer)
+	return nil
+}
+
+// cacheBearerShape is a bearer token writeCacheSecret makes.
+var cacheBearerShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// keepCacheBearer records name's bearer token as its Secret holds it.
+func (r *Runtime) keepCacheBearer(name, bearer string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cacheBearers[name] = bearer
+}
+
+// cacheBearer is the bearer token of the cache Sandbox name as its Secret last held it, "" when the
+// runtime has not written or read that Secret.
+func (r *Runtime) cacheBearer(name string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cacheBearers[name]
+}
+
+// cacheURL is the address an issue pod's fetch reaches the cache Sandbox name at: its headless
+// Service's name in the runtime's namespace, which resolves to the pod only while it is Ready.
+func (r *Runtime) cacheURL(name string) string {
+	return fmt.Sprintf("http://%s.%s.svc:%d", name, r.namespace, repocache.Port)
 }
 
 // reconcileCachePod makes s's pod (again) when it must be: s is Suspended (a fresh create, or one a
@@ -376,10 +431,24 @@ func (r *Runtime) reconcileCachePod(ctx context.Context, s *sandbox, repo ghrepo
 	return nil
 }
 
+// The states of a repository cache, as legion state shows them and a failed fetch names them.
+const (
+	cacheStarting = "starting"
+	cacheCloning  = "cloning"
+	cacheReady    = "ready"
+	cacheFailing  = "failing"
+)
+
+// cacheFailures are the reasons a container waits with that make a cache failing: it is restarting
+// after exits, or cannot start at all.
+var cacheFailures = []string{"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePull", "InvalidImageName", "CreateContainerConfigError", "CreateContainerError", "RunContainerError"}
+
 // RepositoryCache is repo's cache as the stores show it: the Sandbox named CacheSandboxName(repo)
 // whose cacheRepository is repo (a name another repository's cache occupies is logged once and
-// answers not found), Ready when the pod the Sandbox owns has its Ready condition True (the
-// readinessProbe passed) and an address, which is then http://<pod ip>:8418, and RetainedUntil
+// answers not found); its State — starting while the Sandbox owns no live pod or the pod is not
+// yet running, failing with the kubelet's reason while its container waits on one of
+// cacheFailures or the pod has failed, ready once the pod's Ready condition is True (the readiness
+// probe passed) with its address, http://<pod ip>:8418, and cloning otherwise — and RetainedUntil
 // from annotationCacheUnmappedAt plus the retention when the annotation is set. Not found when no
 // Sandbox of the name is stored.
 func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
@@ -399,10 +468,23 @@ func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 		}
 		return CacheStatus{}, false
 	}
-	status := CacheStatus{Repo: held, Sandbox: name}
-	if pod := r.storedPod(name); ownedBy(pod, s.UID) && pod.DeletionTimestamp == nil && pod.Status.PodIP != "" {
-		if ready := podCondition(pod, corev1.PodReady); ready != nil && ready.Status == corev1.ConditionTrue {
-			status.Ready, status.Address = true, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, r.cachePort)
+	status := CacheStatus{Repo: held, Sandbox: name, State: cacheStarting}
+	pod := r.storedPod(name)
+	switch {
+	case !ownedBy(pod, s.UID) || pod.DeletionTimestamp != nil:
+	case pod.Status.Phase == corev1.PodFailed:
+		status.State, status.Reason = cacheFailing, fmt.Sprintf("pod %s Failed: %s %s", pod.Name, pod.Status.Reason, pod.Status.Message)
+	default:
+		ready := podCondition(pod, corev1.PodReady)
+		container := containerStatus(pod, cacheContainer)
+		switch {
+		case ready != nil && ready.Status == corev1.ConditionTrue && pod.Status.PodIP != "":
+			status.State, status.Ready, status.Address = cacheReady, true, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, r.cachePort)
+		case container != nil && container.State.Waiting != nil && slices.Contains(cacheFailures, container.State.Waiting.Reason):
+			status.State = cacheFailing
+			status.Reason = fmt.Sprintf("container %s %s: %s (restarted %d times)", cacheContainer, container.State.Waiting.Reason, container.State.Waiting.Message, container.RestartCount)
+		case pod.Status.Phase == corev1.PodRunning:
+			status.State = cacheCloning
 		}
 	}
 	if at, err := time.Parse(time.RFC3339, s.Annotations[annotationCacheUnmappedAt]); err == nil {
@@ -448,9 +530,10 @@ type cacheHealthRead struct {
 }
 
 // readCacheHealth runs on the gh refresher's tick, after refreshCacheTokens: it asks every Ready
-// cache's /healthz, each bounded by a call's budget, and keeps the answer, or why there is none, as
-// that cache's last health read, which RepositoryCaches serves without asking again. A cache that
-// is not Ready has no read: the store already says it is not serving.
+// cache's /healthz with that cache's bearer token, each bounded by a call's budget, and keeps the
+// answer, or why there is none, as that cache's last health read, which RepositoryCaches serves
+// without asking again. A cache that is not Ready has no read: the store already says it is not
+// serving.
 func (r *Runtime) readCacheHealth(ctx context.Context) {
 	reads := map[string]cacheHealthRead{}
 	for _, u := range r.storedCaches() {
@@ -463,7 +546,7 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 			continue
 		}
 		read := cacheHealthRead{address: status.Address}
-		health, err := cacheHealthOf(ctx, status.Address)
+		health, err := cacheHealthOf(ctx, status.Address, r.cacheBearer(status.Sandbox), repo)
 		if err != nil {
 			read.err = err.Error()
 		} else {
@@ -476,19 +559,28 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 	r.mu.Unlock()
 }
 
-// cacheHealthOf is GET <address>/healthz, decoded, within a call's budget.
-func cacheHealthOf(ctx context.Context, address string) (repocache.Health, error) {
+// cacheHealthOf is GET <address>/healthz with bearer, decoded, within a call's budget: an error
+// when the runtime holds no bearer for the cache yet, or the answer names a repository other than
+// repo (workspace.CacheRepositoryHeader).
+func cacheHealthOf(ctx context.Context, address, bearer string, repo ghrepo.Repository) (repocache.Health, error) {
+	if bearer == "" {
+		return repocache.Health{}, errors.New("the runtime holds no token for the cache yet")
+	}
 	bounded, cancel := call(ctx)
 	defer cancel()
 	request, err := http.NewRequestWithContext(bounded, http.MethodGet, address+"/healthz", nil)
 	if err != nil {
 		return repocache.Health{}, err
 	}
+	request.Header.Set("Authorization", "Bearer "+bearer)
 	response, err := cacheHealthClient.Do(request)
 	if err != nil {
 		return repocache.Health{}, err
 	}
 	defer response.Body.Close()
+	if named := response.Header.Get(workspace.CacheRepositoryHeader); !strings.EqualFold(named, repo.String()) {
+		return repocache.Health{}, fmt.Errorf("GET %s/healthz answered %s naming the repository %q, not %s", address, response.Status, named, repo)
+	}
 	var health repocache.Health
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
 		return repocache.Health{}, fmt.Errorf("GET %s/healthz answered %s with a body that is not the cache's health: %w", address, response.Status, err)

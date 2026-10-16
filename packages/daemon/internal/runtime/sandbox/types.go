@@ -240,6 +240,9 @@ type sandboxSpec struct {
 	PodTemplate          podTemplate           `json:"podTemplate"`
 	VolumeClaimTemplates []volumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 	OperatingMode        string                `json:"operatingMode,omitempty"`
+	// Service has the Agent Sandbox controller make a headless Service of the Sandbox's name, whose
+	// DNS name resolves to the pod while it is Ready: what a repository cache sets.
+	Service *bool `json:"service,omitempty"`
 }
 
 // podTemplate is upstream's PodTemplate: labels and annotations, and a core PodSpec.

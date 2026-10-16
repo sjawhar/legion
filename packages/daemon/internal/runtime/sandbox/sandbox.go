@@ -135,6 +135,9 @@ type Runtime struct {
 	occupiedCaches map[string]bool
 	// cacheHealth is each Ready cache's last health read (readCacheHealth), by its Sandbox's name.
 	cacheHealth map[string]cacheHealthRead
+	// cacheBearers is each cache's bearer token as its Secret last held it (writeCacheSecret), by its
+	// Sandbox's name: what the health read presents, and what an issue pod's Secret is given.
+	cacheBearers map[string]string
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -275,7 +278,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped, cachePort: repocache.Port, occupiedCaches: map[string]bool{},
+		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped, cachePort: repocache.Port,
+		occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}

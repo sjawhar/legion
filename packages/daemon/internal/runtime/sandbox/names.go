@@ -95,11 +95,13 @@ func imageOwnedPaths() []string {
 }
 
 // The keys of a claim's Secret that the runtime fills itself: the boot token and the provisioning
-// token for every claim, and the Dispatch bearer when Dispatch is configured.
+// token for every claim, the Dispatch bearer when Dispatch is configured, and, in an issue pod's
+// provisioning Secret and its repository cache's Secret, the cache's bearer token.
 const (
 	bootTokenKey      = "LEGION_BOOT_TOKEN"
 	provisionTokenKey = "LEGION_PROVISION_TOKEN"
 	dispatchTokenKey  = "DISPATCH_TOKEN"
+	cacheTokenKey     = "LEGION_REPOSITORY_CACHE_TOKEN"
 )
 
 // The keys of a role's Secret that carry its GitHub credential beside the launcher token: each

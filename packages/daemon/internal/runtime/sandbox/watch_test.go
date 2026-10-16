@@ -379,7 +379,16 @@ func TestTheBootReconciliationWarnsOfEachPodRunningAnotherImage(t *testing.T) {
 	if recorded, ok := r2.recorded(workerToken); !ok || recorded != issue {
 		t.Errorf("the watch holds %+v for the drifted pod's claim, want it adopted at %s", recorded, issue.Incarnation)
 	}
-	if writes := g.writes(); len(writes) > 0 {
+	// The repository cache the first launch made has a lifecycle of its own, which the same sweep
+	// runs (repocache_test.go); nothing of the issue and controller pods is written.
+	cache := CacheSandboxName(testProject, spec.Repository)
+	var writes []action
+	for _, w := range g.writes() {
+		if w.name != cache && w.name != cacheSecretName(cache) {
+			writes = append(writes, w)
+		}
+	}
+	if len(writes) > 0 {
 		t.Fatalf("the boot reconciliation wrote %v; a drifted pod is only warned of", writes)
 	}
 

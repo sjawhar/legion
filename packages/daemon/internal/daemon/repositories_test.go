@@ -195,20 +195,21 @@ func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
 	fetched := time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC)
 	retained := time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC)
 	view := repos.view([]sandbox.CacheStatus{
-		{Repo: ghrepo.MustParse("acme/legacy"), Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", RetainedUntil: retained},
-		{Repo: ghrepo.MustParse("acme/widgets"), Sandbox: "legion-legion-cache-acme-widgets-d782c874", Ready: true, Address: "http://10.8.1.4:8418",
+		{Repo: ghrepo.MustParse("acme/legacy"), Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "failing",
+			Reason: "container cache ImagePullBackOff: pull access denied (restarted 0 times)", RetainedUntil: retained},
+		{Repo: ghrepo.MustParse("acme/widgets"), Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://10.8.1.4:8418",
 			Health: &repocache.Health{Ready: true, Repo: "acme/widgets", Head: "34a7ac80", LastFetchAt: fetched, Bytes: 6612345678}},
 	})
 	want := api.RepositoriesView{
 		Owners: []string{"acme", "zeta"},
 		Mapped: []api.MappedRepositoryView{
 			{Repo: "Acme/Widgets", Default: true, Cache: &api.CacheView{
-				Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", Ready: true, Address: "http://10.8.1.4:8418",
+				Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://10.8.1.4:8418",
 				Head: "34a7ac80", LastFetchAt: fetched, Bytes: 6612345678,
 			}},
 			{Repo: "zeta/tools"},
 		},
-		Caches: []api.CacheView{{Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", RetainedUntil: retained}},
+		Caches: []api.CacheView{{Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "failing", Reason: "container cache ImagePullBackOff: pull access denied (restarted 0 times)", RetainedUntil: retained}},
 	}
 	if !reflect.DeepEqual(view, want) {
 		t.Fatalf("view = %+v\nwant %+v", view, want)

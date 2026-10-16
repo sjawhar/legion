@@ -161,11 +161,15 @@ func readOnlyFeed() corev1.VolumeMount {
 }
 
 // initVolumes are the provisioning material only the init containers mount: the provisioning
-// Secret and workspace-fetch's in-memory TMPDIR. The feed is the issue volume's own (FeedDir).
+// Secret, with the provisioning token and the repository cache's bearer token, and
+// workspace-fetch's in-memory TMPDIR. The feed is the issue volume's own (FeedDir).
 func (issuePod) initVolumes(l launch) []corev1.Volume {
 	return []corev1.Volume{
 		{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
+			SecretName: secretName(l.name),
+			Items: []corev1.KeyToPath{
+				{Key: provisionTokenKey, Path: provisionTokenKey}, {Key: cacheTokenKey, Path: cacheTokenKey},
+			},
 			DefaultMode: new(int32(0o440)),
 		}}},
 		{Name: tempVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
@@ -217,10 +221,13 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 
 // provision is what a new issue pod needs before it starts: it reads whether workspace-init must
 // find the issue's volume holding retained sessions (never under a session database, which keeps
-// none on it), reads the repository's cache from the stores (RepositoryCache), so the pod's fetch
-// is told a cache that is ready now, mints the provisioning token for the repository's owner, and
-// writes it to the pod's init-only provisioning Secret. It waits on no other pod: the issue's clone
-// lives on the issue's own volume, which no other pod mounts.
+// none on it), mints the provisioning token for the repository's owner, makes sure the repository
+// has its cache (EnsureRepositoryCache: one a sweep has not made yet is made now), since a fresh
+// feed comes from that cache alone, and writes the token to the pod's init-only provisioning
+// Secret with the cache's bearer token, which the fetch container presents to the cache. It waits
+// on no other pod, the cache's included: the fetch waits for the cache to be ready itself, and the
+// issue's clone lives on the issue's own volume, which no other pod mounts. A cache that cannot be
+// made fails the launch: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionsInDatabase {
 		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
@@ -229,7 +236,6 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 		}
 		l.expectVolume = sessions
 	}
-	l.cache, _ = r.RepositoryCache(l.spec.Repository)
 	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)
 	token, err := r.tokens.Token(minting, owner)
@@ -237,10 +243,18 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 	if err != nil {
 		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
 	}
+	if err := r.EnsureRepositoryCache(ctx, l.spec.Repository); err != nil {
+		return err
+	}
+	cache := CacheSandboxName(r.project, l.spec.Repository)
+	bearer := r.cacheBearer(cache)
+	if bearer == "" {
+		return fmt.Errorf("the repository cache %s of %s holds no token", cache, l.spec.Repository)
+	}
 	if err := r.upsertSecret(ctx, corev1.Secret{
 		ObjectMeta: r.secretMeta(s, *l, secretName(s.Name)),
 		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{provisionTokenKey: []byte(token)},
+		Data:       map[string][]byte{provisionTokenKey: []byte(token), cacheTokenKey: []byte(bearer)},
 	}); err != nil {
 		return fmt.Errorf("write its provisioning secret: %w", err)
 	}

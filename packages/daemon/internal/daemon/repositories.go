@@ -180,8 +180,8 @@ func (r *repositories) view(caches []sandbox.CacheStatus) api.RepositoriesView {
 // cacheView is a repository cache as the state shows it.
 func cacheView(cache sandbox.CacheStatus) api.CacheView {
 	view := api.CacheView{
-		Repo: cache.Repo.String(), Sandbox: cache.Sandbox, Ready: cache.Ready, Address: cache.Address,
-		HealthError: cache.HealthError, RetainedUntil: cache.RetainedUntil,
+		Repo: cache.Repo.String(), Sandbox: cache.Sandbox, State: cache.State, Reason: cache.Reason, Ready: cache.Ready,
+		Address: cache.Address, HealthError: cache.HealthError, RetainedUntil: cache.RetainedUntil,
 	}
 	if health := cache.Health; health != nil {
 		view.Head, view.LastFetchAt, view.Bytes = health.Head, health.LastFetchAt, health.Bytes
