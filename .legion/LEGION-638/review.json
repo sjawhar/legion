@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-638",
+  "completed": "2026-10-16T03:22:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1981",
+  "round": 1,
+  "reviewedHead": "028d5ce5ced6d6070b46436a370aea60e64ebb6d",
+  "codeHead": "35e2f5127cafae534e91bd674cc1933e9af7c981",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "ci": "Required set from the main ruleset: lint, typecheck, test, pr-title (branch protection: none). CI head of the branch's newest pull_request run: 35e2f5127cafae534e91bd674cc1933e9af7c981 (Tests run 38840384373, PR Title runs 38840384401 and 38841185071, Docs 38840384366, Worker Image 38840384410, Legion Envoy and Contracts 38840384408, all success). Its check-runs: lint, typecheck, test, pr-title all completed/success. compare 35e2f512...028d5ce5 touches only .legion/LEGION-638/implement.json and test.json (true). The PR body's CI line names run 38840384373 and 38840384401 at that same commit: current.",
+  "proofs": "E2E (implementer) and E2E (tester) both present in the PR body and in implement.json / test.json, each naming a production-like surface (the branch's legion worker-shim with the Sandbox launcher's flags on a repository copy on the tree volume with the image's real codegraph; legion start --check-config on the kubernetes and tmux file shapes), the commands, the observations, head 35e2f512 and a negative control (the floor-0 overlay build leaving the lease behind at --stop-grace 6s; the unguarded warmLeaseHasToken overlay). The tester drove the surface independently and verified the implementer's proof (implementerProof.verdict verified).",
+  "thermonuclear": "Pair run once at the reviewed head 028d5ce5 (code 35e2f512): thermonuclear-deep-review 0 critical / 1 important / 3 minor; thermonuclear-code-quality 0 critical / 3 important / 8 minor. Both name the same important finding (the heartbeat's permanent stop on an unreadable lease read); the reviewer confirmed it with a throwaway go test -overlay probe at 35e2f512 (lease renamed away for two 50 ms ticks and back: the live holder's mtime was never refreshed again; with the loop's `return` removed the probe passes and TestAStalledHoldersHeartbeatLeavesItsSuccessorsLeaseAtTheSameInode, TestRefreshWarmLease and TestAStalledHoldersReleaseLeavesItsSuccessorsLeaseAtTheSameInode stay green). Probe files removed; the go.work.sum entries the run added were abandoned.",
+  "threads": "gh api graphql reviewThreads: none; no issue comments; no bot findings to adjudicate.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workspace/codegraph.go:366-368, 400-403",
+      "description": "One unreadable os.ReadFile of the lease (any error, not only another token) makes refreshWarmLease report false and the heartbeat goroutine return for good. Before this diff a failing tick cost one Chtimes; now a live holder's heartbeat dies silently, its lease ages past warmLeaseStale (60 s) under a build still running, a sibling container takes it over, and on an uninitialized workspace a second `codegraph init` runs beside the first (codegraph.go:61-63; the malformed-database outcome at :142-146) — the file's own design at :48-49 budgets six missed heartbeats for 'a filesystem hiccup'. Reproduced at 35e2f512 with a throwaway overlay probe. Fix: do not end the loop on false (the token check already keeps a tick from touching a successor's lease, and release always ends the goroutine), or make the predicate three-state (mine / another / unreadable) and stop only on 'another'; keep release's conservative reading. Reword the holdWarmLease / refreshWarmLease comments and TestRefreshWarmLease's `want` column (and the comment at codegraph_test.go:861) to match."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/config/config.go:912-915 (PR body)",
+      "description": "The PR adds a refusal (worker_stop_timeout_seconds < 9 under runtime: kubernetes) and changes a signature at a package boundary (shim.Config.WarmCodegraph / workspace.WarmCodegraphIndex gain `launched`), but the PR body carries no `## Contract change census`. Required: the search commands run (e.g. grep -rn worker_stop_timeout_seconds across the repo's yaml, scripts/e2e, deploy, Go fixtures; grep -rn 'WarmCodegraph' packages), every hit with a disposition, and a rollout line — here an immediate refusal naming what it closes (a pod stop that leaves .codegraph/legion-warm.lock held for a minute). The reviewer's own search found no in-repo configuration below 9 under kubernetes (default 10; kubernetes_test.go uses 9 and 8-under-tmux deliberately; daemon/kubernetes_test.go uses 11) and every WarmCodegraph caller migrated; the body must say so."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:3632, 3642",
+      "description": "Security[untrusted-input] hardening: codegraph_warm_up_lines and warm_up_built_elapsed match `codegraph warm-up for` / `built the index` anywhere in a pod log line, and the same stream carries `tool_execution_start <tool> <args truncated to 80>` with agent-chosen arguments (shim.go:709-724). Anchor on the shim's own message start after the `[pod/…/<container>] <timestamp> ` prefix (`[legion] codegraph warm-up for …`), in both the grep and the parser's case. Consequence today is a wrong container attribution or elapsed figure in the note; the index-complete assertion at :3655 is not forgeable."
+    }
+  ],
+  "fastFollow": "Warm-up stop plumbing cleanup, one pass: (a) drainWarmUp's three sync primitives (warmed Once + warmUps WaitGroup + warmStarted atomic.Bool plus a per-stop adapter goroutine) for one optional goroutine — a warmDone channel closed by the warm-up and warmStarted alone would do; (b) the shim's floored-wait test runs at Grace 3 s / StopGrace 3.5 s, a configuration the daemon refuses — also drive it at DefaultGrace / MinStopGrace on the fake clock; (c) AGENTS.md:61, docs/kubernetes.md:1626-1628 and worker_shim.go:34-35 describe max(leftover, 3 s) as 'at least 3 s and at most what --stop-grace leaves', false when leftover < 3 s (the older-daemon case worker_shim.go:38-39 keeps live) — 'what the stop grace leaves, never under 3 s'; (d) codegraph_test.go is past 1000 lines: the lease suite (:479-914) to codegraph_lease_test.go.",
+  "risks": [
+    "The live stage 4b repository-tools checkpoint reading the success line from the pod's log is LEGION-578's operator lane; neither proof ran it.",
+    "At worker_stop_timeout_seconds: 9 the stop budget has no slack (MinStopGrace = 5 s + 1 s + 3 s exactly; drain_test.go:42 accepts sum == g): an agent ignoring SIGTERM for the full 5 s plus a warm-up not back within the 3 s floor ends at the launcher's SIGKILL instant. Bounded: the drain gave up in that case and the lease is left regardless; stopWarm runs at the SIGTERM relay (shim.go:563) so the warm-up ends 2–3 s in, in practice.",
+    "The checkpoint reads the current container instance's log; a container restarted before repository-tools would never log the line again (a complete index logs nothing). No restart precedes it in stage 4b today.",
+    "Tester's recorded risks stand: one spurious Chtimes of a successor's lease in the read/Chtimes window; a build exiting 0 as its context ends logs the `ended with its process` line instead of the success line."
+  ]
+}
