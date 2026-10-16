@@ -98,4 +98,27 @@ describe("included_jq_modules", () => {
       out: "alpha\nzeta\n",
     });
   });
+
+  // The guard's point is that a module joins it the day the script first includes it, whatever
+  // the module is named: jq takes any relative path as an include string, so a name with an
+  // underscore, a capital, a dot or a directory is read like a kebab-case one, and the compile
+  // loop then names it lib/<name>.jq. A name class that drops one would leave that module out of
+  // the guard silently, which is the hours-in failure the guard exists to catch.
+  test("reads an include whatever its name's characters", () => {
+    const script = join(dir, "names.sh");
+    writeFileSync(
+      script,
+      [
+        "jq 'include \"stage4b-tools\"; x'",
+        "jq 'include \"with_underscore\"; y'",
+        "jq 'include \"Dotted.v2\"; z'",
+        "jq 'include \"nested/module\"; w'",
+        "",
+      ].join("\n")
+    );
+    expect(run(`included_jq_modules ${JSON.stringify(script)}`)).toEqual({
+      code: 0,
+      out: "Dotted.v2\nnested/module\nstage4b-tools\nwith_underscore\n",
+    });
+  });
 });
