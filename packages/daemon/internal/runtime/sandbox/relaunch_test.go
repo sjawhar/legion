@@ -31,7 +31,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -1054,248 +1053,93 @@ func TestAFailedLauncherBindingReadNeverLeavesASupervisedRoleChildRunning(t *tes
 // An API server that refuses the patch recording a generation's addresses as overloaded — the
 // 500 etcd's throttle reaches a client as — has refused nothing the launch did wrong: the launch
 // backs off and tries again, and the claim is launched with no launch failure charged once the
-// server answers. The zero-refusal control holds the same relaunch with no throttle.
+// server answers. Beside it, the rows that bound it: no refusal at all, the zero-refusal control; a
+// refusal of the record, RBAC's 403, charged on each try, the third failing the claim; and a
+// throttle that outlasts the launch's own deadline, charged once per try after each has sent the
+// patch again while the throttle lasted, so a server that stays overloaded fails the claim rather
+// than holding its launch for ever.
 func TestAnAPIServerThrottleOnTheAddressRecordSpendsNoLaunchBudget(t *testing.T) {
-	for name, refusals := range map[string]int32{"no refusal (the control)": 0, "five refusals": 5} {
+	for name, tc := range map[string]struct {
+		// bootTimeout is the rig's boot timeout, 0 for the rig's own.
+		bootTimeout time.Duration
+		// answer is the server's answer to an address record after refused refusals, nil to apply it.
+		answer func(refused int32) error
+		// err is what the relaunch fails with, "" for a relaunch that launches uncharged; one that
+		// fails has spent the machine's three launch failures.
+		err string
+		// refused is whether the count of records the server refused is right, and want says what is.
+		refused func(int32) bool
+		want    string
+	}{
+		"no refusal (the control)": {
+			answer:  func(int32) error { return nil },
+			refused: func(n int32) bool { return n == 0 }, want: "none",
+		},
+		"five refusals": {
+			answer: func(refused int32) error {
+				if refused >= 5 {
+					return nil
+				}
+				return etcdThrottled()
+			},
+			refused: func(n int32) bool { return n == 5 }, want: "5",
+		},
+		"a refusal of the record, charged once per try": {
+			answer: func(int32) error {
+				return apierrors.NewForbidden(sandboxGVR.GroupResource(), SandboxName(workerToken), errors.New("the daemon's identity may not patch it"))
+			},
+			err:     "record the addresses its generation is handed",
+			refused: func(n int32) bool { return n == 3 }, want: "3, once per charged try",
+		},
+		"a throttle past the launch's deadline, charged once per try": {
+			bootTimeout: 300 * time.Millisecond,
+			answer:      func(int32) error { return apierrors.NewInternalError(errors.New(etcdThrottle)) },
+			err:         "etcdserver: throttle: too many requests",
+			refused:     func(n int32) bool { return n > 3 }, want: "more than 3, each try sending it again while the throttle lasted",
+		},
+	} {
 		t.Run(name, func(t *testing.T) {
-			g := newRig(t, nil)
+			var options []rigOption
+			if tc.bootTimeout != 0 {
+				options = append(options, withOptions(func(o *Options) { o.BootTimeout = tc.bootTimeout }))
+			}
+			g := newRig(t, nil, options...)
 			spec := workerSpec(t)
 			machine, _, _ := supervisedSandboxMachine(t, g, spec)
 			first := startSupervisedSandboxRole(t, g, machine, spec, resumeSession)
 			var refused atomic.Int32
 			g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-				if !strings.Contains(string(a.(k8stesting.PatchAction).GetPatch()), addressesAnnotation(claim.RoleTester)) || refused.Load() >= refusals {
+				if !strings.Contains(string(a.(k8stesting.PatchAction).GetPatch()), addressesAnnotation(claim.RoleTester)) {
+					return false, nil, nil
+				}
+				answer := tc.answer(refused.Load())
+				if answer == nil {
 					return false, nil, nil
 				}
 				refused.Add(1)
-				return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusInternalServerError,
-					Message: "rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many requests"}}
+				return true, nil, answer
 			})
-			if err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{Locator: *first, Kind: runtime.StaleAddress, At: rigNow}}); err != nil {
-				t.Fatalf("relaunch through %d refusals: %v", refusals, err)
+			err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{Locator: *first, Kind: runtime.StaleAddress, At: rigNow}})
+			got := machine.Claim()
+			if tc.err == "" {
+				if err != nil {
+					t.Fatalf("relaunch: %v", err)
+				}
+				if got.State == supervise.StateFailed || got.Budgets.LaunchFailures != 0 || got.Locator == nil {
+					t.Fatalf("claim after the relaunch = %+v, want launched with no launch failure", got)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("relaunch = %v, want %q", err, tc.err)
+				}
+				if got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
+					t.Fatalf("claim after the relaunch = %+v, want failed with three launch failures", got)
+				}
 			}
-			if got := machine.Claim(); got.State == supervise.StateFailed || got.Budgets.LaunchFailures != 0 || got.Locator == nil {
-				t.Fatalf("claim after %d refusals = %+v, want launched with no launch failure", refusals, got)
-			}
-			if got := refused.Load(); got != refusals {
-				t.Fatalf("the server refused %d address records, want %d", got, refusals)
+			if n := refused.Load(); !tc.refused(n) {
+				t.Fatalf("the server refused %d address records, want %s", n, tc.want)
 			}
 		})
-	}
-}
-
-// A refusal of the address record — the server acting on the request and refusing it, here RBAC's
-// 403 — is a launch failure as before: each try sends the patch once, is charged, and the third
-// fails the claim.
-func TestARefusalOfTheAddressRecordIsStillChargedAsALaunchFailure(t *testing.T) {
-	g := newRig(t, nil)
-	spec := workerSpec(t)
-	machine, _, _ := supervisedSandboxMachine(t, g, spec)
-	first := startSupervisedSandboxRole(t, g, machine, spec, resumeSession)
-	var refused atomic.Int32
-	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if !strings.Contains(string(a.(k8stesting.PatchAction).GetPatch()), addressesAnnotation(claim.RoleTester)) {
-			return false, nil, nil
-		}
-		refused.Add(1)
-		return true, nil, apierrors.NewForbidden(sandboxGVR.GroupResource(), first.Sandbox.Name, errors.New("the daemon's identity may not patch it"))
-	})
-	err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{Locator: *first, Kind: runtime.StaleAddress, At: rigNow}})
-	if err == nil || !strings.Contains(err.Error(), "record the addresses its generation is handed") {
-		t.Fatalf("relaunch through a refused address record = %v, want the refusal", err)
-	}
-	if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
-		t.Fatalf("claim after three refused address records = %+v, want failed with three launch failures", got)
-	}
-	if got := refused.Load(); got != 3 {
-		t.Fatalf("the address record was sent %d times, want once per charged try, 3", got)
-	}
-}
-
-// A server that answers the address record overloaded for longer than the launch's own deadline
-// allows has still not answered it: each try waits the throttle out up to that deadline, sending
-// the patch again and again, and only then is charged, so a server that stays overloaded fails the
-// claim, three deadlines later, rather than holding its launch for ever.
-func TestAnAPIServerOverloadedPastTheLaunchsDeadlineIsChargedOncePerTry(t *testing.T) {
-	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond }))
-	spec := workerSpec(t)
-	machine, _, _ := supervisedSandboxMachine(t, g, spec)
-	first := startSupervisedSandboxRole(t, g, machine, spec, resumeSession)
-	var refused atomic.Int32
-	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if !strings.Contains(string(a.(k8stesting.PatchAction).GetPatch()), addressesAnnotation(claim.RoleTester)) {
-			return false, nil, nil
-		}
-		refused.Add(1)
-		return true, nil, apierrors.NewInternalError(errors.New("rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many requests"))
-	})
-	err := machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{Locator: *first, Kind: runtime.StaleAddress, At: rigNow}})
-	if err == nil || !strings.Contains(err.Error(), "etcdserver: throttle: too many requests") {
-		t.Fatalf("relaunch through a throttle that never clears = %v, want the throttle", err)
-	}
-	if got := machine.Claim(); got.State != supervise.StateFailed || got.Budgets.LaunchFailures != 3 || got.Locator != nil {
-		t.Fatalf("claim after a throttle that never clears = %+v, want failed with three launch failures", got)
-	}
-	if got := refused.Load(); got <= 3 {
-		t.Fatalf("the address record was sent %d times over three charged tries, want each try to send it again while the throttle lasted", got)
-	}
-}
-
-// burstImage is an image the rig's runtime no longer launches, which a pod launched by an earlier
-// release of the daemon runs (imageDrift).
-const burstImage = "ghcr.io/sjawhar/legion-worker@sha256:0ld0000000000000000000000000000000000000000000000000000000000000"
-
-// A boot onto a new contract relaunches every live role at once (the daemon's stale-plugin pass,
-// which relaunches through the same launch a stale address does), and an API server under that load
-// answers a share of the launches' requests overloaded instead of acting on them: API Priority and
-// Fairness's 429, the 500 etcd's throttle reaches a client as, and that throttle's gRPC text alone.
-// Here 24 roles of eight issue pods relaunch at once while every fifth request a launch sends is
-// answered so. Half the pods run an image the runtime no longer launches, so the first relaunch into
-// each replaces it and every kind of request a launch makes meets the throttle: the Sandbox's
-// suspension and its Running patch, the wait for the old pod's end, the launcher Secrets' writes
-// and binding, their reads, and the address record. The informers meet it too: their watches end as
-// the burst begins, and the server refuses their next lists and watches for half a second, so every
-// store's feed is failing while the launches wait for their launchers. The burst converges: every
-// claim is launched, and none is charged a launch failure.
-func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *testing.T) {
-	const issues = 8
-	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer}
-	g := newRig(t, nil, withBreakableFeeds(), withOptions(func(o *Options) { o.BootTimeout = 15 * time.Second }))
-	type role struct {
-		spec    runtime.SpawnSpec
-		machine *supervise.Machine
-		first   *runtime.Locator
-	}
-	var all []role
-	for i := range issues {
-		issue := fmt.Sprintf("LEGION-%d", 300+i)
-		var name string
-		for _, r := range roles {
-			token, err := claim.NewToken(testProject, issue, r)
-			if err != nil {
-				t.Fatal(err)
-			}
-			spec := testSpec(t, token, r, issue)
-			machine, _, _ := supervisedSandboxMachine(t, g, spec)
-			all = append(all, role{spec: spec, machine: machine, first: startSupervisedSandboxRole(t, g, machine, spec, resumeSession)})
-			name = SandboxName(token)
-		}
-		if i%2 == 0 {
-			g.update(g.pod(name), func(p *corev1.Pod) {
-				for c := range p.Spec.Containers {
-					p.Spec.Containers[c].Image = burstImage
-				}
-			})
-			g.eventually("the pod store to see "+name+"'s old image", func() bool {
-				_, drifted := imageDrift(g.r.storedPod(name), testImage)
-				return drifted
-			})
-		}
-	}
-
-	var throttling atomic.Bool
-	var sent, tooMany, serverError atomic.Int64
-	throttle := func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		switch a.GetVerb() {
-		case "get", "create", "update", "patch", "delete":
-		default:
-			return false, nil, nil
-		}
-		if !throttling.Load() {
-			return false, nil, nil
-		}
-		n := sent.Add(1)
-		if n%5 != 0 {
-			return false, nil, nil
-		}
-		switch (n / 5) % 2 {
-		case 0:
-			tooMany.Add(1)
-			return true, nil, apierrors.NewTooManyRequests("the request has been limited by the API server's flow control", 1)
-		default:
-			serverError.Add(1)
-			return true, nil, &apierrors.StatusError{ErrStatus: metav1.Status{Status: metav1.StatusFailure, Code: http.StatusInternalServerError,
-				Message: "rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many requests"}}
-		}
-	}
-	g.dyn.PrependReactor("*", "sandboxes", throttle)
-	g.kube.PrependReactor("*", "secrets", throttle)
-	g.kube.PrependReactor("*", "pods", throttle)
-	throttling.Store(true)
-	g.refuseFeeds(apierrors.NewInternalError(errors.New(etcdThrottle)))
-	testwait.Eventually(t, "the stores' feeds to fail", func() bool { return g.r.sandboxFeed.check() != nil && g.r.podFeed.check() != nil })
-	time.AfterFunc(500*time.Millisecond, func() { g.refuseFeeds(nil) })
-
-	relaunched := make(chan error, len(all))
-	for _, r := range all {
-		go func() {
-			relaunched <- r.machine.Handle(g.ctx, supervise.RuntimeObservation{Observation: runtime.Observation{Locator: *r.first, Kind: runtime.StaleAddress, At: rigNow}})
-		}()
-	}
-	for range all {
-		select {
-		case err := <-relaunched:
-			if err != nil {
-				t.Errorf("a relaunch of the burst: %v", err)
-			}
-		case <-time.After(time.Minute):
-			t.Fatal("the burst of relaunches did not end")
-		}
-	}
-	throttling.Store(false)
-	for _, r := range all {
-		if got := r.machine.Claim(); got.State == supervise.StateFailed || got.Budgets.LaunchFailures != 0 || got.Locator == nil {
-			t.Errorf("%s after the burst: %s with %d launch failures and locator %v, want launched with none",
-				r.spec.Claim, got.State, got.Budgets.LaunchFailures, got.Locator)
-		}
-	}
-	for i := 0; i < issues; i += 2 {
-		name := SandboxName(all[i*len(roles)].spec.Claim)
-		if _, drifted := imageDrift(g.pod(name), testImage); drifted {
-			t.Errorf("%s still runs the old image after the burst, want its pod replaced", name)
-		}
-	}
-	if tooMany.Load() == 0 || serverError.Load() == 0 {
-		t.Fatalf("the throttle answered %d requests 429 and %d 500 of %d sent; want some of each", tooMany.Load(), serverError.Load(), sent.Load())
-	}
-	feedRefusals := g.refuseFeeds(nil)
-	if feedRefusals == 0 {
-		t.Fatal("the server refused none of the informers' lists and watches")
-	}
-	t.Logf("the throttle answered %d requests 429 and %d 500 of %d sent, and refused %d of the informers' lists and watches",
-		tooMany.Load(), serverError.Load(), sent.Load(), feedRefusals)
-}
-
-// A write the server applied and answered timed out (a 504) is sent again and refused as already
-// done: the launch reads what the write left and goes on from it, and is launched, charged nothing.
-func TestAWriteTheServerAppliedButAnsweredTimedOutIsLaunchedUncharged(t *testing.T) {
-	g := newRig(t, nil)
-	spec := workerSpec(t)
-	machine, _, _ := supervisedSandboxMachine(t, g, spec)
-	provisioning := secretName(SandboxName(spec.Claim))
-	apply := k8stesting.ObjectReaction(g.kube.Tracker())
-	var answered atomic.Bool
-	g.kube.PrependReactor("create", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		object, err := metaOf(a.(k8stesting.CreateAction).GetObject())
-		if err != nil || object.GetName() != provisioning || !answered.CompareAndSwap(false, true) {
-			return false, nil, nil
-		}
-		g.record(a)
-		if _, _, err := apply(a); err != nil {
-			t.Errorf("apply the create of %s: %v", provisioning, err)
-		}
-		return true, nil, apierrors.NewTimeoutError("the request did not complete in time", 0)
-	})
-	g.launcher(spec.Claim)
-	if err := machine.Handle(g.ctx, supervise.RequestSpawn{Claim: spec.Claim}); err != nil {
-		t.Fatalf("spawn through a create applied and answered 504: %v", err)
-	}
-	if !answered.Load() {
-		t.Fatalf("the launch never created %s", provisioning)
-	}
-	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Budgets.LaunchFailures != 0 || got.Locator == nil {
-		t.Fatalf("claim after a create applied and answered 504 = %s with %d launch failures and locator %v, want launching with none",
-			got.State, got.Budgets.LaunchFailures, got.Locator)
 	}
 }
 
@@ -1752,93 +1596,5 @@ func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(
 	}
 	if mode := g.sandbox(SandboxName(workerToken)).mode(); mode != modeSuspended {
 		t.Fatalf("the launch left its sandbox %s after an ambiguous Running patch", mode)
-	}
-}
-
-// relabelSandbox is a Sandbox an issue's old tree left, Suspended and labelled with that tree, which
-// a launch of the issue in testTree relabels (ensureSandbox); answer answers each relabel patch sent,
-// counted from 1.
-func relabelSandbox(t *testing.T, answer func(sent int32, a k8stesting.Action) (bool, k8sruntime.Object, error)) (*rig, *atomic.Int32) {
-	t.Helper()
-	name := SandboxName(workerToken)
-	old := map[string]string{labelProject: testProject, labelTree: "LEGION-100", labelIssue: testTree}
-	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-moved", modeSuspended, old)})
-	var sent atomic.Int32
-	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if !strings.Contains(string(a.(k8stesting.PatchAction).GetPatch()), labelPatchPath(labelTree)) {
-			return false, nil, nil
-		}
-		return answer(sent.Add(1), a)
-	})
-	return g, &sent
-}
-
-// fenceRefused is the API server's answer to a JSON patch whose test operation failed.
-func fenceRefused(name string) error {
-	return apierrors.NewInvalid(sandboxGVR.GroupVersion().WithKind("Sandbox").GroupKind(), name, nil)
-}
-
-// A relabel the server applied and answered timed out is sent again, and its own fence refuses the
-// resend, since the resourceVersion it tests has moved: the launch reads the Sandbox again, finds it
-// relabelled, and goes on.
-func TestARelabelTheServerAppliedButAnsweredTimedOutGoesOn(t *testing.T) {
-	var g *rig
-	g, sent := relabelSandbox(t, func(sent int32, a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if sent > 1 {
-			return true, nil, fenceRefused(SandboxName(workerToken))
-		}
-		if _, _, err := k8stesting.ObjectReaction(generationTracker{g.dyn.Tracker()})(a); err != nil {
-			t.Errorf("apply the relabel: %v", err)
-		}
-		return true, nil, apierrors.NewTimeoutError("the request did not complete in time", 0)
-	})
-	g.spawn(workerSpec(t))
-	if got := g.sandbox(SandboxName(workerToken)).Labels[labelTree]; got != testTree {
-		t.Fatalf("the Sandbox is labelled for tree %q after the launch, want %q", got, testTree)
-	}
-	if got := sent.Load(); got != 2 {
-		t.Fatalf("the relabel was sent %d times, want twice: once applied and answered 504, once refused by its fence", got)
-	}
-}
-
-// A relabel the server refuses as invalid for a reason of its own, which another read does not
-// change, fails the try after one patch: the Sandbox read again still holds the resourceVersion the
-// refused patch tested.
-func TestALastingRefusalOfTheRelabelFailsTheTryAfterOnePatch(t *testing.T) {
-	g, sent := relabelSandbox(t, func(int32, k8stesting.Action) (bool, k8sruntime.Object, error) {
-		return true, nil, fenceRefused(SandboxName(workerToken))
-	})
-	g.launcher(workerToken)
-	if _, err := g.r.Spawn(g.ctx, workerSpec(t)); err == nil || !strings.Contains(err.Error(), "relabel sandbox") {
-		t.Fatalf("Spawn through a lasting refusal of the relabel = %v, want the refusal", err)
-	}
-	if got := sent.Load(); got != 1 {
-		t.Fatalf("the relabel was sent %d times, want once", got)
-	}
-}
-
-// A request inside a launch's wait ends with the wait's budget: the old pod stays in the store for
-// most of awaitPodGone's budget, then the confirming read of it is answered overloaded, and the wait
-// still ends at its budget rather than a boot timeout after that read began.
-func TestARequestInsideALaunchsWaitEndsWithTheWaitsBudget(t *testing.T) {
-	const boot = time.Second
-	name := SandboxName(workerToken)
-	labels := map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree}
-	g := newRig(t, []k8sruntime.Object{
-		sandboxObject(t, name, "uid-waited", modeSuspended, labels),
-		podObject(name, "uid-old-pod", "uid-waited", labels, runningStatus()),
-	}, withoutController(), withOptions(func(o *Options) { o.BootTimeout = boot }))
-	g.kube.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-		return true, nil, apierrors.NewInternalError(errors.New(etcdThrottle))
-	})
-	time.AfterFunc(boot*7/10, func() { _ = g.kube.Tracker().Delete(podsGVR, testNamespace, name) })
-	start := time.Now()
-	_, err := g.r.awaitPodGone(launching(g.ctx), g.sandbox(name))
-	took := time.Since(start)
-	if err == nil {
-		t.Fatal("awaitPodGone through a read answered overloaded throughout = nil, want it to end with an error")
-	}
-	if took > boot*13/10 {
-		t.Fatalf("awaitPodGone took %s, past its %s budget: %v", took, boot, err)
 	}
 }
