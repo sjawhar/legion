@@ -39,18 +39,21 @@ type volumeLostError string
 func (e volumeLostError) Error() string { return string(e) }
 
 // workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
-// prepare a pod's persistent volume before the main container's worker-shim starts, and the one
-// list of them `legion workspace-init --help` names. An issue pod runs two, which prepare the
-// issue's clone and jj workspace on the issue's own volume: `fetch` is the first, the one process of
-// the pod that holds the provisioning token, in a container that mounts nothing an agent of the
-// issue can write; `provision` is the second, all the volume's work, in a container the provisioning
-// Secret is not mounted in. The controller's pod (`controller: daemon`) runs `controller` alone, on
-// the volume its own Sandbox owns. Each one's log lines go to stdout and its refusals and failures
-// to stderr — together the init log the runtime quotes — with exit 1, or 3 for a lost volume.
+// prepare a pod's persistent volume before the main container's worker-shim starts, and the
+// repository cache's process, and the one list of them `legion workspace-init --help` names. An
+// issue pod runs two, which prepare the issue's clone and jj workspace on the issue's own volume:
+// `fetch` is the first, the one process of the pod that holds the provisioning token, in a
+// container that mounts nothing an agent of the issue can write; `provision` is the second, all the
+// volume's work, in a container the provisioning Secret is not mounted in. The controller's pod
+// (`controller: daemon`) runs `controller` alone, on the volume its own Sandbox owns. A repository
+// cache's pod runs `cache` as its one container, on its own volume, until it is stopped. Each one's
+// log lines go to stdout and its refusals and failures to stderr — together the init log the
+// runtime quotes — with exit 1, or 3 for a lost volume.
 var workspaceInitCommands = map[string]command{
 	"fetch":      runWorkspaceFetch,
 	"provision":  runWorkspaceProvision,
 	"controller": runWorkspaceController,
+	"cache":      runWorkspaceCache,
 }
 
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
