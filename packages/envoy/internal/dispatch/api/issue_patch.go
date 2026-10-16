@@ -195,9 +195,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if before.ClosedAt != nil {
 		// A closed issue takes only its rank (board order), its component attachment
 		// (classified without reopening), and an external_links write that adds no URL the issue
-		// does not already have (so a link can move to the issue that replaced it, a same-set
-		// resend is a harmless no-op, and a kept URL's kind may still be retyped) — alone or
-		// beside a reopening status; every other field, and closing it again, waits for a reopen.
+		// does not already have (so a link can move to the issue that replaced it; a same-set
+		// resend or a kept URL's retyped kind rewrites the rows and emits issue.updated the same
+		// as any other accepted write here, it just adds nothing new) — alone or beside a
+		// reopening status; every other field, and closing it again, waits for a reopen.
 		addsLink := input.ExternalLinks != nil && !isExternalLinksSubset(*input.ExternalLinks, before.ExternalLinks)
 		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || addsLink || assigneeProvided || parentProvided || input.BlockedBy != nil
 		reopening := input.Status != nil && status != "done"
@@ -465,11 +466,8 @@ func mergeIssueLabels(existing, added []string) ([]string, error) {
 	return normalizeIssueLabels(append(append([]string{}, existing...), added...))
 }
 
-// isExternalLinksSubset reports whether every URL in requested already belongs to existing: the
-// closed-issue gate uses this to tell a request that adds no URL (always allowed, so a link can
-// move off a closed issue onto whatever replaced it; a same-set resend or a kept URL's retyped
-// kind also pass this check, harmlessly) from one that would add a new URL (refused on a closed
-// issue like any other content write).
+// isExternalLinksSubset reports whether every URL in requested already belongs to existing. The
+// closed-issue gate (above) is what this decides.
 func isExternalLinksSubset(requested, existing []model.ExternalLink) bool {
 	existingURLs := make(map[string]bool, len(existing))
 	for _, link := range existing {

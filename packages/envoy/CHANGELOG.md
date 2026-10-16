@@ -2,12 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- A closed issue can give up an external link (a write whose links are a subset of what it already
-  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
-  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
-
 ### Added
 
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
@@ -759,6 +753,10 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A closed issue can give up an external link (a write whose links are a subset of what it already
+  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
+  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
 
 - A bus client whose NATS connection closes while a publish is in flight now replaces it once,
   and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close

@@ -826,9 +826,9 @@ func TestIssuePatchExternalLinkTakenByAnotherIssue(t *testing.T) {
 }
 
 // A closed issue can give up an external link — a write that adds no URL it does not already
-// have, whether a full clear, a partial removal, or a harmless same-set resend — so a link can
-// move to the issue that replaced it, but still refuses to gain a new one or to touch any other
-// field alongside the removal.
+// have, whether a full clear, a partial removal, or a same-set resend — so a link can move to
+// the issue that replaced it, but still refuses to gain a new one or to touch any other field
+// alongside the removal.
 func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
