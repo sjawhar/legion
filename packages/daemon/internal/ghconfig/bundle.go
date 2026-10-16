@@ -57,16 +57,13 @@ func (b Bundle) Validate() error {
 	return nil
 }
 
-// DefaultFile is the file under a bundle root naming its Default owner, which the tmux runtime's
-// refresher reads back (ReadDefault) for a pane it adopted after a restart. A name starting with a
-// dot is never an owner login, so it never collides with an owner's directory.
-const DefaultFile = ".default"
-
 // WriteBundle brings root to bundle: root made 0700, each owner's directory as Write brings one,
-// DefaultFile naming the default owner, and every other entry of root removed — an owner no longer
-// in the bundle, and the two files of a directory written before bundles, which held one role's
-// files at its top. root is the bundle's alone. It returns the owners whose hosts.yml changed,
-// sorted, and writes nothing for a bundle Validate refuses.
+// and every other entry of root removed — an owner no longer in the bundle, the two files of a
+// directory written before bundles, which held one role's files at its top, and anything else.
+// root is the bundle's alone, and it records nothing of the bundle but the gh files: the pane's own
+// user can write it, so a reader of the bundle's default or write owner reads the daemon's own
+// record instead. It returns the owners whose hosts.yml changed, sorted, and writes nothing for a
+// bundle Validate refuses.
 func WriteBundle(root string, bundle Bundle) (changed []string, err error) {
 	if err := bundle.Validate(); err != nil {
 		return nil, err
@@ -86,18 +83,12 @@ func WriteBundle(root string, bundle Bundle) (changed []string, err error) {
 			changed = append(changed, owner)
 		}
 	}
-	defaultPath := filepath.Join(root, DefaultFile)
-	if current, err := os.ReadFile(defaultPath); err != nil || string(current) != bundle.Default {
-		if err := os.WriteFile(defaultPath, []byte(bundle.Default), 0o600); err != nil {
-			return nil, err
-		}
-	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
 	for _, entry := range entries {
-		if _, ok := bundle.Owners[entry.Name()]; (ok && entry.IsDir()) || entry.Name() == DefaultFile {
+		if _, ok := bundle.Owners[entry.Name()]; ok && entry.IsDir() {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
@@ -105,18 +96,4 @@ func WriteBundle(root string, bundle Bundle) (changed []string, err error) {
 		}
 	}
 	return changed, nil
-}
-
-// ReadDefault is the default owner WriteBundle recorded under root (DefaultFile). A root with no
-// such file, which no WriteBundle wrote, and one whose file names no owner login are errors.
-func ReadDefault(root string) (string, error) {
-	data, err := os.ReadFile(filepath.Join(root, DefaultFile))
-	if err != nil {
-		return "", fmt.Errorf("read the gh bundle's %s: %w", DefaultFile, err)
-	}
-	owner := string(data)
-	if !IsOwner(owner) {
-		return "", fmt.Errorf("the gh bundle's %s names %q, not a lowercased GitHub login", DefaultFile, owner)
-	}
-	return owner, nil
 }

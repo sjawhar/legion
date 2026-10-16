@@ -331,10 +331,12 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 		ResolvedRepo: child.ResolvedRepo,
 	}
 	if s.prepare != nil {
-		if err := s.prepare(r.Context(), observed); err != nil {
+		prepared, err := s.prepare(r.Context(), observed)
+		if err != nil {
 			writeFailure(w, http.StatusBadGateway, "GITHUB_READ_FAILED", fmt.Sprintf("could not read the repository of %s; retry release_children", child.Key))
 			return false
 		}
+		observed = prepared
 	}
 	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("waves/release"), observed, s.handlers...); err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("could not record %s", child.Key))

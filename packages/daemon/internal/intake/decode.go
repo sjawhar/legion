@@ -158,14 +158,15 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch issue event payload key disagrees with event issue_key")
 		}
 		// A Dispatch that resolves an issue's repository sends resolved_repo on every issue event,
-		// null for none; an event without it is from an older Dispatch, which this daemon cannot
-		// read an issue's repository from.
-		if issue.ResolvedRepo == nil {
-			return nil, fmt.Errorf("Dispatch issue event payload has no resolved_repo: it is from a Dispatch older than the one this daemon needs")
-		}
+		// null for none. An event JetStream retained from an older Dispatch has no such field: it
+		// still carries its actor and sequence, which the workflow's fences read, so it is decoded
+		// with its repository missing, for the consumer's PrepareRepository to fill.
+		missing := issue.ResolvedRepo == nil
 		var resolved *string
-		if err := json.Unmarshal(issue.ResolvedRepo, &resolved); err != nil {
-			return nil, fmt.Errorf("decode Dispatch issue payload resolved_repo: %w", err)
+		if !missing {
+			if err := json.Unmarshal(issue.ResolvedRepo, &resolved); err != nil {
+				return nil, fmt.Errorf("decode Dispatch issue payload resolved_repo: %w", err)
+			}
 		}
 		parent := ""
 		if issue.Parent != nil {
@@ -180,7 +181,8 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			actorSession = event.Actor.ID
 		}
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
-			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved)}, nil
+			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
+			ResolvedRepoMissing: missing}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`

@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -45,6 +46,23 @@ func (e *Engine) ResolveRepository(resolved string) (Resolution, error) {
 		return Resolution{}, errors.New("the workflow holds no repository mapping to record an issue's repository from")
 	}
 	return e.cfg.Repositories.ResolveRepository(resolved)
+}
+
+// SettleRetainedRepository is fact with a retained event's missing repository
+// (intake.DispatchIssue.ResolvedRepoMissing) settled from the issue's record, recorded: an issue's
+// repository is its record's, so the event is applied with it, keeping its own actor and sequence.
+// A fact the consumer's preparation did not fill for an issue not yet recorded is refused, so the
+// event is retried: nothing records an issue on a repository nobody read.
+func SettleRetainedRepository(fact intake.DispatchIssue, recorded *record.Issue) (intake.DispatchIssue, error) {
+	if !fact.ResolvedRepoMissing {
+		return fact, nil
+	}
+	if recorded == nil {
+		return fact, fmt.Errorf("the event %d of %s predates Dispatch's resolved_repo and %s is not recorded: it is applied once its repository is read from Dispatch",
+			fact.Seq, fact.Key, fact.Key)
+	}
+	fact.ResolvedRepo, fact.ResolvedRepoMissing = recorded.Repo, false
+	return fact, nil
 }
 
 // setRepositoryHint is the end of every note that asks for an issue's repository.

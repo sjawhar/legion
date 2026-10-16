@@ -76,8 +76,8 @@ func TestDefaultBranchesReadsGitHubOncePerTTL(t *testing.T) {
 	widgets := ghrepo.MustParse("acme/widgets")
 
 	for range 2 {
-		if got, err := branches.Of(context.Background(), widgets); err != nil || got != "release/v7.1" {
-			t.Fatalf("Of = %q, %v; want release/v7.1", got, err)
+		if got, err := branches.Named(context.Background(), widgets); err != nil || got.DefaultBranch != "release/v7.1" {
+			t.Fatalf("Named = %+v, %v; want release/v7.1", got, err)
 		}
 	}
 	if reads := github.reads.Load(); reads != 1 {
@@ -87,8 +87,8 @@ func TestDefaultBranchesReadsGitHubOncePerTTL(t *testing.T) {
 	github.defaultBranch = "trunk"
 	github.mu.Unlock()
 	clock = clock.Add(10 * time.Minute)
-	if got, err := branches.Of(context.Background(), widgets); err != nil || got != "trunk" {
-		t.Fatalf("Of after the TTL = %q, %v; want GitHub's trunk", got, err)
+	if got, err := branches.Named(context.Background(), widgets); err != nil || got.DefaultBranch != "trunk" {
+		t.Fatalf("Named after the TTL = %+v, %v; want GitHub's trunk", got, err)
 	}
 	if reads := github.reads.Load(); reads != 2 {
 		t.Fatalf("a read after the TTL left GitHub asked %d times, want twice", reads)
@@ -108,12 +108,12 @@ func TestDefaultBranchesKeepsNoRefusal(t *testing.T) {
 	branches := newDefaultBranches(roleTokens{}, github.url, 10*time.Minute, time.Now)
 	widgets := ghrepo.MustParse("acme/widgets")
 
-	if _, err := branches.Of(context.Background(), widgets); err == nil || !strings.Contains(err.Error(), "read the default branch of acme/widgets") || !strings.Contains(err.Error(), "500") {
-		t.Fatalf("Of on a 500 = %v, want GitHub's answer naming the repository", err)
+	if _, err := branches.Named(context.Background(), widgets); err == nil || !strings.Contains(err.Error(), "read the default branch of acme/widgets") || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("Named on a 500 = %v, want GitHub's answer naming the repository", err)
 	}
 	github.answer(http.StatusOK)
-	if got, err := branches.Of(context.Background(), widgets); err != nil || got != "main" {
-		t.Fatalf("Of after the 500 = %q, %v; want main", got, err)
+	if got, err := branches.Named(context.Background(), widgets); err != nil || got.DefaultBranch != "main" {
+		t.Fatalf("Named after the 500 = %+v, %v; want main", got, err)
 	}
 	if reads := github.reads.Load(); reads != 2 {
 		t.Fatalf("GitHub was asked %d times, want twice: the refusal is not kept", reads)
@@ -137,8 +137,8 @@ func TestDefaultBranchesNamesTheRepositoryAndKeepsTheLastRead(t *testing.T) {
 	if err != nil || named.Name != ghrepo.MustParse("Acme/Widgets") || named.DefaultBranch != "release/v7.1" {
 		t.Fatalf("Named = %+v, %v; want Acme/Widgets at release/v7.1", named, err)
 	}
-	if got, err := branches.Of(context.Background(), ghrepo.MustParse("Acme/Widgets")); err != nil || got != "release/v7.1" {
-		t.Fatalf("Of in GitHub's spelling = %q, %v", got, err)
+	if got, err := branches.Named(context.Background(), ghrepo.MustParse("Acme/Widgets")); err != nil || got != named {
+		t.Fatalf("Named in GitHub's spelling = %+v, %v; want the same read %+v", got, err, named)
 	}
 	if reads := github.reads.Load(); reads != 1 {
 		t.Fatalf("two spellings of one repository asked GitHub %d times, want once", reads)
@@ -164,11 +164,11 @@ func TestDefaultBranchesSharesOneReadInFlight(t *testing.T) {
 	answers := make(chan string, readers)
 	for range readers {
 		wg.Go(func() {
-			got, err := branches.Of(context.Background(), widgets)
+			got, err := branches.Named(context.Background(), widgets)
 			if err != nil {
-				t.Errorf("Of: %v", err)
+				t.Errorf("Named: %v", err)
 			}
-			answers <- got
+			answers <- got.DefaultBranch
 		})
 	}
 	deadline := time.After(10 * time.Second)

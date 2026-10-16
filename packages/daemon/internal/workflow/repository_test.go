@@ -137,6 +137,37 @@ func TestARecordedIssueKeepsItsRepositoryAndSaysAnEditIsNotApplied(t *testing.T)
 	}
 }
 
+// A retained event names no repository (ResolvedRepoMissing). A recorded issue's is applied with
+// its record's repository, so it says nothing of a repository change; an unrecorded issue's is
+// refused, so the event is retried until its repository is read, and nothing is recorded on a
+// repository nobody read.
+func TestARetainedEventIsAppliedWithTheRecordsRepositoryAndNeverRecordsAnUnreadOne(t *testing.T) {
+	pool := migratedPool(t)
+	openTree(t, pool)
+	parent := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/tools", DefaultBranch: "release/v7.1", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+		Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog", Rank: "V", LastDispatchSeq: 2})
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	retained := childTodo(3, "")
+	retained.ResolvedRepoMissing = true
+	applyFacts(t, pool, engine)("retained-reopen", retained)
+	if child := issueRecord(t, pool, "LEGION-209"); child.Repo != "acme/tools" || child.Generation != 2 {
+		t.Fatalf("child = %#v, want it re-entered on acme/tools", child)
+	}
+	if messages := outboxOf(t, pool, "dispatch_message"); len(messages) != 0 {
+		t.Fatalf("Dispatch messages = %#v, want none: the event names no repository change", messages)
+	}
+
+	unrecorded := intake.DispatchIssue{Key: "LEGION-210", Seq: 1, Type: "issue.updated", Status: "todo", Title: "new child", Parent: "LEGION-208", Rank: "W", ResolvedRepoMissing: true}
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "retained-new-child", unrecorded, engine, admissionStub{}); err == nil ||
+		!strings.Contains(err.Error(), "predates Dispatch's resolved_repo") {
+		t.Fatalf("applying a retained event of an unrecorded child = %v, want it refused for retry", err)
+	}
+	if child := issueRecord(t, pool, "LEGION-210"); child != nil {
+		t.Fatalf("LEGION-210 recorded as %#v, want nothing recorded", child)
+	}
+}
+
 type outboxEntry struct {
 	issue   string
 	payload map[string]any

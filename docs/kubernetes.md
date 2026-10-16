@@ -1633,17 +1633,19 @@ Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bund
 `GH_CONFIG_DIR=/var/run/legion/gh/<owner>`, the issue's repository's owner's directory, and
 `LEGION_GH_PATH=/usr/local/bin/gh`, the image's real gh. The `gh` first on its PATH is
 `/opt/legion/bin/gh`, which runs `legion gh`: it runs the real gh with `GH_CONFIG_DIR` at the
-directory of the owner the command names (`GH_REPO`, `-R`/`--repo`, a `repos/<owner>/…` path of `gh
-api`, a `https://github.com/<owner>/…` URL, or `gh repo <command> <owner>/<repo>`), and at the
-issue owner's otherwise. `git` reads the same files through the shared clone's `credential.helper`,
-`!legion git-credential`, with `credential.useHttpPath` on, so the helper answers from the
-`hosts.yml` of the owner in the path git asks about; `workspace-init provision` is passed it as
-`--credential-helper '!legion git-credential'`, and the `legion` in it resolves on the PATH of
-whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` are set to the empty string,
-which gh ignores, so no value the image or an operator's rc file leaves in the environment outranks
-the files. No container is told `LEGION_GIT_PATH`, `LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a
-grant file (the `legion` tool mints the grants for its own daemon calls in-process), and nothing is
-installed under the issue's volume for a pod to run: a pod's `git` and `jj` are the image's,
+directory of the owner the command names, resolved as gh resolves it (a `repos/<owner>/…` endpoint
+of `gh api`, a pull request or issue URL over `-R`/`--repo`, `-R` over `GH_REPO`, `gh repo <command>
+<owner>/<repo>`), at the issue owner's when it names none, and refuses a command naming an owner the
+bundle holds no directory for. `git` reads the same files through the shared clone's
+`credential.helper`, `!legion git-credential`, with `credential.useHttpPath` on, so the helper
+answers from the `hosts.yml` of the owner in the path git asks about and from nothing else;
+`workspace-init provision` is passed it as `--credential-helper '!legion git-credential'`, and the
+`legion` in it resolves on the PATH of whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
+`GH_HOST` are set to the empty string, which gh ignores, so no value the image or an operator's rc
+file leaves in the environment outranks the files. No container is told `LEGION_GIT_PATH`,
+`LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a grant file (the `legion` tool mints the grants for
+its own daemon calls in-process), and nothing is installed under the issue's volume for a pod to
+run: a pod's `git` and `jj` are the image's,
 resolved on its PATH, which puts only the `legion` directory first. The daemon renders the gh keys
 when it writes the role Secret at the pod's start, logging `sandbox runtime: github credential
 written` with the sandbox, role, App, `expiresAt` and owners, and a refresher walks every live role

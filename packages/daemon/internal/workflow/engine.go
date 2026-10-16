@@ -136,6 +136,9 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if err != nil {
 		return intake.Result{}, err
 	}
+	if fact, err = SettleRetainedRepository(fact, issue); err != nil {
+		return intake.Result{}, err
+	}
 	if issue == nil {
 		return e.recordChildUnderLiveTree(ctx, tx, fact)
 	}

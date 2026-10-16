@@ -60,10 +60,11 @@ type ConsumerSpec struct {
 	RepositoryMapping func(ctx context.Context) error
 	// PrepareRepository readies what the workflow reads in memory of the repository a Dispatch
 	// issue event resolves to (DispatchIssue.ResolvedRepo), before the fact is applied, within
-	// AckWait: the workflow performs no I/O, and takes the repository and its default branch when it
-	// first records an issue. A failed preparation is retried after NakDelay rather than applied
-	// without it. No preparer (a test) applies the fact as decoded.
-	PrepareRepository func(ctx context.Context, issue DispatchIssue) error
+	// AckWait, and returns the fact to apply: the workflow performs no I/O, and takes the repository
+	// and its default branch when it first records an issue, so a retained event's missing
+	// repository (ResolvedRepoMissing) is filled here. A failed preparation is retried after
+	// NakDelay rather than applied without it. No preparer (a test) applies the fact as decoded.
+	PrepareRepository func(ctx context.Context, issue DispatchIssue) (DispatchIssue, error)
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -268,10 +269,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		ackMessage(spec.Logger, message)
 		return
 	}
-	if err := prepareRepository(ctx, spec, decoded.Fact); err != nil {
+	prepared, err := prepareRepository(ctx, spec, decoded.Fact)
+	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "prepare the issue's repository", "nak the repository preparation", err)
 		return
 	}
+	decoded.Fact = prepared
 	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
@@ -313,12 +316,12 @@ func readMapping(ctx context.Context, spec ConsumerSpec) error {
 	return spec.RepositoryMapping(read)
 }
 
-// prepareRepository runs ConsumerSpec.PrepareRepository for a Dispatch issue fact, within AckWait.
-// Every other fact passes through untouched.
-func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact) error {
+// prepareRepository runs ConsumerSpec.PrepareRepository for a Dispatch issue fact, within AckWait,
+// and is the fact to apply. Every other fact passes through untouched.
+func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
 	issue, ok := fact.(DispatchIssue)
 	if !ok || spec.PrepareRepository == nil {
-		return nil
+		return fact, nil
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()

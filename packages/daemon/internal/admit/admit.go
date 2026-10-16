@@ -127,6 +127,9 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if err != nil {
 		return nil, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
+	if observation, err = workflow.SettleRetainedRepository(observation, stored); err != nil {
+		return nil, err
+	}
 	if stored == nil {
 		handed := observation.HandedOver
 		// A root in triage handed to Legion is the controller's to triage, so each observation of it

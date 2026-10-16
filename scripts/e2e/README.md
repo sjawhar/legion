@@ -354,7 +354,7 @@ credentials (`in-agent-credentials`): in one bash tool call of a real implemente
 launcher directory's `legion gh` wrapper, over the daemon's PATH's real gh (`LEGION_GH_PATH`) —
 authenticates as the implement App's bot (`role_app implementer`) from the repository owner's
 directory of the claim's gh bundle, which the pane's `GH_CONFIG_DIR` names and whose root
-(`LEGION_GH_OWNERS_DIR`) holds that one owner's directory beside its `.default`; the shared clone's
+(`LEGION_GH_OWNERS_DIR`) holds that one owner's directory alone; the shared clone's
 helper is `!legion git-credential` with `credential.useHttpPath`; a `task` subagent
 of that pane does the same with no bash command of the parent's first, since it inherits the same
 directory, and `gh auth status` names account `x-access-token`; nothing of the pane's redeems a

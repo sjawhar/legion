@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -454,6 +455,11 @@ func TestControllerGitHubCredential(t *testing.T) {
 	}
 	wantFailure(t, h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "../x"}, nil),
 		http.StatusBadRequest, "INVALID_DEFAULT_OWNER")
+	outside := h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "outside-project"}, nil)
+	if body := outside.Body.String(); !strings.Contains(body, `\"outside-project\"`) || strings.Contains(body, "token-for") {
+		t.Errorf("a default outside the project answered %s, want a refusal naming it and no token", body)
+	}
+	wantFailure(t, outside, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT")
 
 	wantFailure(t, h.controllerGitHubCredential("not-the-capability"), http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY")
 

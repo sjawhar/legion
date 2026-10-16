@@ -46,11 +46,13 @@ func bundleTokens(t *testing.T, bundle ghconfig.Bundle) map[string]string {
 
 // A role's gh bundle holds every owner of the project: its App's own lease for the owner it writes
 // to (its issue's), lowercased, which is the bundle's default, and a lease of the same App narrowed
-// to reading for every other owner; an owner outside the project's set still gets its write lease.
-// The controller writes to no owner: every owner is read-only, as the review App, and the default
-// is the owner it is asked for (the one its launch recorded), or the first owner when it is asked
-// for none. A mint that fails fails the bundle, naming the owner; a project with no owner at all
-// has no bundle.
+// to reading for every other owner; an owner outside the project's set still gets its write lease,
+// since a role's owner is its issue's repository's, from the daemon's own record. The controller
+// writes to no owner: every owner is read-only, as the review App, and the default is the owner it
+// is asked for (the one its launch recorded) or the first owner when it is asked for none; an
+// owner outside the project is refused (ErrOwnerOutsideProject) and mints nothing, since the
+// controller's default is no authority to read another owner's repositories. A mint that fails
+// fails the bundle, naming the owner; a project with no owner at all has no bundle.
 func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 	owners := func() []string { return []string{"sjawhar", "Acme"} }
 	credential := GitHubCredential(ownerTokens{}, owners)
@@ -104,4 +106,23 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 	if _, err := none(context.Background(), claim.RoleController, ""); !errors.Is(err, ErrNoOwner) {
 		t.Errorf("a bundle with no owner = %v, want ErrNoOwner", err)
 	}
+	var minted []string
+	counting := GitHubCredential(countingTokens{minted: &minted}, owners)
+	if _, err := counting(context.Background(), claim.RoleController, "Outside-Project"); !errors.Is(err, ErrOwnerOutsideProject) ||
+		!strings.Contains(err.Error(), `"outside-project"`) || len(minted) != 0 {
+		t.Errorf("the controller asking for an owner outside the project = %v, minted %q; want ErrOwnerOutsideProject naming it and no mint", err, minted)
+	}
+}
+
+// countingTokens records every owner it is asked to mint for.
+type countingTokens struct{ minted *[]string }
+
+func (t countingTokens) Token(ctx context.Context, role AppRole, owner string) (Lease, error) {
+	*t.minted = append(*t.minted, owner)
+	return ownerTokens{}.Token(ctx, role, owner)
+}
+
+func (t countingTokens) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
+	*t.minted = append(*t.minted, owner)
+	return ownerTokens{}.ReadToken(ctx, role, owner)
 }

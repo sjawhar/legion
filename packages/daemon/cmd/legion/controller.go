@@ -301,12 +301,21 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh
 // controllerRealGH is the real gh the controller's `legion gh` runs, its LEGION_GH_PATH: the
 // operator's own LEGION_GH_PATH when set, which a start from inside a Legion pane inherits from
 // that pane, and otherwise the first gh on the operator's PATH that is not this state directory's
-// own wrapper (workerbin.LauncherDir), which would run itself. A relative LEGION_GH_PATH, and no gh
-// at all, are refused before the daemon is asked for anything.
+// own wrapper (workerbin.LauncherDir), which would run itself. Either is an executable file; a
+// LEGION_GH_PATH that is relative, absent or not executable, and no gh at all, are refused before
+// the daemon is asked for anything, since the mint that follows replaces the running controller's
+// capability.
 func controllerRealGH(stateDir string) (string, error) {
 	if gh := os.Getenv("LEGION_GH_PATH"); gh != "" {
 		if !filepath.IsAbs(gh) {
 			return "", fmt.Errorf("LEGION_GH_PATH %q is not an absolute path: the controller's gh wrapper (legion gh) runs it", gh)
+		}
+		info, err := os.Stat(gh)
+		if err != nil {
+			return "", fmt.Errorf("LEGION_GH_PATH %q: %w; the controller's gh wrapper (legion gh) runs it", gh, err)
+		}
+		if !executableFile(info) {
+			return "", fmt.Errorf("LEGION_GH_PATH %q is not an executable file: the controller's gh wrapper (legion gh) runs it", gh)
 		}
 		return gh, nil
 	}
@@ -316,11 +325,16 @@ func controllerRealGH(stateDir string) (string, error) {
 			continue
 		}
 		gh := filepath.Join(dir, "gh")
-		if info, err := os.Stat(gh); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+		if info, err := os.Stat(gh); err == nil && executableFile(info) {
 			return gh, nil
 		}
 	}
 	return "", errors.New("gh is not on PATH: the controller's gh wrapper (legion gh) runs it; install gh or set LEGION_GH_PATH to an absolute executable path")
+}
+
+// executableFile says whether info is a regular file someone may execute.
+func executableFile(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 // probeAndMint is the controller probe and then the one daemon call, which mints the capability:
