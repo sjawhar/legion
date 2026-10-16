@@ -1671,7 +1671,7 @@ Every pod runs:
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated with two stop-eviction annotations:
+- annotated against autoscaler eviction:
   - `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own, which GKE's cluster-autoscaler ignores;
   - the issue pod and the project controller's additionally carry
     `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, the upstream Cluster Autoscaler's own
@@ -1681,11 +1681,13 @@ Every pod runs:
     operator-initiated drain;
   - on GKE Autopilot this second annotation also adds a required node affinity
     (`cloud.google.com/extended-duration-pods`) and gives the pod a node of its own whenever
-    possible, which costs each launch a new node and a cold image pull ([Image size and pull
+    possible, which usually costs each pod it creates (an issue's first launch, or a relaunch that
+    replaces the pod) a fresh node and a cold image pull ([Image size and pull
     time](#image-size-and-pull-time));
-  - Autopilot refuses the pod outright under the `cloud.google.com/gke-spot` node selector or
-    toleration (it offers no extended duration to a Spot Pod requested any other way, such as the
-    `autopilot-spot` compute class);
+  - a pod carrying it is refused outright under the `cloud.google.com/gke-spot` node selector or
+    toleration (GKE offers no extended duration to a Spot Pod requested any other way, such as the
+    `autopilot-spot` compute class); the boot probe (below) carries neither annotation, so it does
+    not catch a `gke-spot` scheduling config before every issue and controller launch is refused;
   - the image probe pod (below) carries only the first: a dedicated node per boot would cost more
     than the eviction window buys a probe that is already short-lived and retried on failure.
 
@@ -3060,7 +3062,7 @@ carries `legion.dev/project` and `legion.dev/role=controller` and no tree or iss
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
 agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it, so under
-Karpenter it lands wherever the pool has room for it (on GKE Autopilot it gets a node of its own,
+Karpenter it lands wherever the pool has room for it (on GKE Autopilot it usually gets a node of its own,
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and it is annotated `karpenter.sh/do-not-disrupt:
 "true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
 or replaces for drift the node it runs on, though issue pods can still be scheduled onto that node;
