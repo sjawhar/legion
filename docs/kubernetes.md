@@ -2291,23 +2291,35 @@ nothing the launch did, so the runtime sends that request again after a jittered
 doubling to 8 s) rather than failing the launch, and the launch goes on from that request once the
 server answers it. It does so for as long as the launch's own deadline for the request allows: the
 boot timeout from its first send, or the deadline of the launch step it belongs to when that comes
-first. Each throttled request logs `sandbox runtime: the API server answered a launch's request
-overloaded; sending it again after a backoff` once, naming it, and `… it had answered overloaded`
-once the server answers, with how many overloaded answers it waited out. No launch failure is
-charged while it waits. A request the server still answers overloaded at its deadline fails the
-launch with that answer, which says how often and how long it was waited out, and the failure is
-charged as any other is. The classification is `serverBusy` in
-`internal/runtime/sandbox/busy.go`: the client's own timeout, a connection that never reached the
-server, and every other 4xx are not the server answering overloaded. Only a launch's requests wait
-the server out; a sweep, a suspension or a hello's credential read fails on the answer and is
-tried again by its own caller.
+first; a request made inside one of a launch's waits (for the old pod's end, the new pod, the role
+launcher) ends with that wait's budget. Each throttled request logs `sandbox runtime: the API
+server answered a launch's request overloaded; sending it again after a backoff` once, naming it,
+and `… it had answered overloaded` once the server answers, with how many overloaded answers it
+waited out. No launch failure is charged while it waits. A request the server still answers
+overloaded at its deadline fails the launch with that answer, which says how often and how long it
+was waited out, and the failure is charged as any other is. The classification is `serverBusy` in
+`internal/runtime/sandbox/busy.go`: an answer with a status is judged by its reason
+(`TooManyRequests`, `InternalError`, `ServerTimeout`, `Timeout` and `ServiceUnavailable` are busy,
+any other reason a refusal), by its code (429, or 500 and up) only when it names no reason, and as
+a refusal whenever its message says an admission webhook denied the request; etcd's
+`ResourceExhausted` text counts only in an error with no status. The client's own timeout and a
+connection that never reached the server are not the server answering overloaded. A write sent
+again may have been applied the first time: a Secret create refused as already existing, or an
+update refused as a conflict, is read and written once more, and a fenced relabel of the
+Sandbox refused as invalid is read again and decided anew. While the API server refuses the
+informers' own lists or watches as overloaded, a launch waiting for its role launcher waits on,
+within its deadline, until the informers list and watch again. Only a launch's requests wait the
+server out; a sweep, a suspension or a hello's credential read fails on the answer and is tried
+again by its own caller.
 
 Under either runtime, a launch failure that is charged is spaced from the next try by the machine's
 launch backoff: 2 s after the first, doubling after each further one, each wait drawn between half
 its step and the whole of it. A launch the runtime refused is tried again after it, and so is a
 process that died or was retired at its registration deadline, so the three tries of
 `launch_failure_limit`'s default span three seconds at least, never the moment one fault lasts.
-The wait logs `supervise: waiting before the next launch` with its length.
+The wait logs `supervise: waiting before the next launch` with its length. The try it waits for is
+stored launching with the charge before the wait begins, so a daemon stop during it forgives
+nothing; the next boot launches the claim again.
 
 A role's launcher credential is read once however often its launcher says hello. The read is
 single-flight per Secret of a Sandbox and outlives the hello that began it: the hello waits for it

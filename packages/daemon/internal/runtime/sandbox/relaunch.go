@@ -232,8 +232,14 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 	// past twice the boot timeout plus ProvisionBound from the start. Two recheck intervals more let
 	// that check end the wait first.
 	backstop := 2*r.bootTimeout + r.ProvisionBound() + 2*recheckInterval
-	err := r.await(ctx, backstop, what, func() (bool, error) {
+	err := r.await(ctx, backstop, what, func(context.Context) (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
+		if serverBusy(err) && time.Now().Before(deadline) {
+			// A store whose list or watch the API server answers overloaded is waited out within the
+			// wait's deadline, as the launch's own requests are (resend): the informer lists and
+			// watches again by itself.
+			return false, nil
+		}
 		if err != nil {
 			return false, err
 		}
@@ -364,13 +370,19 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping its volume",
 				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree, "operatingMode", s.mode())
 			relabelled, err := r.patch(ctx, s, ops...)
+			if apierrors.IsInvalid(err) && time.Now().Before(deadline) {
+				// The fence's test failed: the Sandbox changed since the read, or this patch, sent
+				// again after an overloaded answer (resend), was already applied. Read it again and
+				// decide from what it holds now.
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
 			}
 			return relabelled, nil
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
-		gone := func() (bool, error) {
+		gone := func(ctx context.Context) (bool, error) {
 			current, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return true, nil
@@ -389,7 +401,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 // the incarnation the relaunch will return.
 func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]bool, error) {
 	old := map[types.UID]bool{}
-	gone := func() (bool, error) {
+	gone := func(ctx context.Context) (bool, error) {
 		if pod := r.storedPod(s.Name); ownedBy(pod, s.UID) {
 			old[pod.UID] = true
 			return false, nil
@@ -421,7 +433,7 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID]bool) (*corev1.Pod, error) {
 	var found *corev1.Pod
 	what := fmt.Sprintf("a new pod of sandbox %s and its Running patch in the Sandbox store", s.Name)
-	err := r.await(ctx, r.bootTimeout, what, func() (bool, error) {
+	err := r.await(ctx, r.bootTimeout, what, func(context.Context) (bool, error) {
 		pod := r.storedPod(s.Name)
 		if !ownedBy(pod, s.UID) || old[pod.UID] || pod.DeletionTimestamp != nil {
 			return false, nil
@@ -509,7 +521,20 @@ func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMet
 	}
 }
 
+// upsertSecret writes want, creating it, updating the Sandbox's own Secret by its name, or
+// replacing one that is not the Sandbox's (writeSecret). A create refused as already done, or an
+// update refused as a conflict, is read and written once more: a launch's write the server applied
+// and answered overloaded is sent again (resend) and refused that way, so what it left is read
+// before the launch goes on from it, as bindLauncherSecrets reads again after a conflict.
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
+	err := r.writeSecret(ctx, want)
+	if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
+		err = r.writeSecret(ctx, want)
+	}
+	return err
+}
+
+func (r *Runtime) writeSecret(ctx context.Context, want corev1.Secret) error {
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
 	switch {

@@ -484,8 +484,12 @@ func (r *Runtime) notify(obj any) {
 }
 
 // await re-checks done after every informer event, and every recheck interval, until it reports
-// true, fails, or budget passes; what names the wait in the timeout.
-func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, done func() (bool, error)) error {
+// true, fails, or budget passes; what names the wait in the timeout. done is handed ctx bounded by
+// budget, so a request it makes, a launch's waiting out an overloaded server included (resend),
+// ends with the wait rather than up to a boot timeout past it.
+func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, done func(context.Context) (bool, error)) error {
+	bounded, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	deadline := time.NewTimer(budget)
 	defer deadline.Stop()
 	recheck := time.NewTicker(recheckInterval)
@@ -494,7 +498,7 @@ func (r *Runtime) await(ctx context.Context, budget time.Duration, what string, 
 		r.mu.Lock()
 		changed := r.changed
 		r.mu.Unlock()
-		ok, err := done()
+		ok, err := done(bounded)
 		if err != nil || ok {
 			return err
 		}

@@ -849,18 +849,14 @@ func (m *Machine) launch(ctx context.Context) error {
 }
 
 // launchAfter is launch, whose first try waits the backoff when charged: the launch follows a
-// launch failure charged just before it (relaunchAfterFailure).
+// launch failure charged just before it (relaunchAfterFailure). Each try is written launching, at
+// its generation and with every charge so far, before its backoff waits.
 func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
 	}
 	m.letGo()
 	for {
-		if charged {
-			if err := m.backOff(ctx); err != nil {
-				return err
-			}
-		}
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
@@ -868,6 +864,11 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 		m.claim.State = StateLaunching
 		if err := m.persist(ctx); err != nil {
 			return errors.Join(err, m.stopPrevious(ctx))
+		}
+		if charged {
+			if err := m.backOff(ctx); err != nil {
+				return err
+			}
 		}
 		loc, err := m.start(ctx, token)
 		if err == nil {
@@ -901,8 +902,9 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 // budget allows are spread over seconds rather than spent in the moment one fault lasts — a launch
 // the runtime refuses would otherwise be tried again at once, and a process that dies as it starts
 // be relaunched as soon as its death is seen. The wait holds the machine's decision, as a launch's
-// runtime call does. A wait the daemon's stop ends launches nothing: the claim is left as the
-// failure left it, for the next boot.
+// runtime call does. The try it waits for is already written launching with its charge, so a wait
+// the daemon's stop ends forgives nothing: the next boot launches that claim again, as it does a
+// launch its context cut short.
 func (m *Machine) backOff(ctx context.Context) error {
 	wait := backoff.Wait(m.deps.Timeouts.LaunchBackoff, m.claim.Budgets.LaunchFailures)
 	m.log.Info("supervise: waiting before the next launch", "after", wait, "launchFailures", m.claim.Budgets.LaunchFailures)

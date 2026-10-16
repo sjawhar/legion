@@ -27,26 +27,36 @@ import (
 const defaultBusyBackoff = 250 * time.Millisecond
 
 // serverBusy is whether err is the API server's answer that it is overloaded or failed, rather
-// than its refusal of the request: 429 Too Many Requests, which API Priority and Fairness answers
-// once client-go's own Retry-After retries ran out; any 5xx, such as the 500 etcd's throttle reaches
-// a client as (`rpc error: code = ResourceExhausted desc = etcdserver: throttle: too many
-// requests`), a 503 or a 504; and an error that carries etcd's ResourceExhausted gRPC status in its
-// text alone. It is the one place the runtime tells the two apart. No answer at all is neither — the
-// client's own timeout, a connection that never reached the server — and any other 4xx refuses the
-// request itself.
+// than its refusal of the request. It is the one place the runtime tells the two apart. An answer
+// that carries a status is judged by the status's reason: TooManyRequests, which API Priority and
+// Fairness answers once client-go's own Retry-After retries ran out, InternalError, such as the 500
+// etcd's throttle reaches a client as (`rpc error: code = ResourceExhausted desc = etcdserver:
+// throttle: too many requests`), ServerTimeout, Timeout and ServiceUnavailable are busy, and every
+// other reason refuses the request; only a status that names no reason is judged by its code, 429
+// or 500 and up. A status whose message says an admission webhook denied the request is a refusal
+// whatever its reason or code. An error that carries no status is busy only when it carries etcd's
+// ResourceExhausted gRPC status in its text; no answer at all — the client's own timeout, a
+// connection that never reached the server — is not.
 func serverBusy(err error) bool {
 	if err == nil {
 		return false
 	}
-	if apierrors.IsTooManyRequests(err) || apierrors.IsInternalError(err) || apierrors.IsServerTimeout(err) ||
-		apierrors.IsServiceUnavailable(err) || apierrors.IsTimeout(err) {
-		return true
-	}
 	var status apierrors.APIStatus
-	if errors.As(err, &status) && status.Status().Code >= http.StatusInternalServerError {
-		return true
+	if !errors.As(err, &status) {
+		return strings.Contains(err.Error(), "code = ResourceExhausted")
 	}
-	return strings.Contains(err.Error(), "code = ResourceExhausted")
+	s := status.Status()
+	if strings.Contains(s.Message, "denied the request") {
+		return false
+	}
+	switch s.Reason {
+	case metav1.StatusReasonTooManyRequests, metav1.StatusReasonInternalError, metav1.StatusReasonServerTimeout,
+		metav1.StatusReasonTimeout, metav1.StatusReasonServiceUnavailable:
+		return true
+	case metav1.StatusReasonUnknown:
+		return s.Code == http.StatusTooManyRequests || s.Code >= http.StatusInternalServerError
+	}
+	return false
 }
 
 // launchKey marks a context as a launch's (launching).
@@ -69,12 +79,12 @@ func isLaunch(ctx context.Context) bool {
 // resend sends one request and, when it is a launch's (launching), sends it again after a jittered
 // backoff (backoff.Wait from Options.BusyBackoff) for as long as the API server answers it
 // overloaded (serverBusy) and the launch's own deadline for it allows: the boot timeout from its
-// first send, the bound each wait of a launch has, or ctx's deadline when that comes first. What
-// reaches the launch is the server's answer to the request, or, once the deadline leaves no room
-// for another wait or ctx ends, its last overloaded one, saying how long it was waited out, which
-// the launch then fails on as on any other error. A launch the server keeps waiting is charged
-// nothing while it waits; supervision charges a launch that failed. what names the request in the
-// log.
+// first send, or ctx's deadline when that comes first — a request a launch's wait makes (await) has
+// that wait's budget as ctx's deadline, and a start that of its start step. What reaches the launch
+// is the server's answer to the request, or, once the deadline leaves no room for another wait or
+// ctx ends, its last overloaded one, saying how long it was waited out, which the launch then fails
+// on as on any other error. A launch the server keeps waiting is charged nothing while it waits;
+// supervision charges a launch that failed. what names the request in the log.
 func resend[T any](ctx context.Context, r *Runtime, what string, send func() (T, error)) (T, error) {
 	answer, err := send()
 	if !serverBusy(err) || !isLaunch(ctx) {
