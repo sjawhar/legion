@@ -48,3 +48,10 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 func DispatchKubeconfig(endpoint, ca, name string) string {
 	return renderKubeconfig(endpoint, ca, name)
 }
+
+// DispatchListenerEnvError resolves the listener container's environment from the one NATS URL,
+// for the refusal tests: nil when the URL renders an environment.
+func DispatchListenerEnvError(hostname, url string) error {
+	_, err := dispatchListenerEnv(hostname, url)
+	return err
+}

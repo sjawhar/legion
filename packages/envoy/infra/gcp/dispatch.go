@@ -56,8 +56,8 @@ type DispatchArgs struct {
 	Namespace          *string `pulumi:"namespace,optional"`
 
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
-	// pods the NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster namespace;
-	// the tailnet path (Tailscale Serve on 443) is unaffected either way.
+	// pods the NetworkPolicy admits on port 8766. Unset or empty, the policy admits no ingress at
+	// all; the tailnet path (Tailscale Serve on 443) is unaffected either way.
 	AllowedNamespaces []string `pulumi:"allowedNamespaces,optional"`
 }
 
@@ -85,6 +85,11 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	for i, tag := range args.Tags {
 		if bus.HoldsSeed(tag) {
 			return fmt.Sprintf("tags[%d]", i), true
+		}
+	}
+	for i, namespace := range args.AllowedNamespaces {
+		if bus.HoldsSeed(namespace) {
+			return fmt.Sprintf("allowedNamespaces[%d]", i), true
 		}
 	}
 	if args.DatabaseVersion != nil && bus.HoldsSeed(*args.DatabaseVersion) {
@@ -205,19 +210,34 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		s.deletionProtection = *args.DeletionProtection
 	}
 	if args.Namespace != nil {
-		if !namespaceRule.MatchString(*args.Namespace) {
+		if !dnsLabel(*args.Namespace) {
 			return dispatchSettings{}, fmt.Errorf("namespace %q must be a DNS label", *args.Namespace)
 		}
 		s.namespace = *args.Namespace
+	}
+	for i, namespace := range args.AllowedNamespaces {
+		if !dnsLabel(namespace) {
+			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
+		}
 	}
 	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`,
 		s.hostname, s.tailnetDNSName)
 	return s, nil
 }
 
+// dnsLabel reports whether value is a DNS-1123 label: namespaceRule's shape, at most 63 characters.
+func dnsLabel(value string) bool {
+	return len(value) <= 63 && namespaceRule.MatchString(value)
+}
+
 // NewDispatch registers a Dispatch component after resolving all plain inputs and requiring the
 // providers its cluster, database, generated secrets, and Kubernetes resources use.
 func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...pulumi.ResourceOption) (*Dispatch, error) {
+	// The name is quoted in every refusal below and the component registers under it, so a seed
+	// there is refused first, as NewNatsHub refuses one in its own name.
+	if bus.HoldsSeed(name) {
+		return nil, fmt.Errorf("%s: %w", dispatchType, core.SeedRefusal("the component's name"))
+	}
 	s, err := newDispatchSettings(args)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", dispatchType, name, err)
@@ -237,7 +257,7 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	if err != nil {
 		return nil, err
 	}
-	kube, err := newDispatchKubernetes(ctx, comp, args, s, cloud)
+	kube, err := newDispatchKubernetes(ctx, comp, name, args, s, cloud)
 	if err != nil {
 		return nil, err
 	}

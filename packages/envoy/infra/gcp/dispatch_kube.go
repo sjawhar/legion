@@ -1,6 +1,7 @@
 package gcp
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 type dispatchKubernetes struct {
@@ -71,7 +73,60 @@ func secretEnv(name, secret, key string) corev1.EnvVarArgs {
 	}
 }
 
-func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
+// refuseDispatchSeed is value, a plain-typed Input of the component (the NATS seed secret's id),
+// with a seed refused once it resolves: the output fails naming input and never the value, so no
+// child is registered with it.
+func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi.StringOutput {
+	return value.ToStringOutput().ApplyT(func(v string) (string, error) {
+		if bus.HoldsSeed(v) {
+			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
+		}
+		return v, nil
+	}).(pulumi.StringOutput)
+}
+
+// refuseDispatchSeedInSecret is value, a secret Input of the component, as a secret, with a value
+// holding an nkey seed refused once it resolves: the output fails naming input and never the
+// value, so no child is registered with it. ApplyT keeps value's secretness, and ToSecret marks
+// the result secret whatever value's own marking.
+func refuseDispatchSeedInSecret(value pulumi.StringInput, dispatch, input string) pulumi.StringOutput {
+	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
+		if bus.HoldsSeed(v) {
+			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
+		}
+		return v, nil
+	})).(pulumi.StringOutput)
+}
+
+// dispatchListenerEnv renders the envoy-listener container's environment from the one NATS URL
+// once it resolves. core's Env names its own inputs — natsUrls by index and socks5Proxy, neither
+// an input of gcp:Dispatch — so each refusal is mapped onto natsUrl, this component's input. The
+// SOCKS5 proxy is fixed (the Tailscale sidecar's), so its refusal means the URL names a local
+// server, which the pod's NATS clients can never reach through the tailnet proxy.
+func dispatchListenerEnv(hostname, url string) (corev1.EnvVarArray, error) {
+	env, err := (core.ListenerConfig{
+		MachineID:   hostname,
+		Port:        core.DefaultListenerPort,
+		SOCKS5Proxy: "127.0.0.1:1055",
+	}).Env([]string{url})
+	if err != nil {
+		var input *core.InputError
+		if errors.As(err, &input) && input.Input == "socks5Proxy" {
+			return nil, core.InputErrorf("natsUrl", "natsUrl names a local NATS server; the pod reaches NATS only through its Tailscale sidecar's SOCKS5 proxy, so the URL must be remote (the hub's tailnet name)")
+		}
+		return nil, core.InputErrorf("natsUrl", "%s", strings.ReplaceAll(err.Error(), "natsUrls[0]", "natsUrl"))
+	}
+	values := make(corev1.EnvVarArray, 0, len(env)+1)
+	for _, item := range env {
+		name, value, _ := strings.Cut(item, "=")
+		values = append(values, valueEnv(name, value))
+	}
+	values = append(values, valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"))
+	return values, nil
+}
+
+func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
+	dispatch := dispatchType + " " + name
 	kubeconfig := pulumi.All(cloud.cluster.Endpoint, cloud.cluster.MasterAuth.ClusterCaCertificate(), cloud.cluster.Name).ApplyT(func(values []interface{}) string {
 		return renderKubeconfig(outputString(values[0]), outputString(values[1]), outputString(values[2]))
 	}).(pulumi.StringOutput)
@@ -110,13 +165,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 	authKeyName := s.hostname + "-tailnet-auth-key"
-	if _, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": args.TailnetAuthKey}}, child...); err != nil {
+	if _, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...); err != nil {
 		return nil, err
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", cloud.password.Result)
 	if _, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: pulumi.StringMap{
-		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": args.SignInClientSecret,
+		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret"),
 	}}, child...); err != nil {
 		return nil, err
 	}
@@ -125,7 +180,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 	seedName := s.hostname + "-nats-seed"
-	seedPath := args.NatsSeedSecret.ToStringOutput().ApplyT(func(secret string) string {
+	seedPath := refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret").ApplyT(func(secret string) string {
 		return strings.TrimSuffix(secret, "/") + "/versions/latest"
 	}).(pulumi.StringOutput)
 	if _, err := apiextensions.NewCustomResource(ctx, seedName, &apiextensions.CustomResourceArgs{
@@ -135,25 +190,15 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 
-	listenerEnv := args.NatsUrl.ToStringOutput().ApplyT(func(url string) corev1.EnvVarArray {
-		env, err := (core.ListenerConfig{
-			MachineID:   s.hostname,
-			Port:        core.DefaultListenerPort,
-			SOCKS5Proxy: "127.0.0.1:1055",
-		}).Env([]string{url})
+	listenerEnv := args.NatsUrl.ToStringOutput().ApplyT(func(url string) (corev1.EnvVarArray, error) {
+		env, err := dispatchListenerEnv(s.hostname, url)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("%s: %w", dispatch, err)
 		}
-		values := make(corev1.EnvVarArray, 0, len(env)+1)
-		for _, item := range env {
-			name, value, _ := strings.Cut(item, "=")
-			values = append(values, valueEnv(name, value))
-		}
-		values = append(values, valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"))
-		return values
+		return env, nil
 	}).(corev1.EnvVarArrayOutput)
 
-	deployment, err := appsv1.NewDeployment(ctx, s.hostname, &appsv1.DeploymentArgs{
+	if _, err := appsv1.NewDeployment(ctx, s.hostname, &appsv1.DeploymentArgs{
 		Metadata: metadata(s.hostname),
 		Spec: appsv1.DeploymentSpecArgs{
 			Replicas: pulumi.Int(1),
@@ -184,11 +229,9 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 				},
 			},
 		},
-	}, child...)
-	if err != nil {
+	}, child...); err != nil {
 		return nil, err
 	}
-	_ = deployment
 	if _, err := corev1.NewService(ctx, s.hostname, &corev1.ServiceArgs{
 		Metadata: metadata(s.hostname),
 		Spec: &corev1.ServiceSpecArgs{
@@ -198,12 +241,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	}, child...); err != nil {
 		return nil, err
 	}
-	namespacePeers := make(networkingv1.NetworkPolicyPeerArray, 0, len(args.AllowedNamespaces))
-	for _, namespace := range args.AllowedNamespaces {
-		namespacePeers = append(namespacePeers, networkingv1.NetworkPolicyPeerArgs{
-			NamespaceSelector: &metav1.LabelSelectorArgs{
-				MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
-			},
+	ingress := networkingv1.NetworkPolicyIngressRuleArray{}
+	if len(args.AllowedNamespaces) > 0 {
+		namespacePeers := make(networkingv1.NetworkPolicyPeerArray, 0, len(args.AllowedNamespaces))
+		for _, namespace := range args.AllowedNamespaces {
+			namespacePeers = append(namespacePeers, networkingv1.NetworkPolicyPeerArgs{
+				NamespaceSelector: &metav1.LabelSelectorArgs{
+					MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
+				},
+			})
+		}
+		ingress = append(ingress, networkingv1.NetworkPolicyIngressRuleArgs{
+			From:  namespacePeers,
+			Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(8766)}},
 		})
 	}
 	if _, err := networkingv1.NewNetworkPolicy(ctx, s.hostname, &networkingv1.NetworkPolicyArgs{
@@ -211,12 +261,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		Spec: &networkingv1.NetworkPolicySpecArgs{
 			PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
 			PolicyTypes: pulumi.StringArray{pulumi.String("Ingress")},
-			Ingress: networkingv1.NetworkPolicyIngressRuleArray{
-				networkingv1.NetworkPolicyIngressRuleArgs{
-					From:  namespacePeers,
-					Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(8766)}},
-				},
-			},
+			// With no allowed namespaces there is no rule at all, so the policy admits no ingress:
+			// the Tailscale sidecar only dials out and every probe is an exec probe, so only the
+			// namespaces the consumer names need a path to port 8766.
+			Ingress: ingress,
 		},
 	}, child...); err != nil {
 		return nil, err

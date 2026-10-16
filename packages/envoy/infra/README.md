@@ -10,7 +10,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
-| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL and a tailnet-only entry point: see [gcp:Dispatch](#gcpdispatch). |
+| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach.
@@ -124,8 +124,11 @@ and on `PATH`.
 `envoy-infra:gcp:Dispatch` deploys one private Autopilot cluster, its VPC and Cloud NAT, a
 private-IP Cloud SQL for PostgreSQL instance, and one Dispatch pod. The pod contains
 `envoy-dispatch`, `envoy-listener`, a userspace Tailscale native sidecar, and the Cloud SQL Auth
-Proxy native sidecar. Tailscale Serve is the only ingress: the component creates no Kubernetes
-Service and Dispatch and the listener bind loopback addresses.
+Proxy native sidecar. Dispatch listens on port 8766 on the pod's address, behind a ClusterIP
+Service, and a NetworkPolicy admits, with `allowedNamespaces` unset, no ingress at all — the
+Tailscale sidecar only dials out and every probe is an exec probe — so Tailscale Serve is then the
+only way in. `allowedNamespaces` names the cluster's namespaces whose pods the policy admits on
+port 8766, through that Service; the listener binds the pod's loopback either way.
 
 | Resource | Purpose |
 | --- | --- |
@@ -135,6 +138,8 @@ Service and Dispatch and the listener bind loopback addresses.
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
 | Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
+| ClusterIP Service | Port 8766 to the Dispatch pod: the in-cluster path the NetworkPolicy opens to the namespaces `allowedNamespaces` names. |
+| NetworkPolicy | Ingress to the Dispatch pod: no rule at all with `allowedNamespaces` unset or empty, so nothing in the cluster reaches it; otherwise one rule admitting the named namespaces' pods on port 8766. |
 
 ### Inputs
 
@@ -143,18 +148,27 @@ digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
-`deletionProtection` to `true`.
+`deletionProtection` to `true`. `allowedNamespaces` (optional, each a DNS label) names the
+Kubernetes namespaces, in the Dispatch pod's own cluster, whose pods the NetworkPolicy admits on
+port 8766; unset or empty, the policy admits no ingress at all.
 
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
-names, tags, image references, sign-in domains, namespaces, missing inputs, and nkey seeds in
-plain inputs before it registers a resource. It requires both `gcp` and `random` providers. It
+names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
+and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses a
+seed in `tailnetAuthKey`, `signInClientSecret` and `natsSeedSecret` once each resolves, before any
+child takes it, and a `natsUrl` that holds a seed, is local (the pod reaches NATS only through the
+Tailscale sidecar's SOCKS5 proxy), is empty, or holds a comma or a control character once it
+resolves, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
 creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
 running Pulumi needs `gke-gcloud-auth-plugin`.
 
-The generated `principal` output is the Kubernetes service account's Workload Identity principal.
-Before the first apply, the consumer grants that principal `roles/cloudsql.client` at project
-scope. The component itself grants that principal `roles/secretmanager.secretAccessor` only on the
-NATS seed secret. The pod's Kubernetes Role is limited to its Tailscale state Secret.
+The generated `principal` output is the Kubernetes service account's Workload Identity principal,
+built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
+creates the pool exists. The consumer grants it `roles/cloudsql.client` at project scope from
+`principal` in the same program: a grant built from that output waits for the cluster, so it never
+names a pool that does not exist yet. The component itself grants that principal
+`roles/secretmanager.secretAccessor` only on the NATS seed secret. The pod's Kubernetes Role is
+limited to its Tailscale state Secret.
 
 ### The pod
 
