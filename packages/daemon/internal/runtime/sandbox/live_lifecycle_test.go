@@ -462,8 +462,8 @@ func stalePluginBlocked(r *liveRig) string {
 }
 
 // pluginPackageInfo reads an installed plugin's package.json through node, as the wrapper's own
-// install check does — the worker image has no jq. version is pkg.version; contract is
-// pkg.legion.daemonApiVersion as a string, or "" when the package names none, as pi-envoy's does.
+// install check does. version is pkg.version; contract is pkg.legion.daemonApiVersion as a
+// string, or "" when the package names none, as pi-envoy's does.
 func (r *liveRig) pluginPackageInfo(c *liveClaim, path string) (version, contract string, err error) {
 	const script = `const pkg = require(process.argv[1]); console.log(pkg.version); console.log(pkg.legion && typeof pkg.legion.daemonApiVersion === 'number' ? pkg.legion.daemonApiVersion : '');`
 	out, err := r.exec(c, "node", "-e", script, path)
@@ -781,6 +781,17 @@ func (r *liveRig) checkKillLauncher() error {
 func firstLine(s string) string {
 	line, _, _ := strings.Cut(s, "\n")
 	return line
+}
+
+// lineContaining returns the first line of text that contains want, or "" when none does; the
+// callers assert want is there first, so "" never reaches a note.
+func lineContaining(text, want string) string {
+	for line := range strings.SplitSeq(text, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	return ""
 }
 
 // stale-incarnation: across the kill and the relaunch, nothing about the old process reaches the

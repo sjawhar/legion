@@ -621,12 +621,18 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
 
 ### Task 1.6: production check, after merge
 
-- [ ] Once #1946 is merged and `release-envoy-infra.yaml` has run: record the run id and the
+- [x] Once #1946 is merged and `release-envoy-infra.yaml` has run: record the run id and the
   `envoy-infra-v<v>` tag; from an empty directory, `pulumi package add envoy-infra@<v> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'`
   succeeds, and `pulumi preview` of a YAML program with one explicit `pulumi:providers:docker` and
   one `envoy-infra:host:Listener` plans creates of exactly the stack, that provider, the component,
   its `docker:index/remoteImage:RemoteImage` and its `docker:index/container:Container`. Record the
   commands and output on #1946.
+  - Passed on 2026-10-15: `envoy-infra-v0.1.0` from `release-envoy-infra.yaml` run 38684872348,
+    tagged at `131ccd0a`; `SHA256SUMS --check` OK; the pinned `gh attestation verify` exited 0; a
+    copy with one byte corrupted was refused; `plugin install --checksum` worked; `package add`
+    recorded 0.1.0; the YAML preview planned `{"create": 5}`: the stack, the docker provider,
+    `host:Listener`, the `RemoteImage` and the `Container`. Record:
+    https://github.com/sjawhar/legion/pull/1946#issuecomment-6185319853
 
 ---
 
@@ -1076,20 +1082,27 @@ value is required and has no default, and the brief gives the deployment's value
 
 ### Task 3.1: `envoy-infra:aws:NatsService`
 
-**Files:** Create `packages/envoy/infra/aws/natsservice.go`, `natsservice_test.go`,
-`containers.go`, `containers_test.go`, and `testdata/nats-*.golden`. Modify `provider.go`
-(register), `go.mod` and `go.sum` (pulumi-aws Go SDK v7, the latest release when the task starts).
+**Files:** Create `packages/envoy/infra/aws/natsservice.go`, `natsservice_test.go`, `metricfilter.go`,
+`fargate.go` (what both AWS components register identically), and in `aws/rendering/` (what the
+components render, with no Pulumi, which Task 3.3's `render` shares) `rendering.go`, `nats.go`
+(the container definitions and the start script), `containers.go` (the container-JSON parts both
+components write) and `metricfilters.go` (both components' filters and the listener's alarms'
+text), and `testdata/nats-*.golden`; and `packages/envoy/infra/nats/rules.go`, the schema types
+every NATS component shares whatever its cloud (below). Modify `provider.go` (register), `go.mod`
+and `go.sum` (pulumi-aws Go SDK v7, the latest release when the task starts).
 
 **Interfaces:**
 
 ```go
 type NatsServiceArgs struct {
 	// The authorization, as core.Authorization takes it; nil runs NATS with no authorization
-	// block, as the reference's launch does when a stack declares none.
+	// block, as the reference's launch does when a stack declares none. configHeader and
+	// configPath belong to it: required with it and refused without it (rendering.CheckOwnedInputs,
+	// the listener's rule for a webhook's inputs).
 	Authorization *AuthorizationArgs `pulumi:"authorization,optional"`
-	ConfigHeader  []string           `pulumi:"configHeader"`   // the rendered config's header lines
+	ConfigHeader  []string           `pulumi:"configHeader,optional"` // the rendered config's header lines
 	ServerArgs    []string           `pulumi:"serverArgs"`
-	ConfigPath    string             `pulumi:"configPath"`     // where the task's shell writes the config
+	ConfigPath    *string            `pulumi:"configPath,optional"`   // where the task's shell writes the config
 
 	NatsImage           string `pulumi:"natsImage"`
 	TailscaleImage         string             `pulumi:"tailscaleImage"`
@@ -1121,10 +1134,13 @@ type NatsServiceArgs struct {
 	Memory           string `pulumi:"memory"`
 	PlatformVersion  string `pulumi:"platformVersion"`
 
-	BaseTags           map[string]string `pulumi:"baseTags"`   // the component adds `service` per child
-	MetricNamespace    string            `pulumi:"metricNamespace"`
-	WaitForSteadyState *bool             `pulumi:"waitForSteadyState,optional"` // unset leaves the input unset
-	Adopt              bool              `pulumi:"adopt,optional"`
+	BaseTags        map[string]string `pulumi:"baseTags"` // the component adds `service` per child
+	MetricNamespace string            `pulumi:"metricNamespace"`
+	// The four log metric filters are named <prefix>-route-disconnect-filter,
+	// <prefix>-slow-consumer-filter, <prefix>-jetstream-error-filter and <prefix>-auth-error-filter.
+	MetricFilterLogicalNamePrefix string `pulumi:"metricFilterLogicalNamePrefix"`
+	WaitForSteadyState            *bool  `pulumi:"waitForSteadyState,optional"` // unset leaves the input unset
+	Adopt                         bool   `pulumi:"adopt,optional"`
 }
 
 type NatsService struct {
@@ -1139,10 +1155,14 @@ type NatsService struct {
 }
 ```
 
-`AuthorizationArgs` mirrors `core.Authorization` field for field (`users`: `name`, `nkey`,
-`publish`, `subscribe`, `hasSeed`; `noAuthUser`).
+`AuthorizationArgs` (`aws:Authorization`) and `UserArgs` (`aws:User`) mirror `core.Authorization`
+and `core.User` field for field (`users`: `name`, `nkey`, `publish`, `subscribe`, `hasSeed`;
+`noAuthUser`). A user's `publish` and `subscribe` are `nats.RulesArgs`, the schema type
+`nats:Rules`, in the package `nats`, which imports no cloud package: slice 4's `gcp:NatsHub` takes
+the same type for its users' explicit permissions, so a consumer of either spells rules alike and a
+GCP-only consumer's SDK shows no `aws` type. The Python and Go SDKs name it `nats.RulesArgs`.
 
-- [ ] **Resources, as children.**
+- [x] **Resources, as children.**
   - Two EFS file systems, each with its security group, rules, one mount target per subnet and an
     access point. One holds JetStream's data, the other the sidecar's tailnet state.
   - The log group.
@@ -1153,7 +1173,7 @@ type NatsService struct {
   Each child is registered under the logical name the inventory gives it, `cloudMapServiceLogicalName`
   for the Cloud Map service. The ECS service's `dependsOn` covers every mount target.
   `waitForSteadyState` reaches the service only when set.
-- [ ] **Container definitions.** Build them with `core.PyJSON`, no `SortKeys`, `EnsureASCII` on, in the
+- [x] **Container definitions.** Build them with `core.PyJSON`, no `SortKeys`, `EnsureASCII` on, in the
   reference's dict order, as `core.Object`s, which slice 2 ships: an ordered list of key/value
   pairs that `PyJSON` writes in order (`core/pyfmt.go:18-26, 86-110`). `PyJSON` refuses every Go
   map, which has no key order (`:75-76`). The NATS launch is `{"entryPoint": ["/bin/sh", "-c"], "command":
@@ -1166,7 +1186,7 @@ type NatsService struct {
   container-definition code unchanged. The check: neither original header line appears in any
   golden, and a second run without the wrapper differs from the golden only in those two lines'
   text.
-- [ ] **Tests.** With `pulumi.WithMocks`, cover:
+- [x] **Tests.** With `pulumi.WithMocks`, cover:
   - every child's type, logical name, recorded inputs and parent;
   - the alias when `adopt` is set, and none without it;
   - refusal without an `aws` provider, before any registration;
@@ -1178,18 +1198,28 @@ type NatsService struct {
     stack output the consumer builds from one would otherwise show as changed);
   - `waitForSteadyState` unset leaves the service's input unset;
   - the goldens, byte for byte.
-- [ ] **Commit** `feat(envoy-infra): aws:NatsService`.
+- [x] **Commit** `feat(envoy-infra): aws:NatsService`.
+- [x] **Adoption rehearsal, as run** (at `248b9e25`): a Pulumi YAML program loading the plugin, the
+  aws provider 7.39.0 as one explicit provider pointed at moto, a file backend, CLI 3.268.0. The 22
+  resources declared at root level as the reference registers them, then the same program with the
+  component and `adopt: true`, previewed: `create: 1` (the component; the explicit provider is in
+  both programs), `same: 29`, `update: 1`, the ECS service with the two fields moto does not store
+  (`availabilityZoneRebalancing`, `enableExecuteCommand`), as the reference program's own preview
+  shows; outputs unchanged. With `adopt: false` the preview plans `create: 23, delete: 22`. It is
+  not E11: one explicit provider throughout, and moto stands in for AWS.
 
 ### Task 3.2: `envoy-infra:aws:WebhookListener`
 
-**Files:** Create `packages/envoy/infra/aws/webhooklistener.go`, `webhooklistener_test.go` and
-`testdata/listener-*.golden`; modify `provider.go`.
+**Files:** Create `packages/envoy/infra/aws/webhooklistener.go`, `webhooklistener_test.go`,
+`aws/rendering/listener.go` and its `listener_test.go` (the webhooks, the environment's refusals,
+the container definitions and the read policy, with no Pulumi), and `testdata/listener-*.golden`;
+modify `provider.go`.
 
 **Interfaces:**
 
 ```go
 type WebhookListenerArgs struct {
-	MachineId string                  `pulumi:"machineId"`
+	MachineID string                  `pulumi:"machineId"`
 	NatsUrls  pulumi.StringArrayInput `pulumi:"natsUrls"`
 	Image     string                  `pulumi:"image"`
 	Region    string                  `pulumi:"region"` // the container's awslogs-region
@@ -1197,7 +1227,7 @@ type WebhookListenerArgs struct {
 	ApiTokenSecretArn       pulumi.StringInput    `pulumi:"apiTokenSecretArn"`
 	ApiTokenSecretVersionId pulumi.StringInput    `pulumi:"apiTokenSecretVersionId"` // orders the task definition after the token's version
 	SeedSecretArn           pulumi.StringPtrInput `pulumi:"seedSecretArn,optional"`
-	Webhooks                []string              `pulumi:"webhooks"` // the ENVOY_WEBHOOKS list, e.g. ["github", "slack"]
+	Webhooks                []string              `pulumi:"webhooks"` // the ENVOY_WEBHOOKS list: [] or ["github", "slack"]; refused omitted
 	GitHubWebhookSecretArn  pulumi.StringPtrInput `pulumi:"githubWebhookSecretArn,optional"`
 	SlackSigningSecretArn   pulumi.StringPtrInput `pulumi:"slackSigningSecretArn,optional"`
 	ReviewerAppId           *string               `pulumi:"reviewerAppId,optional"`
@@ -1244,7 +1274,7 @@ type WebhookListener struct {
 }
 ```
 
-- [ ] **Resources, as children.**
+- [x] **Resources, as children.**
   - The log group and the Cloud Map service.
   - The execution-role policies that read the API token and, when it is given, the seed.
   - The task definition. It depends on `apiTokenSecretVersionId` and on those policies.
@@ -1258,25 +1288,50 @@ type WebhookListener struct {
   Ordering inputs go through `pulumi.DependsOnInputs`. Each of these is refused before any
   registration, naming the field and its webhook (a nil `StringPtrInput` is visible at
   construct):
+  - `webhooks` omitted, which a listener with no webhook gives as `[]`;
   - a webhook listed in `webhooks` without its secret ARN;
   - `github` listed without `reviewerAppId` or `mentionTrigger`;
   - a secret ARN, `reviewerAppId` or `mentionTrigger` given for a webhook that is not listed,
     which would otherwise be dropped silently.
 
-  Each refusal has its own test row.
-- [ ] **Container definitions, policies and environment.** Build them inside
+  Each refusal has its own test row: the component's in `aws`, the environment's
+  (`rendering.ListenerEnv.Check`) in `aws/rendering`.
+- [x] **Container definitions, policies and environment.** Build them inside
   `pulumi.All(…).ApplyT` over the Input fields, as the reference builds them inside
-  `Output.all(...).apply`. Each environment value comes from `core.ListenerConfig.Env` (Task 2.1),
-  which runs `Check` first, where the variables match, and from the fields above for the rest.
-  `ENVOY_WEBHOOKS` is written only when `webhooks` is non-empty, `ENVOY_GITHUB_MENTION_TRIGGER`
-  and `ENVOY_REVIEWER_APP_ID` only when `github` is listed, and each webhook's secret entry only
-  when its webhook is listed. That is the reference's rule once the deployment makes its listener
+  `Output.all(...).apply`. Each environment value comes from `core.ListenerConfig` (Task 2.1) where
+  the variables match (its `Check` before any registration, its `Env`, which runs `Check` first, in
+  the apply, once the NATS URLs are known; slice 3 adds its `ListenHost`, which `Env` writes after
+  `PORT` and `host:Listener` leaves unset), and from the fields above for the rest. `ENVOY_WEBHOOKS`
+  is written only when `webhooks` is non-empty, `ENVOY_GITHUB_MENTION_TRIGGER` and
+  `ENVOY_REVIEWER_APP_ID` only when `github` is listed, and each webhook's secret entry only when
+  its webhook is listed. That is the reference's rule once the deployment makes its listener
   slot-capable; for a deployment that lists both, the container is today's. The goldens show the
-  result is byte for byte: one for both webhooks, rendered by the reference implementation. The
-  first version accepts only the full list, refusing any other naming it; Task 3.4 adds the empty
-  list once the deployment plan's PR 0 (its Task 0) renders it.
-- [ ] **Tests,** as in Task 3.1, including its construct test.
-- [ ] **Commit** `feat(envoy-infra): aws:WebhookListener`.
+  result is byte for byte, each rendered by the reference implementation: both webhooks, with and
+  without the seed, and (Task 3.4) none. The component takes `[]` or exactly `["github", "slack"]`
+  and refuses any other list, naming it.
+- [x] **Tests,** as in Task 3.1, including its construct test.
+- [x] **A seed in any input** (with #1951's `bus.HoldsSeed`). Both AWS components refuse an nkey
+  seed, any type and spelling, where it enters, as core and `host:Listener` do, naming the input by
+  its path and never the value: the component's name; every plain string input, by reflection over
+  the args (`aws.seededPlainInput`, so a new field is covered without a list); and every Input once
+  it resolves, wrapped before any child takes it (`aws.refuseSeedInputs`), so no child is
+  registered with it. That covers the secret ARNs, which are Inputs, and an authorization's nkeys,
+  which core also refuses unquoted when they are not public keys. `aws/seeds_test.go` constructs
+  each component through Construct once per input (35 NatsService rows, 34 WebhookListener rows,
+  and the name), with a seed and with a clean value of the same shape. Each seeded row requires the
+  refusal and that no registration, alias, output or error carries the seed; each clean row
+  requires that the value reaches the run. A further test requires a row for every string input of
+  each schema. A clean input renders exactly as before: the goldens, the parity check and the
+  registration dump are unchanged.
+- [x] **Commit** `feat(envoy-infra): aws:WebhookListener`.
+- [x] **Adoption rehearsal, as run** (at `2b7e8c30`): as Task 3.1's, the listener's 19 resources at
+  root level, then the component with `adopt: true`, previewed: `create: 6` (the component, and the
+  five alarms moto cannot store: provider 7.39 calls `PutMetricAlarm` over a protocol moto answers
+  404), `same: 32`, `update: 1`, the ECS service with the three fields moto does not store
+  (`availabilityZoneRebalancing`, `enableExecuteCommand`, `healthCheckGracePeriodSeconds`), as the
+  reference program's own preview shows; outputs unchanged. With `adopt: false` the preview plans
+  `create: 20, delete: 14`. It is not E11, for Task 3.1's reasons; the alarms' arguments are proven
+  byte for byte by the parity check against the reference render instead.
 
 ### Task 3.3: `envoy-infra render`, documentation and the slice's proof
 
@@ -1288,7 +1343,7 @@ The deployment runs two gates before every listener image pin moves:
 Both read the rendered launch, environment and patterns from its Python components. Once those
 are gone, they read them from this command.
 
-- [ ] **`envoy-infra render`** (`cmd/envoy-infra`). Each subcommand prints to stdout and returns
+- [x] **`envoy-infra render`** (`cmd/envoy-infra`). Each subcommand prints to stdout and returns
   exactly what the components register:
   - `render nats-start-script --authorization-file <json> --config-header <line>... --server-arg <arg>... --config-path <path>`
     prints `Authorization.StartScript`.
@@ -1303,8 +1358,13 @@ are gone, they read them from this command.
     literal prefix, not from the component's own name).
 
   A test pins each subcommand's output against the component's recorded inputs under mocks for the
-  same arguments. That keeps one source.
-- [ ] **README.** Document:
+  same arguments. That keeps one source. Every flag's value reaches the output, and the flag
+  package's messages and core's refusals quote values, so render refuses an nkey seed
+  (`bus.HoldsSeed`, any type and spelling) in any flag's value or anywhere in the
+  `--authorization-file`, naming the flag or the file's field, and reports an undefined flag or an
+  unparseable value without quoting it, as `envoy-infra seed` does; a test row each pins the three
+  ways, in either case and split, never echoing the seed.
+- [x] **README.** Document:
   - `aws:NatsService` and `aws:WebhookListener`'s inputs, with a Python example using placeholders;
   - R11-R15, written for an operator;
   - how an existing deployment moves onto them: `adopt`, an explicit provider configured like the
@@ -1316,10 +1376,18 @@ are gone, they read them from this command.
   production and dispatch previews.
   - They must create, update, replace or delete no cloud resource, and stack outputs must not
     change. The only creates allowed are those the Global constraints name.
-  - The previews use this branch's plugin, built by path, and run from the devbox: staging under
-    its `staging` profile, production and dispatch under the instance identity.
+  - The previews use this branch's plugin, built by path, under the deployment's pinned Pulumi
+    CLI. Sami ruled on 2026-10-14 that they run locally rather than from the devbox, under his own
+    AWS SSO session, granted for this migration only: its staging profile for staging, its
+    production profile for production and dispatch.
   - The record goes on that repository's draft PR, opened early for it. This PR gets operation
     counts by resource type only.
+  - Ran with the plugin at `ec0ea342`, and the deployment's gate passed all three: staging and
+    production each create the two components and an explicit `pulumi:providers:aws`, all
+    state-only, with every adopted child `same` (41 in staging, 40 in production); their other
+    replaces and updates are the same steps as the deployment's baseline preview of its main
+    branch, none of them Envoy's; dispatch reads 1 and is otherwise `same`. Core's validation has
+    changed since, so the previews run again on the commit this PR merges.
 
 ### Task 3.4: the empty webhooks list
 
@@ -1328,13 +1396,16 @@ slot-capable Envoy (the deployment plan's PR 0): a standalone slot runs a listen
 Once that PR has a commit, the coordinator supplies it in the brief:
 
 - [x] Render the empty-list container definition with that commit's reference code from placeholder
-  inputs (header lines substituted as in Task 2.1), and commit it as the second golden.
+  inputs, and commit it as the second golden. No deployment value reaches it, so the render needs no
+  substitution; the full list's goldens replace the reference's literal reviewer App ID with a
+  placeholder.
 - [x] `aws:WebhookListener` and `render webhook-listener-env` accept `webhooks: []` as well as the
-  full list, and still refuse any other list, naming it. The component's output for `[]` matches the
-  golden byte for byte; a refusal row per partial list stays.
+  full list, and still refuse any other list, naming it; the component refuses `webhooks` omitted.
+  The component's output for `[]` matches the golden byte for byte; a refusal row per partial list
+  stays, in `aws/rendering`'s table.
 - [x] The README's webhooks row says so.
 - [x] Commit `feat(envoy-infra): a webhook listener with no webhooks` (`86373960`, from the reference
-  at the deployment's PR 0 commit `0b6a25ed`).
+  at the deployment's PR 0 commit `0b6a25ed`), then `ec0ea342`, the refusal of an omitted list.
 
 ---
 
@@ -1627,7 +1698,7 @@ Hardening considered and not taken (the coordinator's ruling, recorded with #195
 | E8. Seed generate and verify against Secret Manager; a generated seed connects | 2, 4 | infrastructure | in-repo fake stores and real nats-server (Tasks 2.2, 4.2); Secret Manager in the first GCP deployment | that deployment's operator | Tasks 2.2, 4.2, 4.4 |
 | E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by the organization's billing administrator, and the operator's tailnet, policy and OAuth-client steps | Task 4.4 |
 | E10. The CLI checks and verifies the existing AWS deployment's live seed read-only, printing the reference script's lines | 2 | infrastructure | that deployment's staging Secrets Manager, from the devbox, with the branch-built CLI | the devbox's `staging` profile (`--expect-account` refuses any other) | Task 2.3 |
-| E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, from the devbox, with this branch's plugin by path | the devbox's `staging` profile for staging, its instance identity for production and dispatch | Task 3.3; the deployment's own plan |
+| E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, run locally (Sami, 2026-10-14), with this branch's plugin by path | Sami's own AWS SSO session, granted for this migration only: its staging profile for staging, its production profile for production and dispatch | Task 3.3; the deployment's own plan |
 
 Legion's own end-to-end stages (`scripts/e2e/stage*.sh`) exercise none of the changed paths. The
 Envoy changes (`bus.LocalNATSURL`, `bus.ListenerDurable`/`ListenerQueue`; in testnats,
@@ -1699,6 +1770,15 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   commit's, since a build ID hashes each package's source and `nkey.go`'s line table moves, but
   not in behaviour. The path is inside the same listener push paths and bump pathspec as
   `testnats`, so whether #1951's squash cuts a listener version is unchanged.
+- `core.Authorization`, `User` and `Rules` (slice 3) gain JSON keys, the names the
+  `aws:Authorization` input spells its fields with, which `render nats-start-script` reads its file
+  by, refusing a key in another letter case. Before slice 3 nothing coded those types as JSON;
+  `git grep -n -e json.Marshal -e '\.Encode(' -- packages/envoy/infra` names only render's own key
+  check among their uses. A test pins each key to the schema name of the field it mirrors.
+- `packages/envoy/AGENTS.md` (slice 3) names the `render` subcommand in its "Where to look" row.
+  The file is inside `release-envoy-listener.yaml`'s push paths and bump pathspec, so #1954's squash
+  commit starts a listener release run, and a `feat` title cuts a `legion-envoy` version with no
+  change to the image or the binaries.
 
 ## Permission source census
 

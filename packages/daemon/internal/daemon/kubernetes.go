@@ -111,6 +111,53 @@ func ResolvedPlugins(cfg config.Config) (*runtime.PluginInstall, string) {
 	return &runtime.PluginInstall{PiLegion: k.Plugins.PiLegion, PiEnvoy: k.Plugins.PiEnvoy, Contract: api.DaemonAPIVersion}, source
 }
 
+// probeBudgetMargin is how far the image probe's attempt budget must clear
+// worker_boot_timeout_seconds (ProbeBudget): long enough that the capacity stop (stuck,
+// internal/runtime/sandbox/probe.go) can see a probe pod's Unschedulable age pass the boot
+// timeout within the same attempt, rather than the attempt ending first and the Outcome.Waiting
+// branch never firing (LEGION-636: a deployment whose worker_boot_timeout_seconds reaches or
+// exceeds slow_command_timeout_seconds never gets there).
+const probeBudgetMargin = 60 * time.Second
+
+// ProbeBudget is how long the image probe's one attempt waits for its pod (ImageProbe.Budget):
+// slow_command_timeout_seconds, or, when worker_boot_timeout_seconds plus probeBudgetMargin is
+// larger, that instead — derived true in the second case. sandboxBootOf (a booting daemon) and
+// probeBoot (`legion probe-boot`) both build their ImageProbe through imageProbe, so both carry
+// the same derived budget.
+func ProbeBudget(cfg config.Config) (budget time.Duration, derived bool) {
+	if bound := cfg.WorkerBootTimeout + probeBudgetMargin; bound > cfg.SlowCommandTimeout {
+		return bound, true
+	}
+	return cfg.SlowCommandTimeout, false
+}
+
+// ProbeBudgetLine is the plain line `legion start --check-config` prints under
+// `runtime: kubernetes` when ProbeBudget's bound exceeds slow_command_timeout_seconds: how long
+// each attempt now waits, and which keys pushed it there. "", false when the bound is
+// slow_command_timeout_seconds itself.
+func ProbeBudgetLine(cfg config.Config) (line string, derived bool) {
+	budget, derived := ProbeBudget(cfg)
+	if !derived {
+		return "", false
+	}
+	return fmt.Sprintf("image probe: each attempt waits %ds: worker_boot_timeout_seconds (%d) + %ds is above slow_command_timeout_seconds (%d)",
+		int(budget.Seconds()), int(cfg.WorkerBootTimeout.Seconds()), int(probeBudgetMargin.Seconds()), int(cfg.SlowCommandTimeout.Seconds())), true
+}
+
+// logProbeBudget is the boot's one line when ProbeBudget derives a bound above
+// slow_command_timeout_seconds: an Info line naming the derived bound and both keys. Nothing is
+// logged when the bound is slow_command_timeout_seconds itself.
+func logProbeBudget(log *slog.Logger, cfg config.Config) {
+	budget, derived := ProbeBudget(cfg)
+	if !derived {
+		return
+	}
+	log.Info("daemon: the image probe's attempt outlives slow_command_timeout_seconds",
+		"budgetSeconds", int(budget.Seconds()),
+		"slow_command_timeout_seconds", int(cfg.SlowCommandTimeout.Seconds()),
+		"worker_boot_timeout_seconds", int(cfg.WorkerBootTimeout.Seconds()))
+}
+
 // logPlugins is the boot's one line on what this Kubernetes daemon will install for a
 // stale-plugin relaunch: an Info line naming the pair and where it came from, or, with none, the
 // Warn naming the gap: a stale claim is recorded and reported but never relaunched or refused.
@@ -202,14 +249,16 @@ var probeReservation = config.RoleResources{CPU: "250m", Memory: "1Gi", Ephemera
 // every pod is handed — this daemon's, inlined at each launch, so the probe resolves what they name
 // rather than the image's copy — and the probe's own reservation (probeReservation), translated as
 // every role's is (requirements), so the probe pod is Guaranteed as every Legion pod is. The
-// error is the translation's, which only an edit to probeReservation can cause.
+// error is the translation's, which only an edit to probeReservation can cause. Budget is
+// ProbeBudget's.
 func imageProbe(cfg config.Config, references promptrefs.Names) (sandbox.ImageProbe, error) {
 	resources, err := requirements("the image probe's reservation", probeReservation)
 	if err != nil {
 		return sandbox.ImageProbe{}, err
 	}
+	budget, _ := ProbeBudget(cfg)
 	return sandbox.ImageProbe{
-		Contract: api.DaemonAPIVersion, Budget: cfg.SlowCommandTimeout, Retry: imageProbeRetry,
+		Contract: api.DaemonAPIVersion, Budget: budget, Retry: imageProbeRetry,
 		RoleReferences: references,
 		Resources:      resources,
 	}, nil

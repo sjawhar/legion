@@ -2,7 +2,12 @@
 # transcript's messages: one definition for every live proof that asks whether an agent called one
 # (stage3-4b13b-acceptance.sh's merger_self_posted, stage4b-sandbox-tree.sh's report_after_tick),
 # or ran a `dispatch` command through bash.
-# Loaded with `jq -L scripts/e2e/lib` and `include "omp-tool-calls";`.
+# Loaded with `jq -L scripts/e2e/lib` and `include "omp-tool-calls";`. A module that includes this
+# one (lib/stage4b-tools.jq) may reach only a def that calls no other def of this file: jq 1.8.2
+# aborts at compile (`nesting_level: Assertion … failed`, `expand_call_arglist: Unknown function
+# type`) on a chain such as bash_command → call_arguments reached through an include, where the same
+# chain from a main program and a one-def reach (calls, call_arguments) both compile. So
+# call_arguments spells a device write's arguments itself rather than through a def of its own.
 
 # calls(name) is whether a message content entry calls the tool name, by any of the ways Oh My Pi
 # gives the model: the tool itself, a write whose path is the tool's device, xd://<name>, alone,
@@ -21,14 +26,11 @@ def calls(name):
        )))
   );
 
-# device_arguments are the arguments a write to a tool's device hands the tool: its content, which
-# is the arguments' JSON; {} when the content is none or no JSON object.
-def device_arguments: (.arguments.content? // "") | tostring | fromjson? // {} | if type == "object" then . else {} end;
-
-# call_arguments are the arguments a call that names its tool's arguments hands it, the tool's own or
-# its device's (device_arguments); {} for eval code, whose arguments are its code.
+# call_arguments are the arguments a call that names its tool's arguments hands it: the tool's own,
+# or, for a write to a tool's device (xd://<name>), its content, which is the arguments' JSON ({}
+# when the content is none or no JSON object); {} for eval code, whose arguments are its code.
 def call_arguments:
-  if .name == "write" then device_arguments
+  if .name == "write" then ((.arguments.content? // "") | tostring | fromjson? // {} | if type == "object" then . else {} end)
   elif .name == "eval" then {}
   else .arguments // {} end;
 

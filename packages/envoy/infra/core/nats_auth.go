@@ -12,26 +12,27 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 )
 
-// User is one nkey user of a NATS server's authorization block.
+// User is one nkey user of a NATS server's authorization block. Its JSON keys, and Rules' and
+// Authorization's, are the names the aws:Authorization input spells its fields with.
 type User struct {
-	Name      string // ^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$
-	NKey      string // nkey user public key; "" for a pending user, which is never rendered
-	Publish   *Rules // required with NKey, refused without
-	Subscribe *Rules // required with NKey, refused without
-	HasSeed   bool   // the consumer stores a seed for this user
+	Name      string `json:"name"`      // ^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$
+	NKey      string `json:"nkey"`      // nkey user public key; "" for a pending user, which is never rendered
+	Publish   *Rules `json:"publish"`   // required with NKey, refused without
+	Subscribe *Rules `json:"subscribe"` // required with NKey, refused without
+	HasSeed   bool   `json:"hasSeed"`   // the consumer stores a seed for this user
 }
 
 // Rules are one direction's permissions. Each entry is a subject pattern; a subscribe entry may
 // instead be "<subject> <queue>", which scopes it to that queue group.
 type Rules struct {
-	Allow []string // must name an entry: nats-server reads an empty subscribe allow as "everything"
-	Deny  []string
+	Allow []string `json:"allow"` // must name an entry: nats-server reads an empty subscribe allow as "everything"
+	Deny  []string `json:"deny"`
 }
 
 // Authorization is a NATS server's static nkey authorization.
 type Authorization struct {
-	Users      []User
-	NoAuthUser string // "" for none; else the Name of a keyed user without a seed
+	Users      []User `json:"users"`
+	NoAuthUser string `json:"noAuthUser"` // "" for none; else the Name of a keyed user without a seed
 }
 
 var userName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$`)

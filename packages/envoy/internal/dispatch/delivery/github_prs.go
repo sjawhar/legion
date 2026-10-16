@@ -322,7 +322,7 @@ const installationSearchConcurrency = 8
 
 // SearchMergedPullRequestsAcrossInstallation finds every pull request merged in [since, until)
 // authored by any of authors, across every repository every installation of the App can see.
-// LEGION-294's population rule (an author allowlist: sjawhar, sjawhar-agent, legion-implementer)
+// LEGION-294's population rule (an author allowlist: sjawhar, sjawhar-agent, Legion's implement App)
 // names no installation or org boundary -- a merge under a second installation is still
 // population, and Rev measured roughly a quarter of the real population living there -- so this
 // does not stop at one configured deploy repository's installation; it lists every installation

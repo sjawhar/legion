@@ -332,6 +332,16 @@
   name every configured production job and a missing apply step, and the Pipeline card's `job`
   joins the names it follows with `or`.
 
+- **Breaking:** migration 0111 drops `delivery_settings.production_job_name`, with the trigger and
+  function 0109 added to keep it at the first of `production_job_names` through the rollout
+  (LEGION-761). No value is lost: the trigger kept the column equal to the list's first name, and
+  the migration's census counts any row where it did not, so such a row refuses the deploy.
+  Rollback floor: once 0111 has applied, a task older than legion-envoy v13.4.1, the release that
+  added 0109, still boots, but its reads and writes of the delivery settings fail with SQLSTATE
+  42703 (undefined column), since they name `production_job_name`, and so does every delivery page
+  and job that reads the settings first.
+  v13.4.1 and every later release read `production_job_names` alone.
+
 - **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
   `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
   `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
@@ -744,6 +754,15 @@
 
 ### Fixed
 
+- A bus client whose NATS connection closes while a publish is in flight now replaces it once,
+  and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close
+  starts and the publish each dialled a replacement, and both were installed in turn, so the
+  first was left connected and was never closed. Once its server went away it reconnected forever,
+  once a second, in the listener, Dispatch or any other process holding a `bus.Client`. Now the
+  second to finish closes its own connection, logs `envoy nats discarded a second replacement
+  connection`, and serves with the first. Its close logs no `envoy nats disconnected` and starts
+  no recovery. No message is lost or sent twice: the discarded connection never carried one.
+
 - Dispatch's job intake now receives job events (LEGION-690). It shared Dispatch's publisher
   client with the delivery intake, and a `bus.Client` held one JetStream subscription, so
   whichever intake bound second unsubscribed the other, whose durable then sat unbound with its
@@ -763,6 +782,12 @@
   workspace build, through `packages/daemon`'s client-go) could close it with 1008, the code for a
   caller that no longer resolves, depending on a race. The published image, built in module mode
   with gorilla v1.5.3, never did. The page reconnects with backoff after either close.
+
+- The delivery live hub arms its one timer for the moment the next view is due, rather than for a
+  wait counted from the moment its worker read the clock (LEGION-690). A wait put the timer late by
+  however long the worker took between that read and the arm, and a test that moved its clock
+  forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
+  timer armed for a moment the clock has already passed fires at once.
 
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since

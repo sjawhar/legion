@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -45,6 +46,15 @@ func TestListenerConfigCheck(t *testing.T) {
 		{name: "a host bridge with leading whitespace", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: " 127.0.0.1"}, input: "hostBridge", err: `hostBridge has leading or trailing whitespace: " 127.0.0.1"`},
 		{name: "a host bridge with trailing whitespace", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: "127.0.0.1 "}, input: "hostBridge", err: `hostBridge has leading or trailing whitespace: "127.0.0.1 "`},
 		{name: "a host bridge with a newline inside", in: core.ListenerConfig{MachineID: "m", Port: 9020, HostBridge: "127.0.0.1\nENVEOF"}, input: "hostBridge", err: `hostBridge contains a control character: "127.0.0.1\nENVEOF"`},
+		{name: "a listen host", in: core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0"}},
+		{name: "a listen host with a control character", in: core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0\n"}, input: "listenHost", err: `listenHost contains a control character: "0.0.0.0\n"`},
+		// A seed is refused before the control-character refusal that would quote it.
+		{name: "a listen host holding a seed", in: core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: readmeSeed + "\n"}, input: "listenHost", err: "listenHost holds an nkey seed (not echoed)"},
+		{
+			name:  "a listen host holding a seed, lowercase and split across DNS labels",
+			in:    core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: strings.ToLower(readmeSeed[:29] + "." + readmeSeed[29:])},
+			input: "listenHost", err: "listenHost holds an nkey seed (not echoed)",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -52,6 +62,7 @@ func TestListenerConfigCheck(t *testing.T) {
 			env, envErr := c.in.Env([]string{"nats://127.0.0.1:4222"})
 			if c.err != "" {
 				requireInputError(t, err, c.input, c.err)
+				require.NotContains(t, strings.ToUpper(err.Error()), readmeSeed[:12], "the refusal quotes no part of the seed")
 				// Env runs Check itself, so a caller that skips Check still gets its refusal.
 				require.Nil(t, env)
 				requireInputError(t, envErr, c.input, c.err)
@@ -89,6 +100,12 @@ func TestListenerConfigEnv(t *testing.T) {
 			in:   core.ListenerConfig{MachineID: "m", Port: 9020},
 			urls: []string{"nats://localhost:4222", "nats://hub.internal.example:4222"},
 			want: []string{"PORT=9020", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://localhost:4222,nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1"},
+		},
+		{
+			name: "a listen host, right after the port",
+			in:   core.ListenerConfig{MachineID: "m", Port: 9020, ListenHost: "0.0.0.0", HostBridge: "127.0.0.1"},
+			urls: []string{"nats://hub.internal.example:4222"},
+			want: []string{"PORT=9020", "ENVOY_LISTEN_HOST=0.0.0.0", "ENVOY_MACHINE_ID=m", "NATS_URLS=nats://hub.internal.example:4222", "ENVOY_ALLOW_REMOTE_NATS=1", "ENVOY_HOST_BRIDGE=127.0.0.1"},
 		},
 		{name: "no URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, err: "natsUrls needs at least one URL"},
 		{name: "a comma in a URL", in: core.ListenerConfig{MachineID: "m", Port: 9020}, urls: []string{"nats://a:1,nats://b:2"}, err: "natsUrls[0] contains a comma"},

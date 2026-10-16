@@ -36,11 +36,15 @@ var Daemon = Retry{Initial: 10 * time.Second, Max: 5 * time.Minute}
 // supervisor and must finish.
 var Image = Retry{Initial: 10 * time.Second, Max: 5 * time.Minute, Attempts: 6}
 
-// Outcome is one attempt: passed; refused, an answer no retry changes; waiting, on a condition
-// outside the probed thing that waiting resolves; or neither — transient, with the detail its retry
-// is logged with.
+// Outcome is one attempt: passed, with what its OK line said of the image in Report; refused, an
+// answer no retry changes; waiting, on a condition outside the probed thing that waiting
+// resolves; or neither — transient, with the detail its retry is logged with.
 type Outcome struct {
-	Passed  bool
+	Passed bool
+	// Report is set on a passed attempt alone, to what its OK line said of the image; the zero
+	// value otherwise. It carries none of CapacityWaits or CapacityReason, which are the run's,
+	// not an attempt's: sandbox.Runtime.ProbeImage counts those itself across every attempt.
+	Report  ImageReport
 	Refusal error
 	// Waiting is set when the attempt could not run for want of something outside what it probes
 	// — capacity: a probe pod the pool had no room for — and says what it waits on. Such an attempt
@@ -141,24 +145,27 @@ const extensionsMark = "extensions=discovered"
 const capabilitiesMark = "capabilities=checked"
 
 // modelFallbackMark carries, on the OK line, whether the image's Oh My Pi falls back to another
-// model under the operator's configuration (capabilities.ReadModelFallback): ModelFallbackOn or
-// ModelFallbackOff.
+// model under the operator's configuration (capabilities.ReadModelFallback): ModelFallbackOn,
+// ModelFallbackOff, or ModelFallbackUnread when the probe could not read retry.modelFallback.
 const modelFallbackMark = "model-fallback="
 
 // The model-fallback mark's states. The probe writes one onto the OK line from what Oh My Pi
 // answered, and the daemon's capability report (capabilities.Deployment) switches on the one it
-// read back, so both ends spell the state here rather than each in its own words.
+// read back, so both ends spell the state here rather than each in its own words. Unread is the
+// probe unable to read retry.modelFallback at all, which it reports rather than guessing one of
+// the other two: the deployment's own capability report shows that row open.
 const (
-	ModelFallbackOn  = "on"
-	ModelFallbackOff = "off"
+	ModelFallbackOn     = "on"
+	ModelFallbackOff    = "off"
+	ModelFallbackUnread = "unread"
 )
 
 // OKLine is that line: the OMP invocation probed, the session-storage mark, the extensions mark,
 // the agent-models mark (AgentModelsResolved or AgentModelsSkipped), the capabilities mark, the
-// model-fallback mark (ModelFallbackOn or ModelFallbackOff), and the daemon API contract the
-// image's plugin declared, last. The daemon's probe Sandbox passes the image only on a line that
-// confirms the daemon's own contract (ConfirmedContract) with the extensions mark
-// (ExtensionsDiscovered), the agents' models resolved (AgentModels) and the capability list
+// model-fallback mark (ModelFallbackOn, ModelFallbackOff, or ModelFallbackUnread), and the daemon
+// API contract the image's plugin declared, last. The daemon's probe Sandbox passes the image
+// only on a line that confirms the daemon's own contract (ConfirmedContract) with the extensions
+// mark (ExtensionsDiscovered), the agents' models resolved (AgentModels) and the capability list
 // checked (CapabilitiesChecked), and keeps the model-fallback mark (ModelFallback) in its
 // ImageReport.
 func OKLine(omp string, contract int, agentModels, modelFallback string) string {
@@ -169,9 +176,10 @@ func OKLine(omp string, contract int, agentModels, modelFallback string) string 
 // ImageReport is what the daemon keeps of a passed probe: what its OK line said of the image, and
 // what the run itself saw of the pool on the way to that line.
 type ImageReport struct {
-	// ModelFallback is the line's model-fallback mark, ModelFallbackOn or ModelFallbackOff: whether
-	// the image's Oh My Pi, under the operator's configuration, falls back to another model when an
-	// agent's own is unavailable.
+	// ModelFallback is the line's model-fallback mark, ModelFallbackOn, ModelFallbackOff, or
+	// ModelFallbackUnread when the probe could not read retry.modelFallback: whether the image's
+	// Oh My Pi, under the operator's configuration, falls back to another model when an agent's
+	// own is unavailable, or that it could not say.
 	ModelFallback string
 	// CapacityWaits is how many attempts ended waiting on capacity (Outcome.Waiting: a probe pod
 	// the pool had no room for) before one scheduled and passed; zero when the first attempt's pod

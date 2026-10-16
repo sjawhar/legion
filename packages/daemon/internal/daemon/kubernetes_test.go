@@ -885,3 +885,73 @@ func TestAHelloWithAnIdentityMapsToTheMachinesEvent(t *testing.T) {
 		t.Fatal("a hello with no identity mapped to one")
 	}
 }
+
+// ProbeBudget is the image probe's attempt budget: slow_command_timeout_seconds, or
+// worker_boot_timeout_seconds plus probeBudgetMargin when that is larger — derived true only then
+// — so the capacity stop (sandbox.Runtime.stuck) always has room, within one attempt, to see a
+// probe pod's Unschedulable age pass the boot timeout (LEGION-636: a deployment whose
+// worker_boot_timeout_seconds reached slow_command_timeout_seconds never got there). imageProbe
+// carries the same budget onto its ImageProbe.
+func TestProbeBudgetIsTheLargerOfTheTwoTimeoutsPlusAMargin(t *testing.T) {
+	for _, tc := range []struct {
+		bootTimeout, slowCommand time.Duration
+		wantBudget               time.Duration
+		wantDerived              bool
+	}{
+		{120 * time.Second, 300 * time.Second, 300 * time.Second, false},
+		{600 * time.Second, 300 * time.Second, 660 * time.Second, true},
+		{240 * time.Second, 300 * time.Second, 300 * time.Second, false},
+		{241 * time.Second, 300 * time.Second, 301 * time.Second, true},
+	} {
+		cfg := config.Config{WorkerBootTimeout: tc.bootTimeout, SlowCommandTimeout: tc.slowCommand}
+		budget, derived := ProbeBudget(cfg)
+		if budget != tc.wantBudget || derived != tc.wantDerived {
+			t.Errorf("ProbeBudget(boot=%s, slow=%s) = %s, derived %v; want %s, derived %v",
+				tc.bootTimeout, tc.slowCommand, budget, derived, tc.wantBudget, tc.wantDerived)
+		}
+		probe, err := imageProbe(cfg, promptrefs.New())
+		if err != nil {
+			t.Fatalf("imageProbe: %v", err)
+		}
+		if probe.Budget != tc.wantBudget {
+			t.Errorf("imageProbe(boot=%s, slow=%s).Budget = %s, want %s", tc.bootTimeout, tc.slowCommand, probe.Budget, tc.wantBudget)
+		}
+	}
+}
+
+// The boot log carries the derived budget, naming both keys, only when ProbeBudget derives one
+// above slow_command_timeout_seconds; a daemon whose worker_boot_timeout_seconds leaves it under
+// that bound logs nothing of it.
+func TestTheBootLogNamesTheDerivedProbeBudgetOnlyWhenItIsDerived(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		bootTimeout time.Duration
+		wantLogged  bool
+	}{
+		{"derived", 600 * time.Second, true},
+		{"not derived", 120 * time.Second, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			cfg := config.Config{WorkerBootTimeout: tc.bootTimeout, SlowCommandTimeout: 300 * time.Second}
+			logProbeBudget(slog.New(slog.NewJSONHandler(&buf, nil)), cfg)
+			got := buf.String()
+			logged := strings.Contains(got, `"msg":"daemon: the image probe's attempt outlives slow_command_timeout_seconds"`)
+			if logged != tc.wantLogged {
+				t.Fatalf("logProbeBudget(worker_boot_timeout_seconds=%s) logged = %v, want %v:\n%s", tc.bootTimeout, logged, tc.wantLogged, got)
+			}
+			if tc.wantLogged {
+				budget, _ := ProbeBudget(cfg)
+				for _, want := range []string{
+					fmt.Sprintf(`"budgetSeconds":%d`, int(budget.Seconds())),
+					fmt.Sprintf(`"slow_command_timeout_seconds":%d`, int(cfg.SlowCommandTimeout.Seconds())),
+					fmt.Sprintf(`"worker_boot_timeout_seconds":%d`, int(cfg.WorkerBootTimeout.Seconds())),
+				} {
+					if !strings.Contains(got, want) {
+						t.Errorf("logProbeBudget wrote %q, want it to contain %q", got, want)
+					}
+				}
+			}
+		})
+	}
+}
