@@ -182,6 +182,7 @@
         ]
       }
     ],
+    "enableServiceLinks": false,
     "initContainers": [
       {
         "env": [
