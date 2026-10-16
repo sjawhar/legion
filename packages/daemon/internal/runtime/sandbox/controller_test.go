@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"reflect"
 	"slices"
@@ -267,6 +268,70 @@ func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) 
 	spec := controllerSpec(t)
 	if err := failedLaunch(t, g, spec); err == nil || !strings.Contains(err.Error(), "write the github credential for "+string(claim.RoleController)) {
 		t.Fatalf("the controller's launch = %v, want the refusal naming its role", err)
+	}
+}
+
+// A project whose repositories have no GitHub owner to mint for (runtime.ErrNoGitHubOwner: every mapped
+// repository lacks an App) still runs its controller, with gh acting as nobody, as `legion
+// controller start` does there: the launch succeeds, its role Secret holds the launcher token and
+// an empty default owner and no gh files, its gh volume is an empty directory rather than a
+// projection of the Secret (a projection with no items would project every key, the launcher
+// token among them), its agent's GH_CONFIG_DIR and LEGION_GH_OWNERS_DIR both name that empty
+// directory, a kept pod with that Secret is bound rather than replaced, and the refresher has
+// nothing to refresh and logs nothing.
+func TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory(t *testing.T) {
+	logs := &lockedLog{}
+	noOwner := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+		return ghconfig.Bundle{}, fmt.Errorf("the review App for controller: %w", runtime.ErrNoGitHubOwner)
+	}
+	options := withOptions(func(o *Options) {
+		o.GitHubCredential = noOwner
+		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	})
+	g := newRig(t, nil, options)
+	spec := controllerSpec(t)
+	loc := g.spawn(spec)
+	name := SandboxName(controllerToken)
+	secret := g.secret(roleSecretName(name, claim.RoleController))
+	if secret == nil || len(secret.Data) != 2 || len(secret.Data[LauncherTokenFile]) == 0 {
+		t.Fatalf("the controller's role Secret holds %+v, want the launcher token and the empty default alone", secret)
+	}
+	if def, ok := secret.Data[GitHubDefaultKey]; !ok || len(def) != 0 {
+		t.Fatalf("the controller's Secret records default %q (present: %t), want an empty one", def, ok)
+	}
+	pod := g.r.storedPod(name)
+	volumes := map[string]corev1.Volume{}
+	for _, v := range pod.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	if gh := volumes[roleVolume(ghVolume, claim.RoleController)]; gh.Secret != nil || gh.EmptyDir == nil {
+		t.Errorf("the controller's gh volume is %+v, want an empty directory and no projection of its Secret", gh.VolumeSource)
+	}
+	l := launch{spec: spec, roles: []claim.Role{claim.RoleController}, kind: controllerPod{}, gh: g.r.tools.GH}
+	start := map[string]string{}
+	for _, entry := range launcherCommand(l, g.r).Env {
+		key, value, _ := strings.Cut(entry, "=")
+		start[key] = value
+	}
+	if start["GH_CONFIG_DIR"] != GHConfigDir || start["LEGION_GH_OWNERS_DIR"] != GHConfigDir {
+		t.Errorf("the controller's agent is told GH_CONFIG_DIR=%q LEGION_GH_OWNERS_DIR=%q, want both %s", start["GH_CONFIG_DIR"], start["LEGION_GH_OWNERS_DIR"], GHConfigDir)
+	}
+	s, err := g.r.storedSandbox(loc.Sandbox.Name)
+	if err != nil || s == nil {
+		t.Fatalf("the store holds Sandbox %v (%v)", s, err)
+	}
+	kept := launch{roles: []claim.Role{claim.RoleController}}
+	if bound, err := g.r.launcherBound(g.ctx, s, pod, &kept); err != nil || !bound || kept.gitHubDefault != "" {
+		t.Errorf("launcherBound = %t, %v, default %q; want the kept pod bound with no default", bound, err, kept.gitHubDefault)
+	}
+	g.clearActions()
+	before := len(logs.String())
+	g.r.refreshGitHubCredentials(g.ctx)
+	if updated := secretUpdates(g.writes()); len(updated) != 0 {
+		t.Errorf("the refresher updated %v, want nothing", updated)
+	}
+	if logged := logs.String()[before:]; strings.Contains(logged, "github credential refresh failed") {
+		t.Errorf("the refresher logged %q, want nothing", logged)
 	}
 }
 

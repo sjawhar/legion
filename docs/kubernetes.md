@@ -3051,7 +3051,11 @@ at `/legion` with its `sessions` directory at Oh My Pi's sessions directory, so 
 the session. It provisions no workspace: no `workspace-fetch`, no provisioning token. Its `gh`
 bundle, projected read-only at `/var/run/legion/gh` by a `gh-controller` volume, acts as the review
 App, refreshed every minute as every role's is; a failed review-App mint fails the launch naming
-the role, and the keeper relaunches it. Its one init container, `legion workspace-init controller --root
+the role, and the keeper relaunches it. A project with no GitHub owner to mint for (none of its
+repositories has an App) starts the controller anyway with `gh` acting as nobody, as `legion
+controller start` does there: its role Secret records an empty `github-default`, its `gh-controller`
+volume is an empty directory, and it holds owners from its next pod on. Its one init container,
+`legion workspace-init controller --root
 /legion`, makes the sessions directory; in a pod created to resume a session whose file is gone it
 exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no

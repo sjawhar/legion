@@ -47,7 +47,9 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // records (GitHubDefaultKey), and rewrites only the owners whose hosts.yml is not the render. A
 // Secret that records no default (one an older runtime wrote, whose pod the next launch replaces),
 // a render that fails, or one whose default is not the Secret's is logged and the role keeps its
-// last tokens until the next tick; a write that conflicts is retried once on a fresh read. Nothing
+// last tokens until the next tick, and a Secret whose default is empty (a controller whose project
+// had no GitHub owner when its pod started, whose gh directory is an empty one) has nothing to
+// refresh until its next pod; a write that conflicts is retried once on a fresh read. Nothing
 // of the Secret but the rewritten owners' gh keys changes: the launcher token, whose hash binds the
 // launcher (credentialFromSecret), the default, the annotations, and the keys of an owner the
 // render no longer holds, which the pod's projection may still name, stay as they are.
@@ -90,9 +92,13 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 	if !ownedBySandbox(secret.OwnerReferences, uid) {
 		return
 	}
-	owner := string(secret.Data[GitHubDefaultKey])
-	if owner == "" {
+	recorded, ok := secret.Data[GitHubDefaultKey]
+	if !ok {
 		failed(fmt.Errorf("Secret %s records no %s", name, GitHubDefaultKey))
+		return
+	}
+	owner := string(recorded)
+	if owner == "" {
 		return
 	}
 	minting, cancel := call(ctx)

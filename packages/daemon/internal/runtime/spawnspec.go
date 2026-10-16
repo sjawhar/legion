@@ -37,11 +37,17 @@ func SecretFilePath(stateDir, name string) string { return filepath.Join(Secrets
 // — the role's App token for owner, the one the agent writes to (its issue's repository's owner),
 // and a token of the same App narrowed to reading for every other owner — with owner's directory
 // the bundle's default, which GH_CONFIG_DIR names. The runtime writes it under the agent's bundle
-// root (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked for the bundle's
-// recorded default, as the leases near their expiry. The controller writes to no owner and acts as
-// the review App (appauth.AppRoleFor): its bundle holds every owner read-only whatever owner it is
-// asked for, the first owner its default.
+// root (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked for the same owner, as
+// the leases near their expiry. The controller writes to no owner and acts as the review App
+// (appauth.AppRoleFor): its bundle holds every owner read-only, the owner it is asked for its
+// default, or the first owner when it is asked for none. A project with no GitHub owner at all to
+// mint for is ErrNoGitHubOwner.
 type GitHubCredential func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error)
+
+// ErrNoGitHubOwner is a GitHubCredential's refusal when there is no GitHub owner to mint for: a
+// project whose repositories none of the Apps can act on, and a caller that names no owner. A
+// controller then runs with gh acting as nobody, its gh directory empty.
+var ErrNoGitHubOwner = errors.New("no GitHub owner to mint an App lease for")
 
 // GHConfigDir is the tmux pane's bundle root (LEGION_GH_OWNERS_DIR): `<state_dir>/secrets/<claim>-gh`,
 // the directory holding the claim's gh bundle (ghconfig.WriteBundle), named for its claim token so
