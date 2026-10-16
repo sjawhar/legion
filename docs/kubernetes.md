@@ -1662,7 +1662,15 @@ Every pod runs:
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated `karpenter.sh/do-not-disrupt: "true"`.
+- annotated `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own stop-eviction annotation, which
+  GKE's cluster-autoscaler ignores; the issue pod and the project controller's additionally carry
+  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, the upstream Cluster Autoscaler's own
+  annotation, which GKE Autopilot honours as a request for up to seven days of extended-duration
+  protection from its own scale-down and node-upgrade eviction — not indefinitely, and not from node
+  pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or an
+  operator-initiated drain; Autopilot also places each such Pod on a node of its own whenever
+  possible. The image probe pod (below) carries only the first: a dedicated node per boot would cost
+  more than the eviction window buys a probe that is already short-lived and retried on failure.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -1915,9 +1923,11 @@ node under the pool's limits when none has, of the smallest type the pool's requ
 production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
 floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 19 GiB
 issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 19 would place three), cpu the binding
-dimension. A pod relaunched onto another node waits for its `ReadWriteOnce` volume to detach from
-the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach` events until the old
-pod is gone; then it runs on.
+dimension. On GKE Autopilot each issue and controller pod tends to get a node of its own instead
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so node count there tracks pod count rather
+than this two-per-node packing. A pod relaunched onto another node waits for its `ReadWriteOnce`
+volume to detach from the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach`
+events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
@@ -3001,8 +3011,12 @@ tree's cleanup lists it, and the boot census holds it to exactly the one launche
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
 agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
 so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
-"true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
-is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
+"true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
+or replaces for drift the node it runs on, though issue pods can still be scheduled onto that node;
+GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) has what it does not stop), after which
+Autopilot may evict it like any other pod, and it is relaunched and resumes the same session like
+any claim's pod that dies ("The claim", above). Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
