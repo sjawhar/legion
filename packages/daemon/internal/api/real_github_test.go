@@ -41,14 +41,14 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	h := newHarness(t)
 	tokens := appauth.New(apps, appauth.Options{})
 	h.handler = NewServer("127.0.0.1", 0, Options{
-		Supervisor:  h.supervisor,
-		BootTokens:  h.tokens,
-		Project:     testProject,
-		Tokens:      tokens,
-		GitHubOwner: "sjawhar",
-		Grants:      credential.New(nil),
-		Pool:        h.store.Pool(),
-		Record:      record.NewStore(),
+		Supervisor:   h.supervisor,
+		BootTokens:   h.tokens,
+		Project:      testProject,
+		Tokens:       tokens,
+		GitHubOwners: func() []string { return []string{"sjawhar"} },
+		Grants:       credential.New(nil),
+		Pool:         h.store.Pool(),
+		Record:       record.NewStore(),
 	}).Handler
 	gh := realGh(t)
 

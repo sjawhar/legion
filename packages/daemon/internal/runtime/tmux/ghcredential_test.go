@@ -117,7 +117,7 @@ func (f *fakeServerRuntime) spec(t *testing.T, role claim.Role) runtime.SpawnSpe
 	}
 	spec.Claim, spec.Role = token, role
 	spec.Prompt.RolePromptPaths = []string{prompt}
-	spec.Repository = ghrepo.MustParse("acme/widgets")
+	spec.Repository, spec.DefaultBranch = ghrepo.MustParse("acme/widgets"), "main"
 	located, err := workspace.Location(f.stateDir, spec.Repository, spec.Issue)
 	if err != nil {
 		t.Fatal(err)

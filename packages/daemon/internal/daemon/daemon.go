@@ -1312,7 +1312,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwner:        githubOwner(cfg),
+		GitHubOwners:       projectOwners(cfg),
 		GitHubAPI:          githubAPI,
 		Repository:         projectRepository(cfg),
 		MergeRules:         projectMergeRules(cfg),

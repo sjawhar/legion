@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -112,14 +113,15 @@ func (h *harness) controllerSessionGrant(session, secret string) *httptest.Respo
 }
 
 // newControllerCredentialHarness is newCredentialHarness with control over whether the daemon
-// launches the project's controller itself.
+// launches the project's controller itself, over a project whose repositories are under two
+// owners, sjawhar and acme.
 func newControllerCredentialHarness(t *testing.T, tokens appauth.Tokens, launched bool) *harness {
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), ControllerLaunched: launched,
-		Tokens: tokens, GitHubOwner: "acme",
+		Tokens: tokens, GitHubOwners: func() []string { return []string{"sjawhar", "acme"} },
 	}).Handler
 	return h
 }
@@ -423,31 +425,53 @@ func TestCredentialAndWorkflowRoutesRefuseAMissingFieldWithACode(t *testing.T) {
 		http.StatusBadRequest, "secret is required")
 }
 
-// legion controller start's refresh call answers the review App's token, rendered as the two
-// files gh reads, for the current controller capability alone: a wrong secret, or one a later
-// legion controller start superseded, is refused the same way.
+// legion controller start's refresh call answers the review App's read-only token for every owner
+// of the project, each rendered as the two files gh reads, with the first owner, sorted, the
+// default, or the owner the request names (the one the controller's GH_CONFIG_DIR already names),
+// for the current controller capability alone: a wrong secret, or one a later legion controller
+// start superseded, is refused the same way, and a default that is no GitHub login is refused.
 func TestControllerGitHubCredential(t *testing.T) {
-	h := newControllerCredentialHarness(t, tokenSource{}, false)
+	h := newControllerCredentialHarness(t, handoffTokens{}, false)
 	secret := h.mintedSecret()
 
-	recorder := h.controllerGitHubCredential(secret)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("controller github credential = %d, want 200; body %s", recorder.Code, recorder.Body)
+	for _, tc := range []struct{ asked, want string }{{"", "acme"}, {"Sjawhar", "sjawhar"}} {
+		recorder := h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: tc.asked}, nil)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("controller github credential asking %q = %d, want 200; body %s", tc.asked, recorder.Code, recorder.Body)
+		}
+		var answer ControllerCredentialResponse
+		decodeInto(t, recorder, &answer)
+		want := map[string]ControllerOwnerCredential{
+			"acme":    {Hosts: ghconfig.Hosts("review-token-for-acme-read"), Config: ghconfig.Config},
+			"sjawhar": {Hosts: ghconfig.Hosts("review-token-for-sjawhar-read"), Config: ghconfig.Config},
+		}
+		if !maps.Equal(answer.Owners, want) || answer.Default != tc.want || answer.App != "review" {
+			t.Fatalf("controller github credential asking %q = %+v, want the review App's read-only files of both owners, default %s", tc.asked, answer, tc.want)
+		}
+		if _, err := time.Parse(timeFormat, answer.ExpiresAt); err != nil {
+			t.Fatalf("expiresAt %q does not parse: %v", answer.ExpiresAt, err)
+		}
 	}
-	var answer ControllerCredentialResponse
-	decodeInto(t, recorder, &answer)
-	if answer.Hosts != ghconfig.Hosts("installation-token") || answer.Config != ghconfig.Config || answer.App != "review" {
-		t.Fatalf("controller github credential = %+v, want the review App's rendered files", answer)
-	}
-	if _, err := time.Parse(timeFormat, answer.ExpiresAt); err != nil {
-		t.Fatalf("expiresAt %q does not parse: %v", answer.ExpiresAt, err)
-	}
+	wantFailure(t, h.request(http.MethodPost, "/legion/v1/controller/github-credential", ControllerCredentialRequest{Secret: secret, Default: "../x"}, nil),
+		http.StatusBadRequest, "INVALID_DEFAULT_OWNER")
 
 	wantFailure(t, h.controllerGitHubCredential("not-the-capability"), http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY")
 
 	superseded := secret
 	h.mintedSecret()
 	wantFailure(t, h.controllerGitHubCredential(superseded), http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY")
+}
+
+// A project with no GitHub owner answers the credential route's GITHUB_OWNER_UNCONFIGURED, which
+// legion controller start reads as a daemon with nothing to act as.
+func TestControllerGitHubCredentialWithoutAnOwner(t *testing.T) {
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Tokens: handoffTokens{}, GitHubOwners: func() []string { return nil },
+	}).Handler
+	secret := h.mintedSecret()
+	wantFailure(t, h.controllerGitHubCredential(secret), http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED")
 }
 
 // A daemon that launches its own controller (`controller: daemon`) refuses the credential route

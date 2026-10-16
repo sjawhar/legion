@@ -201,8 +201,8 @@ func acmeWidgets(project string) (ghrepo.Repository, bool) {
 
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
 // the implement App for READY, with facts recording every fact the routes apply, refused as
-// refusal says. The issue's repository is acme/widgets, while the daemon's configured owner is
-// another, so a READY read minted for anyone but the repository's owner shows.
+// refusal says. The issue's repository is acme/widgets, so a READY read minted for anyone but acme
+// shows.
 func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
@@ -214,7 +214,7 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
-		Tokens: handoffTokens{}, GitHubOwner: "sjawhar", GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubAPI: github.url, Repository: acmeWidgets,
 		MergeRules: func(project string) config.MergeRules {
 			if project != testProject {
 				return config.MergeRules{}
@@ -405,7 +405,7 @@ func TestHandoffCompleteReadyRefusesAnIssueWhoseProjectHasNoRepository(t *testin
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store, Grants: credential.New(nil),
 		Pool: h.store.Pool(), Record: record.NewStore(), Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{},
-		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url,
+		Tokens: handoffTokens{}, GitHubAPI: github.url,
 		Repository: func(string) (ghrepo.Repository, bool) { return ghrepo.Repository{}, false },
 	}).Handler
 	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
@@ -626,7 +626,7 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, facts}, Dispatch: &statusRecorder{},
-		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubAPI: github.url, Repository: acmeWidgets,
 	}).Handler
 	// The tester takes run 1's task, and the child is then re-entered at run 2 while it works.
 	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
@@ -691,7 +691,7 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine}, Dispatch: &statusRecorder{},
-		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubAPI: github.url, Repository: acmeWidgets,
 	}).Handler
 	ctx := context.Background()
 	issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",

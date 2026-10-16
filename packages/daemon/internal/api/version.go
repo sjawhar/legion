@@ -183,4 +183,15 @@ package api
 // image at boot instead. (26 is LEGION-694's, open as sjawhar/legion#1999 when this was taken; a
 // release declaring 26 carries no `--default-branch`, so this branch takes the number above it, as
 // the collision note says.)
-const DaemonAPIVersion = 27
+//
+// 28: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
+// directory per GitHub owner of the project under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's
+// owner's (write) and every other owner's read-only, with LEGION_GH_PATH the real gh the `gh`
+// wrapper first on PATH (`legion gh`; `/opt/legion/bin/gh` in the image) runs; every shared
+// clone's credential helper is `legion git-credential` with `credential.useHttpPath` on. A role
+// Secret's gh keys are per owner (`github-hosts-<owner>`, `github-config-<owner>`,
+// `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
+// `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
+// `expiresAt` in place of one `hosts` and `config`. An image built at 27 has neither the wrapper
+// nor the two commands, so the image probe refuses it. (Taken above 27, sjawhar/legion#2000's.)
+const DaemonAPIVersion = 28
