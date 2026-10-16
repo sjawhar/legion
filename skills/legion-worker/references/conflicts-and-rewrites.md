@@ -35,8 +35,8 @@ Every path it cites is in sjawhar/legion.
   the revset is built from the serialized name alone:
 
   ```bash
-  base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json')
-  jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "merge: resolve conflict against ${base}@origin"
+  base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && \
+    jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "merge: resolve conflict against ${base}@origin"
   ```
 
   Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
@@ -50,8 +50,8 @@ Every path it cites is in sjawhar/legion.
   no `skip-checks: true` line): the merge descends from both the bookmark's old position and the
   destination, so it is a genuine fast-forward and *Rewriting pushed commits* never applies.
 - **After a retarget.** Retargeting a pull request to a new base does not re-run Tests. Read
-  `base` again as above, merge the bookmark onto it
-  (`jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "<message>"`) and push it the
+  `base` again and merge the bookmark onto it in one command
+  (`base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "<message>"`) and push it the
   ordinary way — a genuine fast-forward, never `--allow-backwards` — so the new head runs Tests
   against the new merge result, and cite that run in the PR body.
 
@@ -61,11 +61,11 @@ The fingerprint every role compares after a conflict-forced rebase (every flag a
 verified on jj 0.45.1):
 
 ```bash
-base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json')
+base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && \
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
-  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head-sha>)" --to <head-sha> \
+fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head-sha>)" --to <head-sha> \
     --git --context 0 '~(.legion | docs/solutions)' \
-  | sed -e '/^@@/d' -e '/^index /d' | sha256sum
+  | sed -e '/^@@/d' -e '/^index /d' | sha256sum) && echo "$fingerprint"
 ```
 
 - `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
@@ -73,9 +73,11 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
   the old base for the pre-rebase head, the new base for the rebased one, so one command serves
   both sides. `base` is the pull request's base branch as a jj string literal, as in the merge
   above.
-- A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
-  workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a
-  changed diff — never as unchanged.
+- A head the rebase hid is still addressable by its SHA in the shared workspace. The check
+  prints a fingerprint only when every step of it succeeded: the base read, the fetch and the
+  diff (`pipefail` keeps the diff's failure through `sed` and `sha256sum`, which would otherwise
+  hash empty input to `e3b0c442…`). A nonzero exit or no printed fingerprint (a failed read of the
+  base, or a SHA the workspace cannot resolve) counts as a changed diff — never as unchanged.
 - `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
   on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
