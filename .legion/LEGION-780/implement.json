@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-780",
+  "completed": "2026-10-16T02:23:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1982",
+  "codeHead": "33edf7b85885770a4cb3136b1398517074f1251a",
+  "proof": [
+    {
+      "criterion": "Item 4: a bash call is bound on its command alone (.arguments | fromjson | .command); the two real full-agent-tools excerpts #1866's tester kept still pass under the new binding, and an intent-only call fails.",
+      "surface": "The proof script's own helpers (session_jq, tool_result_said, tool_result_answered) lifted by name with scripts/e2e/lib/script-functions.ts and run over the two real Oh My Pi session excerpts LEGION-578's tester attached to LEGION-578 on request: dispatch://LEGION-578/artifact/full-agent-tools-implementer-excerpt-jsonl (38 lines, sha256 b1da44a15af793aeba0360bbf6ce3833d3c5c9bbec584308950e653b86bd15bc, nonce full-agent-tools-implementer-tester-287839177, the implement App) and dispatch://LEGION-578/artifact/full-agent-tools-tester-excerpt-jsonl (78 lines, sha256 b27c947e8eadaa68621671b795d563448c6717339ab5e62881c4241943b4654b, nonce full-agent-tools-tester-578001, the review App), each read with `dispatch doc-read --issue LEGION-578 --artifact <slug>` with the header line dropped and its sha256 equal to the tester's reply; under each of jq 1.6, 1.7.1 and 1.8.2 (/tmp/jqs/<v>/jq first on PATH).",
+      "command": "fns=$(bun -e 'import {scriptFunctions} from \"./scripts/e2e/lib/script-functions\"; const fn = scriptFunctions(\"scripts/e2e/stage4b-sandbox-tree.sh\"); console.log([\"session_jq\",\"tool_result_said\",\"tool_result_answered\"].map(fn).join(\"\\n\"))'); for v in 1.6 1.7.1 1.8.2; do PATH=/tmp/jqs/$v:$PATH bash -c \"set -uo pipefail; root=\\$PWD; $fns; e=<excerpt>; tool_result_answered \\$e bash 'gh api graphql' '<App>'; echo \\$?; tool_result_answered \\$e bash 'go version &&' 'go version go'; echo \\$?; ! tool_result_said \\$e bash '<other App>'; echo \\$?\"; done",
+      "observed": "Implementer excerpt (legion-implementer[bot], other legion-reviewer[bot]): 0, 0, 0 under all three jqs. Tester excerpt as kept (78 lines; legion-reviewer[bot], other legion-implementer[bot]): 0, 0 for the gh api graphql and toolchain assertions under all three jqs; the other-App negative is 1 under the old and the new def alike, because that kept window runs past the eight items into the tester's own later work, where a bash result prints `legion-implementer[bot]` (the tester's replay of the implementer excerpt's assertions); cut at the operation's last tool result, the FullAgentGh task result (line 24 of 78, sha256 8a246bdf9491a5b51a87e98a621236bcf0b334980e40b713789bf6edf127c970), all three are 0 under all three jqs. tool_result_said is tool-wide and unchanged by this change; the binding only narrows tool_result_answered.",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "The composed intent-only excerpt (one bash call {command: \"gh pr view 1866 --json author\", i: \"Running gh api graphql for the viewer login\"} answered by a text naming legion-implementer[bot]) saved to /tmp/proof/intent-only.jsonl and judged with the same lifted `tool_result_answered <file> bash 'gh api graphql' 'legion-implementer[bot]'`: exit 1 under the new def, and exit 0 (fooled) with the old `.arguments | contains($args)` restored for bash in a copy of the library (session_jq's -L pointed at the copy), under all three jqs. The unit test `a bash call is bound on its command, not the model's intent` fails the same way against the old def (the worker ran it once with the def reverted: `Expected: false Received: true` on tool_result_answered)."
+    },
+    {
+      "criterion": "Item 1: the controller checkpoint judges each tick alone: its openCapabilities, as a set, is [\"secrets\"] or [\"secrets\",\"pool-capacity\"]; no daemon snapshot is read.",
+      "surface": "pi-envoy's real renderer, renderInbound of packages/envoy-client/src/delivery.ts, rendering tick envelopes (payload_summary `tick on LEGSMOKE`, payload {kind: \"tick\", openCapabilities: [...]}) into envoy-message custom messages of a temp controller session (/tmp/proof/render-ticks.ts), read by the head's lifted controller_deliveries and controller_ticks with notice_needle from scripts/e2e/lib/workflow.sh and judged by lib/controller-ticks.jq's ticks_name_deployment_open, under jq 1.6, 1.7.1 and 1.8.2.",
+      "command": "bun run /tmp/proof/render-ticks.ts /tmp/proof/ticks-good good; bun run /tmp/proof/render-ticks.ts /tmp/proof/ticks-bad withNoList; then for each jq: bash -c 'set -Eeuo pipefail; root=$PWD; project=LEGSMOKE; profile_agent=/tmp/proof/ticks-<case>; <notice_needle from lib/workflow.sh>; <lifted controller_deliveries, controller_ticks>; ticks=$(controller_ticks | jq -s -c .); jq -L \"$root/scripts/e2e/lib\" '\"'\"'include \"controller-ticks\"; ticks_name_deployment_open'\"'\"' <<<\"$ticks\"'",
+      "observed": "The rendered card carries `openCapabilities[1]: secrets` on its own line under `message:`; good (two ticks) read [[\"secrets\"],[\"secrets\",\"pool-capacity\"]] → true; withNoList read [[\"secrets\"],[\"secrets\",\"pool-capacity\"],[]] → false; identical under the three jqs.",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "The third tick rendered with no openCapabilities list (payload {kind: \"tick\"}) is read as [] and turns the session's verdict false; and the unit cases [[\"secrets\",\"model-fallback\"]] and [[\"secrets\",\"web-search\"]] fail against a def that drops the arms (the worker ran them once with `length > 0 and all(.[]; (.open | index(\"secrets\")) != null)`: `Expected: false Received: true`)."
+    },
+    {
+      "criterion": "Item 2: prerequisites compiles every jq module the script includes on the host's jq, and a module with a syntax error is refused.",
+      "surface": "The lifted included_jq_modules and jq_modules_compile run from scripts/e2e over the real lib directory and over a copy with a syntax error appended to controller-ticks.jq, with fail and note stubbed, under jq 1.6, 1.7.1 and 1.8.2.",
+      "command": "cd scripts/e2e && bash -c \"set -euo pipefail; $(fn included_jq_modules)$(fn jq_modules_compile) fail(){ echo FAIL \\\"\\$@\\\"; exit 3; }; note(){ echo NOTE \\\"\\$@\\\"; }; jq_modules_compile lib \\$(included_jq_modules stage4b-sandbox-tree.sh)\"",
+      "observed": "`NOTE jq-<v> compiles lib/controller-ticks.jq lib/design-gate-approval-requests.jq lib/omp-tool-calls.jq lib/stage4b-pods.jq lib/stage4b-room.jq lib/stage4b-tools.jq`, exit 0, for jq-1.6, jq-1.7.1 and jq-1.8.2; included_jq_modules lists exactly those six, the script's own include strings.",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "cp -r lib /tmp/proof/lib-broken && printf 'def broken: (;\\n' >> /tmp/proof/lib-broken/controller-ticks.jq, then the same call with /tmp/proof/lib-broken as LIBDIR → `FAIL the host's jq-<v> cannot compile lib/controller-ticks.jq: jq: error: syntax error, unexpected ';' … at /tmp/proof/lib-broken/controller-ticks.jq, line 41: def broken: (; jq: 1 compile error`, exit 3, under each jq."
+    },
+    {
+      "criterion": "Item 3: the merger block and the role loop share one function for their four common assertions, with the fail-line prefix and order kept; the controller scans share controller_deliveries.",
+      "surface": "The lifted full_agent_common_asserts (with session_jq, tool_result_said, tool_result_answered, tool_result_quotes) run over lib/testdata/stage4b-tools-session.jsonl, a real implementer pod's session, with fail stubbed; lib/stage4b-controller-deliveries.test.ts runs controller_deliveries and controller_received under set -Eeuo pipefail over fixture session files.",
+      "command": "bash -c 'set -Eeuo pipefail; root=$PWD; <lifted fns>; fail(){ echo \"FAIL $*\"; exit 3; }; full_agent_common_asserts merger scripts/e2e/lib/testdata/stage4b-tools-session.jsonl nonce-x \"legion-implementer[bot]\" \"legion-reviewer[bot]\"'; bun test scripts/e2e/lib/stage4b-controller-deliveries.test.ts",
+      "observed": "First line `FAIL merger: no edit result carries 'edited nonce-x', so the edit tool did not change the page; its edit results: {\"i\":\"Rehearsal: edit the page title\",…}`, exit 3 (the prefix and the order: the edit assertion is first); with fail not exiting, exactly the edit and read lines fail, the gh api graphql assertion passes (the fixture's call answers legion-implementer[bot]) and no result names legion-reviewer[bot]. The deliveries test: 7 pass, 0 fail (file order, needle filter, no match → nothing and exit 0, a quoted needle, an empty sessions root). `grep -c 'profile_agent/sessions'` dropped from 9 to 6.",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "The fixture holds no `edited nonce-x` edit, so the shared function fails there first, as the role loop and the merger block did before the fold; `controller_received \"summary: todo on LEGSMOKE-9\"` exits 1 over the fixture sessions and over an empty sessions root."
+    },
+    {
+      "criterion": "Item 5: agent_setting runs omp config get once with every variable of the process, or fails on xargs's `argument list too long` instead of running twice under a partial environment.",
+      "surface": "This pod's /usr/bin/xargs (GNU findutils 4.10.0; the harness bash's xargs is a builtin, so the binary is named), the committed xargs line with the environ file substituted (the kernel's /proc/<pid>/environ cannot be enlarged) and against this shell's own /proc/$$/environ with omp on PATH.",
+      "command": "env=$(mktemp); printf 'A=%040d\\0B=%040d\\0' 0 0 >\"$env\"; (cd /tmp && KEY=k /usr/bin/xargs -0 -x -n \"$(tr -cd '\\0' <\"$env\" | wc -c)\" -s 70 sh -c 'echo \"$#\"' agent-env <\"$env\"; echo exit=$?); (cd /tmp && KEY=retry.modelFallback /usr/bin/xargs -0 -x -n \"$(tr -cd '\\0' <\"/proc/$$/environ\" | wc -c)\" sh -c 'exec env -i \"$@\" omp config get \"$KEY\" --json' agent-env <\"/proc/$$/environ\" | /usr/bin/jq -c .value)",
+      "observed": "Overflow: `/usr/bin/xargs: argument list too long`, nothing printed, exit 1. This shell's 61-variable environ: one run, `true`, exit 0.",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "The old line (no `-x -n <count>`) on the same two-variable file with -s 70: `1` printed twice, exit 0 — two runs, the second under a partial environment, which the spec's item 5 describes."
+    },
+    {
+      "criterion": "Item 6: the hold test pins both sleep 300 clauses and the three wait budgets allow for the turn.",
+      "surface": "bun test over lib/stage4b-hold.test.ts, which lifts hold_end_charged from the script and reads the script text; grep over the script for the three budgets.",
+      "command": "bun test scripts/e2e/lib/stage4b-hold.test.ts; grep -n -E 'until_true 1500 \"implementer pull request|wait_for_phase \"\\$tree1\" testing 1500|until_true 1200 \"the implementer.s production-check completion\"' scripts/e2e/stage4b-sandbox-tree.sh",
+      "observed": "8 pass, 0 fail; the grep prints exactly three lines (3904, 4226, 5692 at this head), and `wait_for_phase \"$tree1\" testing 1200` after `pr_number=` stays (count 1).",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "With the task line's `(its timeout 600 seconds)` edited to `601` once: `error: expect(received).toContain(expected) Expected to contain: \"run `sleep 300` as one bash call (its timeout 600 seconds), so this turn stays open while the proof ends your process\"`, 7 pass 1 fail; restored → 8 pass. The worker did the same for the instructions' clause (`timeout set to 600 seconds` → 601): the second pin fails, green once restored."
+    },
+    {
+      "criterion": "Spec proof: the unit tests under jq 1.6, 1.7.1 and 1.8.2, bash -n, shellcheck on the changed functions.",
+      "surface": "bun test over scripts/e2e/lib with each downloaded jq first on PATH; bash -n; shellcheck v0.10.0 (-f gcc -x) finding texts sorted and compared with main's as sets.",
+      "command": "for v in 1.6 1.7.1 1.8.2; do PATH=/tmp/jqs/$v:$PATH bun test scripts/e2e/lib; done; bash -n scripts/e2e/stage4b-sandbox-tree.sh; cd scripts/e2e && shellcheck -f gcc -x stage4b-sandbox-tree.sh | sed -E 's/^[^:]+:[0-9]+:[0-9]+: //' | sort > after.txt; comm -13 before.txt after.txt",
+      "observed": "362 pass, 2 fail under each jq; the two failures are lib/nats-stream.test.ts, which needs docker, absent in this pod (`Executable not found in $PATH: \"docker\"`) and unrelated to this change; the five files of this change pass 51 tests under each jq. bash -n exit 0. shellcheck: main 24 findings, this head 24, comm -13 empty (no new finding). bunx biome check . : the repository's one pre-existing warning (packages/claude-envoy) and nothing in scripts/e2e.",
+      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
+      "negativeControl": "The jq on PATH in this pod's harness shell is a jaq builtin (`jq --version` → jaq 3.1.1), so each loop names the downloaded binary first on PATH and bun's spawned bash resolves it; /tmp/jqs/<v>/jq --version printed jq-1.6, jq-1.7.1 and jq-1.8.2 before each run."
+    }
+  ],
+  "filesChanged": [
+    "scripts/e2e/stage4b-sandbox-tree.sh",
+    "scripts/e2e/lib/stage4b-tools.jq",
+    "scripts/e2e/lib/controller-ticks.jq",
+    "scripts/e2e/lib/stage4b-tools.test.ts",
+    "scripts/e2e/lib/controller-ticks.test.ts",
+    "scripts/e2e/lib/stage4b-hold.test.ts",
+    "scripts/e2e/lib/stage4b-jq-modules.test.ts (new)",
+    "scripts/e2e/lib/stage4b-controller-deliveries.test.ts (new)",
+    "scripts/e2e/README.md"
+  ],
+  "trickyParts": [
+    "arguments_carry reads the stored arguments with `fromjson? // {}` (the simplify pass's one behavioural finding): the stored text is call_arguments | tostring, always a JSON object for the sessions Oh My Pi writes, and the guard keeps one odd call from aborting every bash assertion, matching the module's `select(.id | strings)` guard.",
+    "The tester's kept 78-line excerpt runs past the eight-item operation into the tester's later work, so its tool-wide `! tool_result_said bash <other App>` negative fails on a bash result that prints the other App's name; it fails identically under the old def. The proof records both the kept window and the operation-bounded window (cut at the FullAgentGh task result).",
+    "In this pod's harness shell `jq` and `xargs` are builtins (jaq, and a shell xargs): every measurement names /usr/bin/xargs or a downloaded jq first on PATH; bun's spawned bash resolves PATH for real.",
+    "`bunx biome check <single file>` printed nothing and exited 0 before `bun install` had run in the workspace; after `bun install --frozen-lockfile` the directory check found two formatting diffs, fixed with `biome check --write`. CI's lint job runs `bunx biome check .`, now clean but for the repository's pre-existing claude-envoy warning.",
+    "included_jq_modules reads the script's text, so an `include \"x\"` inside a comment is counted (the new test pins this); a commented include compiles or names a missing module, either of which the guard reports."
+  ],
+  "deviations": [
+    "Plan task 3's comment wording: the plan called stage4b-tools 'the one module the script reaches through a nested include'; stage4b-room also includes stage4b-pods and the script reaches its defs, so the committed comments say stage4b-tools is the module whose include (of omp-tool-calls) met jq 1.8.2's abort, and is therefore also run over its fixture.",
+    "Plan task 4: controller_deliveries has one grep pipeline (`grep -F -- \"${1-}\"`, an empty fixed-string pattern matching every line) instead of an if on $#, after the simplify pass's reuse and quality reviewers both flagged the duplicated literal; the same output, order and exit status, pinned by lib/stage4b-controller-deliveries.test.ts.",
+    "Plan task 5's fail line: the shared third fail line reads `as $who's App` (so `as reviewer's App`, `as merger's App`) where the two blocks read `as the role's App` and `as the merger's App`.",
+    "Plan task 1's proof (a) departure 2 as the architect ruled: the two real excerpts are replayed as proof and not committed; the tester's own excerpt is judged in two windows (see trickyParts).",
+    "Spec item 7's premise, as the architect ruled: main's null-id comment did not claim vacuity; the comment now states the measured fact (from_entries on a null key exits 5 under jq 1.6, 1.7.1 and 1.8.2 alike, measured again here)."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "scripts/e2e/lib's bun suite needs `bun install` in the workspace and docker on the host (lib/nats-stream.test.ts); neither is this change's, and CI's test job has both."
+  ]
+}
