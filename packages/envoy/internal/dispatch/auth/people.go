@@ -24,21 +24,26 @@ type PersonMembership struct {
 type PeopleStore interface {
 	// Record notes that email has signed in, keeping any membership it already holds.
 	Record(ctx context.Context, email string) error
-	// SignIn records a sign-in through the issuer: its refresh token, confirmed at confirmedAt.
-	// subject is the Google account's `sub` of a sign-in for a Workspace domain, and empty for a
-	// Cognito pool's, which neither reads nor writes the stored subject. When email already holds
-	// another subject, the sign-in ends every session of email (SessionStore.RevokeSessions) before
-	// it records subject, so a revoke that fails leaves the old subject for the next sign-in to
-	// revoke again.
-	SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
+	// SignIn records a sign-in through a Cognito sign-in pool, confirmed at confirmedAt; the
+	// stored subject is neither read nor written. When email already holds a refresh token stored
+	// in plain text, the sign-in retires it first.
+	SignIn(ctx context.Context, email, refreshToken string, confirmedAt time.Time) error
+	// SignInSubject records a sign-in for a Workspace domain, confirmed at confirmedAt: subject is
+	// the Google account's `sub`. When email already holds another subject, the sign-in ends every
+	// session of email (SessionStore.RevokeSessions) before it records subject, so a revoke that
+	// fails leaves the old subject for the next sign-in to revoke again. When email already holds
+	// a refresh token stored in plain text, the sign-in retires it first.
+	SignInSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
 	// Membership reads email's membership; found is false for a person who never signed in.
 	Membership(ctx context.Context, email string) (membership PersonMembership, found bool, err error)
-	// Confirm records a refresh that confirmed email's membership, with the refresh token to use
-	// next. subject is the Google account a domain-mode refresh confirmed: the write happens only
-	// while the row still records that account, so a refresh that began before another account
-	// signed in to the address cannot overwrite the new holder's token. A Cognito pool's
-	// confirmation passes an empty subject and writes whatever the row's subject.
-	Confirm(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
+	// Confirm records a refresh that confirmed email's Cognito-pool membership, with the refresh
+	// token to use next.
+	Confirm(ctx context.Context, email, refreshToken string, confirmedAt time.Time) error
+	// ConfirmSubject records a refresh that confirmed email's domain-mode membership: the write
+	// happens only while the row still records subject, the Google account the refresh read, so a
+	// refresh that began before another account signed in to the address cannot overwrite the new
+	// holder's token.
+	ConfirmSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
 	// EndSubject ends email's domain-mode sign-in only while its row still records subject (an
 	// empty subject: records none). In one transaction it advances email's session generation and
 	// forgets the refresh token and confirmation, and ended reports that it did; a row another

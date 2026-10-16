@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -74,6 +75,18 @@ func (r GroupRule) End(ctx context.Context, people auth.PeopleStore, sessions au
 // there is nothing another sign-in could have taken the address under.
 func (r GroupRule) ConfirmCookie(ctx context.Context, people auth.PeopleStore, email, subject string) error {
 	return nil
+}
+
+// WriteSignIn records a sign-in through the Cognito sign-in pool (auth.PeopleStore.SignIn);
+// subject, always empty under a group, is unused.
+func (r GroupRule) WriteSignIn(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string, confirmedAt time.Time) error {
+	return people.SignIn(ctx, email, refreshToken, confirmedAt)
+}
+
+// WriteConfirm records a refresh that confirmed email's membership (auth.PeopleStore.Confirm);
+// subject, always empty under a group, is unused.
+func (r GroupRule) WriteConfirm(ctx context.Context, people auth.PeopleStore, email, subject, refreshToken string, confirmedAt time.Time) error {
+	return people.Confirm(ctx, email, refreshToken, confirmedAt)
 }
 
 // providerEmail is the lowercased email a federated provider's username carries, the Cognito

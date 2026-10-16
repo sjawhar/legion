@@ -86,8 +86,14 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 		sessions: sessions,
 		now:      time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
 	}
-	if err := rig.people.SignIn(context.Background(), memberEmail, subject, session.RefreshToken, rig.now); err != nil {
-		t.Fatalf("record sign-in: %v", err)
+	var signInErr error
+	if subject != "" {
+		signInErr = rig.people.SignInSubject(context.Background(), memberEmail, subject, session.RefreshToken, rig.now)
+	} else {
+		signInErr = rig.people.SignIn(context.Background(), memberEmail, session.RefreshToken, rig.now)
+	}
+	if signInErr != nil {
+		t.Fatalf("record sign-in: %v", signInErr)
 	}
 	rig.membership = &Membership{
 		People:   rig.people,
@@ -325,7 +331,7 @@ func TestDomainMembershipWhoseRefreshFailsAfterAnotherAccountSignedInLeavesThatA
 	rig.now = rig.now.Add(2 * time.Hour)
 	var newGeneration int64
 	rig.membership.SignIn = refresherFunc(func(ctx context.Context, _ string) (oidc.Session, error) {
-		if err := rig.people.SignIn(ctx, memberEmail, "google-subject-B", "refresh-B", rig.now); err != nil {
+		if err := rig.people.SignInSubject(ctx, memberEmail, "google-subject-B", "refresh-B", rig.now); err != nil {
 			t.Errorf("the new account's sign-in: %v", err)
 		}
 		generation, err := rig.sessions.EnsureSession(ctx, memberEmail)

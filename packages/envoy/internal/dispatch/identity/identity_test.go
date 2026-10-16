@@ -73,18 +73,25 @@ func (s *testPeopleStore) Record(_ context.Context, email string) error {
 	return nil
 }
 
-func (s *testPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+func (s *testPeopleStore) SignIn(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership := s.people[email]
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
+}
+
+func (s *testPeopleStore) SignInSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership, existed := s.people[email]
-	if subject != "" {
-		if existed && membership.Subject != subject {
-			if err := s.sessions.RevokeSessions(ctx, email); err != nil {
-				return err
-			}
+	if existed && membership.Subject != subject {
+		if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+			return err
 		}
-		membership.Subject = subject
 	}
+	membership.Subject = subject
 	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
 	s.people[email] = membership
 	return nil
@@ -97,11 +104,20 @@ func (s *testPeopleStore) Membership(_ context.Context, email string) (auth.Pers
 	return membership, found, nil
 }
 
-func (s *testPeopleStore) Confirm(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+func (s *testPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership := s.people[email]
-	if subject != "" && membership.Subject != subject {
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
+}
+
+func (s *testPeopleStore) ConfirmSubject(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership := s.people[email]
+	if membership.Subject != subject {
 		return nil
 	}
 	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt

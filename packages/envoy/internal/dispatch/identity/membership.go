@@ -96,7 +96,7 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	if err != nil {
 		return m.end(ctx, email, membership.Subject, err.Error())
 	}
-	return m.People.Confirm(ctx, email, subject, session.RefreshToken, m.now())
+	return m.Rule.WriteConfirm(ctx, m.People, email, subject, session.RefreshToken, m.now())
 }
 
 // end ends email's sign-in under m.Rule's end policy (SignInRule.End).

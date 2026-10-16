@@ -447,7 +447,13 @@ func ageConfirmation(t *testing.T, people auth.PeopleStore, email string) {
 	if err != nil || !found || membership.RefreshToken == "" {
 		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
 	}
-	if err := people.Confirm(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+	if membership.Subject != "" {
+		if err := people.ConfirmSubject(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := people.Confirm(context.Background(), email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -993,7 +999,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// it opens a refresh token sealed under DISPATCH_SIGNING_KEY.
 			t.Run("people store", func(t *testing.T) {
 				database := storetest.Open(t)
-				if err := store.NewPgPeopleStore(database.Pool, "table-key", nil).SignIn(context.Background(), "alice@example.com", "", "refresh-sealed", time.Now()); err != nil {
+				if err := store.NewPgPeopleStore(database.Pool, "table-key", nil).SignIn(context.Background(), "alice@example.com", "refresh-sealed", time.Now()); err != nil {
 					t.Fatal(err)
 				}
 				people, key, err := openPeople(resolveWith(t, map[string]string{"DISPATCH_SIGNING_KEY": "table-key"}), t.TempDir(), database.Pool, nil)

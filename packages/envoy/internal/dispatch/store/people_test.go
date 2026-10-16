@@ -28,7 +28,7 @@ func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
 		t.Fatalf("membership before any sign-in: found=%t err=%v, want not found", found, err)
 	}
 	signedIn := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	if err := people.SignIn(ctx, email, "", "refresh-1", signedIn); err != nil {
+	if err := people.SignIn(ctx, email, "refresh-1", signedIn); err != nil {
 		t.Fatalf("sign in: %v", err)
 	}
 	// Recording a person who already signed in through the pool keeps their membership.
@@ -41,7 +41,7 @@ func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
 	}
 
 	confirmed := signedIn.Add(90 * time.Minute)
-	if err := people.Confirm(ctx, email, "", "refresh-2", confirmed); err != nil {
+	if err := people.Confirm(ctx, email, "refresh-2", confirmed); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	membership, _, err = people.Membership(ctx, email)
@@ -154,8 +154,8 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 		name  string
 		write func(token string) error
 	}{
-		{"sign-in", func(token string) error { return people.SignIn(ctx, email, "", token, confirmed) }},
-		{"confirmation", func(token string) error { return people.Confirm(ctx, email, "", token, confirmed) }},
+		{"sign-in", func(token string) error { return people.SignIn(ctx, email, token, confirmed) }},
+		{"confirmation", func(token string) error { return people.Confirm(ctx, email, token, confirmed) }},
 	} {
 		token := "refresh-" + write.name + "-" + randomDatabaseSuffix(t)
 		if err := write.write(token); err != nil {
@@ -192,13 +192,13 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 		revoked bool
 	}{
 		"sealed under another signing key": {store: func(t *testing.T, _ *PgPeopleStore, email, token string) {
-			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key", nil).SignIn(ctx, email, "", token, confirmed); err != nil {
+			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key", nil).SignIn(ctx, email, token, confirmed); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		"sealed for another person": {store: func(t *testing.T, people *PgPeopleStore, email, token string) {
 			other := "other-" + email
-			if err := people.SignIn(ctx, other, "", token, confirmed); err != nil {
+			if err := people.SignIn(ctx, other, token, confirmed); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := database.Pool.Exec(ctx, `insert into people (email, refresh_token, confirmed_at) select $1, refresh_token, confirmed_at from people where email = $2`, email, other); err != nil {
@@ -239,7 +239,7 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 			if strings.Contains(out, token) || strings.Contains(out, *stored) {
 				t.Errorf("the log carries the stored value:\n%s", out)
 			}
-			if err := people.SignIn(ctx, email, "", "refresh-again", confirmed); err != nil {
+			if err := people.SignIn(ctx, email, "refresh-again", confirmed); err != nil {
 				t.Fatal(err)
 			}
 			if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-again" {
@@ -266,7 +266,7 @@ func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
 	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
 	storePlainRefreshToken(t, database, "plain-1@d.example", "plain-token-1")
 	storePlainRefreshToken(t, database, "plain-2@d.example", "plain-token-2")
-	if err := people.SignIn(ctx, "sealed@d.example", "", "sealed-token", time.Now()); err != nil {
+	if err := people.SignIn(ctx, "sealed@d.example", "sealed-token", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	sealed := storedRefreshToken(t, database, "sealed@d.example")
@@ -396,7 +396,7 @@ func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 		storePlainRefreshToken(t, database, email, plain)
 		pool.FailRevocation(status, "invalid_request")
 		logs := captureLogs(t)
-		if err := people.SignIn(ctx, email, "", "refresh-fresh", time.Now()); err != nil {
+		if err := people.SignIn(ctx, email, "refresh-fresh", time.Now()); err != nil {
 			t.Fatalf("pool answering %d: sign in: %v", status, err)
 		}
 		if got := pool.RevocationRequests(); !reflect.DeepEqual(got, []string{plain}) {
@@ -427,7 +427,7 @@ func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
 	_, flow := revokingPool(t)
 	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
 	email := "raced@d.example"
-	if err := people.SignIn(ctx, email, "", "refresh-new", time.Now()); err != nil {
+	if err := people.SignIn(ctx, email, "refresh-new", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := people.retire(ctx, email, "plain-the-sweep-read"); err != nil {
@@ -470,7 +470,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 	}
 	logs := captureLogs(t)
 
-	if err := people.SignIn(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
 		t.Fatalf("first sign-in: %v", err)
 	}
 	if got := membership(); got.Subject != "subject-1" || got.RefreshToken != "refresh-1" {
@@ -484,7 +484,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 		t.Fatal(err)
 	}
 
-	if err := people.SignIn(ctx, email, "subject-1", "refresh-2", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-2", time.Now()); err != nil {
 		t.Fatalf("sign-in under the same subject: %v", err)
 	}
 	if got, _ := sessionGeneration(t, sessions, email); got != generation {
@@ -494,7 +494,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 		t.Fatalf("a sign-in under the same subject logged a revoke:\n%s", logs.String())
 	}
 
-	if err := people.SignIn(ctx, email, "subject-2", "refresh-3", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-3", time.Now()); err != nil {
 		t.Fatalf("sign-in under another subject: %v", err)
 	}
 	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
@@ -507,7 +507,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 		t.Errorf("the revoke was not logged at WARN with the address:\n%s", out)
 	}
 
-	if err := people.SignIn(ctx, email, "", "refresh-4", time.Now()); err != nil {
+	if err := people.SignIn(ctx, email, "refresh-4", time.Now()); err != nil {
 		t.Fatalf("sign-in under a group: %v", err)
 	}
 	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "refresh-4" {
@@ -529,7 +529,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 	if err := people.Record(ctx, "recorded@example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if err := people.SignIn(ctx, "recorded@example.com", "subject-3", "refresh-5", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, "recorded@example.com", "subject-3", "refresh-5", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if generation, found := sessionGeneration(t, sessions, "recorded@example.com"); !found || generation != 1 {
@@ -538,7 +538,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 
 	// A sign-in whose own insert creates the row has no earlier session to end, however its
 	// subject reads: it is not a reassignment.
-	if err := people.SignIn(ctx, "brand-new@example.com", "subject-4", "refresh-6", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, "brand-new@example.com", "subject-4", "refresh-6", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if _, found := sessionGeneration(t, sessions, "brand-new@example.com"); found {
@@ -554,7 +554,7 @@ func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
-	if err := people.SignIn(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	generation, err := sessions.EnsureSession(ctx, email)
@@ -567,7 +567,7 @@ func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()); err == nil || !strings.Contains(err.Error(), "the test refuses every revoke") {
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err == nil || !strings.Contains(err.Error(), "the test refuses every revoke") {
 		t.Fatalf("a sign-in whose revoke fails: err = %v, want the revoke's error", err)
 	}
 	if membership, _, err := people.Membership(ctx, email); err != nil || membership.Subject != "subject-1" || membership.RefreshToken != "refresh-1" {
@@ -576,7 +576,7 @@ func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `drop trigger refuse_session_revoke on user_sessions`); err != nil {
 		t.Fatal(err)
 	}
-	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
 		t.Fatalf("the retry: %v", err)
 	}
 	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
@@ -602,7 +602,7 @@ func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := make(chan error, 1)
-	go func() { second <- people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()) }()
+	go func() { second <- people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()) }()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		var waiting int
@@ -646,10 +646,10 @@ func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 	const email = "a.person@example.com"
 	signedIn := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	later := signedIn.Add(90 * time.Minute)
-	if err := people.SignIn(ctx, email, "subject-1", "refresh-1", signedIn); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", signedIn); err != nil {
 		t.Fatal(err)
 	}
-	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", signedIn); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", signedIn); err != nil {
 		t.Fatal(err)
 	}
 	membership := func() auth.PersonMembership {
@@ -660,19 +660,19 @@ func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 		}
 		return membership
 	}
-	if err := people.Confirm(ctx, email, "subject-1", "refresh-stale", later); err != nil {
+	if err := people.ConfirmSubject(ctx, email, "subject-1", "refresh-stale", later); err != nil {
 		t.Fatalf("a stale confirmation: %v", err)
 	}
 	if got := membership(); got.RefreshToken != "refresh-2" || got.Subject != "subject-2" || !got.ConfirmedAt.Equal(signedIn) {
 		t.Fatalf("after subject-1's stale confirmation: %#v, want subject-2's refresh-2 confirmed %s", got, signedIn)
 	}
-	if err := people.Confirm(ctx, email, "subject-2", "refresh-3", later); err != nil {
+	if err := people.ConfirmSubject(ctx, email, "subject-2", "refresh-3", later); err != nil {
 		t.Fatal(err)
 	}
 	if got := membership(); got.RefreshToken != "refresh-3" || !got.ConfirmedAt.Equal(later) {
 		t.Fatalf("after subject-2's confirmation: %#v, want refresh-3 confirmed %s", got, later)
 	}
-	if err := people.Confirm(ctx, email, "", "refresh-4", later); err != nil {
+	if err := people.Confirm(ctx, email, "refresh-4", later); err != nil {
 		t.Fatal(err)
 	}
 	if got := membership(); got.RefreshToken != "refresh-4" {
@@ -689,7 +689,7 @@ func TestPgPeopleStoreEndSubjectEndsOnlyTheAccountItNames(t *testing.T) {
 	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
 	sessions := NewPgSessionStore(database.Pool)
 	const email = "a.person@example.com"
-	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	generation, err := sessions.EnsureSession(ctx, email)

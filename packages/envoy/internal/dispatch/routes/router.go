@@ -307,7 +307,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	subject := r.ctx.SignInRule.Subject(session.Claims)
-	if err := r.ctx.People.SignIn(req.Context(), email, subject, session.RefreshToken, time.Now()); err != nil {
+	if err := r.ctx.SignInRule.WriteSignIn(req.Context(), r.ctx.People, email, subject, session.RefreshToken, time.Now()); err != nil {
 		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return

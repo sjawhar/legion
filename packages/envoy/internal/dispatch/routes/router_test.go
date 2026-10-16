@@ -87,29 +87,39 @@ func (s *memoryPeopleStore) Record(_ context.Context, email string) error {
 	return nil
 }
 
-func (s *memoryPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) runAfterSignIn() {
 	// afterSignIn runs once, after this sign-in has committed and released the store: a test's
 	// window between a sign-in's commit and its cookie.
-	defer func() {
-		if hook := s.afterSignIn; hook != nil {
-			s.afterSignIn = nil
-			hook()
-		}
-	}()
+	if hook := s.afterSignIn; hook != nil {
+		s.afterSignIn = nil
+		hook()
+	}
+}
+
+func (s *memoryPeopleStore) SignIn(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+	defer s.runAfterSignIn()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership := s.people[email]
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
+}
+
+func (s *memoryPeopleStore) SignInSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	defer s.runAfterSignIn()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership, existed := s.people[email]
-	if subject != "" {
-		if existed && membership.Subject != subject {
-			if s.sessions == nil {
-				return errors.New("memoryPeopleStore: a sign-in under another subject has no sessions to end")
-			}
-			if err := s.sessions.RevokeSessions(ctx, email); err != nil {
-				return err
-			}
+	if existed && membership.Subject != subject {
+		if s.sessions == nil {
+			return errors.New("memoryPeopleStore: a sign-in under another subject has no sessions to end")
 		}
-		membership.Subject = subject
+		if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+			return err
+		}
 	}
+	membership.Subject = subject
 	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
 	s.people[email] = membership
 	return nil
@@ -122,11 +132,20 @@ func (s *memoryPeopleStore) Membership(_ context.Context, email string) (auth.Pe
 	return membership, found, nil
 }
 
-func (s *memoryPeopleStore) Confirm(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership := s.people[email]
-	if subject != "" && membership.Subject != subject {
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
+}
+
+func (s *memoryPeopleStore) ConfirmSubject(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership := s.people[email]
+	if membership.Subject != subject {
 		return nil
 	}
 	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
@@ -548,7 +567,7 @@ func TestDomainSignInUnderAnotherSubjectEndsTheAddressSessions(t *testing.T) {
 // taken it yet.
 func TestDomainSignInEndsACookieFromBeforeTheSwitchToDomainMode(t *testing.T) {
 	rig := newDomainSignInRig(t)
-	if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "", "old-refresh-token", rig.clock()); err != nil {
+	if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "old-refresh-token", rig.clock()); err != nil {
 		t.Fatalf("sign in the pre-switch row: %v", err)
 	}
 	generation, err := rig.sessions.EnsureSession(context.Background(), rigGoogleEmail)
@@ -637,7 +656,7 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 func TestDomainSignInGetsNoSessionWhenAnotherAccountTakesTheAddressBeforeItsCookie(t *testing.T) {
 	rig := newDomainSignInRig(t)
 	rig.people.afterSignIn = func() {
-		if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "google-subject-2", "refresh-2", time.Now()); err != nil {
+		if err := rig.people.SignInSubject(context.Background(), rigGoogleEmail, "google-subject-2", "refresh-2", time.Now()); err != nil {
 			t.Errorf("the other account's sign-in: %v", err)
 		}
 	}
@@ -1293,7 +1312,7 @@ func TestAuthStartAsksGoogleForOfflineAccessInTheDomain(t *testing.T) {
 func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *memoryPeopleStore) {
 	t.Helper()
 	people := newMemoryPeople()
-	if err := people.SignIn(context.Background(), "sami@d.example", "", "refresh-token", time.Now()); err != nil {
+	if err := people.SignIn(context.Background(), "sami@d.example", "refresh-token", time.Now()); err != nil {
 		t.Fatalf("record sign-in: %v", err)
 	}
 	sessions := &memorySessionStore{generations: map[string]int64{"sami@d.example": 0}}
