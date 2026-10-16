@@ -87,9 +87,10 @@ func TestGraphQLNamesItsRouteAndItsErrors(t *testing.T) {
 // RetryAfter reads GitHub's rate limit from either error a call returns, wrapped or not: an *Answer
 // for a REST or GraphQL answer other than 2xx, and a *GraphQLError for a RATE_LIMITED answer GitHub
 // sends with 200. It names how long GitHub asks the caller to wait and the budget the limit spent:
-// a Retry-After, or a limit that reports no primary budget spent, is GitHub's secondary limit, which
-// every call of the token meets; a primary limit spends the budget x-ratelimit-resource names, or the
-// called API's own when it names none. Any other error is no limit.
+// a Retry-After, a limit that reports no primary budget spent, or one whose message names the
+// secondary limit, is GitHub's secondary limit, which every call of the token meets; a primary limit
+// spends the budget x-ratelimit-resource names, or the called API's own when it names none. Any
+// other error is no limit.
 func TestRetryAfterNamesTheBudgetALimitSpent(t *testing.T) {
 	reset := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
 	const limited = `{"message":"API rate limit exceeded"}`
@@ -113,8 +114,12 @@ func TestRetryAfterNamesTheBudgetALimitSpent(t *testing.T) {
 			limited, BudgetGraphQL, 9 * time.Minute, 10 * time.Minute},
 		{"GraphQL's RATE_LIMITED", true, http.StatusOK, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset, "X-RateLimit-Resource": "graphql"},
 			graphQLLimited, BudgetGraphQL, 9 * time.Minute, 10 * time.Minute},
-		{"GraphQL's RATE_LIMITED naming no wait", true, http.StatusOK, nil, graphQLLimited, BudgetGraphQL, time.Minute, time.Minute},
+		{"GraphQL's RATE_LIMITED reporting no primary budget spent", true, http.StatusOK, nil, graphQLLimited, BudgetSecondary, time.Minute, time.Minute},
 		{"GraphQL's RATE_LIMITED with a Retry-After", true, http.StatusOK, map[string]string{"Retry-After": "17"}, graphQLLimited, BudgetSecondary, 17 * time.Second, 17 * time.Second},
+		{"GraphQL's RATE_LIMITED for a secondary limit, its primary budget left", true, http.StatusOK, map[string]string{"X-RateLimit-Remaining": "4000", "X-RateLimit-Resource": "graphql"},
+			`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}]}`, BudgetSecondary, time.Minute, time.Minute},
+		{"GraphQL's RATE_LIMITED for a secondary limit, its primary budget spent too", true, http.StatusOK, map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset, "X-RateLimit-Resource": "graphql"},
+			`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"You have exceeded a secondary rate limit."}]}`, BudgetSecondary, 9 * time.Minute, 10 * time.Minute},
 		{"a secondary limit's 429", false, http.StatusTooManyRequests, map[string]string{"Retry-After": "17"}, limited, BudgetSecondary, 17 * time.Second, 17 * time.Second},
 		{"a secondary limit named by its message", false, http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4321"},
 			`{"message":"You have exceeded a secondary rate limit."}`, BudgetSecondary, time.Minute, time.Minute},

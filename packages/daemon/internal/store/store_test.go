@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
@@ -830,6 +833,108 @@ func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
 	if rows != 1 {
 		t.Fatalf("ready_merge rows %d, want one", rows)
 	}
+}
+
+// An issue already awaiting its merge when the daemon is upgraded to the release that submits READY
+// merges reached awaiting_merge before any ready_merge row existed, and the workflow queues one only
+// as an issue reaches awaiting_merge or its pull request reopens. The upgrade queues it once: for
+// each issue awaiting its merge at its merger's READY head, in the workflow, on an open pull
+// request, in a tree that does not linger, and with no ready_merge row already. A READY a person
+// merges (its by-hand note), a closed pull request, an issue that left the workflow, a lingering
+// tree and an issue in another phase get none, and an existing row is kept as it is.
+func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
+	seed := func(t *testing.T, store *Store) {
+		t.Helper()
+		ctx, records := context.Background(), record.NewStore()
+		until, root := time.Now().Add(time.Hour), "LEGION-212"
+		awaiting := func(key, status string) record.Issue {
+			return record.Issue{Key: key, Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 1, Status: status, Rank: "U"}
+		}
+		lingering := awaiting("LEGION-213", "retro")
+		lingering.Tree, lingering.Parent = root, &root
+		merging := awaiting("LEGION-214", "retro")
+		merging.Phase = phase.Merging
+		if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error {
+			for _, seeded := range []struct {
+				issue     record.Issue
+				mergeNote string
+				pr        record.PullRequestState
+			}{
+				{awaiting("LEGION-208", "retro"), "", record.PullRequestOpen},
+				{awaiting("LEGION-209", "retro"), "MANUAL_MERGE_REQUIRED: pull request #43 matches a by_hand merge rule; do not auto-arm it", record.PullRequestOpen},
+				{awaiting("LEGION-210", "retro"), "", record.PullRequestClosed},
+				{awaiting("LEGION-211", "done"), "", record.PullRequestOpen},
+				{record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", Rank: "T", LingerUntil: &until}, "", ""},
+				{lingering, "", record.PullRequestOpen},
+				{merging, "", record.PullRequestOpen},
+			} {
+				if err := records.PutIssue(ctx, tx, seeded.issue); err != nil {
+					return err
+				}
+				if seeded.pr == "" {
+					continue
+				}
+				if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: seeded.issue.Key, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head", MergeNote: seeded.mergeNote}); err != nil {
+					return err
+				}
+				number, _ := strconv.Atoi(strings.TrimPrefix(seeded.issue.Key, "LEGION-"))
+				if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: seeded.pr, Issue: seeded.issue.Key, Repo: "acme/widgets", Number: number,
+					Branch: "legion/" + seeded.issue.Key, HeadSHA: "ready-head", Failing: []string{}}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("seed the issues: %v", err)
+		}
+	}
+	readyMerges := func(t *testing.T, store *Store) []string {
+		t.Helper()
+		rows, err := store.pool.Query(context.Background(), `select id, issue, payload->>'number', payload->>'head', attempts from outbox where kind = 'ready_merge' order by id`)
+		if err != nil {
+			t.Fatalf("read ready_merge rows: %v", err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var id int64
+			var issue, number, head string
+			var attempts int
+			if err := rows.Scan(&id, &issue, &number, &head, &attempts); err != nil {
+				t.Fatalf("scan a ready_merge row: %v", err)
+			}
+			got = append(got, fmt.Sprintf("row %d %s #%s at %s attempts %d", id, issue, number, head, attempts))
+		}
+		return got
+	}
+	t.Run("from schema 42", func(t *testing.T) {
+		store := emptyStore(t)
+		migrateThrough(t, store, 42)
+		seed(t, store)
+		if _, err := store.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		got := readyMerges(t, store)
+		if len(got) != 1 || !strings.HasSuffix(got[0], " LEGION-208 #208 at ready-head attempts 0") {
+			t.Fatalf("READY merges after the upgrade %q, want LEGION-208's alone", got)
+		}
+	})
+	t.Run("an existing row is kept", func(t *testing.T) {
+		store := emptyStore(t)
+		migrateThrough(t, store, 44)
+		seed(t, store)
+		if _, err := store.pool.Exec(context.Background(), `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
+			values ('ready_merge', 'LEGION-208', '{"number":208,"head":"ready-head"}', 3, now(), 'waiting', '')`); err != nil {
+			t.Fatalf("queue the existing row: %v", err)
+		}
+		before := readyMerges(t, store)
+		if _, err := store.Migrate(context.Background()); err != nil {
+			t.Fatalf("migrate: %v", err)
+		}
+		if got := readyMerges(t, store); !slices.Equal(got, before) {
+			t.Fatalf("READY merges after the upgrade %q, want the existing row alone, unchanged: %q", got, before)
+		}
+	})
 }
 
 // waitForALockWait waits until another backend running a statement that contains marker waits on a

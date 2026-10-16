@@ -107,7 +107,10 @@ func (e *GraphQLError) NotFoundAt(path ...string) bool {
 // GraphQL sends query and variables to the client's API, and reads the answer's data into into when
 // into is not nil. An answer that carries errors is a *GraphQLError, and one other than 2xx an
 // *Answer. GitHub answers its RATE_LIMITED with 200, so the *GraphQLError carries the limit its
-// headers name.
+// headers name. GitHub's GraphQL documentation tells the two apart: a primary limit reports its
+// budget spent (x-ratelimit-remaining: 0), and a secondary limit says so in its message, and may
+// leave the primary budget unspent. Only a limit that spent the primary budget and does not name
+// the secondary limit is GraphQL's own (spent).
 func (c Client) GraphQL(ctx context.Context, query string, variables map[string]any, into any) error {
 	var response struct {
 		Data   json.RawMessage  `json:"data"`
@@ -126,7 +129,8 @@ func (c Client) GraphQL(ctx context.Context, query string, variables map[string]
 		for _, failure := range failed.Failures {
 			if failure.Type == "RATE_LIMITED" {
 				failed.RetryAfter = rateLimitRetryAfter(headers, time.Now())
-				failed.Budget = spent(headers, true, BudgetGraphQL)
+				primary := headers.Get("X-RateLimit-Remaining") == "0" && !namesSecondaryLimit(failure.Message)
+				failed.Budget = spent(headers, primary, BudgetGraphQL)
 				break
 			}
 		}
@@ -311,7 +315,13 @@ func RateLimited(response *http.Response, body []byte) bool {
 	if response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "" {
 		return true
 	}
-	message := strings.ToLower(string(body))
+	return namesSecondaryLimit(string(body))
+}
+
+// namesSecondaryLimit says whether text, a GitHub answer's body or error message, says it is GitHub's
+// secondary rate limit (secondaryLimitMessages).
+func namesSecondaryLimit(text string) bool {
+	message := strings.ToLower(text)
 	for _, named := range secondaryLimitMessages {
 		if strings.Contains(message, named) {
 			return true

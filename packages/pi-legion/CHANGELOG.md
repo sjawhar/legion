@@ -167,13 +167,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   under a controller grant minted with its registration secret), in place of running
   `legion state` and `legion status` from bash. The client's strict parse needs this release beside
   a daemon at 19; the daemon's boot gate and `legion probe-image` refuse any earlier contract (the
-  8.9.0 release declares 18 and the 8.6.0 release 17, each still minting a grant before every command; 8.4.1 declares 16). The
-  merger submits the merge itself the moment READY is accepted, with
-  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a merge queue
-  enqueues the pull request, a repository without one arms auto-merge, and the repository's
-  required reviews and checks decide when it lands); the implementer disarms it with
-  `gh pr merge <n> -R <owner>/<repo> --disable-auto` at the start of a round that follows a
-  withdrawn READY; and no skill or prompt says Legion never merges. The tester's prompt and the
+  8.9.0 release declares 18 and the 8.6.0 release 17, each still minting a grant before every command; 8.4.1 declares 16). No
+  role runs `gh pr merge`: the daemon submits an accepted READY's merge and disarms a withdrawn
+  one (this section's first entry), and no skill or prompt says Legion never merges. The tester's
+  prompt and the
   `legion-worker` skill now say the tester runs the changed surface for real, tries to break it,
   judges whether the implementer's tests would catch what it broke and reads CI for everything
   static; the sentences that had it rerun the lint, type or unit lanes before a push are gone.
