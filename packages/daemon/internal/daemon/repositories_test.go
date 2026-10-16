@@ -126,6 +126,39 @@ func TestTheMappingNamesEveryMissingAppAndFailsOnAFailedRead(t *testing.T) {
 	}
 }
 
+// The boot refuses a project with no repository mapped, and one none of whose mapped repositories
+// both Apps are installed on, naming the cause; a mapping with one served repository and one left
+// out boots, the left-out one reported.
+func TestTheBootRefusesAMappingItCannotServe(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mappings []dispatch.RepoProject
+		missing  map[string]bool
+		want     string
+	}{
+		{"no repository mapped", []dispatch.RepoProject{{Repo: "other/thing", Project: "OTHER"}}, nil,
+			"project LEGION has no repository mapped in Dispatch (Settings → Repositories → Projects)"},
+		{"no repository with both Apps", []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}}, map[string]bool{"review acme/gadgets": true},
+			"no repository mapped to project LEGION in Dispatch has both GitHub Apps installed (the review App is not installed on acme/gadgets): install them, or map a repository they are installed on"},
+		{"one served, one left out", []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION"}, {Repo: "acme/gadgets", Project: "LEGION"}}, map[string]bool{"review acme/gadgets": true}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &workflowRuntime{dispatch: &mappingDispatch{mappings: tc.mappings}, dispatchProject: "LEGION", installs: &installations{missing: tc.missing},
+				repositories: newRepositories("LEGION"), log: quietLogger()}
+			err := w.loadMapping(context.Background())
+			if tc.want == "" {
+				if err != nil || len(w.repositories.Refused()) != 1 || len(w.repositories.Accepted()) != 1 {
+					t.Fatalf("loadMapping = %v, accepted %v, refused %v; want it to boot with acme/gadgets left out", err, w.repositories.Accepted(), w.repositories.Refused())
+				}
+				return
+			}
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("loadMapping = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // namedGitHub answers GET /repos/{owner}/{repo} for each repository it names, as
 // "<GitHub's spelling>@<default branch>".
 type namedGitHub struct{ url string }
