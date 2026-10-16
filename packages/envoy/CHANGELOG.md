@@ -774,6 +774,9 @@
   a `GET` or `DELETE`, is unaffected, and webhook routes keep their own signature and content
   handling. Every Legion client already sends the header; an operator's own script that posts to
   `/v1` without it now gets the 415 and must set the header.
+- A closed issue can give up an external link (a write whose links are a subset of what it already
+  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
+  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
 
 - A bus client whose NATS connection closes while a publish is in flight now replaces it once,
   and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close

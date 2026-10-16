@@ -15,6 +15,7 @@
     "podTemplate": {
       "metadata": {
         "annotations": {
+          "cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
           "karpenter.sh/do-not-disrupt": "true"
         },
         "labels": {

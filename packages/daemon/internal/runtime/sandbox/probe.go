@@ -691,7 +691,11 @@ type probeSpec struct {
 // secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
 // and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
 // requires. Its command and env are escaped against the kubelet's expansion as every worker
-// container's are (kubeletLiteral).
+// container's are (kubeletLiteral). It carries Karpenter's `do-not-disrupt` alone, not the Cluster
+// Autoscaler's `safe-to-evict` (podTemplate sets both): GKE Autopilot places a pod carrying that
+// one on a node of its own whenever possible, so each boot's probe would ask for a node, and a
+// probe minutes long and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing
+// from a seven-day eviction window.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -718,7 +722,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 			ShutdownPolicy: "Delete",
 			ShutdownTime:   metav1.NewTime(shutdown.UTC().Truncate(time.Second)),
 			PodTemplate: podTemplate{
-				Metadata: podMetadata{Labels: labels, Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"}},
+				Metadata: podMetadata{Labels: labels, Annotations: map[string]string{doNotDisruptAnnotation: "true"}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					TerminationGracePeriodSeconds: new(int64(probeTerminationGrace)),

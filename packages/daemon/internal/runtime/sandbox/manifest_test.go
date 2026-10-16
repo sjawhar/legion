@@ -213,6 +213,35 @@ func TestManifestGoldens(t *testing.T) {
 	}
 }
 
+// Every issue pod and the project controller's pod carry the two stop-eviction annotations
+// unconditionally (the image probe carries only Karpenter's,
+// TestTheProbePodCarriesNoGKEExtendedDurationAnnotation): Karpenter's own, which protects a pod on
+// an AWS cluster, and the Cluster Autoscaler's, which GKE Autopilot honours; GKE ignores
+// Karpenter's, so a pod on Autopilot without the second can be evicted mid-turn by consolidation or
+// a node upgrade.
+func TestEveryIssueAndControllerPodIsProtectedFromAutoscalerEviction(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		doNotDisruptAnnotation: "true",
+		safeToEvictAnnotation:  "false",
+	}
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := r.podTemplate(l).Metadata.Annotations; !maps.Equal(got, want) {
+				t.Errorf("pod annotations = %v, want exactly %v", got, want)
+			}
+		})
+	}
+}
+
 // Every field of every manifest, podTemplate.spec included, is one the v1.0.3 CRD declares with
 // that type: the API server prunes an unknown field without a word, so this walk is the only place
 // a misspelled or misplaced one shows (decision 9, N18).

@@ -294,6 +294,12 @@
 
 ### Fixed
 
+- `dispatch issue-update --clear-external-links` actually clears every external link instead of
+  re-sending the issue's existing set unchanged: `dispatch_issue_update`'s executor now replaces
+  the set with nothing when the request names an explicit empty list, instead of merging it with
+  zero new links. A non-empty list still merges by URL, so linking a pull request still keeps
+  every earlier link.
+
 - `dispatch_open_asks` links an issue ask by its item route, `/issues/<KEY>/asks/<id>`, which
   `dispatchRefFromUrl` reads back as the ask; the link it printed before named the issue alone
   (LEGION-622).

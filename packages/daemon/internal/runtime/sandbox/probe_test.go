@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -948,6 +949,19 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 	}
 	if !bytes.Equal(buffer.Bytes(), want) {
 		t.Fatalf("%s is stale\n got: %s\nwant: %s", path, buffer.Bytes(), want)
+	}
+}
+
+// The probe pod carries Karpenter's `do-not-disrupt` annotation alone; probeManifest says why.
+func TestTheProbePodCarriesNoGKEExtendedDurationAnnotation(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{doNotDisruptAnnotation: "true"}
+	manifest := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC))
+	if got := manifest.Spec.PodTemplate.Metadata.Annotations; !maps.Equal(got, want) {
+		t.Errorf("probe pod annotations = %v, want exactly %v", got, want)
 	}
 }
 
