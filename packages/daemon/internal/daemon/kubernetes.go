@@ -140,8 +140,8 @@ func ProbeBudgetLine(cfg config.Config) (line string, derived bool) {
 	if !derived {
 		return "", false
 	}
-	return fmt.Sprintf("image probe: each attempt waits %ds: worker_boot_timeout_seconds (%d) + 60s is above slow_command_timeout_seconds (%d)",
-		int(budget.Seconds()), int(cfg.WorkerBootTimeout.Seconds()), int(cfg.SlowCommandTimeout.Seconds())), true
+	return fmt.Sprintf("image probe: each attempt waits %ds: worker_boot_timeout_seconds (%d) + %ds is above slow_command_timeout_seconds (%d)",
+		int(budget.Seconds()), int(cfg.WorkerBootTimeout.Seconds()), int(probeBudgetMargin.Seconds()), int(cfg.SlowCommandTimeout.Seconds())), true
 }
 
 // logProbeBudget is the boot's one line when ProbeBudget derives a bound above

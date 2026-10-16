@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// Binaries are the binaries the capability check's image rows look for.
-var Binaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
+// binaries are the binaries the capability check's image rows look for.
+var binaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
 
 // BinaryScript is what a stubbed binary runs: `go version` answers a Go version, `chromium
 // --version` a Chromium one.
@@ -31,10 +31,10 @@ func LockPath(home string) string {
 	return filepath.Join(home, ".omp", "profiles", "legion", "plugins", "omp-plugins.lock.json")
 }
 
-// InstallBinaries writes BinaryScript, executable, as every name in Binaries under bin.
+// InstallBinaries writes BinaryScript, executable, as every binary the image rows look for, under bin.
 func InstallBinaries(t testing.TB, bin string) {
 	t.Helper()
-	for _, name := range Binaries {
+	for _, name := range binaries {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(BinaryScript), 0o755); err != nil {
 			t.Fatal(err)
 		}

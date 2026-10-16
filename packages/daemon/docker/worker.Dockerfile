@@ -289,10 +289,10 @@ ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ARG GO_VERSION
 ARG GO_SHA256
-COPY packages/daemon/docker/language-servers/package.json packages/daemon/docker/language-servers/package-lock.json /opt/language-servers/
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
+COPY packages/daemon/docker/language-servers/package.json packages/daemon/docker/language-servers/package-lock.json /opt/language-servers/
 RUN set -eu; \
     t=/tmp/toolchain; mkdir -p "$t" /out/bin /opt/node; \
     curl -fsSLo "$t/uv.tar.gz" \
@@ -356,7 +356,7 @@ ARG CODEGRAPH_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
-COPY --from=toolchain /opt/language-servers/package.json /in/language-servers/package.json
+COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
 # The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds

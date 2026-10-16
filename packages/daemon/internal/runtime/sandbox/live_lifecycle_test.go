@@ -783,9 +783,10 @@ func firstLine(s string) string {
 	return line
 }
 
-// lineContaining returns the first line of text that contains want, or "" when none does.
+// lineContaining returns the first line of text that contains want, or "" when none does; the
+// callers assert want is there first, so "" never reaches a note.
 func lineContaining(text, want string) string {
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if strings.Contains(line, want) {
 			return line
 		}

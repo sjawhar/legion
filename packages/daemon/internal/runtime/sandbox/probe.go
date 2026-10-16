@@ -544,12 +544,12 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-// lastBytes reads r to its end, keeping only the last keep bytes (never holding more than about
-// 2×keep in memory at once), and answers that tail: with a leading … and its partial first line
-// (everything up to and including the first \n) dropped when anything of r was cut, unchanged
-// when r was keep bytes or shorter.
+// lastBytes reads r to its end, keeping only the last keep bytes (one buffer of 2×keep, compacted
+// in place), and answers that tail: with a leading … and its partial first line (everything up to
+// and including the first \n) dropped when anything of r was cut, unchanged when r was keep bytes
+// or shorter.
 func lastBytes(r io.Reader, keep int) (string, error) {
-	buf := make([]byte, 0, keep)
+	buf := make([]byte, 0, 2*keep)
 	chunk := make([]byte, keep)
 	dropped := false
 	for {
@@ -557,7 +557,7 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 		buf = append(buf, chunk[:n]...)
 		if len(buf) > keep {
 			dropped = true
-			buf = buf[len(buf)-keep:]
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break

@@ -69,13 +69,7 @@ func (s stubs) lock() string {
 }
 
 func (s stubs) writeLock(content string) {
-	s.t.Helper()
-	if err := os.MkdirAll(filepath.Dir(s.lock()), 0o755); err != nil {
-		s.t.Fatal(err)
-	}
-	if err := os.WriteFile(s.lock(), []byte(content), 0o644); err != nil {
-		s.t.Fatal(err)
-	}
+	capabilitiestest.WriteLock(s.t, s.home, content)
 }
 
 // image is the Image the checks read: the stubs' PATH alone, never this process's, and the
