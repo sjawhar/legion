@@ -18,3 +18,28 @@ func CloudConfigOf(args *NatsHubArgs) (CloudConfig, string, error) {
 	}
 	return s.vm.document(), s.userData, nil
 }
+
+// DispatchSettings is the resolved Dispatch configuration the external tests assert without
+// exporting the component's internal representation.
+type DispatchSettings struct {
+	DatabaseVersion    string
+	DatabaseTier       string
+	DeletionProtection bool
+	Namespace          string
+	ServeConfig        string
+}
+
+// ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
+func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
+	s, err := newDispatchSettings(args)
+	if err != nil {
+		return DispatchSettings{}, err
+	}
+	return DispatchSettings{
+		DatabaseVersion:    s.databaseVersion,
+		DatabaseTier:       s.databaseTier,
+		DeletionProtection: s.deletionProtection,
+		Namespace:          s.namespace,
+		ServeConfig:        s.serveConfig,
+	}, nil
+}
