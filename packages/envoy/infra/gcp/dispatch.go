@@ -232,8 +232,13 @@ func NewDispatch(ctx *pulumi.Context, name string, args *DispatchArgs, opts ...p
 	if err != nil {
 		return nil, err
 	}
+	kube, err := newDispatchKubernetes(ctx, comp, args, s, cloud)
+	if err != nil {
+		return nil, err
+	}
 	comp.ClusterName = cloud.cluster.Name
 	comp.DatabaseInstance = cloud.instance.ConnectionName
+	comp.Kubeconfig = kube.kubeconfig
 	comp.Principal = cloud.principal
 	comp.AgentToken = cloud.agentToken.Result
 	comp.Url = pulumi.String("https://" + s.hostname + "." + s.tailnetDNSName).ToStringOutput()

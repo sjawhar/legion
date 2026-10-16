@@ -43,3 +43,8 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		ServeConfig:        s.serveConfig,
 	}, nil
 }
+
+// DispatchKubeconfig renders the component's stable exec-plugin kubeconfig for the golden test.
+func DispatchKubeconfig(endpoint, ca, name string) string {
+	return renderKubeconfig(endpoint, ca, name)
+}

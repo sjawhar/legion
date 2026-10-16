@@ -1,0 +1,12 @@
+{
+  "metadata": {
+    "labels": {"app": "example-dispatch"}
+  },
+  "spec": {
+    "serviceAccountName": "example-dispatch",
+    "terminationGracePeriodSeconds": 30,
+    "initContainers": ["tailscale", "cloud-sql-proxy"],
+    "containers": ["envoy-dispatch", "envoy-listener"],
+    "volumes": ["nats-seed", "serve"]
+  }
+}

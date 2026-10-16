@@ -1,6 +1,7 @@
 package gcp_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/nats-io/nkeys"
@@ -170,4 +171,25 @@ func TestDispatchRegistersItsCloudResources(t *testing.T) {
 		}
 	}
 	require.Equal(t, want, got)
+}
+
+func TestDispatchRegistersKubernetesResources(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	var kubernetesResources int
+	for _, registration := range m.Registrations() {
+		if strings.HasPrefix(registration.Type, "kubernetes:") {
+			kubernetesResources++
+		}
+	}
+	require.Positive(t, kubernetesResources)
+}
+
+func TestDispatchRenderingsMatchGoldens(t *testing.T) {
+	require.Equal(t, readGolden(t, "dispatch-kubeconfig.golden"),
+		gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"))
+	settings, err := gcp.ResolveDispatch(dispatchArgs())
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "dispatch-serve.golden"), settings.ServeConfig)
 }
