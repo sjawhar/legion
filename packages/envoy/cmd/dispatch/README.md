@@ -1,7 +1,7 @@
 # Dispatch HTTP server
 
-Go binary serving the Dispatch dashboard and API. People sign in with Google
-Workspace through the shared sign-in pool and are named by lowercase email; the
+Go binary serving the Dispatch dashboard and API. People sign in through a Cognito
+sign-in pool or with Google directly and are named by lowercase email; the
 web app's GitHub reads go to GitHub as the GitHub App. Dispatch keeps application
 state in Postgres.
 

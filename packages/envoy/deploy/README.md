@@ -3,8 +3,8 @@
 Compose definitions run the on-prem Envoy listener, the Dispatch server against an external
 database, and a single-node Envoy with its own NATS. All services use host networking. The
 listener serves `127.0.0.1:9020` for local session registration and webhook ingress; Dispatch
-serves `127.0.0.1:8766` by default for the SPA, Google sign-in through the shared sign-in pool,
-and the native Dispatch API.
+serves `127.0.0.1:8766` by default for the SPA, Google sign-in through a Cognito sign-in pool or
+with Google directly, and the native Dispatch API.
 
 ## Host configuration lives in `compose/.env`
 
@@ -35,7 +35,8 @@ DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 
 The origin humans open in the browser is the sign-in callback origin: the server builds
 `<DISPATCH_SERVER_URL>/auth/callback` from `DISPATCH_SERVER_URL` in `compose/.env`, and
-the sign-in pool's app client must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
+Dispatch's client at the sign-in issuer — the sign-in pool's app client, or the Google web
+client — must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
 (recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
 stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after
 every deploy and rolls back on a mismatch.

@@ -101,7 +101,7 @@ func TestResolveBootConfigReadsTheDomainSignIn(t *testing.T) {
 // server refuses to boot and names what is missing.
 func TestResolveBootConfigRefusesCookieIdentityWithoutTheWholeSignIn(t *testing.T) {
 	_, err := resolveBootConfig(envGetter(map[string]string{"DATABASE_URL": "postgres://dispatch", "DISPATCH_AGENT_TOKEN": "agent-token"}))
-	if want := "cookie identity signs people in with Google Workspace: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required"; err == nil || err.Error() != want {
+	if want := "cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required"; err == nil || err.Error() != want {
 		t.Fatalf("cookie identity without sign-in: err = %v, want %q", err, want)
 	}
 	_, err = resolveBootConfig(envGetter(signInEnvironment(map[string]string{"DISPATCH_SIGNIN_GROUP": ""})))

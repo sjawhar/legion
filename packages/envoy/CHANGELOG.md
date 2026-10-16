@@ -14,7 +14,7 @@
   domain as `hd`, and the hourly confirmation applies the same rule to the refreshed token. The code
   flow reads `email`, `email_verified` and `hd` from the verified token in domain mode alone; the
   shared verifier, which Cognito tokens, pods' tokens and the listener go through, is unchanged.
-  Migration `0111` adds the nullable `people.sub`: in domain mode a sign-in records the Google
+  Migration `0112` adds the nullable `people.sub`: in domain mode a sign-in records the Google
   account's `sub`, and a sign-in under another account for the same address (a Workspace admin
   gave a deleted account's address to a new one) ends every session of the address in the
   transaction that records it, as does a confirmation whose refreshed token names another account.

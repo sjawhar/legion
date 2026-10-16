@@ -200,10 +200,10 @@ people through `Identity.Login`, which names a person by lowercase email, and
 write identity errors with `identity.WriteError`.
 
 - `DISPATCH_IDENTITY=cookie` is the default. Cookie identity signs people in
-  with Google Workspace (OpenID Connect authorization code,
-  `internal/oidc/codeflow.go`) and requires `DISPATCH_SIGNIN_ISSUER`,
+  through a Cognito sign-in pool or with Google directly (OpenID Connect
+  authorization code, `internal/oidc/codeflow.go`) and requires `DISPATCH_SIGNIN_ISSUER`,
   `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one
-  of `DISPATCH_SIGNIN_GROUP` (through a shared Cognito sign-in pool) or
+  of `DISPATCH_SIGNIN_GROUP` (through the pool) or
   `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under the issuer
   `https://accounts.google.com`). `checkSignInSettings` refuses, in this order,
   both set, some without the others (naming the missing ones), a domain under
@@ -228,7 +228,7 @@ write identity errors with `identity.WriteError`.
   a reason on the 403 page (`ErrNotInDomain`, `ErrEmailNotVerified`,
   `ErrNoEmail`). The callback records the person in `people` with the issuer's
   refresh token, and under a domain the Google account's `sub` (`people.sub`,
-  migration 0111): `PgPeopleStore.SignIn` ends every session of the address in
+  migration 0112): `PgPeopleStore.SignIn` ends every session of the address in
   the transaction that records a `sub` other than the stored one, so a failed
   revoke records nothing. `identity.Membership` renews that sign-in at least
   hourly: a refresh the issuer refuses, or one whose ID token no longer passes

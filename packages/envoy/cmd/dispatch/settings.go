@@ -45,9 +45,9 @@ var settings = []setting{
 	{Name: "DISPATCH_AGENT_TOKEN", Required: "yes",
 		Description: "Shared bearer token an agent may authenticate with: one value, or several separated by whitespace while it rotates, the first the current one, all accepted. Personal tokens minted in Settings are the usual agent credential."},
 	{Name: "DISPATCH_IDENTITY", Default: "`cookie`", Required: "no",
-		Description: "How a browser request names its person: `cookie` (Google Workspace sign-in, through a Cognito sign-in pool or with Google directly, then a signed session cookie) or `header:<Header-Name>` (tests and local harnesses only: the header names the person by email)."},
+		Description: "How a browser request names its person: `cookie` (Google sign-in, through a Cognito sign-in pool or with Google directly, then a signed session cookie) or `header:<Header-Name>` (tests and local harnesses only: the header names the person by email)."},
 	{Name: "DISPATCH_SIGNIN_ISSUER", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
-		Description: "OpenID Connect issuer people sign in through with Google Workspace: a Cognito sign-in pool, with `DISPATCH_SIGNIN_GROUP`, or Google itself (`https://accounts.google.com`), with `DISPATCH_SIGNIN_DOMAIN`; Dispatch reads its endpoints from the issuer's discovery document at startup. Google sign-in takes the issuer, client ID, client secret and exactly one of the group or the domain, or none of them, and header identity and dev sign-in refuse every one of them."},
+		Description: "OpenID Connect issuer people sign in through: a Cognito sign-in pool, with `DISPATCH_SIGNIN_GROUP`, or Google itself (`https://accounts.google.com`), with `DISPATCH_SIGNIN_DOMAIN`; Dispatch reads its endpoints from the issuer's discovery document at startup. Google sign-in takes the issuer, client ID, client secret and exactly one of the group or the domain, or none of them, and header identity and dev sign-in refuse every one of them."},
 	{Name: "DISPATCH_SIGNIN_CLIENT_ID", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
 		Description: "Client ID of Dispatch's confidential client at the issuer: the sign-in pool's app client, or a Google OAuth web client."},
 	{Name: "DISPATCH_SIGNIN_CLIENT_SECRET", Required: "when `DISPATCH_IDENTITY` is `cookie` and `DISPATCH_DEV_SIGNIN` is unset",
@@ -123,7 +123,7 @@ var settings = []setting{
 // ignore, so resolveBootConfig refuses to start naming it. readSettings reads them with the rows,
 // so that refusal too reads the environment through the table.
 var removedSettings = []struct{ Name, Replacement string }{
-	{"DISPATCH_ALLOWED_LOGINS", "people sign in with Google Workspace; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
+	{"DISPATCH_ALLOWED_LOGINS", "people sign in; DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN names who may"},
 	{"DISPATCH_APP_CLIENT_SECRET", "nobody signs in through the GitHub App; its JWT needs only DISPATCH_APP_CLIENT_ID and DISPATCH_APP_PEM_B64"},
 	{"COHERE_API_KEY", "meaning search (LEGION-549) calls Cohere Embed v4 through AWS Bedrock on the AWS SDK's default credential chain (the task role in production), never a Cohere API key"},
 }

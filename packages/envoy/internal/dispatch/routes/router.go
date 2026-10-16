@@ -1,8 +1,8 @@
 // Package routes assembles the Dispatch HTTP server routes.
 //
-// Authenticated people use a signed cookie issued when they sign in with Google Workspace through
-// the sign-in pool. Test and local harnesses can inject header identity. The web app's GitHub reads
-// go to GitHub as the GitHub App.
+// Authenticated people use a signed cookie issued when they sign in through a Cognito sign-in
+// pool or with Google directly. Test and local harnesses can inject header identity. The web
+// app's GitHub reads go to GitHub as the GitHub App.
 package routes
 
 import (
@@ -270,9 +270,9 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 // authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
 // person's ID token and signs in only a person SignInRule admits (identity.Person), keeping the
 // issuer's refresh token to confirm that hourly. Under a group the person is named by the email
-// their Google Workspace username at the Cognito pool carries; under a domain, by the email of a
-// Google account of the domain, and the account's subject is recorded with the sign-in, which
-// ends the address's sessions when another account held it (auth.PeopleStore.SignIn).
+// their pool username carries; under a domain, by the email of a Google account of the domain,
+// and the account's subject is recorded with the sign-in, which ends the address's sessions when
+// another account held it (auth.PeopleStore.SignIn).
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -758,7 +758,7 @@ func writeCodeError(w http.ResponseWriter, status int, message, code string) {
 // verified, each named by email; a Google sign-in that carries no email; or a sign-in that names
 // nobody by email.
 func writeSignInRefusedPage(w http.ResponseWriter, email string, reason error) {
-	message := "This sign-in does not name a person by a Google Workspace email. Sign in with your Google Workspace account."
+	message := "This sign-in does not name a person by email. Sign in again, or with a different account."
 	switch {
 	case errors.Is(reason, identity.ErrNotMember):
 		message = html.EscapeString(email) + " is not in the group that may use Dispatch. Ask an administrator to add you, then sign in again."

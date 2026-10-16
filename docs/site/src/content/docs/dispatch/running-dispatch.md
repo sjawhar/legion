@@ -30,8 +30,8 @@ When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads t
 from `envoy.natsUrls` in `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, the file agents use,
 whatever that file's `envoy.enabled` says, so set one of them explicitly.
 
-People sign in with Google Workspace by default, and Dispatch names each person by their lowercase
-email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
+People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch
+names each person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
 tests and local harnesses only, needs `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and refuses every
 `DISPATCH_SIGNIN_*` setting. Serve Dispatch over HTTPS. `DISPATCH_INSECURE_COOKIE=1` is only for
 trying it over plain HTTP on your own machine.
@@ -43,7 +43,8 @@ by which of `DISPATCH_SIGNIN_GROUP` and `DISPATCH_SIGNIN_DOMAIN` is set beside t
 ID and the client secret. Setting both, or some of the settings without the others, refuses the
 start, naming what is wrong.
 
-- **Through a Cognito sign-in pool** that federates Google Workspace: `DISPATCH_SIGNIN_ISSUER` is
+- **Through a Cognito sign-in pool**, federating whatever identity provider the deployment
+  chooses: `DISPATCH_SIGNIN_ISSUER` is
   the pool's issuer, the client is Dispatch's confidential app client in the pool, and
   `DISPATCH_SIGNIN_GROUP` names the pool group (`cognito:groups`) a person must be in. Dispatch
   names the person by the email in their pool username, never by the `email` claim, which a

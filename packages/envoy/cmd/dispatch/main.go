@@ -1,5 +1,5 @@
-// Command dispatch serves the Dispatch dashboard and API, signs people in with Google Workspace
-// through the sign-in pool, and reads GitHub for the web app as the GitHub App.
+// Command dispatch serves the Dispatch dashboard and API, signs people in through a Cognito
+// sign-in pool or with Google directly, and reads GitHub for the web app as the GitHub App.
 package main
 
 import (

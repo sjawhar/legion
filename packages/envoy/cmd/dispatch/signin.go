@@ -122,7 +122,7 @@ func requireCookieSignIn(boot bootConfig, devSignIn bool) error {
 	if boot.SignInIssuer != "" || devSignIn {
 		return nil
 	}
-	return fmt.Errorf("cookie identity signs people in with Google Workspace: %s are required", signInSettingNames())
+	return fmt.Errorf("cookie identity signs people in: %s are required", signInSettingNames())
 }
 
 // signInRule is who boot's sign-in admits: the members of a Cognito pool's group, or the people of
