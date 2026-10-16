@@ -144,3 +144,30 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 	require.ErrorContains(t, err, "nkey seed")
 	require.NotContains(t, err.Error(), string(seed))
 }
+
+func TestDispatchRegistersItsCloudResources(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	want := map[string]int{
+		"gcp:compute/network:Network":                       1,
+		"gcp:compute/subnetwork:Subnetwork":                 1,
+		"gcp:compute/router:Router":                         1,
+		"gcp:compute/routerNat:RouterNat":                   1,
+		"gcp:compute/globalAddress:GlobalAddress":           1,
+		"gcp:servicenetworking/connection:Connection":       1,
+		"gcp:container/cluster:Cluster":                     1,
+		"gcp:sql/databaseInstance:DatabaseInstance":         1,
+		"random:index/randomPassword:RandomPassword":        3,
+		"gcp:sql/database:Database":                         1,
+		"gcp:sql/user:User":                                 1,
+		"gcp:secretmanager/secretIamMember:SecretIamMember": 1,
+	}
+	got := map[string]int{}
+	for _, registration := range m.Registrations() {
+		if _, wanted := want[registration.Type]; wanted {
+			got[registration.Type]++
+		}
+	}
+	require.Equal(t, want, got)
+}

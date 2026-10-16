@@ -32,6 +32,8 @@ type Mocks struct {
 	// Computed, when not nil, returns what a resource's provider would compute: its id, "" for
 	// <name>-id, and the outputs it adds to the resource's state.
 	Computed func(args pulumi.MockResourceArgs) (id string, outputs resource.PropertyMap)
+	// CallResult, when not nil, answers an invoke as the resource provider would.
+	CallResult func(args pulumi.MockCallArgs) (resource.PropertyMap, error)
 
 	mu         sync.Mutex
 	registered []Registration
@@ -62,8 +64,10 @@ func (m *Mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.Prop
 	return id, state, nil
 }
 
-// Call answers a function call with its arguments.
 func (m *Mocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+	if m.CallResult != nil {
+		return m.CallResult(args)
+	}
 	return args.Args, nil
 }
 
