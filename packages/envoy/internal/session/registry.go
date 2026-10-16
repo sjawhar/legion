@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,10 +44,7 @@ type SessionEntry struct {
 // reported one, MachineID (the routing listener's own id) otherwise. MachineID keeps its
 // routing meaning either way; this method only decides what a human sees.
 func (e SessionEntry) HostOrMachine() string {
-	if e.Host != "" {
-		return e.Host
-	}
-	return e.MachineID
+	return cmp.Or(e.Host, e.MachineID)
 }
 
 type SessionRegistryOption func(*sessionRegistryOpts)
