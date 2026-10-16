@@ -6,10 +6,13 @@
 -- its next_at before a GitHub rate-limit deadline; it never creates a duplicate mutation or
 -- architect notice.
 --
--- A daemon still on 0043 may write the outbox while this runs, and a row it commits after the
--- dedup's snapshot would fail the index. The lock holds every write off (a worker's row lock does
--- not conflict with it) until the index exists, which a held-off duplicate then meets.
-lock table outbox in share row exclusive mode;
+-- A daemon still on 0043 may work the outbox while this runs, and a row it commits after the
+-- dedup's snapshot would fail the index. The lock holds every write off until the index exists,
+-- which a held-off duplicate then meets. It is EXCLUSIVE so it also waits out a worker that has
+-- locked rows to claim them (FOR UPDATE, then its lease write): a lock that let the dedup start
+-- between the two would leave the lease write waiting on this migration while it waits on the
+-- worker's row. Plain reads go on.
+lock table outbox in exclusive mode;
 
 with ranked as (
   select id, row_number() over (

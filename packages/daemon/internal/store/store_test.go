@@ -764,10 +764,13 @@ func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
 	}
 }
 
-// 0044 can run while a daemon still on 0043 writes the outbox. A ready_merge row that writer commits
-// while the dedup waits on a row lock is one the dedup's snapshot never saw, and would fail the
-// unique index and with it the upgrade. The migration locks the outbox against writes before its
-// dedup, so the writer waits for the index and meets it (unique_violation) instead.
+// 0044 can run while a daemon still on 0043 works the outbox. A ready_merge row that daemon commits
+// while the dedup waits would be one the dedup's snapshot never saw, and would fail the unique index
+// and with it the upgrade. A worker claiming the duplicate the dedup deletes locks it and then
+// writes its lease (record's ClaimDue), and a lock that let the dedup start between the two would
+// leave the lease write waiting on the migration while the migration waits on the worker's row. The
+// migration locks the outbox before its dedup so that the worker's claim finishes, the writer waits
+// for the index and meets it (unique_violation), and the upgrade succeeds.
 func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
 	ctx := context.Background()
 	store := emptyStore(t)
@@ -782,7 +785,7 @@ func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
 	if err := store.pool.QueryRow(ctx, insert+"\nreturning id", now.Add(time.Minute)).Scan(&duplicate); err != nil {
 		t.Fatalf("insert the duplicate the dedup deletes: %v", err)
 	}
-	// A worker holds the duplicate, so the dedup waits on its row lock.
+	// A worker claims the duplicate as ClaimDue does: it locks the row, and writes its lease later.
 	worker, err := store.pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin the worker: %v", err)
@@ -804,8 +807,11 @@ func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
 		enqueued <- err
 	}()
 	enqueue := waitForALockWait(t, store, "-- concurrent enqueue", enqueued)
+	if _, err := worker.Exec(ctx, "update outbox set lease_token = $2, lease_until = $3 where id = $1", duplicate, "worker", now.Add(30*time.Second)); err != nil {
+		t.Fatalf("write the worker's lease while the migration waits: %v", err)
+	}
 	if err := worker.Commit(ctx); err != nil {
-		t.Fatalf("release the duplicate: %v", err)
+		t.Fatalf("finish the worker's claim: %v", err)
 	}
 	if err := <-migrated; err != nil {
 		t.Fatalf("migrate while a writer enqueues: %v", err)
