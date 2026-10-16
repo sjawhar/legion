@@ -66,6 +66,9 @@ func (c ListenerConfig) Check() error {
 	if bus.HoldsSeed(c.ListenHost) {
 		return InputErrorf("listenHost", "%w", SeedRefusal("listenHost"))
 	}
+	if strings.ContainsFunc(c.ListenHost, unicode.IsControl) {
+		return InputErrorf("listenHost", "listenHost contains a control character: %q", c.ListenHost)
+	}
 	if c.SOCKS5Proxy != "" {
 		if err := bus.CheckSOCKS5Proxy(c.SOCKS5Proxy); err != nil {
 			return InputErrorf("socks5Proxy", "%s %w", bus.SOCKS5ProxyEnvVar, err)
