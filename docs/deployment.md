@@ -122,15 +122,21 @@ from its cached leases (the log lines `tmux runtime: github credential written` 
 credential refreshed`, with the claim, role, App, `expiresAt` and the owners written); a pane it
 adopted after a restart is refreshed for the owner the daemon records for its claim, never one read
 from the pane's directory. `legion gh` runs the real gh with `GH_CONFIG_DIR` at the directory of the
-owner the command targets, read as gh reads it from the real gh's own help of each command down to
-its leaf (`-R`/`--repo` before or after the command, a repository, owner or `github.com` URL
-argument, a `repos/<owner>/…` endpoint of `gh api`, a search query's `repo:`/`owner:`, `--owner`,
-`--org`; `GH_REPO` only when none names one), and at the issue owner's when the command names no
-repository at all. It fails closed: a command it cannot read for certain (an option the leaf's help
-does not list, a subcommand gh does not know), one naming two owners, and one naming an owner the
-bundle holds no directory for are refused with exit 2, naming the argument, and send nothing. The
-saved help its tests read is the image's gh's (`packages/daemon/cmd/legion/testdata`, with the
-script that regenerates it when that pin moves). The shared clone's `credential.helper` is `!legion
+owner the command targets, read as gh reads it, with pflag's rules, from the real gh's own help of
+each command down to its leaf (`-R`/`--repo` before or after the command, a repository, owner or
+`github.com` URL argument, a `repos/<owner>/…` endpoint of `gh api` or a search endpoint's `q`, a
+search query's plain `repo:`/`owner:`, `--owner`, `--org`, a name in `--repos` under `--org`;
+`GH_REPO` only when none names one), and at the issue owner's when the command names no repository
+at all; a command whose last `--help` is true only prints help. It fails closed: a command it cannot
+read for certain (an option the leaf's help does not list, a subcommand gh does not know, an
+argument the leaf's usage has no place for or names in a way it does not know, a search qualifier
+gh or GitHub could read otherwise, a gh alias or an extension, whose help it never reads since
+reading it runs them, and `gh copilot`), one naming two owners, one naming an owner the bundle holds
+no directory for, and every command under a `GH_HOST` other than `github.com` or a set `GH_TOKEN`
+or `GITHUB_TOKEN` are refused with exit 2, naming the argument, and send nothing. The saved help its
+tests read is the image's gh's, with that gh's whole command reference, every argument of which
+names a kind the wrapper knows (`packages/daemon/cmd/legion/testdata`, with the script that
+regenerates it when that pin moves). The shared clone's `credential.helper` is `!legion
 git-credential` with `credential.useHttpPath` on, so a pane's `git` and `jj git push` read the
 hosts.yml of the owner in the path git asks about and nothing else. A box whose login
 `PATH` heads with a `gh` wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in
