@@ -13,15 +13,22 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// ready tells the human the pull request is ready to merge (tellReadyAudience). The packet is the
-// merger's READY completion's summary — its first line `READY #<n> at <sha> (approved at <sha>)
-// for <KEY> (<url>)`, then the diff summary and the gate facts (the shared merger prompt's step 4)
-// — told as record.ReadyPacket gives it: verbatim, or for a READY a person merges with its by-hand
-// note at its head and its request to submit the merge replaced, so nobody arms it. The daemon
-// tells it, not the merger, so the READY is told exactly when the issue reaches awaiting_merge: on
-// the completion itself, or on the approval that opens a gate that refused it.
-func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, merger record.PhaseRow) error {
-	return e.tellReadyAudience(ctx, tx, issue, record.ReadyPacket(merger.Summary, merger.MergeNote))
+// ready tells the human the pull request is ready to merge (tellReadyAudience) and queues the
+// merge of READY's head (record.ReadyMerge). The packet is the merger's READY completion's summary
+// — its first line `READY #<n> at <sha> (approved at <sha>) for <KEY> (<url>)`, then the diff
+// summary and the gate facts (the shared merger prompt's step 3) — told as record.ReadyPacket gives
+// it: verbatim, or for a READY a person merges with its by-hand note at its head and its `Merge:`
+// line replaced, so nobody arms it. A READY a person merges queues no merge. The daemon does both,
+// not the merger, so they happen exactly when the issue reaches awaiting_merge: on the completion
+// itself, or on the approval that opens a gate that refused it.
+func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, merger record.PhaseRow, pr *record.PullRequest) error {
+	if err := e.tellReadyAudience(ctx, tx, issue, record.ReadyPacket(merger.Summary, merger.MergeNote)); err != nil {
+		return err
+	}
+	if merger.MergeNote != "" || pr == nil || pr.State != record.PullRequestOpen {
+		return nil
+	}
+	return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
 }
 
 // holdReadyToItsHead holds a merger's READY to the pull request's head before anything of it is
@@ -136,7 +143,7 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 
 // withdrawMovedReady withdraws the READY of an awaiting_merge pull request a push or a reopen moved
 // past the head READY named (the merger's completion commit), as a red or a conflicting head withdraws it
-// (TriggerChecksRed, withdrawReady): GitHub checks --match-head-commit only when auto-merge is
+// (TriggerChecksRed, withdrawReady): GitHub checks the expected head only when auto-merge is
 // enabled, so the arm would otherwise merge a head no review approved. The issue goes back to
 // implementing with its implementer started and the architect told, and the new head comes back
 // through testing, review and a new READY. A tree that lingers takes no transition, as merged
@@ -158,6 +165,25 @@ func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record
 	}
 	reason := fmt.Sprintf("its head moved from %s, the head READY named, to %s, which no review approved", merger.HandoffCommit, pr.HeadSHA)
 	return e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
+}
+
+// resubmitReopenedReady queues the merge of an awaiting READY's head again (record.ReadyMerge) when
+// its pull request is reopened at that head: the close ended the READY's merge row, which found the
+// pull request closed, and the READY still stands. A reopen at another head has withdrawn the READY
+// (withdrawMovedReady), a READY a person merges is never submitted, and a tree that lingers submits
+// nothing.
+func (e *Engine) resubmitReopenedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	if issue.Phase != phase.AwaitingMerge {
+		return nil
+	}
+	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
+	if err != nil || merger.HandoffCommit == "" || merger.HandoffCommit != pr.HeadSHA || merger.MergeNote != "" {
+		return err
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return err
+	}
+	return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
 }
 
 // disarm queues the disarm of pr's merge (record.AutoMergeDisable): arming is legitimate only for

@@ -932,7 +932,7 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // branch; each other member queues its own before starting. Every member resumes in
 // workflow.ResumePhase, recorded before its start: a child of a re-admitted tree, and a root a
 // hand-over created, left awaiting its merge resume in merging, since the old tree's linger disarmed
-// the pull request (beginLinger) and only a new READY from the merger arms it again.
+// the pull request (beginLinger) and only a new READY, whose merge the daemon submits, arms it again.
 func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {

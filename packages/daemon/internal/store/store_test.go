@@ -673,7 +673,7 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 // check, and a database that ran 0031 through 0038 before 0029 and 0030 applies those two last, so
 // a queued close suspension must survive them and both kinds must stand at the end in either
 // order. Migrations from 0039 on ship only in binaries that carry 0030, and Migrate applies in
-// ascending order, so none can run before it: 0039 sets the list after every kind it names.
+// ascending order, so none can run before it: 0043 sets the list after every kind it names.
 func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
 	all, err := migrations.All()
 	if err != nil {
@@ -681,7 +681,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}
 	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
 		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish,
-		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch, record.OutboxKindAutoMergeDisable}
+		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch, record.OutboxKindAutoMergeDisable, record.OutboxKindReadyMerge}
 	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
 	for _, tc := range []struct {
 		name  string

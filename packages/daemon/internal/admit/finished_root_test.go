@@ -792,7 +792,7 @@ func seedFinishedChildUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool, root,
 
 const (
 	byHandNote    = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
-	carriedPacket = "READY #42 at head (approved at approved) for LEGION-209 (https://github.com/acme/widgets/pull/42)\nMerge: submit on normal acceptance with gh pr merge 42 -R acme/widgets --auto --squash --match-head-commit head\n\nA docs/solutions/legion/retro-LEGION-209.md"
+	carriedPacket = "READY #42 at head (approved at approved) for LEGION-209 (https://github.com/acme/widgets/pull/42)\nMerge: the daemon submits pull request #42 at head once READY is accepted\n\nA docs/solutions/legion/retro-LEGION-209.md"
 )
 
 // A hand-over carries the merger's phase row whole, the by-hand note of its READY included
@@ -853,7 +853,7 @@ func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	if len(told) != 1 {
 		t.Fatalf("messages told on LEGION-209 = %q, want the READY once", told)
 	}
-	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || strings.Contains(told[0], "gh pr merge") || strings.Contains(told[0], "--auto") {
+	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || strings.Contains(told[0], "the daemon submits") {
 		t.Fatalf("told READY %q, want the by-hand note first and no submitted merge", told[0])
 	}
 }
