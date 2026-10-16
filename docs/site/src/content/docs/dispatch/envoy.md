@@ -52,7 +52,9 @@ mounts when `ENVOY_WEBHOOKS` lists `slack`. Set the app's Event Subscriptions re
 example `https://envoy.internal.example/webhook/slack`, and subscribe it to the `app_mention` bot
 event (its `app_mentions:read` scope). The listener answers Slack's `url_verification` challenge,
 and checks every other delivery's signature against `ENVOY_SLACK_SIGNING_SECRET`, the app's
-signing secret, answering `401` to one that does not match.
+signing secret, answering `401` to one that does not match. The repository's
+`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read` and
+`chat:write` bot scopes and the `app_mention` bot event.
 
 A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
 thread a second time under the thread's root, its timestamp's dot written `_`:
