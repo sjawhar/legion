@@ -103,27 +103,33 @@ function runKeyCommand(role: AppRole, command: string): string {
 }
 
 /** The bot login GitHub gives the App `source` names: `<slug>[bot]`, the slug read from
- * `GET <api>/app` under the App's own JWT. */
+ * `GET <api>/app` under the App's own JWT. Every failure names the App by its role and id: a
+ * GitHub that never answered, an answer that is not 2xx, and one with no slug. */
 export async function appLogin(
   role: AppRole,
   source: AppKeySource,
   api: string,
   now: () => Date = () => new Date()
 ): Promise<string> {
+  const read = `GET /app as the ${role} App (app_id ${source.appId})`;
   const jwt = appJWT(source.appId, runKeyCommand(role, source.privateKeyCommand), now());
-  const response = await fetch(`${api.replace(/\/+$/, "")}/app`, {
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      Accept: "application/vnd.github+json",
-      "User-Agent": "legion-e2e",
-    },
-    signal: AbortSignal.timeout(30_000),
-  });
-  const body = await response.text();
+  let response: Response;
+  let body: string;
+  try {
+    response = await fetch(`${api.replace(/\/+$/, "")}/app`, {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        Accept: "application/vnd.github+json",
+        "User-Agent": "legion-e2e",
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
+    body = await response.text();
+  } catch (error) {
+    throw new Error(`${read} failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
   if (!response.ok) {
-    throw new Error(
-      `GET /app as the ${role} App (app_id ${source.appId}) answered ${response.status}: ${body.slice(0, 300)}`
-    );
+    throw new Error(`${read} answered ${response.status}: ${body.slice(0, 300)}`);
   }
   let slug: unknown;
   try {
@@ -132,9 +138,7 @@ export async function appLogin(
     slug = undefined;
   }
   if (typeof slug !== "string" || slug === "") {
-    throw new Error(
-      `GET /app as the ${role} App (app_id ${source.appId}) answered no slug: ${body.slice(0, 300)}`
-    );
+    throw new Error(`${read} answered no slug: ${body.slice(0, 300)}`);
   }
   return `${slug}[bot]`;
 }
