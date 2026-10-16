@@ -1089,6 +1089,21 @@ test("issue header picks the issue's repository from its project's mappings, and
     await page.reload();
     await expect(page.getByLabel(`Repository of ${parent.key}`)).toHaveValue("");
     await expect(header.locator("span", { hasText: /^acme\/widgets$/ })).toBeVisible();
+
+    // A project that maps no repository has nothing to pick: once the page has read the mappings,
+    // its issues' rail has no item for the repository.
+    await createProject({ key: "BARE", name: "Bare" });
+    const bare = await createIssue({ project: "BARE", title: "No repository mapped" });
+    expect(bare.resolved_repo).toBeNull();
+    const mappingsRead = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/settings/repo-projects"
+    );
+    await page.goto(`/issues/${bare.key}`);
+    await mappingsRead;
+    const rail = page.getByTestId("issue-metadata-rail");
+    await expect(rail.getByText("Parent:")).toBeVisible();
+    await expect(page.getByLabel(`Repository of ${bare.key}`)).toHaveCount(0);
+    await expect(rail.getByText("Repository:")).toHaveCount(0);
   } finally {
     await context.close();
   }

@@ -3,17 +3,20 @@ import { type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
-import { badgeLow, badgePrimary } from "../../theme/classes";
+import { badgeLow, badgePrimary, textSecondaryOnSurface } from "../../theme/classes";
 import { badgeSelectBadge, badgeSelectOverlay, badgeSelectRailWrapper } from "./badge-select";
 import { useIssueRepo } from "./useIssueRepo";
 
 /**
- * The issue's repository editor: a badge naming the repository the issue resolves to (its own,
- * else its nearest ancestor's, else the project's default, muted when not its own; "No repository"
- * when none resolves) with a native `<select>` laid over it, as `AssigneeControl` does. The select
- * lists Inherit first, then the repositories mapped to the issue's project in Settings, read only
- * once the reader reaches for the control (pointer over it, a touch on it, or focus). Inherit
- * clears the issue's own repository. Labelled `Repository of <KEY>`.
+ * The issue's repository in the details rail: `Repository:` and a badge naming the repository the
+ * issue resolves to (its own, else its nearest ancestor's, else the project's default, muted when
+ * not its own; "No repository" when none resolves) with a native `<select>` laid over it, as
+ * `AssigneeControl` does. The select lists Inherit first, then the repositories mapped to the
+ * issue's project in Settings; Inherit clears the issue's own repository. Labelled
+ * `Repository of <KEY>`. While the issue resolves to a repository the mappings are read only once
+ * the reader reaches for the control (pointer over it, a touch on it, or focus). While it resolves
+ * to none, they are read at once, because the item shows only when the project maps a repository:
+ * a project that maps none has nothing to pick, and its rail carries no repository item.
  */
 export function RepoControl({
   disabled = false,
@@ -30,7 +33,7 @@ export function RepoControl({
 }): ReactNode {
   const [wanted, setWanted] = useState(false);
   const mappings = useQuery({
-    enabled: wanted,
+    enabled: wanted || resolvedRepo === null,
     queryKey: ["repo-projects"],
     queryFn: () => api.listRepoProjects(),
   });
@@ -40,12 +43,16 @@ export function RepoControl({
     .filter((mapping) => mapping.project === project)
     .map((mapping) => mapping.repo)
     .sort();
+  if (resolvedRepo === null && mapped.length === 0) {
+    return null;
+  }
   // The issue's own repository stays selectable before the list loads, so the control never
   // shows a value its options lack.
   const options = repo === null || mapped.includes(repo) ? mapped : [repo, ...mapped];
   const tone = repo === null ? badgeLow : badgePrimary;
   return (
-    <>
+    <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
+      <span className="font-medium">Repository:</span>
       <span
         className={`${badgeSelectRailWrapper} ${disabled ? "opacity-50" : ""}`}
         title={
@@ -91,6 +98,6 @@ export function RepoControl({
           retrying={write.pending}
         />
       ) : null}
-    </>
+    </div>
   );
 }
