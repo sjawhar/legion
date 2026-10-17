@@ -833,14 +833,22 @@ production issue pod as well as this run's own:
   `bridge` mode the pod-facing advertise host is the bridge's cluster-DNS name, which the devbox
   itself cannot resolve. A second DSN file, at the bind host (loopback under `bridge`), is written
   for the harness alone; pods and the providers Secret still get the original.
-- **A passing run's own teardown order matters.** The main flow's passing path called `teardown;
-  namespace_clean` directly, never `bridge_stop` — that only ran from the script's EXIT trap,
-  which fires after a passing run's own calls, so `namespace-clean`'s snapshot was always taken
-  with the bridge pod still live. Mistaken for a GKE API-consistency quirk at first (a direct
-  `kubectl get` by name and every kind of `LIST` query agreed the pod was gone within seconds of
-  `namespace_clean` reporting it present — because `bridge_stop` ran, and deleted it, moments
-  later, in the trap): the real fix is one `teardown_sequence` function, `bridge_stop` first, run
-  from both the passing path and the trap's fallback, idempotent either way.
+- **This script's own `set -e` treats `kill`, `wait` and `kubectl get` succeeding at exactly what
+  they were asked to do as a fatal error, if nothing guards them.** The actual cause of every
+  "every `CHECK` passed, then the script exits before teardown runs at all" failure this lane hit
+  (confirmed by `strace -f -e trace=kill,tkill,tgkill,execve`, after a GKE API-consistency theory,
+  this devbox's own tooling, a watchdog race, and a shared process group were each ruled out by
+  direct evidence first): three bare statements in `bridge_stop` — `wait PID` for a process it had
+  just killed (which reports 128+15=143, bash's own encoding for "killed by that signal"), a bare
+  `kubectl get` on an object that has just, correctly, become `NotFound`, and `kill PID` on a
+  process already dead (an empty-but-expected race between the watchdog's own exit and
+  `bridge_stop`'s cleanup) — each returns a nonzero status at exactly the moment its own job
+  finishes successfully, and `set -e` ends the whole script right there, having nothing to do with
+  an external signal at all. Every one of those three needs its own `|| true`; a guard around only
+  some of them still fails the same way, intermittently, since which one fires first depends on
+  timing. Confirmed in isolation (not just live) with a six-line repro before the final fix: a bare
+  `kill $pid; wait $pid` reliably exits 143 printing nothing after it; the same two lines each
+  followed by `|| true` run to completion.
 - **A dropped `kubectl port-forward` does not have to end the run.** Two full-length runs died
   outright to a transient drop during this lane's work. `kubectl port-forward` never retries
   itself, but nothing about a drop invalidates the chisel client's tunnel state (its auth, its
@@ -858,6 +866,9 @@ production issue pod as well as this run's own:
   actual fix is the same `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` and
   `karpenter.sh/do-not-disrupt: "true"` pair every issue pod already carries, now on the bridge pod
   too.
+- **This cluster's `autopilot-default-resources-mutator` admission webhook adjusts the bridge
+  pod's cpu on create**, and bringing up the fresh Node-Auto-Provisioned node it needs can take
+  close to the original 120s `Ready` wait budget; raised to 240s.
 
 ## stage4b-sandbox-tree.sh
 
