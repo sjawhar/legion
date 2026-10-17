@@ -2,55 +2,47 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-694",
-  "completed": "2026-10-16T23:15:00Z",
-  "round": 3,
-  "head": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
-  "codeHead": "9e05432746f9bd0e55fc896b74fbfb78814439ee",
+  "completed": "2026-10-17T00:03:14Z",
+  "round": 4,
+  "head": "058797ec90b2fbdabb15d51a88d4ef7f31a873b5",
+  "codeHead": "d85e65f63616e8c12b371d54da13ae4fe2d0adf8",
   "verdict": "pass",
   "fingerprint": {
-    "from": "c2e8d328d868521bdab983d869b588f20e006ffa",
-    "fromSha256": "5388afb37788bfc819804b98bbe92ded6c9418a5c6acbfd7ffb69aabec12e845",
-    "to": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
-    "toSha256": "98a58055f153a4213b82ebba9b89b368eea6dc1fbf52ada85144d8472a747ac9",
-    "verdict": "changed: contract 28 (version.go history, version.json, pi-legion manifest and CHANGELOG), migration 0043 -> 0046, main's #1987 rate-limit deferral folded into the lanes (noteLimit/deferral under limitsMu, retryAt before a claimed row runs), ready_merge in the lifecycle lane, leaseStealer ported to ClaimRow; so a full test round, not the bare gates"
+    "from": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
+    "fromSha256": "98a58055f153a4213b82ebba9b89b368eea6dc1fbf52ada85144d8472a747ac9",
+    "to": "058797ec90b2fbdabb15d51a88d4ef7f31a873b5",
+    "toSha256": "32f448b7ed8a4945902e8c3e09ca95a4c3886a194823324fa0779802ecc4f49f",
+    "verdict": "changed, by the review-round fix alone: outbox.go finishRefused runs its finish-and-notice transaction in an intake.WithCommitHooks scope and calls committed(); record/outbox.go's lane doc names why ready_merge is a lifecycle row; the new lane test. No state, projection, CLI or contract file in the delta, so round 3's real-binary state proof stands on identical code and was re-driven anyway (below)."
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "The round-4 implement handoff's proof re-run on my own embedded Postgres (54332) at the merged head: `go test -count=3 -run 'TestTwoDaemonsClaimingDifferentLifecycleRowsOfOneIssueAtOnceLeaseOnlyOne|TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce|TestEveryOutboxKindIsInExactlyOneLane' ./internal/record/` -> 9 PASS; `go test -count=1 ./internal/record/` -> ok (17.4s). The contract renumber verified by the collision learning's own check: the branch daemon built from the head, booted against a pi-legion manifest declaring main's released 27 (package 10.3.6), refuses by name and serves nothing (below); against the branch's manifest at 28 it boots. The fresh-database boot applied 46 migrations (0046 is this branch's outbox_issue index, renumbered past main's 0043-0045 ready_merge migrations). The lanes' suites are CI's `Tests` run 38978630778 at 9e05432 (success; race step and Stage 1 green), read, not re-run; the sweep of this branch's number found only history mentions of 26/27 (CHANGELOG, pi-legion AGENTS.md), which the learning keeps."
+    "how": "Round 5's proof re-run on my own embedded Postgres (54332): `go test -count=1 -run <the ten READY-merge lane tests, TestAREADYMergeRefusalsNoticeRunsOnTheBoardLaneAsTheRefusalCommits included> ./internal/daemon/` -> 10 PASS (9.2 s): the committed ready_merge row runs on the lifecycle lane, GitHub refuses the one submission, the merge-refused notice is published to the architect's topic from the board lane woken by the finish's commit, both rows finish, the one sweep timer never fires, and the log carries no `outbox row written outside a commit scope` line. Its negative control re-run by `go test -overlay` with `scoped, committed := ctx, func() {}` in place of `intake.WithCommitHooks(ctx)`: FAIL 3/3 at outbox_lanes_test.go:546 `the refusal's notice was written outside a commit scope:` with wakeOnCommit's ERROR line — the test is a deterministic witness, not a race the commit usually wins. Census of every non-test Enqueue/ExpediteOutbox caller on the merged tree: outbox.go:299 (now scoped), notice_exceptions.go:186 and :343 and api/architect.go:389 (scoped at their own transactions), workflow/effects.go:138, linger.go:100 and admit.go:1021 (inside ApplyFact handlers or admission's scoped Reconcile); the daemon package reaches the engine outside ApplyFact only through the read-only ReviewerSession/DecidesRound. Both notice kinds the path writes (merge-refused, merge-stalled; readyMergeEnded) go through the one scoped finishRefused. CI's Tests run 38983018793 at d85e65f6: success, race step and Stage 1 green."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The daemon API contract: a `pi-legion` release declaring a number without this branch's `heldOutboxRows` must not pass the boot gate (docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md); the branch's number is 28, above main's released 27.",
-      "surface": "The `legion` binary built from the head (`go build -o /tmp/legion694 ./cmd/legion` at b2956ff9) in this worker pod, `legion start --config` as Stage 1 boots it, with the plugin-gate `omp` stub reading the pi-legion manifest under the pane's HOME.",
-      "command": "jq '.version = \"10.3.6\" | .legion.daemonApiVersion = 27' into home/.omp/plugins/node_modules/@sjawhar/pi-legion/package.json; legion start --config legion.yaml; then the branch's own manifest ({name, version, legion} of packages/pi-legion/package.json, daemonApiVersion 28); legion start --config legion.yaml",
-      "observed": "At 27: exit 1 with `legion start: pi-legion at …/@sjawhar/pi-legion/package.json (package 10.3.6) speaks daemon API contract 27; this daemon requires 28. Install the @sjawhar/pi-legion release built from this daemon's commit into the default OMP profile.`, port 15695 closed. At 28: `boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy … daemonApiVersion: 28`, `legion daemon started … migrationsApplied: 46`. fixtures/daemon-api/version.json 28, pi-legion package.json legion.daemonApiVersion 28, version.go `DaemonAPIVersion = 28` with 26 recorded as the reserved gap and 27 as main's.",
-      "headSha": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
-      "negativeControl": "The contract-27 manifest IS the negative control (refused by name, nothing served); at the previous head 6dc873d6, where the constant was 27, the same manifest would have passed the gate and a 10.3.6 reader then refused the state — the finding that sent round 3 back."
+      "criterion": "Criterion 1 for main's ready_merge path (review round 2's finding): a READY merge GitHub refuses for good tells the issue's architect as the refusal commits — the merge-refused notice runs on the board lane woken by the finish's commit, not by the 30 s sweep — and no outbox row is written outside a commit scope on that path.",
+      "surface": "The outbox's real lanes (outbox_lanes.go Run on the held clock) over my embedded Postgres 16.4 (a migrated database per test), a fake GitHub refusing the merge, the workflow's waking store (projectRecords with wake: runner.wake), in internal/daemon's lane tests.",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable' go test -count=1 -run 'TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead|TestAPermanentREADYMergeRefusalTellsTheArchitectOnce|TestARetriedPermanentREADYMergeRefusalPostsOneNotice|TestOnlyTheOwningREADYMergeLeasePostsAPermanentRefusal|TestAWaitingREADYMergeWarnsOnlyWhenItWaitsOnSomeone|TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree|TestADelayedDisarmNeverLosesTheREADYMerge|TestAREADYMergeRowWaitingOnAnArmEndsOnceTheMergeMovesTheRecord|TestARateLimitedREADYMergeWaitsGitHubsRetryAfter|TestAREADYMergeRefusalsNoticeRunsOnTheBoardLaneAsTheRefusalCommits' -v ./internal/daemon/",
+      "observed": "10 PASS at 058797ec (ok 9.159s): the refusal's notice published to LEGION-208's architect topic with one sweep timer armed and never fired, both rows finished, no `written outside a commit scope` line; the other nine (submit only the awaited head, one notice per permanent refusal, the owning lease alone posts, waits warn only when waiting on someone, GitHub and the record must agree, a delayed disarm never loses the merge, a rate-limited merge waits GitHub's Retry-After) green on the merged lanes.",
+      "headSha": "058797ec90b2fbdabb15d51a88d4ef7f31a873b5",
+      "negativeControl": "`go test -overlay` with finishRefused's scope replaced by `scoped, committed := ctx, func() {}` -> FAIL 3/3: `outbox_lanes_test.go:546: the refusal's notice was written outside a commit scope:` followed by wakeOnCommit's ERROR line naming outbox.go as the writer."
     },
     {
-      "criterion": "A due row waiting behind its issue's running lifecycle row is visible: `legion state --json` lists it with its id, kind, issue, how long it has waited and the row it waits on, `LegionStateResponse` and the daemon-api fixtures carry the field, the plain `legion state` line names the held rows — including main's new `ready_merge` kind, which the merge put in the lifecycle lane.",
-      "surface": "The same binary over a fresh database (`t694r4`, 46 migrations applied at boot) on my embedded Postgres 16.4, rows seeded by SQL through pgx; the live `GET /legion/v1/state` parsed by the strict `LegionStateResponse` of `packages/contracts/src/legion-api.ts` under `bun run`.",
+      "criterion": "A due row waiting behind its issue's running lifecycle row is visible: `legion state --json` lists it with its id, kind, issue, how long it has waited and the row it waits on, `LegionStateResponse` carries the field, the plain `legion state` line names the held rows (ready_merge included).",
+      "surface": "The `legion` binary rebuilt from the head (`go build -o /tmp/legion694 ./cmd/legion` at 058797ec) over my embedded Postgres 16.4 (database t694r4, schema 46), booted as Stage 1 boots it (boot gate `daemonApiVersion: 28`), rows seeded by SQL through pgx; the live `GET /legion/v1/state` parsed by the strict `LegionStateResponse` under `bun run`.",
       "command": "/tmp/legion694 state --json --port 15695 | jq -c .heldOutboxRows; /tmp/legion694 state --port 15695 | sed -n 4p; curl -sS http://127.0.0.1:15695/legion/v1/state > state-wire.json; bun run parse-state.ts",
-      "observed": "Baseline (running suspend under a foreign live lease, row 1; due start, row 2, next_at = now() - 150 s): `[{\"id\":2,\"kind\":\"supervise\",\"issue\":\"T694-1\",\"waitedSeconds\":150,\"waitsOn\":1}]` and `held lifecycle rows: 1; the longest waiting, supervise row 2 of T694-1, has waited 2m30s behind row 1`. R1: a due `ready_merge` row (3) behind the running suspend is held too (`waitsOn: 1`), the summary counting 2. R2: a `ready_merge` row under a live lease (4) holds the issue's due start (5, `waitsOn: 4`) and not its due `dispatch_status` row. S7: a start behind its leased `issue_branch` row -> `waitsOn` the branch row. `outbox_kind_check` admits `ready_merge`. The strict parse accepts the live document and reads a held `ready_merge` row. Round 1's S1-S10 (rounds[0].proof[0]) stand on the same state code.",
-      "headSha": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
-      "negativeControl": "The running row's lease lapsed (`lease_until = now() - 1 s`) -> `[]` and `held lifecycle rows: none`. Contract: the live document with `heldOutboxRows` removed is refused (`heldOutboxRows invalid_type`); a held row with `waitsOn: 0`, `waitedSeconds: -1` and an extra key is refused (`too_small`, `too_small`, `unrecognized_keys`)."
-    },
-    {
-      "criterion": "Criterion 4 across daemons (round 1's finding): two daemons' lanes claiming two different lifecycle rows of one issue at the same moment lease only one; the issue's board row is leased at once beside the uncommitted lifecycle claim; every outbox kind, `ready_merge` included, is in exactly one lane.",
-      "surface": "The record package's real-process Postgres tests over my embedded Postgres 16.4 (a migrated database per test, 46 migrations) at the merged head.",
-      "command": "cd packages/daemon && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable' go test -count=3 -run 'TestTwoDaemonsClaimingDifferentLifecycleRowsOfOneIssueAtOnceLeaseOnlyOne|TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce|TestEveryOutboxKindIsInExactlyOneLane' -v ./internal/record/; go test -count=1 ./internal/record/",
-      "observed": "9 PASS, then ok (17.4s) at b2956ff9: the second daemon's lifecycle claim waits on the first's advisory lock and refuses once it commits; the board row is leased at once; `ready_merge` sorts into the lifecycle lane alone.",
-      "headSha": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
-      "negativeControl": "At 05418755 (before round 2's fix) the first test fails with `[supervise workspace_remove]` both leased (rounds[0].failures[0].evidence)."
+      "observed": "Running suspend under a foreign live lease (row 13), due start (row 14, -150 s) and due ready_merge (row 15, -30 s): `[{\"id\":14,\"kind\":\"supervise\",\"issue\":\"T694-1\",\"waitedSeconds\":150,\"waitsOn\":13},{\"id\":15,\"kind\":\"ready_merge\",\"issue\":\"T694-1\",\"waitedSeconds\":30,\"waitsOn\":13}]` and `held lifecycle rows: 2; the longest waiting, supervise row 14 of T694-1, has waited 2m30s behind row 13`; the strict parse accepts the live document with both rows. Rounds 1 and 3's shapes (rounds[0].proof[0], rounds[2].proof[1]) stand: the fingerprint delta touches no state, projection, CLI or contract file.",
+      "headSha": "058797ec90b2fbdabb15d51a88d4ef7f31a873b5",
+      "negativeControl": "The running row's lease lapsed (`lease_until = now() - 1 s`) -> `[]` and `held lifecycle rows: none`; the wire document with `heldOutboxRows` removed is refused (`heldOutboxRows invalid_type`), as is a held row with `waitsOn: 0`, `waitedSeconds: -1` and an extra key (`too_small`, `too_small`, `unrecognized_keys`)."
     }
   ],
   "notes": [
-    "Criteria 1-6 (lanes, lease, sweep, stop, launch bound) have no live surface in the pod beyond the daemon's Postgres harness (plan §6, architect's §10.1): CI's `Tests` run 38978630778 at 9e05432 (lint, typecheck, test success; `Test the outbox's lanes and store under the race detector` and `Stage 1 live proof` steps green) is their evidence, cited, not re-run. The merge's one new piece of lane concurrency, main's #1987 GitHub rate-limit deferral, is folded in under `limitsMu` (`deferral` read before a claimed row runs, `noteLimit` written in `settle`), and a deferred row is retried at the limit's end on the lane's own timer path; read, and under the race step.",
-    "The `Legion Envoy and Contracts` run 38978630787 at 9e05432 had `dispatch`, `dispatch-memory` and `envoy-go-race` still in progress at 23:13Z; not in the CI line's required pair.",
-    "main has since moved to 649a32e6 (fix(envoy): require JSON listener request bodies) with the pull request still MERGEABLE; no further merge is owed unless GitHub reports a conflict.",
-    "This file was removed by retro (8c1442d7) and is written anew this round with the two earlier rounds under `rounds`, recovered from commit 8d18ae80."
+    "Criteria 1-6 beyond the ready_merge path, and the launch bound, are unchanged since round 3 and have no live surface in the pod beyond the daemon's Postgres harness (plan §6, architect's §10.1): CI's `Tests` run 38983018793 at d85e65f6 (lint, typecheck, test success; race step and Stage 1 green), cited, not re-run.",
+    "Round 1's note that the `outbox row written outside a commit scope` fallback had no production caller was true of the branch then; main's #1987 ready_merge refusal path brought one in with the fourth forward merge, which the reviewer found and this round removes. The census above is of the merged tree.",
+    "The reviewer's minor findings (the per-process rate-limit deferral's absolute wording, the ready_merge reopen's up-to-30 s lane hold, prose) are recorded in its handoff and the body's Not proven / risk and Fast-follow lines; none changes behaviour this round tests.",
+    "`Legion Envoy and Contracts` run 38983018774 at d85e65f6 was still in progress at 00:03Z; not in the CI line's required pair. main is at a23c016e with the pull request MERGEABLE."
   ],
   "rounds": [
     {
@@ -123,6 +115,58 @@
         "The `Legion Envoy and Contracts` run 38956917224 at 364da278 was still in progress at 20:05Z (the `dispatch` suites); not in the CI line's required pair.",
         "Lock ordering read: a claim takes the issue's advisory lock then the row lock and waits on nothing else before commit; FinishOutbox/RetryOutbox/ExpediteOutbox take row locks only; intake.ApplyFact's lock is a different key and no transaction takes both — no cycle."
       ]
+    },
+    {
+      "round": 3,
+      "completed": "2026-10-16T23:15:00Z",
+      "head": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
+      "codeHead": "9e05432746f9bd0e55fc896b74fbfb78814439ee",
+      "verdict": "pass",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "The round-4 implement handoff's proof re-run on my own embedded Postgres (54332) at the merged head: `go test -count=3 -run 'TestTwoDaemonsClaimingDifferentLifecycleRowsOfOneIssueAtOnceLeaseOnlyOne|TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce|TestEveryOutboxKindIsInExactlyOneLane' ./internal/record/` -> 9 PASS; `go test -count=1 ./internal/record/` -> ok (17.4s). The contract renumber verified by the collision learning's own check: the branch daemon built from the head, booted against a pi-legion manifest declaring main's released 27 (package 10.3.6), refuses by name and serves nothing (below); against the branch's manifest at 28 it boots. The fresh-database boot applied 46 migrations (0046 is this branch's outbox_issue index, renumbered past main's 0043-0045 ready_merge migrations). The lanes' suites are CI's `Tests` run 38978630778 at 9e05432 (success; race step and Stage 1 green), read, not re-run; the sweep of this branch's number found only history mentions of 26/27 (CHANGELOG, pi-legion AGENTS.md), which the learning keeps."
+      },
+      "failures": [],
+      "failed": 0,
+      "proof": [
+        {
+          "criterion": "The daemon API contract: a `pi-legion` release declaring a number without this branch's `heldOutboxRows` must not pass the boot gate (docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md); the branch's number is 28, above main's released 27.",
+          "surface": "The `legion` binary built from the head (`go build -o /tmp/legion694 ./cmd/legion` at b2956ff9) in this worker pod, `legion start --config` as Stage 1 boots it, with the plugin-gate `omp` stub reading the pi-legion manifest under the pane's HOME.",
+          "command": "jq '.version = \"10.3.6\" | .legion.daemonApiVersion = 27' into home/.omp/plugins/node_modules/@sjawhar/pi-legion/package.json; legion start --config legion.yaml; then the branch's own manifest ({name, version, legion} of packages/pi-legion/package.json, daemonApiVersion 28); legion start --config legion.yaml",
+          "observed": "At 27: exit 1 with `legion start: pi-legion at …/@sjawhar/pi-legion/package.json (package 10.3.6) speaks daemon API contract 27; this daemon requires 28. Install the @sjawhar/pi-legion release built from this daemon's commit into the default OMP profile.`, port 15695 closed. At 28: `boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy … daemonApiVersion: 28`, `legion daemon started … migrationsApplied: 46`. fixtures/daemon-api/version.json 28, pi-legion package.json legion.daemonApiVersion 28, version.go `DaemonAPIVersion = 28` with 26 recorded as the reserved gap and 27 as main's.",
+          "headSha": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
+          "negativeControl": "The contract-27 manifest IS the negative control (refused by name, nothing served); at the previous head 6dc873d6, where the constant was 27, the same manifest would have passed the gate and a 10.3.6 reader then refused the state — the finding that sent round 3 back."
+        },
+        {
+          "criterion": "A due row waiting behind its issue's running lifecycle row is visible: `legion state --json` lists it with its id, kind, issue, how long it has waited and the row it waits on, `LegionStateResponse` and the daemon-api fixtures carry the field, the plain `legion state` line names the held rows — including main's new `ready_merge` kind, which the merge put in the lifecycle lane.",
+          "surface": "The same binary over a fresh database (`t694r4`, 46 migrations applied at boot) on my embedded Postgres 16.4, rows seeded by SQL through pgx; the live `GET /legion/v1/state` parsed by the strict `LegionStateResponse` of `packages/contracts/src/legion-api.ts` under `bun run`.",
+          "command": "/tmp/legion694 state --json --port 15695 | jq -c .heldOutboxRows; /tmp/legion694 state --port 15695 | sed -n 4p; curl -sS http://127.0.0.1:15695/legion/v1/state > state-wire.json; bun run parse-state.ts",
+          "observed": "Baseline (running suspend under a foreign live lease, row 1; due start, row 2, next_at = now() - 150 s): `[{\"id\":2,\"kind\":\"supervise\",\"issue\":\"T694-1\",\"waitedSeconds\":150,\"waitsOn\":1}]` and `held lifecycle rows: 1; the longest waiting, supervise row 2 of T694-1, has waited 2m30s behind row 1`. R1: a due `ready_merge` row (3) behind the running suspend is held too (`waitsOn: 1`), the summary counting 2. R2: a `ready_merge` row under a live lease (4) holds the issue's due start (5, `waitsOn: 4`) and not its due `dispatch_status` row. S7: a start behind its leased `issue_branch` row -> `waitsOn` the branch row. `outbox_kind_check` admits `ready_merge`. The strict parse accepts the live document and reads a held `ready_merge` row. Round 1's S1-S10 (rounds[0].proof[0]) stand on the same state code.",
+          "headSha": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
+          "negativeControl": "The running row's lease lapsed (`lease_until = now() - 1 s`) -> `[]` and `held lifecycle rows: none`. Contract: the live document with `heldOutboxRows` removed is refused (`heldOutboxRows invalid_type`); a held row with `waitsOn: 0`, `waitedSeconds: -1` and an extra key is refused (`too_small`, `too_small`, `unrecognized_keys`)."
+        },
+        {
+          "criterion": "Criterion 4 across daemons (round 1's finding): two daemons' lanes claiming two different lifecycle rows of one issue at the same moment lease only one; the issue's board row is leased at once beside the uncommitted lifecycle claim; every outbox kind, `ready_merge` included, is in exactly one lane.",
+          "surface": "The record package's real-process Postgres tests over my embedded Postgres 16.4 (a migrated database per test, 46 migrations) at the merged head.",
+          "command": "cd packages/daemon && LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable' go test -count=3 -run 'TestTwoDaemonsClaimingDifferentLifecycleRowsOfOneIssueAtOnceLeaseOnlyOne|TestABoardRowClaimedWhileItsIssuesLifecycleClaimIsUncommittedIsLeasedAtOnce|TestEveryOutboxKindIsInExactlyOneLane' -v ./internal/record/; go test -count=1 ./internal/record/",
+          "observed": "9 PASS, then ok (17.4s) at b2956ff9: the second daemon's lifecycle claim waits on the first's advisory lock and refuses once it commits; the board row is leased at once; `ready_merge` sorts into the lifecycle lane alone.",
+          "headSha": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
+          "negativeControl": "At 05418755 (before round 2's fix) the first test fails with `[supervise workspace_remove]` both leased (rounds[0].failures[0].evidence)."
+        }
+      ],
+      "notes": [
+        "Criteria 1-6 (lanes, lease, sweep, stop, launch bound) have no live surface in the pod beyond the daemon's Postgres harness (plan §6, architect's §10.1): CI's `Tests` run 38978630778 at 9e05432 (lint, typecheck, test success; `Test the outbox's lanes and store under the race detector` and `Stage 1 live proof` steps green) is their evidence, cited, not re-run. The merge's one new piece of lane concurrency, main's #1987 GitHub rate-limit deferral, is folded in under `limitsMu` (`deferral` read before a claimed row runs, `noteLimit` written in `settle`), and a deferred row is retried at the limit's end on the lane's own timer path; read, and under the race step.",
+        "The `Legion Envoy and Contracts` run 38978630787 at 9e05432 had `dispatch`, `dispatch-memory` and `envoy-go-race` still in progress at 23:13Z; not in the CI line's required pair.",
+        "main has since moved to 649a32e6 (fix(envoy): require JSON listener request bodies) with the pull request still MERGEABLE; no further merge is owed unless GitHub reports a conflict.",
+        "This file was removed by retro (8c1442d7) and is written anew this round with the two earlier rounds under `rounds`, recovered from commit 8d18ae80."
+      ],
+      "fingerprint": {
+        "from": "c2e8d328d868521bdab983d869b588f20e006ffa",
+        "fromSha256": "5388afb37788bfc819804b98bbe92ded6c9418a5c6acbfd7ffb69aabec12e845",
+        "to": "b2956ff9b5229c7fa56e31e91e6665eab4c07511",
+        "toSha256": "98a58055f153a4213b82ebba9b89b368eea6dc1fbf52ada85144d8472a747ac9",
+        "verdict": "changed: contract 28 (version.go history, version.json, pi-legion manifest and CHANGELOG), migration 0043 -> 0046, main's #1987 rate-limit deferral folded into the lanes (noteLimit/deferral under limitsMu, retryAt before a claimed row runs), ready_merge in the lifecycle lane, leaseStealer ported to ClaimRow; so a full test round, not the bare gates"
+      }
     }
   ]
 }
