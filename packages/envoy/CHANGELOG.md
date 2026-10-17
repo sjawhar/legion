@@ -18,6 +18,22 @@
   `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
   `agent-secrets secret` manages AWS Secrets Manager only in this release and refuses a broker on
   the GCP store by name; a Secret Manager secret is written with `gcloud secrets`.
+- `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
+  `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
+  dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the
+  MCP bridge. The proxy is handed each server's host name as the URL spells it, unresolved, so a
+  proxy that resolves names this process cannot (a userspace Tailscale container's SOCKS5 server
+  and MagicDNS) reaches them. A value that is not `host:port` (whitespace around it, a scheme, an
+  IPv6 address with a zone, a host that is neither an IP address nor a DNS name, a port outside
+  1-65535, or empty) is refused before anything dials, and so is one that holds an nkey seed as
+  `bus.HoldsSeed` finds one (the value, its host, a label or part of one, or split across labels by
+  `.`, `-` or `_`, in either case), which is a valid DNS label but never a proxy address. A set
+  proxy is remote reach, refused without `ENVOY_ALLOW_REMOTE_NATS=1`, since
+  the proxy chooses the server. No refusal prints the value. A connect through the proxy that
+  fails, its attempts spent or its deadline reached, names the setting and the proxy's address,
+  with the proxy's own dial error where nats.go alone would report only `nats: no servers
+  available for connection`, and a proxied dial ends at a connect's deadline as a direct one does.
+  Unset, the bus dials NATS directly, as before.
 - Dispatch signs people in with Google directly for one Google Workspace domain, with no Cognito
   sign-in pool and no AWS account: `DISPATCH_SIGNIN_DOMAIN` takes the place of
   `DISPATCH_SIGNIN_GROUP` beside the issuer, client ID and client secret, under the issuer
@@ -367,6 +383,15 @@
   tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
+
+- **Breaking:** every listener `/v1` request with a body must set `Content-Type: application/json`;
+  parameters such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is
+  answered 415 with a JSON error before authentication or the handler runs, whether the body's
+  length is known or not (a chunked body is checked too). A cross-site browser request can no longer
+  publish a `text/plain` body through an unauthenticated loopback listener. A request with no body,
+  such as a `GET` or `DELETE`, is unaffected, and webhook routes keep their own signature and
+  content handling. Every Legion client already sends the header; an operator's own script that
+  posts to `/v1` without it now gets the 415 and must set the header.
 
 - **Breaking:** `GET` and `PUT /api/v1/settings/delivery` replace
   `production_job_name` with `production_job_names` (a string array) and

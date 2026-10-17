@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -14,20 +15,26 @@ import (
 
 const bearerPrefix = "Bearer "
 
-// apiAuth authenticates /v1 with the shared ENVOY_API_TOKEN bearer and, when a
-// verifier is configured, with a projected service-account token issued to its
-// issuer and audience. Exempt paths pass in every configuration; /v1 is open
-// only when neither kind of credential is configured, so an empty shared token
-// beside a configured verifier requires a token rather than opening the tree. A
-// bearer the verifier rejects is answered 401 and never falls back to another
-// authentication path; the failure class goes to the log and never to the
-// caller, since naming it would tell an unauthenticated client which credential
-// the listener is configured for.
+// apiAuth requires JSON bodies for /v1, then authenticates it with the shared ENVOY_API_TOKEN
+// bearer and, when a verifier is configured, with a projected service-account token issued to its
+// issuer and audience. Exempt paths pass in every configuration; /v1 is open only when neither
+// kind of credential is configured, so an empty shared token beside a configured verifier requires
+// a token rather than opening the tree. A bearer the verifier rejects is answered 401 and never
+// falls back to another authentication path; the failure class goes to the log and never to the
+// caller, since naming it would tell an unauthenticated client which credential the listener is
+// configured for.
 func apiAuth(token string, verifier *oidc.Verifier, logger *logging.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isAPIAuthExemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
+		}
+		if r.ContentLength != 0 {
+			contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || contentType != "application/json" {
+				writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+				return
+			}
 		}
 		if token == "" && verifier == nil {
 			next.ServeHTTP(w, r)

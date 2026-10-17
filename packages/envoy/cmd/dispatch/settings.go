@@ -72,6 +72,8 @@ var settings = []setting{
 		Description: "Set to `1` to let Dispatch reach a NATS server that is not on this machine; without it Dispatch refuses one, and every deployment sets it."},
 	{Name: "NATS_NKEY_SEED", File: true, Required: "no",
 		Description: "Nkey seed of the NATS user Dispatch connects as; unset, it connects with no credential. A set but unusable seed refuses startup."},
+	{Name: "ENVOY_NATS_SOCKS5_PROXY", Required: "no",
+		Description: "SOCKS5 proxy, as `host:port`, that every NATS connection Dispatch makes goes through, each server's host name handed to the proxy unresolved; unset, Dispatch dials NATS directly. A set proxy needs `ENVOY_ALLOW_REMOTE_NATS=1`, since the proxy chooses the server. A deployment that reaches NATS through a tailnet sidecar's SOCKS5 server (tailscaled's `TS_SOCKS5_SERVER`) sets it."},
 	{Name: "DISPATCH_NATS_DISABLED", Required: "no",
 		Description: "Set to `1` to run without NATS: no event is published, and the agent conversation relay and webhook redelivery are off."},
 	{Name: "ENVOY_URL", Default: "`" + defaultEnvoyURL + "`", Required: "no",

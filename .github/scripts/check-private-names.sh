@@ -2,7 +2,7 @@
 # This repository is public. The private repository Legion is deployed from, its private internal
 # hosts, and the company that runs it are named nowhere in docs, skills, role prompts, CHANGELOGs,
 # code comments, tests, fixtures or file names, since the published site renders text from all of
-# them. This check fails on any text line or file path naming one:
+# them. This check fails on any text line naming one, and on any file path naming the first two:
 #
 #   1. the deployment repository — "agent", then "c", with nothing or one separator between them,
 #      in any case, standing as a token of its own: no letter or digit on either side, and a
@@ -20,7 +20,10 @@
 #   3. a private host below `.internal.`, in any case. A reserved example host (`<name>` then
 #      `.internal.example`, optionally `.com`, `.net` or `.org`) passes, and so does the NATS
 #      client's own `this` property of that name in the one bundle that vendors it
-#      (packages/claude-envoy/dist/envoy-channel.js), and nowhere else.
+#      (packages/claude-envoy/dist/envoy-channel.js), and nowhere else;
+#   4. a Tailscale MagicDNS host — a DNS label then `.ts.net`, in any case, with no letter or
+#      digit after it. A reserved tailnet name (`example-tailnet`, under any machine name of its
+#      own in front) passes.
 #
 # With no arguments it scans the repository: every file git tracks, a file under an ignored path
 # included, plus every untracked file git does not ignore, so a new file is caught before it is
@@ -35,8 +38,9 @@
 # matches is printed as <name>, so the log does not repeat the name; the only non-zero exits are
 # named hits (1) and a target or search that failed (2).
 #
-# The rules below are spelled so that no line of this file matches them, which is why the check
-# needs no exception for itself.
+# The rules below are spelled so that no line of this file is refused by them: a line a rule's raw
+# pattern matches, such as a reserved placeholder host, always clears that rule's own allow-list
+# too, which is why the check needs no exception for itself.
 #
 # Run from anywhere: .github/scripts/check-private-names.sh [path...]
 # CI runs it over the repository in the lint job of pr-and-main.yaml, over the built site in
@@ -67,10 +71,18 @@ private_host_rule='[[:alnum:]-]+[.]internal[.][[:alnum:].-]+'
 allowed_host='[[:alnum:]-]+[.]internal[.]example([.](com|net|org))?[.]*'
 vendored_nats='packages/claude-envoy/dist/envoy-channel[.]js'
 vendored_property='this[.]internal[.][[:alnum:]_]+'
+# A Tailscale MagicDNS host: one DNS label immediately before the literal, with no letter or digit
+# right after it (a GNU "\b" word boundary would miss a host that sits next to a "_").
+tailnet_host_rule='[[:alnum:]-]+[.]ts[.]net([^[:alnum:]]|$)'
+# A whole match of the tailnet rule that names no private tailnet: the reserved example tailnet
+# name (the match is only its last label, so a machine name in front of it passes the same way),
+# with the one trailing character the rule itself may have captured.
+allowed_tailnet_host='example-tailnet[.]ts[.]net[^[:alnum:]]?'
 
 repository_label='names the private deployment repository or its Dispatch project key'
 company_label='names the company'
 private_host_label='names a private internal host'
+tailnet_host_label='names a Tailscale MagicDNS host'
 
 lockfiles=(bun.lock go.sum go.work.sum)
 targets=("$@")
@@ -146,7 +158,8 @@ search() {
     run grep -r -n -o -H -I -E "${excludes[@]}" "$@" -e "$rule" -- "${targets[@]}"
   fi
   { grep -v -i -E -e "^[^:]*:[0-9]+:($allowed_host)\$" \
-    -e "^$vendored_nats:[0-9]+:$vendored_property\$" "$matches" || true; } |
+    -e "^$vendored_nats:[0-9]+:$vendored_property\$" \
+    -e "^[^:]*:[0-9]+:($allowed_tailnet_host)\$" "$matches" || true; } |
     cut -d: -f1,2 | while IFS=: read -r path line; do
       printf '%s:%s: %s\n' "$(mask "$path")" "$line" "$label"
     done >> "$hits"
@@ -168,6 +181,7 @@ search "$repository_label" "$repository_rule" -i
 search "$company_label" "$company_rule" -i
 search "$company_label" "$proper_noun_rule"
 search "$private_host_label" "$private_host_rule" -i
+search "$tailnet_host_label" "$tailnet_host_rule" -i
 search_paths "$repository_label" "$repository_rule" -i
 search_paths "$company_label" "$company_rule" -i
 search_paths "$company_label" "$proper_noun_rule"
@@ -193,9 +207,13 @@ if [ -s "$hits" ]; then
   echo "  - for a host write a reserved example host such as <name>.internal.example. Code that only"
   echo "    looks like one, such as a field chain <value>.internal.<field> or a module file named"
   echo "    that way, is refused too: rename it, or reach the field through a variable;"
+  echo "  - for a Tailscale MagicDNS host write <tailnet>.ts.net or <name>.<tailnet>.ts.net, or a"
+  echo "    host under the reserved example-tailnet.ts.net. Code that only looks like one, such as"
+  echo "    an unbraced shell variable glued right before the literal, is refused too: brace the"
+  echo "    variable or build the suffix separately;"
   echo "  - for a file or directory whose path is reported with <name> in it, rename it."
   exit 1
 fi
 
-echo "check-private-names: no text file or path names the private deployment repository, the" \
-  "company, or a private internal host ($scanned)"
+echo "check-private-names: no file or path names the private deployment repository or the" \
+  "company, and no text names a private internal host or a Tailscale MagicDNS host ($scanned)"

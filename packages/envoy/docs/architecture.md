@@ -44,6 +44,9 @@ Agent messages  --/       |
 ## Listener API
 
 All `/v1/*` endpoints answer 503 until NATS is connected and the interest and session caches are warm; they do not wait for the durable consumer.
+Every `/v1` request with a body must set `Content-Type: application/json` (parameters such as
+`charset=utf-8` are accepted). The listener returns a JSON 415 error otherwise. Webhook routes
+retain their signature and content handling.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
