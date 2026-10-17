@@ -105,11 +105,7 @@ function mainIsMessageEvent(event: Event): boolean {
 }
 
 function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
-  if (
-    event.type === "project.created" ||
-    event.type === "project.updated" ||
-    event.type === "settings.repo_project.updated"
-  ) {
+  if (event.type === "project.created" || event.type === "project.updated") {
     if (event.project === undefined) {
       throw new Error("project event is missing its project");
     }
@@ -118,6 +114,18 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
       ["project", event.project],
       ["issues", "project", event.project],
       ["repo-projects"],
+    ];
+  }
+  if (event.type === "settings.repo_project.updated") {
+    if (event.project === undefined) {
+      throw new Error("project event is missing its project");
+    }
+    return [
+      projectsQuery().queryKey,
+      ["project", event.project],
+      ["issues", "project", event.project],
+      ["repo-projects"],
+      ["issue"],
     ];
   }
   if (
@@ -803,6 +811,23 @@ test("a write refreshes the rows of the nodes it cited, and a plain one refreshe
     const keys = invalidatedKeys(plain);
     expect(keys).not.toContainEqual(["inbox"]);
     expect(keys.some((key) => key[0] === "ask")).toBe(false);
+  }
+});
+
+// A mapping write can change which repository every issue of its project resolves to (a new
+// default, a removed or moved one), and the issue header shows that from the issue's detail, so the
+// event refreshes every loaded issue detail.
+test("a repository mapping event refreshes every loaded issue detail", () => {
+  for (const deleted of [false, true]) {
+    expect(
+      invalidatedKeys(
+        event(
+          "settings.repo_project.updated",
+          { deleted, mapping: { repo: "acme/widgets", project: "CORE", default: true } },
+          { issue_key: null, project: "CORE" }
+        )
+      )
+    ).toContainEqual(["issue"]);
   }
 });
 

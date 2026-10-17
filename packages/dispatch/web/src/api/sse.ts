@@ -412,6 +412,11 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ["project", event.project],
       ["issues", "project", event.project],
       ["repo-projects"],
+      // A mapping write can change the repository every issue of its project resolves to (a new
+      // default, one removed or moved away), which the issue header reads from the issue's
+      // detail. The detail's key names no project, so every loaded detail refreshes; mapping
+      // writes are rare settings changes.
+      ...(event.type === "settings.repo_project.updated" ? [["issue"]] : []),
     ];
   }
   if (

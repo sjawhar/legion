@@ -173,6 +173,11 @@ export function putRepoProject(
   return request<RepoProject>(`/api/v1/settings/repo-projects/${repo}`, "PUT", input, { login });
 }
 
+/** Removes `repo`'s mapping, as the Settings page's Delete does. */
+export function deleteRepoProject(repo: string, login = "alice"): Promise<void> {
+  return request<void>(`/api/v1/settings/repo-projects/${repo}`, "DELETE", {}, { login });
+}
+
 /** Mints a personal agent token for `login`; the returned bearer acts for that human. */
 export async function mintAgentToken(name: string, login: string): Promise<string> {
   const minted = await request<{ token: string }>(
