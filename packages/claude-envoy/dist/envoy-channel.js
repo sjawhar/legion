@@ -39907,13 +39907,70 @@ try {
 }
 `;
 var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
-var CLUSTER_INTERNAL_URL = /https?:\/\/[^\s/|>]+\.(?:svc|cluster\.local)(?::\d+)?(?=[/\s|>]|$)[^\s|>]*/i;
-async function postSlackReply(reply, options = {}) {
-  const internal = CLUSTER_INTERNAL_URL.exec(reply.text);
-  if (internal !== null) {
-    throw new Error(`the reply links ${internal[0]}, a cluster-internal address nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`);
+var URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
+var BARE_HOST = /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.){2,}[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
+var TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+function linkInsideCluster(text, env) {
+  const { DISPATCH_URL: apiUrl, DISPATCH_PUBLIC_URL: publicUrl } = env;
+  const apiHost = hostOf(apiUrl);
+  const publicHost = hostOf(publicUrl);
+  const dispatchHost = apiHost !== undefined && publicHost !== undefined && apiHost !== publicHost ? apiHost : undefined;
+  const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  for (const match of decoded.matchAll(URL_CANDIDATE)) {
+    for (const written of [match[0], match[0].replace(TRAILING_PUNCTUATION, "")]) {
+      const host = hostOf(written);
+      if (host === undefined)
+        continue;
+      if (insideCluster(host, dispatchHost, true))
+        return written;
+      break;
+    }
   }
+  const prose = decoded.replace(URL_CANDIDATE, (url2) => " ".repeat(url2.length));
+  for (const match of prose.matchAll(BARE_HOST)) {
+    const host = hostOf(`http://${match[0]}`);
+    if (host !== undefined && insideCluster(host, dispatchHost, false))
+      return match[0];
+  }
+  return;
+}
+function hostOf(value) {
+  if (value === undefined || value === "")
+    return;
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/\.$/, "") || undefined;
+  } catch {
+    return;
+  }
+}
+function insideCluster(host, dispatchHost, fromUrl) {
+  if (host === dispatchHost)
+    return true;
+  if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
+    return true;
+  if (!fromUrl)
+    return privateIPv4(host);
+  if (host.startsWith("["))
+    return privateIPv6(host.slice(1, -1));
+  return privateIPv4(host) || !host.includes(".");
+}
+function privateIPv4(host) {
+  const octets = host.split(".");
+  if (octets.length !== 4 || !octets.every((octet) => /^\d{1,3}$/.test(octet)))
+    return false;
+  const [a = 0, b = 0] = octets.map(Number);
+  return a === 10 || a === 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 100 && b >= 64 && b <= 127;
+}
+function privateIPv6(address) {
+  const head = address.split(":")[0] ?? "";
+  return address === "::1" || /^f[cd][0-9a-f]{0,2}$/.test(head) || /^fe[89ab][0-9a-f]?$/.test(head);
+}
+async function postSlackReply(reply, options = {}) {
   const env = options.env ?? process.env;
+  const internal = linkInsideCluster(reply.text, env);
+  if (internal !== undefined) {
+    throw new Error(`the reply links ${internal}, an address inside the cluster nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`);
+  }
   const override = env[SLACK_POST_API_URL_VARIABLE];
   if (override !== undefined && override !== "" && !allowedAPIURL(override)) {
     throw new Error(`${SLACK_POST_API_URL_VARIABLE} must be an https URL, or http on a loopback host (got ${override}); nothing was posted`);

@@ -16899,7 +16899,7 @@ function progressText(progress, sep) {
   }
   return parts.join(sep);
 }
-function issueSummary(issue2, events, references, graph, titles) {
+function issueSummary(issue2, events, references, graph, linkBase, titles) {
   const asks = issue2.open_asks;
   const spec = issue2.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -16917,6 +16917,7 @@ function issueSummary(issue2, events, references, graph, titles) {
   return [
     `Title: ${issue2.title}`,
     `Key: ${issue2.key}`,
+    `Link: ${new URL(`/issues/${encodeURIComponent(issue2.key)}`, linkBase).toString()}`,
     `Status: ${issue2.status}`,
     `Assignee: ${issue2.assignee ?? "unassigned"}`,
     `Claimed by: ${issue2.claim === null ? "nobody" : claimText(issue2.claim, titles)}`,
@@ -18305,7 +18306,7 @@ ${trailer.join(`
         ])
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], linkBase, titles),
         details: { issue: read.issue.key },
         ...showImages(pictures2)
       };

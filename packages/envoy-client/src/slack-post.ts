@@ -180,29 +180,116 @@ interface PosterLine {
 const MAY_HAVE_POSTED =
   "the reply may have been posted, and posting it again may put it in the thread twice";
 
-/** A Kubernetes Service's in-cluster host (`<service>.<namespace>.svc`, with or without
- * `.cluster.local`), which nobody reading Slack can reach. */
-const CLUSTER_INTERNAL_URL =
-  /https?:\/\/[^\s/|>]+\.(?:svc|cluster\.local)(?::\d+)?(?=[/\s|>]|$)[^\s|>]*/i;
+/** A run of a reply that starts like a URL: a scheme, `://`, and everything up to whitespace or a
+ * delimiter of Slack's `<url|text>` form. Trailing punctuation is trimmed before it is parsed. The
+ * scheme and each host label are bounded, so a long reply is scanned in linear time. */
+const URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
+/** A host written with no scheme: three or more dotted labels, optionally a port, not inside a
+ * path, an address or another word. */
+const BARE_HOST =
+  /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.){2,}[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
+const TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+
+/**
+ * The first link in text that points inside the cluster, as the reply wrote it, or undefined. Each
+ * URL, Slack's `<url|text>` and its HTML-escaped form included, and each scheme-less host is parsed
+ * with the URL parser (which also decodes a percent-encoded host) and its host checked
+ * (insideCluster). While DISPATCH_PUBLIC_URL names another host, DISPATCH_URL's host is inside too,
+ * whatever form the deployment gave it.
+ */
+function linkInsideCluster(
+  text: string,
+  env: Record<string, string | undefined>
+): string | undefined {
+  const { DISPATCH_URL: apiUrl, DISPATCH_PUBLIC_URL: publicUrl } = env;
+  const apiHost = hostOf(apiUrl);
+  const publicHost = hostOf(publicUrl);
+  const dispatchHost =
+    apiHost !== undefined && publicHost !== undefined && apiHost !== publicHost
+      ? apiHost
+      : undefined;
+  const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  for (const match of decoded.matchAll(URL_CANDIDATE)) {
+    for (const written of [match[0], match[0].replace(TRAILING_PUNCTUATION, "")]) {
+      const host = hostOf(written);
+      if (host === undefined) continue;
+      if (insideCluster(host, dispatchHost, true)) return written;
+      break;
+    }
+  }
+  const prose = decoded.replace(URL_CANDIDATE, (url) => " ".repeat(url.length));
+  for (const match of prose.matchAll(BARE_HOST)) {
+    const host = hostOf(`http://${match[0]}`);
+    if (host !== undefined && insideCluster(host, dispatchHost, false)) return match[0];
+  }
+  return undefined;
+}
+
+/** A URL's host, lower-case and without a trailing dot; undefined for no URL or one that does not
+ * parse. */
+function hostOf(value: string | undefined): string | undefined {
+  if (value === undefined || value === "") return undefined;
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/\.$/, "") || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether host is one only the cluster reaches: a Kubernetes Service name (ending `.svc`, a custom
+ * cluster domain after `.svc.`, or `.cluster.local`), Dispatch's own in-cluster host (dispatchHost),
+ * and, for a host a URL names, a single label (`dispatch`, `localhost`) or a private or loopback IP
+ * literal (a ClusterIP among them).
+ */
+function insideCluster(host: string, dispatchHost: string | undefined, fromUrl: boolean): boolean {
+  if (host === dispatchHost) return true;
+  if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
+    return true;
+  if (!fromUrl) return privateIPv4(host);
+  if (host.startsWith("[")) return privateIPv6(host.slice(1, -1));
+  return privateIPv4(host) || !host.includes(".");
+}
+
+/** A loopback, link-local, private or shared (carrier-grade NAT) IPv4 address. */
+function privateIPv4(host: string): boolean {
+  const octets = host.split(".");
+  if (octets.length !== 4 || !octets.every((octet) => /^\d{1,3}$/.test(octet))) return false;
+  const [a = 0, b = 0] = octets.map(Number);
+  return (
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
+/** A loopback, link-local or unique-local IPv6 address. */
+function privateIPv6(address: string): boolean {
+  const head = address.split(":")[0] ?? "";
+  return address === "::1" || /^f[cd][0-9a-f]{0,2}$/.test(head) || /^fe[89ab][0-9a-f]?$/.test(head);
+}
 
 /**
  * Posts reply once. Nothing retries it: a post whose answer was lost may already be in the
- * thread. A reply linking a cluster-internal address is refused before anything is asked, since
- * nobody in Slack can open it. A broker that has not granted LEGION_SLACK_BOT_TOKEN (pending
- * approval, denied, or any other refusal) posts nothing, and the error names the state and quotes
- * the client.
+ * thread. A reply linking an address inside the cluster (linkInsideCluster) is refused before
+ * anything is asked, since nobody in Slack can open it. A broker that has not granted
+ * LEGION_SLACK_BOT_TOKEN (pending approval, denied, or any other refusal) posts nothing, and the
+ * error names the state and quotes the client.
  */
 export async function postSlackReply(
   reply: SlackReply,
   options: { readonly env?: Record<string, string | undefined> } = {}
 ): Promise<SlackPosted> {
-  const internal = CLUSTER_INTERNAL_URL.exec(reply.text);
-  if (internal !== null) {
+  const env = options.env ?? process.env;
+  const internal = linkInsideCluster(reply.text, env);
+  if (internal !== undefined) {
     throw new Error(
-      `the reply links ${internal[0]}, a cluster-internal address nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`
+      `the reply links ${internal}, an address inside the cluster nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`
     );
   }
-  const env = options.env ?? process.env;
   const override = env[SLACK_POST_API_URL_VARIABLE];
   if (override !== undefined && override !== "" && !allowedAPIURL(override)) {
     throw new Error(

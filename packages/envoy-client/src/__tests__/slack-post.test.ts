@@ -183,21 +183,87 @@ describe("postSlackReply", () => {
     expect(slack.calls).toEqual([]);
   });
 
-  // A reply goes to people in Slack, who cannot open a cluster's Service address: a reply linking
-  // one is refused before the broker is asked or Slack is called, naming the link.
-  test("refuses a reply that links a cluster-internal address, asking nothing of the broker", async () => {
-    const slack = fakeSlack({ ok: true, ts: "1.2" });
-    const { env, args } = brokerEnvironment("granted", slack.url);
-    for (const text of [
-      "Filed as ACME-12: http://dispatch.example-ns.svc.cluster.local:8766/issues/ACME-12",
-      "Filed as <http://dispatch.example-ns.svc:8766/issues/ACME-12|ACME-12>",
-    ]) {
-      await expect(postSlackReply({ ...reply, text }, { env })).rejects.toThrow(
-        "nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted"
-      );
+  // A reply goes to people in Slack, who cannot open an address inside the cluster: every URL in the
+  // reply, Slack's <url|text> form included, is parsed and its host checked, and a reply linking
+  // one is refused before the broker is asked or Slack is called, naming the link. Inside means a
+  // Service name (.svc, a custom cluster domain after .svc, .cluster.local, a single label), a
+  // private or loopback IP literal, or, while DISPATCH_PUBLIC_URL names another host, the host of
+  // DISPATCH_URL itself, whatever form the deployment gave it.
+  describe("refuses a reply linking an address inside the cluster, asking nothing of the broker", () => {
+    const internal = "dispatch.example-ns.svc.cluster.local";
+    const rows: [string, string, Record<string, string>?][] = [
+      ["an FQDN Service link", `Filed as ACME-12: http://${internal}:8766/issues/ACME-12`],
+      ["upper case", `See HTTP://${internal.toUpperCase()}:8766/issues/ACME-12`],
+      ["Slack's link form", `Filed as <http://${internal}:8766/issues/ACME-12|ACME-12>`],
+      [
+        "Slack's link form on a .svc host",
+        "Filed as <http://dispatch.example-ns.svc:8766/issues/ACME-12|ACME-12>",
+      ],
+      ["userinfo", `See http://u:p@${internal}/issues/ACME-12`],
+      ["Slack-escaped angle brackets", `See &lt;http://${internal}:8766/issues/ACME-12&gt;`],
+      ["a trailing-dot FQDN", `See http://${internal}.:8766/issues/ACME-12`],
+      ["a ClusterIP", "See http://10.96.12.34:8766/issues/ACME-12"],
+      ["an IPv6 literal", "See http://[fd00:10:96::1234]:8766/issues/ACME-12"],
+      ["a loopback address", "See http://127.0.0.1:8766/issues/ACME-12"],
+      ["a single-label Service name", "See http://dispatch:8766/issues/ACME-12"],
+      [
+        "percent-encoded dots",
+        "See http://dispatch%2Eexample-ns%2Esvc%2Ecluster%2Elocal:8766/issues/ACME-12",
+      ],
+      ["a bare origin ending a sentence", `Dispatch is at http://${internal}:8766.`],
+      ["a bare origin in parentheses", `Dispatch (http://${internal}:8766) has it.`],
+      ["a bare origin before a query", `See http://${internal}:8766?x=1`],
+      ["a bare origin before a fragment", `See http://${internal}:8766#top`],
+      [
+        "a custom cluster domain",
+        "See http://dispatch.example-ns.svc.corp.internal/issues/ACME-12",
+      ],
+      ["a host with no scheme", `See ${internal}:8766/issues/ACME-12`],
+      [
+        "DISPATCH_URL's short <svc>.<ns> host while the dashboard is elsewhere",
+        "See http://dispatch.example-ns:8766/issues/ACME-12",
+        {
+          DISPATCH_URL: "http://dispatch.example-ns:8766",
+          DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
+        },
+      ],
+    ];
+    for (const [name, text, extra] of rows) {
+      test(name, async () => {
+        const slack = fakeSlack({ ok: true, ts: "1.2" });
+        const { env, args } = brokerEnvironment("granted", slack.url);
+        await expect(
+          postSlackReply({ ...reply, text }, { env: { ...env, ...extra } })
+        ).rejects.toThrow(
+          "nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted"
+        );
+        expect(slack.calls).toEqual([]);
+        expect(() => readFileSync(args)).toThrow();
+      });
     }
-    expect(slack.calls).toEqual([]);
-    expect(() => readFileSync(args)).toThrow();
+
+    const allowed: [string, string, Record<string, string>?][] = [
+      ["the public dashboard", "Filed as ACME-12: https://dispatch.example.org/issues/ACME-12"],
+      ["a path that merely ends in .svc", "See http://example.org/docs.svc"],
+      ["a dotted word in prose", "Fixed in README.md, e.g. the setup section."],
+      [
+        "DISPATCH_URL's host when it is the dashboard too",
+        "See https://dispatch.example.org/issues/ACME-12",
+        { DISPATCH_URL: "https://dispatch.example.org" },
+      ],
+    ];
+    for (const [name, text, extra] of allowed) {
+      test(`posts ${name}`, async () => {
+        const slack = fakeSlack({ ok: true, channel: "C00000000", ts: "1700000000.000200" });
+        const { env } = brokerEnvironment("granted", slack.url);
+        await expect(
+          postSlackReply({ ...reply, text }, { env: { ...env, ...extra } })
+        ).resolves.toMatchObject({
+          ts: "1700000000.000200",
+        });
+        expect(slack.calls).toHaveLength(1);
+      });
+    }
   });
 
   test("Slack's refusal comes back verbatim", async () => {

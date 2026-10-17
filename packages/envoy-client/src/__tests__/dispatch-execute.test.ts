@@ -7331,6 +7331,51 @@ describe("executeDispatchTool", () => {
     expect(result.details).toEqual({ issue: "DSP-42" });
   });
 
+  // An agent asked about an issue answers with its link, so the summary names the issue's page:
+  // on the public dashboard when DISPATCH_PUBLIC_URL is set, on the API's address otherwise.
+  test.each([
+    [undefined, "Link: http://dispatch.test/issues/DSP-42"],
+    ["https://dispatch.example.org", "Link: https://dispatch.example.org/issues/DSP-42"],
+  ] as const)("an issue summary names the issue's page (public URL %p)", async (publicUrl, link) => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          priority: null,
+          assignee: null,
+          claim: null,
+          components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+          route: null,
+          open_asks: [],
+          last_seq: 0,
+          external_links: [],
+          labels: [],
+        });
+      }
+      if (pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      return new Response(JSON.stringify({ error: "missing", code: "NOT_FOUND" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config: publicUrl === undefined ? config : { ...config, publicUrl },
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(`Title: Dispatch issue\nKey: DSP-42\n${link}\nStatus: open`);
+  });
+
   // A bare "unavailable" means Dispatch has no such section (a server without the route). A
   // gateway's 404 page in its place is a failure the agent can act on, so the section says what
   // answered, as it does for every other failure.

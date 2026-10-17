@@ -1340,6 +1340,7 @@ function issueSummary(
   events: readonly Event[],
   references: IssueReferences | string,
   graph: readonly string[],
+  linkBase: string,
   titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
@@ -1355,6 +1356,9 @@ function issueSummary(
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
+    // The issue's page, on the dashboard people open (DISPATCH_PUBLIC_URL when set), so an agent
+    // asked about the issue repeats a link rather than building one.
+    `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
     `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
@@ -3431,6 +3435,7 @@ export async function executeDispatchTool(
           read.events,
           references,
           [...pictures.lines, ...graph],
+          linkBase,
           titles
         ),
         details: { issue: read.issue.key },

@@ -37,9 +37,10 @@ Every answer is one `slack_post` call:
   the thread the mention opened or joined, never at the channel's top level.
 - `text` is what you say, at most 4,000 characters, written as `skill://dispatch`'s "Writing for
   the human" says. Address the person as `<@user_id>` and give every issue as its key, its title
-  and its Dispatch link, the one `dispatch` printed: it points at Dispatch's dashboard, and
-  `slack_post` refuses a reply linking a cluster-internal address nobody in Slack can open. Say
-  only what Dispatch shows: an issue's assignee is the one `dispatch` names, never one you assume.
+  and its Dispatch link exactly as `dispatch` printed it (the `Link:` line of `dispatch read`, the
+  link on a `Created` line or a search hit): it points at Dispatch's dashboard, and `slack_post`
+  refuses a reply linking an address inside the cluster. Never build a link yourself. Say only what
+  Dispatch shows: an issue's assignee is the one `dispatch` names, never one you assume.
 
 `slack_post` is sent once and never retried. When it answers that Slack did not answer, the reply
 may already be in the thread: do not post it again. When it answers with Slack's refusal, the

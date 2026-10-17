@@ -16900,7 +16900,7 @@ function progressText(progress, sep) {
   }
   return parts.join(sep);
 }
-function issueSummary(issue2, events, references, graph, titles) {
+function issueSummary(issue2, events, references, graph, linkBase, titles) {
   const asks = issue2.open_asks;
   const spec = issue2.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -16918,6 +16918,7 @@ function issueSummary(issue2, events, references, graph, titles) {
   return [
     `Title: ${issue2.title}`,
     `Key: ${issue2.key}`,
+    `Link: ${new URL(`/issues/${encodeURIComponent(issue2.key)}`, linkBase).toString()}`,
     `Status: ${issue2.status}`,
     `Assignee: ${issue2.assignee ?? "unassigned"}`,
     `Claimed by: ${issue2.claim === null ? "nobody" : claimText(issue2.claim, titles)}`,
@@ -18306,7 +18307,7 @@ ${trailer.join(`
         ])
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], linkBase, titles),
         details: { issue: read.issue.key },
         ...showImages(pictures2)
       };
@@ -19224,7 +19225,7 @@ async function openAsks(raw) {
     try {
       const snapshot = await new DispatchClient(dispatch.url, dispatch.token, fetch, AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)).openAsks(input.session_id);
       process.stdout.write(`Dispatch authored-ask summary:
-${formatOpenAsksSummary(snapshot, dispatch.url)}
+${formatOpenAsksSummary(snapshot, dispatch.publicUrl ?? dispatch.url)}
 `);
     } catch (error48) {
       process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error48)}
