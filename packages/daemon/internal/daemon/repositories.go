@@ -345,8 +345,8 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 // a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
 // GitHub spells it, which Envoy's subjects carry and NATS matches case-sensitively, whatever
 // spelling a record keeps for its workspace (a backfilled record keeps its clone's): a served
-// repository as the mapping names it, and any other as its record keeps GitHub's spelling
-// (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub.
+// repository as GitHub names it (nameAccepted), and any other as its record keeps GitHub's
+// spelling (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {

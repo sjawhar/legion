@@ -165,13 +165,16 @@ func (s *Postgres) FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo
 	return nil
 }
 
-func (s *Postgres) NameIssueRepository(ctx context.Context, tx pgx.Tx, key, githubRepo string) error {
-	tag, err := tx.Exec(ctx, "update issues set github_repo = $2 where key = $1 and repo <> '' and github_repo = '' and lower(repo) = lower($2)", key, githubRepo)
+func (s *Postgres) NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error {
+	if !strings.EqualFold(repo, githubRepo) {
+		return fmt.Errorf("name the repository of %s: GitHub's spelling %s names another repository than %s", key, githubRepo, repo)
+	}
+	tag, err := tx.Exec(ctx, "update issues set github_repo = $3 where key = $1 and repo = $2 and github_repo = ''", key, repo, githubRepo)
 	if err != nil {
 		return fmt.Errorf("name the repository of %s: %w", key, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("name the repository of %s: it has no unnamed record on %s", key, githubRepo)
+		return fmt.Errorf("name the repository of %s: it has no record on %s without GitHub's spelling", key, repo)
 	}
 	return nil
 }

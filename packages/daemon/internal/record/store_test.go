@@ -235,7 +235,8 @@ func TestUnfilledIssuesAndFillIssueRepository(t *testing.T) {
 // A record written before the schema carried GitHub's spelling of its repository has its own
 // spelling and no GitHub one, and the boot names it (daemon's backfillRepositories):
 // UnnamedIssues lists one project's such records, and NameIssueRepository names one, once, with a
-// spelling of the record's own repository alone.
+// spelling of the record's own repository alone, refusing another repository as
+// FillIssueRepository does.
 func TestUnnamedIssuesAndNameIssueRepository(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -255,18 +256,23 @@ func TestUnnamedIssuesAndNameIssueRepository(t *testing.T) {
 		if len(unnamed) != 1 || unnamed[0].Key != "LEGION-502" {
 			t.Fatalf("UnnamedIssues(LEGION) = %#v, want LEGION-502 alone", unnamed)
 		}
-		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "Acme/Gadgets"); err == nil ||
-			err.Error() != "name the repository of LEGION-502: it has no unnamed record on Acme/Gadgets" {
+		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "acme/widgets", "Acme/Gadgets"); err == nil ||
+			err.Error() != "name the repository of LEGION-502: GitHub's spelling Acme/Gadgets names another repository than acme/widgets" {
 			t.Fatalf("naming another repository = %v, want it refused", err)
 		}
-		must(t, records.NameIssueRepository(ctx, tx, "LEGION-502", "Acme/Widgets"))
+		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "zeta/tools", "Zeta/Tools"); err == nil ||
+			err.Error() != "name the repository of LEGION-502: it has no record on zeta/tools without GitHub's spelling" {
+			t.Fatalf("naming a record on another repository = %v, want it refused", err)
+		}
+		must(t, records.NameIssueRepository(ctx, tx, "LEGION-502", "acme/widgets", "Acme/Widgets"))
 		got, err := records.Issue(ctx, tx, "LEGION-502")
 		must(t, err)
 		if got.Repo != "acme/widgets" || got.GitHubRepo != "Acme/Widgets" {
 			t.Fatalf("named issue = %s (GitHub's %s), want acme/widgets (GitHub's Acme/Widgets)", got.Repo, got.GitHubRepo)
 		}
-		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "Acme/Widgets"); err == nil {
-			t.Fatal("a second naming was not refused")
+		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "acme/widgets", "Acme/Widgets"); err == nil ||
+			err.Error() != "name the repository of LEGION-502: it has no record on acme/widgets without GitHub's spelling" {
+			t.Fatalf("a second naming = %v, want it refused", err)
 		}
 	})
 }

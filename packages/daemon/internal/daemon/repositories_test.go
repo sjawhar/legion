@@ -163,7 +163,8 @@ func TestTheBootRefusesOnlyAnEmptyMapping(t *testing.T) {
 }
 
 // namedGitHub answers GET /repos/{owner}/{repo} for each repository it names, as
-// "<GitHub's spelling>@<default branch>".
+// "<GitHub's spelling>@<default branch>", or as "301 <owner>/<name>" for one GitHub renamed, which
+// it answers as GitHub does: a 301 to the new name's path.
 type namedGitHub struct{ url string }
 
 func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
@@ -174,6 +175,10 @@ func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
 		if r.Method != http.MethodGet || !ok {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			return
+		}
+		if renamed, moved := strings.CutPrefix(named, "301 "); moved {
+			http.Redirect(w, r, "/repos/"+renamed, http.StatusMovedPermanently)
 			return
 		}
 		name, branch, _ := strings.Cut(named, "@")

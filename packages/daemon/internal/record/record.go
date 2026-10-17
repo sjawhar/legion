@@ -381,9 +381,10 @@ type Store interface {
 	FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, defaultBranch, githubRepo string) error
 	// UnnamedIssues is every record of the Dispatch project key project that carries its repository
 	// but was written before the record carried GitHub's spelling of it, by key; NameIssueRepository
-	// names one such record, once, with a spelling of its own repository.
+	// names one such record on repo, once, with a spelling of that repository, refusing another as
+	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
-	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, githubRepo string) error
+	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
