@@ -125,7 +125,7 @@ func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {
 	t.Helper()
 	database, err := store.Open(t.Context(), databaseURL)
 	require.NoError(t, err)
-	t.Cleanup(database.Pool.Close)
+	defer database.Pool.Close()
 	require.NoError(t, database.Migrate(t.Context()))
 	_, err = delivery.PutSettings(t.Context(), database.Pool, delivery.DeliverySettings{
 		DeployRepo:           "acme/widgets",
@@ -218,25 +218,11 @@ func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *na
 	require.True(t, strings.HasSuffix(envelope.Topic, ".issue.created"), "event topic %q", envelope.Topic)
 }
 
-// nextControl is the next agent stream control message Dispatch sent, failing the test after 10s:
-// a refused control publish never arrives.
-func nextControl(t *testing.T, control <-chan *natsgo.Msg) *natsgo.Msg {
-	t.Helper()
-	select {
-	case msg := <-control:
-		return msg
-	case <-time.After(10 * time.Second):
-		t.Fatal("Dispatch sent no agent stream control message within 10s")
-		return nil
-	}
-}
-
 func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	t.Helper()
-	control := make(chan *natsgo.Msg, 2)
-	subscription, err := conn.ChanSubscribe(contracts.AgentStreamControlSubject(dispatchSessionID), control)
+	control, err := conn.SubscribeSync(contracts.AgentStreamControlSubject(dispatchSessionID))
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = subscription.Unsubscribe() })
+	t.Cleanup(func() { _ = control.Unsubscribe() })
 	require.NoError(t, conn.Flush())
 
 	jar, err := cookiejar.New(nil)
@@ -265,9 +251,11 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	t.Cleanup(func() { _ = stream.Body.Close() })
 	require.Equal(t, http.StatusOK, stream.StatusCode)
 
-	watch := nextControl(t, control)
+	watch, err := control.NextMsg(10 * time.Second)
+	require.NoError(t, err, "Dispatch sent no agent stream control message within 10s")
 	require.Equal(t, `{"v":1,"type":"watch"}`, string(watch.Data))
-	replay := nextControl(t, control)
+	replay, err := control.NextMsg(10 * time.Second)
+	require.NoError(t, err, "Dispatch sent no agent stream control message within 10s")
 	require.Equal(t, `{"v":1,"type":"replay"}`, string(replay.Data))
 	require.NoError(t, replay.Respond(nil))
 

@@ -3,7 +3,6 @@ package testpg
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/testcontainers/testcontainers-go"
@@ -32,13 +31,9 @@ func URL(t testing.TB) string {
 	if err != nil {
 		t.Fatalf("start Postgres: %v", err)
 	}
-	host, err := container.Host(ctx)
+	endpoint, err := container.PortEndpoint(ctx, "5432/tcp", "")
 	if err != nil {
-		t.Fatalf("Postgres host: %v", err)
+		t.Fatalf("Postgres endpoint: %v", err)
 	}
-	port, err := container.MappedPort(ctx, "5432/tcp")
-	if err != nil {
-		t.Fatalf("Postgres port: %v", err)
-	}
-	return fmt.Sprintf("postgres://postgres:test@%s:%s/postgres?sslmode=disable", host, port.Port())
+	return "postgres://postgres:test@" + endpoint + "/postgres?sslmode=disable"
 }
