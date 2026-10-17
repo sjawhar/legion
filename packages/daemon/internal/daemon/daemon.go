@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -1422,9 +1423,18 @@ type source struct {
 // filtered here: a slot's index is unique across every project's slots, so admission chooses the
 // next one over all of them and counts only its own against its cap (admit.ownSlots). The outbox's
 // claim is scoped in its SQL instead, because the lease it takes is itself the damage.
+//
+// It is also where the outbox learns of its rows: every write that makes a row due — Enqueue, and
+// ExpediteOutbox — wakes the row's lane (outbox.wake) once the transaction has committed, through
+// the transaction's commit hooks (intake.OnCommit), so no lane runs a row it cannot yet read, and
+// no lane polls for one. wake is nil where there is no workflow to wake: the API-only daemon, the
+// state route's reads and the stranded report.
 type projectRecords struct {
 	record.Store
 	project string
+	wake    func(issue string, kind record.OutboxKind)
+	// log says when a row was written outside a commit scope; nil is the default logger.
+	log *slog.Logger
 }
 
 func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, error) {
@@ -1439,6 +1449,46 @@ func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, 
 		}
 	}
 	return issues, nil
+}
+
+func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.OutboxRow) error {
+	if err := s.Store.Enqueue(ctx, tx, row); err != nil {
+		return err
+	}
+	s.wakeOnCommit(ctx, row)
+	return nil
+}
+
+func (s projectRecords) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row record.OutboxRow, now time.Time) error {
+	if err := s.Store.ExpediteOutbox(ctx, tx, row, now); err != nil {
+		return err
+	}
+	s.wakeOnCommit(ctx, row)
+	return nil
+}
+
+// wakeOnCommit wakes the row's lane once the transaction that wrote it commits. A write made
+// outside a commit scope (intake.WithCommitHooks) has no commit to wait for: its lane is woken at
+// once, and the write is logged with its caller, since a lane woken before the row is visible
+// finds nothing and the row then waits for the sweep — every transaction that writes a row is
+// meant to be scoped, and one that is not is a bug to fix where the log names.
+func (s projectRecords) wakeOnCommit(ctx context.Context, row record.OutboxRow) {
+	if s.wake == nil {
+		return
+	}
+	if intake.CommitScoped(ctx) {
+		intake.OnCommit(ctx, func() { s.wake(row.Issue, row.Kind) })
+		return
+	}
+	log := s.log
+	if log == nil {
+		log = slog.Default()
+	}
+	// Caller 2 is the caller of Enqueue or ExpediteOutbox, past this helper and the method.
+	_, file, line, _ := goruntime.Caller(2)
+	log.Error("outbox row written outside a commit scope; its lane is woken at once",
+		"kind", row.Kind, "issue", row.Issue, "file", file, "line", line)
+	s.wake(row.Issue, row.Kind)
 }
 
 func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
@@ -1456,7 +1506,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
-	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports())
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), time.Now().UTC())
 	if err != nil {
 		return api.State{}, err
 	}

@@ -160,6 +160,13 @@ Legion and role notifications included), claim a role, list every session and de
 holds whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for
 any device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
 
+Because the API takes no bearer, a web page open on any device the policy lets reach 9020 could
+otherwise post to it: a browser sends a cross-site form without asking. The listener refuses any
+request body whose `Content-Type` is not `application/json`, which a page can send cross-site only
+after a CORS preflight the listener never grants (`apiauth.go`). That refusal shipped in
+legion-envoy-v13.9.0, so pin `listener.image` to that release or a later one; an older image
+leaves 9020 open to any page a tailnet user visits.
+
 The listener connects as the listener's user (see [The hub's users](#the-hubs-users)) with the
 seed `listener.seedSecret` holds. The hub's service account gets
 `roles/secretmanager.secretAccessor` on that secret and nothing more; the consumer declares the
@@ -429,13 +436,17 @@ e2fsck's repair, on a real disk, leaves what JetStream needs are for a first dep
 An instance template cannot change once it is created
 ([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
 holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`listener`, `sessionUser`, `tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskType`, `diskSizeGb`, `network` or
-`subnetwork` makes a new template. The group then replaces its VM at once (`PROACTIVE`, minimal
-action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
-unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
-clients reconnect then. The new VM gets the same data disk, so it keeps the stream and rejoins the
-tailnet as the same node. Its boot disk comes from the `cos-stable` family as it is then, so a new
-template also brings whichever COS release the family names at that moment.
+`listener`, `sessionUser`, `tags`, `natsImage`, `tailscaleImage`) or to `machineType`,
+`diskType`, `diskSizeGb`, `network` or `subnetwork` makes a new template. So does a plugin release
+that changes the rendering itself: the release that added `listener` and `sessionUser` renamed the
+secret fetcher and gives every hub a Serve configuration, so upgrading to it replaces every
+existing hub's VM once, with the outage below, even a hub that sets neither input. The group then
+replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting it before it creates the
+next (`RECREATE`, no surge, at most one unavailable). NATS is down from the old VM's stop until the
+new one's `nats` unit starts, and its clients reconnect then. The new VM gets the same data disk,
+so it keeps the stream and rejoins the tailnet as the same node. Its boot disk comes from the
+`cos-stable` family as it is then, so a new template also brings whichever COS release the family
+names at that moment.
 
 Three inputs work otherwise:
 

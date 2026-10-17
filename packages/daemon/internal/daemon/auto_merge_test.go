@@ -1047,20 +1047,20 @@ func mergeRunner(pool *pgxpool.Pool, records record.Store, api string, log *slog
 		repo: ghrepo.MustParse("acme/widgets"), githubAPI: api, defaultBranch: mainBranch, now: now}
 }
 
-// leaseStealer is a record store whose ClaimDue lets another worker take every row it hands out, as
-// a worker too slow for its lease meets: it claims them again in the same transaction, as of the
-// moment their leases expire, so the rows it returns hold stale leases.
+// leaseStealer is a record store whose ClaimRow lets another worker take every row it hands out, as
+// a worker too slow for its lease meets: it claims the row again in the same transaction, as of the
+// moment its lease expires, so the row it returns holds a stale lease.
 type leaseStealer struct{ record.Store }
 
-func (s leaseStealer) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, lease time.Duration) ([]record.OutboxRow, error) {
-	rows, err := s.Store.ClaimDue(ctx, tx, project, now, limit, lease)
-	if err != nil {
-		return nil, err
+func (s leaseStealer) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.Time, lease time.Duration) (record.OutboxRow, bool, error) {
+	row, ok, err := s.Store.ClaimRow(ctx, tx, id, now, lease)
+	if err != nil || !ok {
+		return row, ok, err
 	}
-	if _, err := s.Store.ClaimDue(ctx, tx, project, now.Add(lease), limit, lease); err != nil {
-		return nil, err
+	if _, _, err := s.Store.ClaimRow(ctx, tx, id, now.Add(lease), lease); err != nil {
+		return record.OutboxRow{}, false, err
 	}
-	return rows, nil
+	return row, true, nil
 }
 
 // assertMergeRows checks the outbox holds ready ready_merge rows and notices notices of noticeKind,
