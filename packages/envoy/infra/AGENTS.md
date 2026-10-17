@@ -118,11 +118,11 @@ versions. Never add the module to the root `go.work`.
   `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
   `natsSeedSecret`, `agentSecretsToken` and `appPrivateKey` are checked for a seed once they
   resolve, before any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
-  `gcp.dispatchAppPEM`, `TestConstructRefusesASeedInADispatchInput`); the four of those Dispatch
-  reads as a token or credential — `tailnetAuthKey`, `signInClientSecret`, `agentSecretsToken`
-  and `appPrivateKey` — are also refused blank or whitespace-only then, through the one rule all
-  four run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since
-  Dispatch refuses an empty credential only at boot; `appPrivateKey` is further refused, naming
+  `gcp.dispatchAppPEM`, `TestConstructRefusesASeedInADispatchInput`); the four credentials —
+  `tailnetAuthKey`, `signInClientSecret`, `agentSecretsToken` and `appPrivateKey` — are also
+  refused blank or whitespace-only then, through the one rule all four run
+  (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since none of
+  them can work blank; `appPrivateKey` is further refused, naming
   it and never echoing it, unless its first PEM block parses as a PKCS#1 or PKCS#8 RSA private
   key — the rule Dispatch boots on, `githubapp.parsePrivateKey`, copied into `gcp.dispatchAppPEM`
   because the plugin compiles no Envoy package but bus and contracts

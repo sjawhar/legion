@@ -1,6 +1,8 @@
 package gcp
 
 import (
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -99,14 +101,27 @@ func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi
 	}).(pulumi.StringOutput)
 }
 
+// keyKind names a parsed private key's algorithm for a refusal, never its value.
+func keyKind(key any) string {
+	switch key.(type) {
+	case *ecdsa.PrivateKey:
+		return "an ECDSA"
+	case ed25519.PrivateKey:
+		return "an Ed25519"
+	default:
+		return "a non-RSA"
+	}
+}
+
 // refuseDispatchSecret is the one check every secret credential input of the component runs once
-// it resolves (tailnetAuthKey, signInClientSecret, agentSecretsToken, appPrivateKey): Dispatch
-// reads each as a token or credential and refuses a blank one only at boot, so a blank or
-// whitespace-only value is refused here, and so is one holding an nkey seed. Each refusal names
-// input and never the value.
+// it resolves (tailnetAuthKey, signInClientSecret, agentSecretsToken, appPrivateKey): a blank or
+// whitespace-only value is a credential that cannot work (the sidecar cannot join the tailnet,
+// Dispatch refuses a blank sign-in secret or broker token at boot, and a blank App key turns the
+// App off), so it is refused here, and so is one holding an nkey seed. Each refusal names input
+// and never the value.
 func refuseDispatchSecret(v, dispatch, input string) error {
 	if strings.TrimSpace(v) == "" {
-		return fmt.Errorf("%s: %w", dispatch, core.InputErrorf(input, "%s is blank; Dispatch reads it as a credential, so it would fail the pod's boot", input))
+		return fmt.Errorf("%s: %w", dispatch, core.InputErrorf(input, "%s is blank, which no credential is", input))
 	}
 	if bus.HoldsSeed(v) {
 		return fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
@@ -151,7 +166,7 @@ func dispatchAppPEM(value pulumi.StringInput, dispatch string) pulumi.StringOutp
 				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block is not a PKCS#1 or PKCS#8 RSA private key, which Dispatch's GitHub App needs to boot (not echoed)"))
 			}
 			if _, ok := parsed.(*rsa.PrivateKey); !ok {
-				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block holds a %T, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)", parsed))
+				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block holds %s key, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)", keyKind(parsed)))
 			}
 		}
 		return base64.StdEncoding.EncodeToString([]byte(v)), nil

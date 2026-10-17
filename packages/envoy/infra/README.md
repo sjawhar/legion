@@ -187,8 +187,9 @@ and nkey seeds in its own name and in plain inputs before it registers a resourc
 that is not an absolute http(s) URL with no path. Once each secret input resolves, before any
 child takes it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`,
 `agentSecretsToken` and `appPrivateKey`; a blank or whitespace-only `tailnetAuthKey`,
-`signInClientSecret`, `agentSecretsToken` or `appPrivateKey`, each of which Dispatch reads as a
-token or credential and refuses only at boot; and an `appPrivateKey` whose first PEM block is not
+`signInClientSecret`, `agentSecretsToken` or `appPrivateKey`, none of which can work blank (the
+sidecar cannot join the tailnet, Dispatch refuses a blank sign-in secret or broker token at boot,
+and a blank App key would turn the App off); and an `appPrivateKey` whose first PEM block is not
 a PKCS#1 or PKCS#8 RSA private key, the one key Dispatch boots on — each a refusal naming the
 input and never echoing it. It refuses a `natsUrl` that holds a seed, is local (the pod reaches
 NATS only through the Tailscale sidecar's SOCKS5 proxy), is empty, or holds a comma or a control
@@ -212,7 +213,8 @@ namespace, since Tailscale creates its state Secret on first start.
 ### The pod
 
 The Tailscale sidecar joins with the supplied tag, serves
-`https://<hostname>.<tailnetDnsName>`, and routes the pod's NATS clients through its SOCKS5 proxy.
+`https://<hostname>.<tailnetDnsName>`, runs the listener beside Dispatch as machine `<hostname>`
+(so the hub's user for this deployment sets `dispatchMachineId` to the component's `hostname`), and routes the pod's NATS clients through its SOCKS5 proxy.
 The Cloud SQL Auth Proxy listens only on `127.0.0.1:5432` with `--private-ip`. The two Envoy
 containers mount the NATS seed at `/var/run/secrets/envoy/nats-seed`; the seed remains outside
 Pulumi state. With `agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts the

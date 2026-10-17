@@ -597,9 +597,9 @@ func TestDispatchRefusesAnAppPrivateKeyDispatchCannotBootOn(t *testing.T) {
 		{"a SEC1 EC private key", frame("EC PRIVATE KEY", sec1),
 			"appPrivateKey's PEM block is not a PKCS#1 or PKCS#8 RSA private key, which Dispatch's GitHub App needs to boot (not echoed)"},
 		{"PKCS#8 holding an EC key", frame("PRIVATE KEY", ecPKCS8),
-			"appPrivateKey's PEM block holds a *ecdsa.PrivateKey, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)"},
+			"appPrivateKey's PEM block holds an ECDSA key, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)"},
 		{"PKCS#8 holding an Ed25519 key", frame("PRIVATE KEY", edPKCS8),
-			"appPrivateKey's PEM block holds a ed25519.PrivateKey, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)"},
+			"appPrivateKey's PEM block holds an Ed25519 key, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchBrokerAndAppArgs(t)
@@ -639,7 +639,7 @@ func TestDispatchRefusesABlankSecretOnceItResolves(t *testing.T) {
 				input.edit(args, pulumi.String(row.value))
 				_, err := runDispatch(t, args, true)
 				require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+input.name+
-					" is blank; Dispatch reads it as a credential, so it would fail the pod's boot")
+					" is blank, which no credential is")
 			})
 		}
 	}
