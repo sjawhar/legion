@@ -14,7 +14,7 @@
 -- counts the same issues, so the pre-deploy census refuses first.
 --
 -- It takes both tables it changes in ACCESS EXCLUSIVE before it counts, and holds them to commit,
--- so no earlier release's write lands between the count and the trigger below: a create that
+-- so no earlier release's write commits between the count and the trigger below: a create that
 -- commits while this waits for the lock is in the count. ACCESS EXCLUSIVE, not EXCLUSIVE, because
 -- the ALTER TABLEs below take it anyway, and taking it later would be an upgrade an old server's
 -- read-then-write transaction on issues can deadlock with (the read granted beside EXCLUSIVE, the
