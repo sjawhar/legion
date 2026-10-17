@@ -1290,7 +1290,7 @@ it as its `authorization` input, an `aws:Authorization` of `aws:User`s, with the
 `envoy-infra render nats-start-script` reads the same from its file, keyed the same way. A user's
 `publish` and `subscribe` are each a `nats:Rules`, the one rules type every NATS component takes,
 whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs. `gcp:NatsHub` renders its server's
-from its `users` (see [The hub's users](docs/nats-hub.md#the-hubs-users)); `host:Listener` runs no
+from its `users`, `listener` and `sessionUser` (see [The hub's users](docs/nats-hub.md#the-hubs-users)); `host:Listener` runs no
 NATS server and takes none.
 
 | Input | What it is |

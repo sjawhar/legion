@@ -90,6 +90,7 @@ The hub refuses these before it registers anything, with an error naming the inp
   (`^[A-Za-z0-9_-]{1,255}$`, Secret Manager's rule, so a resource path such as
   `projects/<p>/secrets/<s>` is refused) or is the hub's own `<h>-tailnet-auth-key`, or whose
   `nkey` is empty;
+- a `sessionUser` whose `nkey` is empty;
 - a missing provider (see [Providers](../README.md#providers)).
 
 ## The hub's users
@@ -138,8 +139,8 @@ user's name or a rule entry before any of those, naming the path and not the val
 `users[1] "example-operator": publish.allow[0] holds an nkey seed (not echoed)`. The listener's
 user and the session user are named by their inputs in the same refusals, as
 `listener "<h>": nkey repeats users[0] "example-host-a"` or
-`sessionUser "<name>": nkey is not a user public key …`; a user of `users` named `<h>` repeats the
-listener's user's name.
+`sessionUser "<name>": nkey is not a user public key …`; a user of `users` named `<h>` is refused
+as the listener's user repeating it, as `listener "<h>": name repeats users[<index>]`.
 
 ## The hub's listener
 
