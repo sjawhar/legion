@@ -161,7 +161,11 @@ YAML
 
 # bridge_stop tears down everything bridge_start may have started, in reverse order, and never
 # fails: a torn-down leg that is already gone is not an error. Safe to call unconditionally from
-# cleanup, bridge mode or not.
+# cleanup, bridge mode or not. Issues both deletes without kubectl's own --wait (which returned
+# before the pod was actually gone at least twice, live, 2026-10-17, though a lone chisel pod
+# deleted by hand elsewhere on this cluster took under 6s — the discrepancy is unexplained but
+# repeatable) and instead polls for both objects gone itself, the same way namespace-rig.sh's own
+# teardown does, so the confirmation is this script's own observation, not kubectl's claim.
 bridge_stop() {
   [ -n "$bridge_started" ] || return 0
   bridge_started=
@@ -171,10 +175,14 @@ bridge_stop() {
   wait "$bridge_client_pid" 2>/dev/null
   [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null
   wait "$bridge_portforward_pid" 2>/dev/null
-  if [ -n "$bridge_name" ]; then
-    op delete pod "$bridge_name" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 ||
-      echo "   [operator] could not delete bridge pod $bridge_name; it may remain"
-    op delete service "$bridge_name" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 ||
-      echo "   [operator] could not delete bridge Service $bridge_name; it may remain"
-  fi
+  [ -n "$bridge_name" ] || return 0
+  op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  local i left
+  for i in $(seq 1 150); do
+    left=$(op get pod,service "$bridge_name" -o name 2>/dev/null) || true
+    [ -n "$left" ] || return 0
+    sleep 2
+  done
+  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 300s: $left; it may remain"
 }
