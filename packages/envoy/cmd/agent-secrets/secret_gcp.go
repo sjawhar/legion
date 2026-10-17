@@ -319,7 +319,10 @@ func (b *gcpBackend) currentTags(ctx context.Context, slug string) (owner, tier 
 // retag changes only the owner and tier annotations, preserving any other annotation the secret
 // holds: an UpdateSecret whose mask names "annotations" replaces the whole map, unlike AWS's
 // TagResource, which touches only the tags it names, so this reads the secret's current
-// annotations first and sends the merged map rather than one holding only owner and tier.
+// annotations first and sends the merged map rather than one holding only owner and tier. It
+// sends the read's Etag, so a concurrent change to the secret between the read and this write
+// (another annotation, say) fails the update with FAILED_PRECONDITION instead of being silently
+// overwritten by this request's stale map.
 func (b *gcpBackend) retag(ctx context.Context, slug, owner, tier string) error {
 	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
 	if err != nil {
@@ -336,6 +339,7 @@ func (b *gcpBackend) retag(ctx context.Context, slug, owner, tier string) error 
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),
 			Annotations: merged,
+			Etag:        secret.GetEtag(),
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"annotations"}},
 	})

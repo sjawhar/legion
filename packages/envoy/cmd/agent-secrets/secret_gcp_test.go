@@ -46,8 +46,9 @@ func gcpTestSettings() Settings {
 
 // fakeSecret is one secret fakeSecretManager holds.
 type fakeSecret struct {
-	secret   *secretmanagerpb.Secret
-	versions []*secretmanagerpb.SecretVersion
+	secret      *secretmanagerpb.Secret
+	versions    []*secretmanagerpb.SecretVersion
+	etagCounter int
 }
 
 // fakeSecretManager is a minimal in-memory Secret Manager server, implementing only the RPCs the
@@ -75,7 +76,8 @@ func (f *fakeSecretManager) CreateSecret(_ context.Context, req *secretmanagerpb
 	}
 	secret := req.GetSecret()
 	secret.Name = name
-	f.secrets[name] = &fakeSecret{secret: secret}
+	secret.Etag = "1"
+	f.secrets[name] = &fakeSecret{secret: secret, etagCounter: 1}
 	return secret, nil
 }
 
@@ -89,6 +91,9 @@ func (f *fakeSecretManager) GetSecret(_ context.Context, req *secretmanagerpb.Ge
 	return entry.secret, nil
 }
 
+// UpdateSecret refuses an Etag that does not match the secret's current one with
+// FAILED_PRECONDITION, as the real API does for optimistic concurrency, and bumps the etag on
+// every applied update; a request with no Etag (as delete/restore send) skips the check.
 func (f *fakeSecretManager) UpdateSecret(_ context.Context, req *secretmanagerpb.UpdateSecretRequest) (*secretmanagerpb.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -101,6 +106,9 @@ func (f *fakeSecretManager) UpdateSecret(_ context.Context, req *secretmanagerpb
 	if !ok {
 		return nil, status.Error(codes.NotFound, "not found")
 	}
+	if etag := req.GetSecret().GetEtag(); etag != "" && etag != entry.secret.GetEtag() {
+		return nil, status.Error(codes.FailedPrecondition, "etag mismatch")
+	}
 	for _, path := range req.GetUpdateMask().GetPaths() {
 		switch path {
 		case "annotations":
@@ -109,6 +117,8 @@ func (f *fakeSecretManager) UpdateSecret(_ context.Context, req *secretmanagerpb
 			entry.secret.Expiration = req.GetSecret().GetExpiration()
 		}
 	}
+	entry.etagCounter++
+	entry.secret.Etag = strconv.Itoa(entry.etagCounter)
 	return entry.secret, nil
 }
 
