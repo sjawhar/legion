@@ -403,10 +403,19 @@
 
 ### Changed
 
-- **Breaking:** deploy `0113` with no server of the earlier release running. Stop it, or scale it
-  to zero, before this release boots: a Recreate rollout, never a rolling one. Only this release's
-  API holds the depth limit, so an earlier release left serving can build a deeper chain again, and
-  every read of that chain's issues fails (500) until an ancestor's parent is set to null.
+- **Breaking:** deploy `0113` with no server of the earlier release running, and never start one
+  again after it applies. Stop it, or scale it to zero, before this release boots (a Recreate
+  rollout, never a rolling one), and recover a failed deploy forward rather than by rolling the
+  image back. Only this release's API holds the depth limit, so an earlier release serving over
+  `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
+  ancestor that still reads has its parent set to null.
+- The Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) no longer rolls a failed deploy back
+  to the previous image once that deploy has moved the database's schema. It records the schema
+  version the deployed tag runs against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys,
+  and reads it again when a deploy fails. If the schema moved past it, or cannot be read, the
+  deployer stops the failed image, logs `refusing to roll back` with both versions, and exits 1,
+  leaving the recovery to an operator, forward. It also stops before a deploy whose schema version
+  it cannot read.
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret

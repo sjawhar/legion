@@ -89,7 +89,8 @@ against another checkout, Compose project, or dump directory.
 Two releases of Dispatch never serve the database together here:
 `docker compose up -d --no-deps dispatch` stops and removes the old container before it starts the
 new one, which boots and migrates. A deployment that rolls Dispatch some other way must keep that
-order. Migration `0113` requires it (`../cmd/dispatch/README.md`, "Database migrations").
+order, and must never start an image older than its database's schema afterwards: migration `0113`
+requires both (`../cmd/dispatch/README.md`, "Database migrations").
 
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:
@@ -101,8 +102,20 @@ scripts/autodeploy.sh --once
 After health succeeds, the deployer reads `DISPATCH_SERVER_URL` from
 `compose/.env` and checks that `/auth/start` emits exactly
 `$DISPATCH_SERVER_URL/auth/callback`. It persists the new `ENVOY_IMAGE_TAG`
-only after both checks; a failed deployment restores the previous tag and
-restarts only `dispatch`.
+only after both checks. A failed deployment restores the previous tag and
+restarts only `dispatch`, unless the failed image moved the database's schema
+before it failed. Before each deploy the deployer reads the schema version
+(`max(version)` from `schema_migrations`, through the `pg_dump` image with
+`DATABASE_URL` passed by name) and records, as `ENVOY_IMAGE_SCHEMA=<tag>:<version>`
+in `compose/.env`, the version the deployed tag runs against. It keeps that record
+until the tag changes, so a retry of a failed image compares against the version the
+previous tag runs against, not the one the failed attempt left. When a deploy fails, it
+reads the version again. If the version moved past that record, or cannot be read,
+it does not restart the previous image. It stops the failed one instead, logs
+`refusing to roll back to <previous>` with both versions, and exits 1. Recovery is
+then forward: deploy an image that fixes the failure, or start the failed one by
+hand once its failure is understood. Never start the previous tag against the newer
+schema.
 
 ## Listener configuration
 
@@ -184,7 +197,7 @@ The database's nightly logical backup is not this compose's job: the production
 deployment's own scheduled backup task `pg_dump`s the `dispatch` database to object
 storage and alerts when a day has no dump; restores go through that deployment's own
 restore tooling. `scripts/autodeploy.sh` still takes its own pre-deploy dump of
-`DATABASE_URL` before every image roll, kept locally for rollback.
+`DATABASE_URL` before every image roll, kept locally; it never restores one itself.
 
 ## Sync to a remote host
 

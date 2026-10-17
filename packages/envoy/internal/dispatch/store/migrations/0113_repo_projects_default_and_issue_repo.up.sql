@@ -23,10 +23,11 @@
 -- as long as the count and the ALTERs take; the runner's lock_timeout (pgmigrate.LockTimeout, 5 s)
 -- bounds the wait for the lock, and fails the boot past it.
 --
--- Only this release's API holds the cap; nothing here does. An earlier release still serving once
--- this commits could build a chain past it again, so the earlier release stops before this one
--- boots (cmd/dispatch/README.md, "Database migrations"). A chain built anyway, or by direct SQL,
--- fails the reads of its issues (500) until an ancestor's parent is cleared.
+-- Only this release's API holds the cap; nothing here does. An earlier release serving once this
+-- commits, left running or started again by a rollback, could build a chain past it again, so the
+-- earlier release stops before this one boots and a failed deploy recovers forward
+-- (cmd/dispatch/README.md, "Database migrations"). A chain built anyway, or by direct SQL, fails the
+-- reads of its issues (500) until it is repaired as that README says.
 lock table repo_projects, issues in access exclusive mode;
 
 do $$

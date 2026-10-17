@@ -57,6 +57,27 @@ deployed_tag() {
   env_value ENVOY_IMAGE_TAG
 }
 
+set_env_value() {
+  if grep -q "^$1=" "$COMPOSE_ENV"; then
+    sed -i -E "s|^$1=.*|$1=$2|" "$COMPOSE_ENV"
+  else
+    printf '%s=%s\n' "$1" "$2" >>"$COMPOSE_ENV"
+  fi
+}
+
+# schema_version prints the highest migration the database has applied, the `schema_version`
+# Dispatch's /healthz reports, read through the image the backup runs and with DATABASE_URL passed
+# by name as the backup passes it.
+schema_version() {
+  local version
+  # shellcheck disable=SC2016 # $DATABASE_URL expands in the container's shell, from its environment
+  version=$(DATABASE_URL="$1" timeout 60 docker run --rm --network host -e DATABASE_URL "$PG_DUMP_IMAGE" \
+    sh -c 'psql -X -At -v ON_ERROR_STOP=1 -c "select coalesce(max(version), 0) from schema_migrations" "$DATABASE_URL"') ||
+    return 1
+  [[ "$version" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$version"
+}
+
 newest_published_main() {
   local sha
   jj -R "$REPO" git fetch >/dev/null 2>&1
@@ -116,11 +137,40 @@ rollback() {
   fi
 }
 
+# roll_back_or_stop answers a deploy of $sha that failed. It restores $previous only while the
+# schema is still the one $previous runs against. A failed image may have migrated before it failed,
+# and an image older than its database's schema can write what the newer release fails to read
+# (packages/envoy/cmd/dispatch/README.md, "Database migrations"), so once the schema has moved, or
+# cannot be read, it stops $sha instead and fails, leaving the recovery to an operator, forward.
+roll_back_or_stop() {
+  local sha="$1"
+  local previous="$2"
+  local baseline="$3"
+  local databaseUrl="$4"
+  local dispatchPort="$5"
+  local now
+  if ! now=$(schema_version "$databaseUrl"); then
+    compose 120 stop dispatch || log "could not stop $sha"
+    log "could not read the schema version after $sha failed, so refusing to roll back to $previous, which runs against schema $baseline: $sha is stopped, and forward recovery is required"
+    return 1
+  fi
+  if ((now > baseline)); then
+    compose 120 stop dispatch || log "could not stop $sha"
+    log "refusing to roll back to $previous: it runs against schema $baseline, and $sha moved the schema to $now before it failed. $sha is stopped, and forward recovery is required: deploy an image that fixes it, or start $sha by hand once its failure is understood. Never start $previous against schema $now"
+    return 1
+  fi
+  log "rolling back to $previous (schema $now)"
+  rollback "$previous" "$dispatchPort"
+}
+
 deploy() {
   local sha="$1"
   local previous
   local databaseUrl
   local dispatchPort
+  local before
+  local recorded
+  local baseline
   local dump
   local origin
   local redirect
@@ -139,6 +189,27 @@ deploy() {
   fi
   dispatchPort=$(env_value DISPATCH_PORT)
   dispatchPort="${dispatchPort:-8766}"
+  if ! before=$(schema_version "$databaseUrl"); then
+    log "could not read the schema version from DATABASE_URL; not deploying $sha"
+    return 1
+  fi
+  # ENVOY_IMAGE_SCHEMA is <tag>:<version>, the schema version the deployed tag was running against
+  # when the deployer first tried to replace it. Kept while that tag stays deployed, it is what a
+  # rollback to it needs: a retry after a failed deploy that migrated starts from the moved schema.
+  recorded=$(env_value ENVOY_IMAGE_SCHEMA)
+  if [[ -n "$recorded" && "${recorded%:*}" == "$previous" ]]; then
+    baseline="${recorded##*:}"
+    if [[ ! "$baseline" =~ ^[0-9]+$ ]]; then
+      log "ENVOY_IMAGE_SCHEMA in $COMPOSE_ENV is '$recorded', not <tag>:<version>; not deploying $sha"
+      return 1
+    fi
+  else
+    baseline="$before"
+    if ! set_env_value ENVOY_IMAGE_SCHEMA "$previous:$baseline"; then
+      log "could not record the schema version $previous runs against; not deploying $sha"
+      return 1
+    fi
+  fi
   dump="$BACKUPS/pre-${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
   # `-e DATABASE_URL` with no value: docker reads it from this process's environment, so the
   # password never appears in argv (/proc/<pid>/cmdline is world-readable on a shared host).
@@ -149,25 +220,25 @@ deploy() {
   fi
   prune_backups
   if ! compose_with_tag "$sha" 900 pull -q dispatch || ! compose_with_tag "$sha" 300 up -d --no-deps dispatch; then
-    log "compose failed for $sha; rolling back to $previous"
-    rollback "$previous" "$dispatchPort"
+    log "compose failed for $sha"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
     return 1
   fi
   if ! wait_for_health "$dispatchPort"; then
-    log "deployed $sha but /healthz did not answer within 90s; rolling back to $previous"
-    rollback "$previous" "$dispatchPort"
+    log "deployed $sha but /healthz did not answer within 90s"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
     return 1
   fi
   redirect=$(oauth_redirect_uri "$origin" "$dispatchPort")
   expected="$origin/auth/callback"
   if [[ "$redirect" != "$expected" ]]; then
-    log "deployed $sha but the OAuth redirect_uri is '$redirect', expected '$expected' - login would break; rolling back to $previous"
-    rollback "$previous" "$dispatchPort"
+    log "deployed $sha but the OAuth redirect_uri is '$redirect', expected '$expected' - login would break"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
     return 1
   fi
   if ! sed -i -E "s|^ENVOY_IMAGE_TAG=.*|ENVOY_IMAGE_TAG=$sha|" "$COMPOSE_ENV"; then
-    log "could not persist deployed tag $sha; rolling back to $previous"
-    rollback "$previous" "$dispatchPort"
+    log "could not persist deployed tag $sha"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
     return 1
   fi
   log "deployed $sha ($(jj -R "$REPO" log -r "$sha" --no-graph -T 'description.first_line()' | cut -c1-90)); login origin $origin verified; backup $dump"
