@@ -643,7 +643,7 @@ owner-only file the harness and the providers Secret read; neither is printed.
 ### The bridge (`LEGION_E2E_POD_REACHABILITY=bridge`)
 
 GKE's pods have no route to the devbox at all: no tailnet bridge, no routable private address
-(INFRA's 2026-10-17 measurement: the devbox's tailnet address timed out from a `legion` pod, which
+(measured live, 2026-10-17: the devbox's tailnet address timed out from a `legion` pod, which
 could reach only in-cluster Services). [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) stands in for
 that reachability with a reverse tunnel, entirely of the run's own:
 
