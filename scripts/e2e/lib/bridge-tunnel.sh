@@ -190,11 +190,21 @@ YAML
   # the drop, or the chisel client itself exits (it already gave up on its own budget). Confirmed
   # live, 2026-10-17: killing the port-forward process mid-run let the watchdog restart it and the
   # run continue past the point it would otherwise have died.
+  # A flag file, not just the TERM bridge_stop sends, decides whether a detected failure here
+  # still fires kill -TERM "$$": confirmed live, 2026-10-17, three full-length runs died with the
+  # script's own `check` variable never past "harness" — teardown_sequence's bridge_stop had not
+  # even reached its first visible line — consistent with this watchdog noticing the tunnel down
+  # (a natural reconnect cycle, or bridge_stop's own first steps) and firing kill -TERM "$$" in the
+  # same narrow window bridge_stop sends it TERM, before the trap had a chance to run: a `kill`
+  # does not preempt a command already in flight (a `sleep`, a `bridge_portforward_start` retry
+  # loop), so the two races. The flag file is checked right before every kill -TERM "$$", not only
+  # at loop top, so it still catches a check made moments before bridge_stop writes it.
   (
     trap 'kill "$pf_pid" 2>/dev/null; exit 0' TERM
     pf_pid=$bridge_portforward_pid
     down_since=
     while :; do
+      [ -f "$work/bridge-stopping" ] && exit 0
       if kill -0 "$pf_pid" 2>/dev/null; then
         down_since=
       else
@@ -207,13 +217,15 @@ YAML
           echo "   [harness] kubectl port-forward to $bridge_name recovered after $(($(date +%s) - down_since))s" >&2
           down_since=
         elif [ $(($(date +%s) - down_since)) -ge 60 ]; then
-          echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name could not be restarted within 60s" >&2
+          [ -f "$work/bridge-stopping" ] && exit 0
+          echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name could not be restarted within 60s; terminating the run" >&2
           kill -TERM "$$" 2>/dev/null
           exit 1
         fi
       fi
       if ! kill -0 "$bridge_client_pid" 2>/dev/null; then
-        echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted): $(cat "$work/bridge-chisel-client.log")" >&2
+        [ -f "$work/bridge-stopping" ] && exit 0
+        echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted); terminating the run: $(cat "$work/bridge-chisel-client.log")" >&2
         kill -TERM "$$" 2>/dev/null
         exit 1
       fi
@@ -240,6 +252,7 @@ YAML
 bridge_stop() {
   [ -n "$bridge_started" ] || return 0
   bridge_started=
+  : >"$work/bridge-stopping"
   [ -z "$bridge_watchdog_pid" ] || kill "$bridge_watchdog_pid" 2>/dev/null
   wait "$bridge_watchdog_pid" 2>/dev/null
   [ -z "$bridge_client_pid" ] || kill "$bridge_client_pid" 2>/dev/null
