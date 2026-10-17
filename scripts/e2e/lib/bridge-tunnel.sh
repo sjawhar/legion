@@ -143,8 +143,13 @@ spec:
     - {name: sessiondb, port: $sessiondb_port, targetPort: $sessiondb_port}
 YAML
   bridge_started=1
-  op wait "pod/$bridge_name" --for=condition=Ready --timeout=120s >/dev/null ||
-    fail "the bridge pod $bridge_name did not become Ready within 120s: $(op get pod "$bridge_name" -o wide 2>&1)"
+  # 240s, not 120s: confirmed live, 2026-10-17, this cluster's own autopilot-default-resources-
+  # mutator admission webhook adjusts the chisel container's cpu on create, and bringing up the
+  # fresh NAP node this lone pod needs took long enough that 120s timed out the wait while the pod
+  # itself reached Ready moments later (its own age already past 2 minutes by the time the
+  # timeout's own diagnostic read it).
+  op wait "pod/$bridge_name" --for=condition=Ready --timeout=240s >/dev/null ||
+    fail "the bridge pod $bridge_name did not become Ready within 240s: $(op get pod "$bridge_name" -o wide 2>&1)"
   note "[operator] bridge pod/Service $bridge_name: chisel server on :$bridge_control_port (control, never exposed by the Service), reverse-forwarding :$stream_port and :$sessiondb_port, label legion.dev/project=$run_label"
 
   bridge_local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$stream_port" "$sessiondb_port") ||
