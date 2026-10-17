@@ -36,7 +36,7 @@ type Config struct {
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
 	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
-	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
+	// leaves it empty: it refuses a review App that names no login (daemon.appLoginsAtBoot).
 	ReviewAppLogin string
 	// Repositories is the daemon's in-memory view of the project's repositories, which the workflow
 	// records an issue's repository and default branch from when it first records the issue.
