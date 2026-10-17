@@ -48,6 +48,9 @@ type fakeSecret struct {
 	// denyVersion makes GetSecretVersion on the secret answer PERMISSION_DENIED, as for a secret
 	// outside the namespace the broker's condition grants it.
 	denyVersion bool
+	// keyUnusable makes AccessSecretVersion answer FAILED_PRECONDITION on an ENABLED version, as
+	// an unusable CMEK key might.
+	keyUnusable bool
 	value       []byte
 }
 
@@ -187,7 +190,7 @@ func (f *fakeSecretManager) AccessSecretVersion(_ context.Context, req *secretma
 	if err != nil {
 		return nil, err
 	}
-	if s.state != secretmanagerpb.SecretVersion_ENABLED {
+	if s.state != secretmanagerpb.SecretVersion_ENABLED || s.keyUnusable {
 		return nil, status.Errorf(codes.FailedPrecondition, "Secret Version [%s] is in %s state", req.GetName(), s.state)
 	}
 	return &secretmanagerpb.AccessSecretVersionResponse{Name: secret + "/versions/1", Payload: &secretmanagerpb.SecretPayload{Data: s.value}}, nil
@@ -502,5 +505,54 @@ func TestGCPReadCachesARefusalAndCoalescesConcurrentChecks(t *testing.T) {
 	wg.Wait()
 	if got := f.reads() - before; got != 1 {
 		t.Fatalf("eight concurrent releases of a cold secret cost %d metadata reads, want 1", got)
+	}
+}
+
+// TestGCPBoundsItsRetriesAndKeepsAKeyFailureAnError pins two failure answers. A metadata call that
+// keeps answering UNAVAILABLE is made gcpMetadataAttempts times and then fails with its own code
+// under a request's deadline, within seconds. A FAILED_PRECONDITION on an enabled version (an
+// unusable key, say) is an error the broker logs, not a secret with no value.
+func TestGCPBoundsItsRetriesAndKeepsAKeyFailureAnError(t *testing.T) {
+	broken := servedSecret("v")
+	broken.keyUnusable = true
+	f := &fakeSecretManager{
+		secrets:     map[string]*fakeSecret{fakePrefix + "a": servedSecret("v"), fakePrefix + "broken": broken},
+		unavailable: map[string]int{"GetSecret": 100},
+	}
+	store := NewGCP(startFake(t, f), fakeKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	start := time.Now()
+	_, err := store.Describe(ctx, fakePrefix+"a")
+	if err == nil || !strings.Contains(err.Error(), "Unavailable") || time.Since(start) > 10*time.Second {
+		t.Fatalf("Describe through a lasting UNAVAILABLE = %v after %s; want Unavailable within seconds", err, time.Since(start))
+	}
+	f.mu.Lock()
+	calls := f.calls["GetSecret"]
+	f.unavailable = nil
+	f.mu.Unlock()
+	if calls != gcpMetadataAttempts {
+		t.Fatalf("GetSecret calls = %d, want %d", calls, gcpMetadataAttempts)
+	}
+	if _, err := store.Read(context.Background(), fakePrefix+"broken"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read of an enabled version that answers FAILED_PRECONDITION = %v; want a logged error, not ErrNotFound", err)
+	}
+}
+
+// TestGCPReadDoesNotCacheAFailedCheck pins that a metadata check failing for another reason than
+// not-found (a denied call, an outage past its retries) is not remembered: the next release
+// checks again, so one caller's failure never refuses every release of the secret for 30 s.
+func TestGCPReadDoesNotCacheAFailedCheck(t *testing.T) {
+	f := &fakeSecretManager{
+		secrets:     map[string]*fakeSecret{fakePrefix + "a": servedSecret("v")},
+		unavailable: map[string]int{"GetSecret": gcpMetadataAttempts},
+	}
+	store := NewGCP(startFake(t, f), fakeKey)
+	ctx := context.Background()
+	if _, err := store.Read(ctx, fakePrefix+"a"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("first Read through an outage = %v, want its error", err)
+	}
+	if v, err := store.Read(ctx, fakePrefix+"a"); err != nil || v != "v" {
+		t.Fatalf("second Read = %q, %v; want a fresh check that succeeds", v, err)
 	}
 }

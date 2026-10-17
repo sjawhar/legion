@@ -127,8 +127,10 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 // live one was approved after it, by someone the withheld name let approve it
 // (currentPolicyAdmits), and an automatic grant, which no one decided, never passes. A grant whose
 // frozen source is not the one the policy now serves the name from (the broker moved between
-// stores, or the secret was replaced by another of the same name) is not live either: the frozen
-// source no longer names the secret the policy decides about, so the session asks again.
+// stores, or, on AWS, the secret was replaced by another of the same name, which gets a new ARN;
+// a Secret Manager source is the resource name, which a recreated secret keeps) is not live
+// either: the frozen source no longer names the secret the policy decides about, so the session
+// asks again.
 func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {

@@ -127,9 +127,11 @@ func (h *heldCache) verdict(source string, look func() error) error {
 	if !e.at.IsZero() && h.now().Sub(e.at) < gcpHeldFor {
 		return e.err
 	}
+	// The verdict dates from before the lookup, so a slow one does not stretch gcpHeldFor.
+	start := h.now()
 	err := look()
 	if err == nil || errors.Is(err, ErrNotFound) {
-		e.at, e.err = h.now(), err
+		e.at, e.err = start, err
 	}
 	return err
 }
@@ -145,16 +147,39 @@ func NewGCPClient(ctx context.Context, opts ...option.ClientOption) (*secretmana
 		return nil, fmt.Errorf("open Secret Manager: %w", err)
 	}
 	// The library retries only AccessSecretVersion; the metadata calls a reload and a reread make
-	// get the same retry of UNAVAILABLE, so one transient failure neither fails a reload (and its
-	// alarm) nor a value release. RESOURCE_EXHAUSTED is not retried: the read quota is shared by
-	// the whole project, and retrying into it only spends more of it.
+	// get a retry of UNAVAILABLE, at most gcpMetadataAttempts calls in all, so one transient failure
+	// neither fails a reload (and its alarm) nor a value release, and a lasting outage fails each
+	// call within seconds with its own code, as the AWS SDK's three attempts do. RESOURCE_EXHAUSTED
+	// is not retried: the read quota is shared by the whole project, and retrying into it only
+	// spends more of it.
 	retry := gax.WithRetry(func() gax.Retryer {
-		return gax.OnCodes([]codes.Code{codes.Unavailable}, gax.Backoff{Initial: 200 * time.Millisecond, Max: 5 * time.Second, Multiplier: 2})
+		return &boundedRetryer{inner: gax.OnCodes([]codes.Code{codes.Unavailable}, gax.Backoff{Initial: 200 * time.Millisecond, Max: 2 * time.Second, Multiplier: 2}), left: gcpMetadataAttempts - 1}
 	})
 	client.CallOptions.ListSecrets = append(client.CallOptions.ListSecrets, retry)
 	client.CallOptions.GetSecret = append(client.CallOptions.GetSecret, retry)
 	client.CallOptions.GetSecretVersion = append(client.CallOptions.GetSecretVersion, retry)
 	return client, nil
+}
+
+// gcpMetadataAttempts is how many times a metadata call is made before an UNAVAILABLE answer is
+// returned: the AWS SDK's standard retryer's three.
+const gcpMetadataAttempts = 3
+
+// boundedRetryer is inner with at most left retries.
+type boundedRetryer struct {
+	inner gax.Retryer
+	left  int
+}
+
+func (b *boundedRetryer) Retry(err error) (time.Duration, bool) {
+	if b.left <= 0 {
+		return 0, false
+	}
+	pause, ok := b.inner.Retry(err)
+	if ok {
+		b.left--
+	}
+	return pause, ok
 }
 
 // gcpListLag is how stale Secret Manager's metadata may be. Google documents every operation but
@@ -295,8 +320,18 @@ func (g GCP) Read(ctx context.Context, source string) (string, error) {
 	out, err := g.Client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})
 	switch status.Code(err) {
 	case codes.OK:
-	case codes.NotFound, codes.FailedPrecondition:
+	case codes.NotFound:
 		return "", ErrNotFound
+	case codes.FailedPrecondition:
+		// A disabled or destroyed latest version answers FAILED_PRECONDITION, and that is the
+		// secret having no value. Google does not document it as the code's only meaning (an
+		// unusable CMEK key may answer it too), so the version's own state decides: anything but
+		// DISABLED or DESTROYED stays an error the broker logs.
+		version, verr := g.Client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
+		if verr == nil && (version.GetState() == secretmanagerpb.SecretVersion_DISABLED || version.GetState() == secretmanagerpb.SecretVersion_DESTROYED) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(err))
 	default:
 		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(err))
 	}
