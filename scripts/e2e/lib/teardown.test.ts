@@ -59,7 +59,6 @@ describe("teardown_sequence", () => {
     expect(calls).toEqual(["bridge_stop:1", "teardown", "namespace_clean", "bridge_stop:2"]);
   });
 
-
   test("a fully completed sequence is a no-op on a second call", () => {
     const script = `
       set -euo pipefail

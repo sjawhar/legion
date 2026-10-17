@@ -281,28 +281,22 @@ YAML
 
 # bridge_stop tears down everything bridge_start may have started, in reverse order, and never
 # fails: a torn-down leg that is already gone is not an error. Safe to call unconditionally from
-# cleanup, bridge mode or not. Issues both deletes without kubectl's own --wait (which returned
-# before the pod was actually gone at least three times, live, 2026-10-17, though a lone chisel
-# pod deleted by hand elsewhere on this cluster took under 6s — the discrepancy is unexplained but
-# repeatable) and instead polls for both objects gone itself. The first version of this poll
-# captured `op get pod,service $bridge_name -o name` and treated empty output as gone — but a
-# transient read error (rate limiting, a network blip) also prints nothing to stdout, so that
-# version silently treated "the read failed" the same as "confirmed gone" and returned early,
-# leaving the pod for namespace-clean to catch, live, twice, after apparently succeeding. This
-# version checks each object on its own and requires the literal word NotFound in its own read's
-# output before counting it gone; any other text — the object's own name, or an unrelated error —
-# keeps the loop going.
+# cleanup, bridge mode or not. Confirms the pod and Service actually gone itself, polling, rather
+# than trusting kubectl's own --wait (confirmed live, 2026-10-17, to sometimes return before the
+# pod was actually gone, though a lone chisel pod deleted by hand on this cluster took under 6s).
+# Requires the literal word NotFound in each object's own read before counting it gone; a read that
+# prints neither the object's name nor NotFound (a transient error) keeps the loop going rather than
+# being treated as confirmed gone.
 
-# The real cause of every "every CHECK passed, then silent exit before teardown_sequence ran"
-# failure (confirmed live, 2026-10-17, by `strace -f -e trace=kill,tkill,tgkill,execve`, after
-# API consistency, this devbox's tool timeout, a watchdog race and a shared process group were
-# each ruled out in turn): this script's own `set -e` treats a command whose last-evaluated part
-# returns nonzero as fatal, including `[ -z "$X" ] || kill "$X"` when $X is already dead (`kill`
-# itself fails, "No such process") and `wait PID`/`var=$(kubectl get ...)` once the process or
-# object they are waiting to see gone has actually gone — the normal, successful outcome, not an
-# error. The trace caught this exactly: no signal ever reached the script; it chose `exit 143` on
-# its own, immediately after `wait`ing for a port-forward process it had itself just killed. Every
-# kill, wait and NotFound-expecting read in this function is guarded the same way below.
+# Every kill, wait and NotFound-expecting read in this function is guarded against the one thing
+# this script's own `set -e` cannot tell apart from a real failure: a command whose last-evaluated
+# part succeeds at exactly what it was asked to do returns nonzero anyway — `[ -z "$X" ] || kill
+# "$X"` when $X is already dead (`kill` itself fails, "No such process"), and `wait PID`/
+# `var=$(kubectl get ...)` once the process or object being waited for has actually gone, the
+# normal, successful outcome. Unguarded, `set -e` ends the whole script right there, with no signal
+# ever having reached it (confirmed live, 2026-10-17, by `strace -f -e trace=kill,tkill,tgkill,
+# execve`: the script chose `exit 143` on its own, immediately after `wait`ing for a port-forward
+# process it had itself just killed).
 bridge_stop() {
   [ -n "$bridge_started" ] || return 0
   bridge_started=
