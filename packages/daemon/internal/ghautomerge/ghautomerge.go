@@ -324,11 +324,11 @@ func (a *Armed) Is(target error) bool { return target == wait.ErrWaiting }
 func (a *Armed) Routine() bool { return true }
 
 // MergeFailed is the merge queue taking pull request Number out at READY's Head because its merge
-// failed: GitHub's removal for Reason failed_checks, or for any reason with a red run on Commit,
-// the commit the queue built for it (its merge_group runs ran on gh-readonly-queue/<base>/pr-<n>-…,
-// a branch GitHub deletes with the entry). Runs names each check that failed there, with its run's
-// URL; Event is GitHub's id for the removal, and At when it was made. The submission is over: the
-// issue goes back to implementing on it.
+// failed: GitHub's removal for Reason failed_checks, or for a reason GitHub gives no other meaning
+// with a run that failed on Commit, the commit the queue built for it (its merge_group runs ran on
+// gh-readonly-queue/<base>/pr-<n>-…, a branch GitHub deletes with the entry). Runs names each check
+// that failed there, with its run's URL; Event is GitHub's id for the removal, and At when it was
+// made. The submission is over: the issue goes back to implementing on it.
 type MergeFailed struct {
 	Number               int
 	Head, Reason, Commit string
@@ -552,14 +552,16 @@ const moreChecks = `query MergeGroupContexts($owner: String!, $name: String!, $o
 
 // removal is what took pull request number of repo's arm or merge-queue entry away at READY's
 // head, after Submit saw one there, as GitHub's timeline records it: the removals since the last
-// arm or entry, each queue removal's checks read in full (moreChecks). The merge queue's removal for
-// the merge itself is a wait for GitHub to show the merge (Disappeared, Merging), and one because
-// the merge failed is MergeFailed (timelineItem.mergeFailed). Two removals restart the submission,
-// and removal answers nil when they are all there is, for Submit to submit again
-// (timelineItem.restarts): the daemon's own disarm landing late, and auto-merge a close turned off,
-// which the pull request's reopen at READY's head undid. Any other is Removed, the latest of them. A
-// timeline that shows no removal since the last arm is behind the read of the pull request
-// (Disappeared).
+// arm or entry. The merge queue's removal for the merge itself is a wait for GitHub to show the
+// merge (Disappeared, Merging), whatever else the timeline shows, and reads no check. A queue
+// removal whose reason leaves it to the checks on the commit the queue built
+// (timelineItem.judgedByChecks) is judged on every page of them (mergeGroupCommit.checks): one for
+// failed_checks, or for an unexplained reason with a run that failed there (failingRuns), is
+// MergeFailed. Two removals restart the submission, and removal answers nil when they are all there
+// is, for Submit to submit again (timelineItem.restarts): the daemon's own disarm landing late, and
+// auto-merge a close turned off, which the pull request's reopen at READY's head undid. Any other is
+// Removed, the latest of them. A timeline that shows no removal since the last arm is behind the
+// read of the pull request (Disappeared).
 func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string) error {
 	var answer struct {
 		Viewer struct {
@@ -586,20 +588,28 @@ func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Reposito
 			since = i + 1
 		}
 	}
+	removed := items[since:]
+	for _, item := range removed {
+		if item.Type == "RemovedFromMergeQueueEvent" && item.Reason == "merged" {
+			return &Disappeared{Number: number, Repo: repo, Head: head, Merging: true}
+		}
+	}
 	self := strings.TrimSuffix(answer.Viewer.Login, "[bot]")
 	var failed, other *timelineItem
-	for i := range items[since:] {
-		item := &items[since+i]
-		if err := item.BeforeCommit.readAll(ctx, github, repo); err != nil {
-			return err
+	var runs []string
+	for i := range removed {
+		item := &removed[i]
+		if item.judgedByChecks() {
+			checks, err := item.BeforeCommit.checks(ctx, github, repo)
+			if err != nil {
+				return err
+			}
+			if failing := failingRuns(checks); item.Reason == "failed_checks" || len(failing) > 0 {
+				failed, runs = item, failing
+				continue
+			}
 		}
-		switch {
-		case item.Type == "RemovedFromMergeQueueEvent" && item.Reason == "merged":
-			return &Disappeared{Number: number, Repo: repo, Head: head, Merging: true}
-		case item.mergeFailed():
-			failed = item
-		case item.restarts(self):
-		default:
+		if !item.restarts(self) {
 			other = item
 		}
 	}
@@ -610,7 +620,7 @@ func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Reposito
 			commit = failed.BeforeCommit.Oid
 		}
 		return &MergeFailed{Number: number, Head: head, Reason: failed.Reason, Commit: commit,
-			Runs: failed.failingRuns(), Event: failed.ID, At: failed.CreatedAt}
+			Runs: runs, Event: failed.ID, At: failed.CreatedAt}
 	case other != nil:
 		return &Removed{Number: number, Head: head, Actor: other.actor(), Reason: other.removalReason(), Detail: other.Reason,
 			Queue: other.Type == "RemovedFromMergeQueueEvent", At: other.CreatedAt}
@@ -621,21 +631,21 @@ func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Reposito
 	}
 }
 
-// mergeFailed says whether a queue removal is the merge queue failing the merge: GitHub's reason
-// failed_checks, or a reason GitHub gives no other meaning (not a person's manual dequeue, not a
-// merge_conflict) with a check that failed on the commit the queue built (failingRuns). A person's
-// dequeue cancels the merge group's runs in flight, which is no failed merge.
-func (t *timelineItem) mergeFailed() bool {
+// judgedByChecks says whether a removal is a queue removal whose reason leaves it to the checks on
+// the commit the queue built: failed_checks, whose failing runs the issue goes back to implementing
+// on, and a reason GitHub gives no other meaning, a failed merge only with a run that failed there.
+// The merge itself (merged), a person's dequeue (manual) and a conflict (merge_conflict) mean what
+// they say, so none of their checks is read: a person's dequeue cancels the merge group's runs in
+// flight, which is no failed merge.
+func (t *timelineItem) judgedByChecks() bool {
 	if t.Type != "RemovedFromMergeQueueEvent" {
 		return false
 	}
 	switch t.Reason {
-	case "failed_checks":
-		return true
-	case "manual", "merge_conflict":
+	case "merged", "manual", "merge_conflict":
 		return false
 	default:
-		return len(t.failingRuns()) > 0
+		return true
 	}
 }
 
@@ -686,16 +696,13 @@ func (t *timelineItem) removalReason() string {
 	return t.Reason
 }
 
-// failingRuns is each check that failed on the commit the merge queue built for a queue removal,
-// named with how it ended and its run: a check run that completed in failure, timed out or failed
-// to start, and a commit status in failure or error. A cancelled run is no failure: a person's
-// dequeue cancels every run in flight.
-func (t *timelineItem) failingRuns() []string {
-	if t.BeforeCommit == nil || t.BeforeCommit.StatusCheckRollup == nil {
-		return nil
-	}
+// failingRuns is each of checks, every check on the commit the merge queue built for a queue
+// removal (mergeGroupCommit.checks), that failed there, named with how it ended and its run: a check
+// run that completed in failure, timed out or failed to start, and a commit status in failure or
+// error. A cancelled run is no failure: a person's dequeue cancels every run in flight.
+func failingRuns(checks []checkContext) []string {
 	var runs []string
-	for _, check := range t.BeforeCommit.StatusCheckRollup.Contexts.Nodes {
+	for _, check := range checks {
 		switch {
 		case check.Type == "CheckRun" && check.Status == "COMPLETED" &&
 			(check.Conclusion == "FAILURE" || check.Conclusion == "TIMED_OUT" || check.Conclusion == "STARTUP_FAILURE"):
@@ -729,27 +736,31 @@ type checkContexts struct {
 	Nodes []checkContext `json:"nodes"`
 }
 
-// readAll reads the rest of the commit's checks, page by page (moreChecks), so no failure past the
-// first page is missed. A nil commit, or one with no checks, has nothing to read.
-func (c *mergeGroupCommit) readAll(ctx context.Context, github githubrest.Client, repo ghrepo.Repository) error {
-	for c != nil && c.StatusCheckRollup != nil && c.StatusCheckRollup.Contexts.PageInfo.HasNextPage {
+// checks is every check GitHub lists on the commit: the first page, as the timeline's read carried
+// it, then each later page, read one by one (moreChecks), so a judgment of them misses no failure
+// past the first. A nil commit, or one with no checks, has none.
+func (c *mergeGroupCommit) checks(ctx context.Context, github githubrest.Client, repo ghrepo.Repository) ([]checkContext, error) {
+	if c == nil || c.StatusCheckRollup == nil {
+		return nil, nil
+	}
+	checks, page := c.StatusCheckRollup.Contexts.Nodes, c.StatusCheckRollup.Contexts.PageInfo
+	for page.HasNextPage {
 		var answer struct {
 			Repository struct {
 				Object *mergeGroupCommit `json:"object"`
 			} `json:"repository"`
 		}
-		after := c.StatusCheckRollup.Contexts.PageInfo.EndCursor
-		if err := github.GraphQL(ctx, moreChecks, map[string]any{"owner": repo.Owner(), "name": repo.Name(), "oid": c.Oid, "after": after}, &answer); err != nil {
-			return fmt.Errorf("read the checks of merge queue commit %s after %s: %w", c.Oid, after, err)
+		if err := github.GraphQL(ctx, moreChecks, map[string]any{"owner": repo.Owner(), "name": repo.Name(), "oid": c.Oid, "after": page.EndCursor}, &answer); err != nil {
+			return nil, fmt.Errorf("read the checks of merge queue commit %s after %s: %w", c.Oid, page.EndCursor, err)
 		}
 		next := answer.Repository.Object
 		if next == nil || next.StatusCheckRollup == nil {
-			return fmt.Errorf("GitHub answered no further checks of merge queue commit %s after %s", c.Oid, after)
+			return nil, fmt.Errorf("GitHub answered no further checks of merge queue commit %s after %s", c.Oid, page.EndCursor)
 		}
-		c.StatusCheckRollup.Contexts.Nodes = append(c.StatusCheckRollup.Contexts.Nodes, next.StatusCheckRollup.Contexts.Nodes...)
-		c.StatusCheckRollup.Contexts.PageInfo = next.StatusCheckRollup.Contexts.PageInfo
+		checks = append(checks, next.StatusCheckRollup.Contexts.Nodes...)
+		page = next.StatusCheckRollup.Contexts.PageInfo
 	}
-	return nil
+	return checks, nil
 }
 
 // checkContext is one check run or commit status on a merge queue's commit.
