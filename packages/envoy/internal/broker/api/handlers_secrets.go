@@ -41,11 +41,11 @@ func (s *server) readSettings(w http.ResponseWriter, r *http.Request) {
 	resp := settingsResponse{Store: s.deps.SecretsStore, SecretsPrefix: s.deps.SecretsPrefix}
 	switch s.deps.SecretsStore {
 	case secrets.StoreGCP:
-		resp.KMSKeyName = s.deps.SecretsKMSKeyName
+		resp.KMSKeyName = s.deps.SecretsKMSKey
 		resp.GCPProject = secrets.GCPProject(s.deps.SecretsPrefix)
 	default:
-		resp.KMSKeyARN = s.deps.SecretsKMSKeyARN
-		resp.AWSRegion, resp.AWSAccountID = secrets.AWSKeyARNParts(s.deps.SecretsKMSKeyARN)
+		resp.KMSKeyARN = s.deps.SecretsKMSKey
+		resp.AWSRegion, resp.AWSAccountID = secrets.AWSKeyARNParts(s.deps.SecretsKMSKey)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

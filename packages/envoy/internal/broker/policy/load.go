@@ -65,9 +65,12 @@ func ValidPersonOwner(owner string) bool {
 // its owner and tier tags, whether it is on the agent-secrets key, and whether it has a current
 // value.
 type Loader struct {
-	// Store lists, describes and reads the secrets: secrets.AWS over Secrets Manager and KMS,
-	// secrets.GCP over Secret Manager, or secrets.Local in local development and tests. Its List
-	// may lag a change by minutes where its Describe is read-after-write consistent.
+	// Store lists, describes and reads the secrets: secrets.AWS over Secrets Manager and KMS (in
+	// local development and tests, over a secrets.Local), or secrets.GCP over Secret Manager. Its
+	// metadata may answer a write's previous state for up to its ListLag, for which Current keeps
+	// and re-describes what a single-name read settled. Secrets Manager's DescribeSecret shows a
+	// write at once; Secret Manager documents its GetSecret as eventually consistent too, so
+	// there a reread settles a name only once Secret Manager does.
 	Store secrets.Store
 	// Prefix is the namespace every agent secret's name starts with: a Secrets Manager name
 	// prefix ending in "/", or a Secret Manager one, projects/<number>/secrets/<id prefix>-.
@@ -92,9 +95,9 @@ func (l Loader) Load(ctx context.Context) (*Set, error) {
 	served := map[string]Secret{}
 	for _, ls := range listings {
 		// The namespace is the prefix as written: a name outside it is skipped, whatever the
-		// lister answered, and so is a secret scheduled for deletion, as LoadOne answers it absent.
+		// lister answered.
 		slug, ok := strings.CutPrefix(ls.ID, l.Prefix)
-		if !ok || ls.Deleted {
+		if !ok {
 			continue
 		}
 		secret, reason, err := l.secret(ctx, slug, ls)
@@ -148,9 +151,6 @@ func (l Loader) LoadOne(ctx context.Context, name string) (Lookup, error) {
 		return Lookup{Reason: ReasonAbsent}, nil
 	case err != nil:
 		return Lookup{}, err
-	}
-	if ls.Deleted {
-		return Lookup{Reason: ReasonAbsent}, nil
 	}
 	secret, reason, err := l.secret(ctx, slug, ls)
 	if err != nil {

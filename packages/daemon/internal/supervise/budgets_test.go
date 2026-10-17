@@ -227,6 +227,59 @@ func TestASpawnTheRuntimeRefusesIsALaunchFailure(t *testing.T) {
 	}
 }
 
+// A Spawn the runtime refuses while the launch's own context is alive is the runtime's failure
+// (TestASpawnTheRuntimeRefusesIsALaunchFailure): a Sandbox try that runs out of its LaunchBound
+// returns one such error. A Spawn that ends with the launch's context — the daemon's stop — is
+// not: the machine reads its context's error, charges the claim nothing, tries again nothing, and
+// leaves the claim launching at the same generation with no process recorded, for the next boot
+// to launch again, saying so in the log.
+func TestASpawnCutShortByItsContextIsChargedNothing(t *testing.T) {
+	h := newBareHarness(t)
+	gated := &gatedSpawn{Runtime: h.rt, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h.deps.Runtime = gated
+	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+		t.Fatal(err)
+	}
+	h.start(queuedClaim())
+	ctx, cancel := context.WithCancel(h.ctx)
+	launched := make(chan error, 1)
+	go func() { launched <- h.m.Handle(ctx, RequestSpawn{Claim: testToken}) }()
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch never reached the runtime")
+	}
+	cancel()
+
+	select {
+	case err := <-launched:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the cut-short launch returned %v, want its context's cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch did not end with its context")
+	}
+	h.m.Wait()
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{})
+	// The gate answered the one try itself, so the fake behind it recorded no Spawn; a retry would
+	// have entered the gate again before Handle returned.
+	select {
+	case <-gated.entered:
+		t.Fatal("the machine tried the launch again after its context ended")
+	default:
+	}
+	if h.generation() != 1 || h.claim().Locator != nil {
+		t.Errorf("claim %+v, want generation 1 with no process recorded", h.claim())
+	}
+	if lines := h.logs.lines("launch cut short; its context ended"); len(lines) != 1 {
+		t.Errorf("logged %v, want the launch cut short by its context once", lines)
+	}
+	if lines := h.logs.lines("launch failed"); len(lines) != 0 {
+		t.Errorf("logged %v, want no launch failure", lines)
+	}
+}
+
 func TestSpawnsTheRuntimeKeepsRefusingEndInFailed(t *testing.T) {
 	h := newHarness(t)
 	h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom})

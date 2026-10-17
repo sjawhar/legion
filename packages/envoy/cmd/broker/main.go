@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -112,21 +113,19 @@ func main() {
 	case fakeSecrets != "":
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
-		// The file's kms_key_id names the agent-secrets key as the selected store configures it:
-		// its ARN, or under the GCP store its Cloud KMS key name.
-		key := cfg.SecretsKMSKeyARN
-		if cfg.SecretsStore == secrets.StoreGCP {
-			key = cfg.SecretsKMSKeyName
-		}
-		secretStore, credentials = secrets.AWS{Client: local, KMS: local, KeyARN: key}, "fake secrets file"
+		// The file's kms_key_id names the agent-secrets key as the selected store configures it.
+		// Under gcp-secret-manager this is still the AWS store over the file, holding the Cloud KMS
+		// key name where it would hold an ARN: names follow Secrets Manager's rules and a source
+		// is a local ARN, which only a local run sees.
+		secretStore, credentials = secrets.AWS{Client: local, KMS: local, KeyARN: cfg.SecretsKMSKey}, "fake secrets file"
 	case cfg.SecretsStore == secrets.StoreGCP:
 		client, err := secrets.NewGCPClient(ctx)
 		fatal(err)
 		defer client.Close()
-		secretStore, credentials = secrets.GCP{Client: client, KeyName: cfg.SecretsKMSKeyName}, "application-default"
+		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
-		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKeyARN}, "aws-sdk"
+		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
 	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
@@ -200,11 +199,17 @@ func main() {
 	go sweeper.Run(ctx)
 
 	mux := http.NewServeMux()
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken,
+	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so its overall
+	// cap is the GCP one.
+	var rereadOverall *ratelimit.Limit
+	if cfg.SecretsStore == secrets.StoreGCP {
+		rereadOverall = &api.GCPRereadOverallLimit
+	}
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
-		SecretsKMSKeyARN: cfg.SecretsKMSKeyARN, SecretsKMSKeyName: cfg.SecretsKMSKeyName,
+		SecretsKMSKey:      cfg.SecretsKMSKey,
 		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),

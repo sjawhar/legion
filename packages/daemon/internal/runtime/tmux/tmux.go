@@ -272,6 +272,10 @@ func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 // first.
 func (r *Runtime) ProvisionBound() time.Duration { return 0 }
 
+// LaunchBound is zero, no bound stated: a pane start is a local tmux command with no cluster wait,
+// each invocation already bounded by its own command timeout (runTmux).
+func (r *Runtime) LaunchBound() time.Duration { return 0 }
+
 // CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
 // each workspace is the outbox's to remove (workspace_remove).
 func (r *Runtime) CleanupTree(context.Context, string) error { return nil }

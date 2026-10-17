@@ -1552,6 +1552,7 @@ describe("Legion OMP extension", () => {
           },
         },
         pendingStatusWrites: [],
+        heldOutboxRows: [],
         strandedClaims: [],
         capabilities: [],
       };

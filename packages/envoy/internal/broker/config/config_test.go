@@ -327,7 +327,7 @@ func TestLoadRequiresTheNamespaceAndItsKey(t *testing.T) {
 		}
 	}
 	cfg, err := Load(env(validEnv()))
-	if err != nil || cfg.SecretsPrefix != "example/agent-secrets/" || cfg.SecretsKMSKeyARN != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
+	if err != nil || cfg.SecretsPrefix != "example/agent-secrets/" || cfg.SecretsKMSKey != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
 		t.Fatalf("Load(valid) = %+v, %v", cfg, err)
 	}
 }
@@ -340,7 +340,7 @@ func TestLoadRequiresTheNamespaceAndItsKey(t *testing.T) {
 // naming both.
 func TestLoadReadsTheSecretStore(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
-	if err != nil || cfg.SecretsStore != secrets.StoreAWS || cfg.SecretsKMSKeyName != "" {
+	if err != nil || cfg.SecretsStore != secrets.StoreAWS || cfg.SecretsKMSKey != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
 		t.Fatalf("Load(unset store) = %+v, %v; want %s", cfg, err, secrets.StoreAWS)
 	}
 
@@ -353,7 +353,7 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 		return e
 	}
 	cfg, err = Load(env(gcp()))
-	if err != nil || cfg.SecretsStore != secrets.StoreGCP || cfg.SecretsPrefix != "projects/000000000000/secrets/agent-secrets-" || cfg.SecretsKMSKeyName != gcp()["BROKER_SECRETS_KMS_KEY_NAME"] || cfg.SecretsKMSKeyARN != "" {
+	if err != nil || cfg.SecretsStore != secrets.StoreGCP || cfg.SecretsPrefix != "projects/000000000000/secrets/agent-secrets-" || cfg.SecretsKMSKey != gcp()["BROKER_SECRETS_KMS_KEY_NAME"] {
 		t.Fatalf("Load(gcp) = %+v, %v", cfg, err)
 	}
 
@@ -368,14 +368,14 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 		"gcp with no key name": {func(e map[string]string) { delete(e, "BROKER_SECRETS_KMS_KEY_NAME") }, "BROKER_SECRETS_KMS_KEY_NAME is required"},
 		"gcp with a project id": {func(e map[string]string) {
 			e["BROKER_SECRETS_PREFIX"] = "projects/example-project/secrets/agent-secrets-"
-		}, "BROKER_SECRETS_PREFIX must be a Google Secret Manager prefix"},
-		"gcp with an AWS prefix": {func(e map[string]string) { e["BROKER_SECRETS_PREFIX"] = "example/agent-secrets/" }, "BROKER_SECRETS_PREFIX must be a Google Secret Manager prefix"},
+		}, "BROKER_SECRETS_PREFIX: a Google Secret Manager prefix is projects/<project number>/secrets/"},
+		"gcp with an AWS prefix": {func(e map[string]string) { e["BROKER_SECRETS_PREFIX"] = "example/agent-secrets/" }, "BROKER_SECRETS_PREFIX: a Google Secret Manager prefix is projects/<project number>/secrets/"},
 		"gcp with no trailing dash": {func(e map[string]string) {
 			e["BROKER_SECRETS_PREFIX"] = "projects/000000000000/secrets/agent-secrets"
-		}, "BROKER_SECRETS_PREFIX must be a Google Secret Manager prefix"},
+		}, "BROKER_SECRETS_PREFIX: a Google Secret Manager prefix is projects/<project number>/secrets/"},
 		"gcp with a regional key": {func(e map[string]string) {
 			e["BROKER_SECRETS_KMS_KEY_NAME"] = "projects/example-project/locations/us-west1/keyRings/r/cryptoKeys/k"
-		}, "BROKER_SECRETS_KMS_KEY_NAME must be a Cloud KMS key name"},
+		}, "BROKER_SECRETS_KMS_KEY_NAME: a Cloud KMS key name is projects/"},
 	} {
 		e := gcp()
 		tc.edit(e)

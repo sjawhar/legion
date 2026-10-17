@@ -111,7 +111,7 @@ func newContractRig(t *testing.T) *contractRig {
 		PublicURL: brokerServer.URL, UIToken: contractUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
 
 	dispatchDB := storetest.Open(t)

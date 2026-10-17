@@ -131,7 +131,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		PublicURL: srv.URL, UIToken: uiToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
 
 	operatorFile := filepath.Join(t.TempDir(), "operator")

@@ -2,10 +2,12 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -59,35 +61,125 @@ func ValidGCPKeyName(name string) error {
 	return nil
 }
 
-// GCPClient is the four Secret Manager calls the GCP store reads with; *secretmanager.Client
-// implements it, and the tests' fake stands in over gRPC behind one.
-type GCPClient interface {
-	ListSecrets(ctx context.Context, req *secretmanagerpb.ListSecretsRequest, opts ...gax.CallOption) *secretmanager.SecretIterator
-	GetSecret(ctx context.Context, req *secretmanagerpb.GetSecretRequest, opts ...gax.CallOption) (*secretmanagerpb.Secret, error)
-	GetSecretVersion(ctx context.Context, req *secretmanagerpb.GetSecretVersionRequest, opts ...gax.CallOption) (*secretmanagerpb.SecretVersion, error)
-	AccessSecretVersion(ctx context.Context, req *secretmanagerpb.AccessSecretVersionRequest, opts ...gax.CallOption) (*secretmanagerpb.AccessSecretVersionResponse, error)
-}
-
-// GCP is the Store over Google Cloud Secret Manager.
+// GCP is the Store over Google Cloud Secret Manager. Build it with NewGCP.
 type GCP struct {
-	// Client reads the secrets.
-	Client GCPClient
+	// Client reads the secrets: Secret Manager's own client, which the tests dial to a fake
+	// Secret Manager over gRPC.
+	Client *secretmanager.Client
 	// KeyName is the agent-secrets key's resource name (BROKER_SECRETS_KMS_KEY_NAME); a secret
 	// whose current version is encrypted with any other key, Google's default one included, is
 	// not OnKey.
 	KeyName string
+	// held remembers, per source, Read's last metadata verdict (readable, or not: absent or
+	// scheduled for deletion), so releasing the same secret again within gcpHeldFor costs no
+	// metadata read whatever the verdict was.
+	held *heldCache
+}
+
+// gcpHeldFor is how long Read trusts its last metadata verdict on a secret. Value releases cost
+// metadata reads per distinct secret per 30 s, not per release; a delete is refused at most 30 s
+// after Secret Manager's own metadata shows it (which Google documents as eventually consistent).
+const gcpHeldFor = 30 * time.Second
+
+// heldCache is each source's last metadata verdict, with one check at a time per source.
+type heldCache struct {
+	mu      sync.Mutex
+	entries map[string]*heldEntry
+	now     func() time.Time
+}
+
+// heldEntry is one source's verdict: err is nil for readable, ErrNotFound for absent or
+// scheduled for deletion. check serialises the source's metadata reads, so concurrent releases of
+// a cold source make one.
+type heldEntry struct {
+	check sync.Mutex
+	at    time.Time
+	err   error
+}
+
+// NewGCP is the Store over client, on the agent-secrets key keyName.
+func NewGCP(client *secretmanager.Client, keyName string) GCP {
+	return GCP{Client: client, KeyName: keyName, held: &heldCache{entries: map[string]*heldEntry{}, now: time.Now}}
+}
+
+// verdict answers source's metadata verdict, from the cache while it is younger than gcpHeldFor
+// and otherwise from look, whose answer it caches unless look failed for another reason.
+// Concurrent callers for one source wait for one look.
+func (h *heldCache) verdict(source string, look func() error) error {
+	h.mu.Lock()
+	now := h.now()
+	for s, e := range h.entries {
+		if e.check.TryLock() {
+			if !e.at.IsZero() && now.Sub(e.at) >= 2*gcpHeldFor {
+				delete(h.entries, s)
+			}
+			e.check.Unlock()
+		}
+	}
+	e, ok := h.entries[source]
+	if !ok {
+		e = &heldEntry{}
+		h.entries[source] = e
+	}
+	h.mu.Unlock()
+	e.check.Lock()
+	defer e.check.Unlock()
+	if !e.at.IsZero() && h.now().Sub(e.at) < gcpHeldFor {
+		return e.err
+	}
+	// The verdict dates from before the lookup, so a slow one does not stretch gcpHeldFor.
+	start := h.now()
+	err := look()
+	if err == nil || errors.Is(err, ErrNotFound) {
+		e.at, e.err = start, err
+	}
+	return err
 }
 
 // NewGCPClient opens Secret Manager under Application Default Credentials: on GKE the metadata
 // server and Workload Identity Federation for the pod's ServiceAccount, with no key file. The
 // client library's logging is off whatever GOOGLE_SDK_GO_LOGGING_LEVEL says: at debug it prints
-// every request and response, and a Read's response carries the value.
-func NewGCPClient(ctx context.Context) (*secretmanager.Client, error) {
-	client, err := secretmanager.NewClient(ctx, option.WithLogger(slog.New(slog.DiscardHandler)))
+// every request and response, and a Read's response carries the value. opts are the tests' dial
+// to a fake Secret Manager.
+func NewGCPClient(ctx context.Context, opts ...option.ClientOption) (*secretmanager.Client, error) {
+	client, err := secretmanager.NewClient(ctx, append([]option.ClientOption{option.WithLogger(slog.New(slog.DiscardHandler))}, opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("open Secret Manager: %w", err)
 	}
+	// The library retries only AccessSecretVersion; the metadata calls a reload and a reread make
+	// get a retry of UNAVAILABLE, at most gcpMetadataAttempts calls in all, so one transient failure
+	// neither fails a reload (and its alarm) nor a value release, and a lasting outage fails each
+	// call within seconds with its own code, as the AWS SDK's three attempts do. RESOURCE_EXHAUSTED
+	// is not retried: the read quota is shared by the whole project, and retrying into it only
+	// spends more of it.
+	retry := gax.WithRetry(func() gax.Retryer {
+		return &boundedRetryer{inner: gax.OnCodes([]codes.Code{codes.Unavailable}, gax.Backoff{Initial: 200 * time.Millisecond, Max: 2 * time.Second, Multiplier: 2}), left: gcpMetadataAttempts - 1}
+	})
+	client.CallOptions.ListSecrets = append(client.CallOptions.ListSecrets, retry)
+	client.CallOptions.GetSecret = append(client.CallOptions.GetSecret, retry)
+	client.CallOptions.GetSecretVersion = append(client.CallOptions.GetSecretVersion, retry)
 	return client, nil
+}
+
+// gcpMetadataAttempts is how many times a metadata call is made before an UNAVAILABLE answer is
+// returned: the AWS SDK's standard retryer's three.
+const gcpMetadataAttempts = 3
+
+// boundedRetryer is inner with at most left retries.
+type boundedRetryer struct {
+	inner gax.Retryer
+	left  int
+}
+
+func (b *boundedRetryer) Retry(err error) (time.Duration, bool) {
+	if b.left <= 0 {
+		return 0, false
+	}
+	pause, ok := b.inner.Retry(err)
+	if ok {
+		b.left--
+	}
+	return pause, ok
 }
 
 // gcpListLag is how stale Secret Manager's metadata may be. Google documents every operation but
@@ -112,7 +204,7 @@ func (g GCP) ValidName(id string) error {
 // List lists every secret of the prefix's project whose id starts with the prefix's id prefix:
 // ListSecrets' name filter (name:<id prefix>) is a case-insensitive substring match, so a listed
 // secret whose full name does not start with prefix, byte for byte, is dropped here before any
-// call is made for it. It reads every page, then each kept secret's latest version with one
+// call is made for it, as is one with an expire_time, scheduled for deletion. It reads every page, then each kept secret's latest version with one
 // GetSecretVersion for its state and key. A failed call fails the whole List.
 func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 	parent, idPrefix, ok := strings.Cut(prefix, "/secrets/")
@@ -125,7 +217,7 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 		if err != nil {
 			return nil, fmt.Errorf("list secrets under %s: %w", prefix, gcpErr(err))
 		}
-		if !strings.HasPrefix(secret.GetName(), prefix) {
+		if !strings.HasPrefix(secret.GetName(), prefix) || secret.GetExpireTime() != nil {
 			continue
 		}
 		ls, err := g.listing(ctx, secret)
@@ -138,10 +230,10 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 }
 
 // Describe reads one secret with GetSecret, then its latest version with GetSecretVersion:
-// ErrNotFound for one Secret Manager does not hold, and Deleted for one with an expire_time:
+// ErrNotFound for one Secret Manager does not hold, and for one with an expire_time:
 // `agent-secrets secret delete` schedules a deletion by setting one (Secret Manager deletes the
 // secret, with every version, when that time comes), so a secret with one is the counterpart of a
-// Secrets Manager secret in its recovery window, which the policy stops serving at once.
+// Secrets Manager secret in its recovery window, which the broker stops serving at once.
 func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: id})
 	if status.Code(err) == codes.NotFound {
@@ -150,13 +242,16 @@ func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 	if err != nil {
 		return Listing{}, fmt.Errorf("describe %s: %w", id, gcpErr(err))
 	}
+	if secret.GetExpireTime() != nil {
+		return Listing{}, ErrNotFound
+	}
 	return g.listing(ctx, secret)
 }
 
 // listing is the Listing of one Secret the API answered, with its latest version read.
 func (g GCP) listing(ctx context.Context, secret *secretmanagerpb.Secret) (Listing, error) {
 	name := secret.GetName()
-	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations(), Deleted: secret.GetExpireTime() != nil}
+	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations()}
 	if ls.Tags == nil {
 		ls.Tags = map[string]string{}
 	}
@@ -194,29 +289,58 @@ func (g GCP) onKey(keyVersion string) bool {
 // GetSecret that refuses one scheduled for deletion: Secret Manager reads a secret until its
 // expire_time, so without that check a grant made before `agent-secrets secret delete` would keep
 // reading it until the policy drops it, where Secrets Manager refuses a secret in its recovery
-// window at once. ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND),
-// when the secret has an expire_time, or when the latest version is disabled or destroyed
+// window at once. That GetSecret counts against the project's shared metadata read quota, so its
+// verdict (readable, or absent or scheduled for deletion) is trusted for gcpHeldFor (30 s), with
+// one check at a time per secret: a busy fleet's releases, including repeated releases of a
+// deleted secret through a grant the policy has not dropped yet, cost a read per distinct secret
+// per 30 s, and a delete is refused at most 30 s after Secret Manager's metadata shows it.
+// ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND), when the
+// secret has an expire_time, or when the latest version is disabled or destroyed
 // (FAILED_PRECONDITION), all the same answer to the caller: the secret is not readable. The value
 // must be non-empty UTF-8, since the broker injects it into an environment; an error names the
 // secret and never the bytes.
 func (g GCP) Read(ctx context.Context, source string) (string, error) {
-	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
-	switch status.Code(err) {
-	case codes.OK:
-		if secret.GetExpireTime() != nil {
-			return "", ErrNotFound
+	if err := g.held.verdict(source, func() error {
+		secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
+		switch status.Code(err) {
+		case codes.OK:
+			if secret.GetExpireTime() != nil {
+				return ErrNotFound
+			}
+			return nil
+		case codes.NotFound:
+			return ErrNotFound
+		default:
+			return fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
 		}
-	case codes.NotFound:
-		return "", ErrNotFound
-	default:
-		return "", fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
+	}); err != nil {
+		return "", err
 	}
 	latest := source + "/versions/" + gcpLatest
 	out, err := g.Client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})
 	switch status.Code(err) {
 	case codes.OK:
-	case codes.NotFound, codes.FailedPrecondition:
+	case codes.NotFound:
 		return "", ErrNotFound
+	case codes.FailedPrecondition:
+		// A disabled or destroyed latest version answers FAILED_PRECONDITION, and that is the
+		// secret having no value. Google does not document it as the code's only meaning (an
+		// unusable CMEK key may answer it too), so the version's own state decides: anything but
+		// DISABLED or DESTROYED stays an error the broker logs.
+		// That check is a metadata read too, so its "no value" verdict is cached under the same
+		// 30 s as Read's other check, keyed on the version: it is consulted only after a fresh
+		// FAILED_PRECONDITION, so a re-enabled or new version is served at once.
+		accessErr := err
+		if err := g.held.verdict(latest, func() error {
+			version, err := g.Client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
+			if err == nil && (version.GetState() == secretmanagerpb.SecretVersion_DISABLED || version.GetState() == secretmanagerpb.SecretVersion_DESTROYED) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("secret manager %s: %w", latest, gcpErr(accessErr))
+		}); err != nil {
+			return "", err
+		}
+		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(accessErr))
 	default:
 		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(err))
 	}

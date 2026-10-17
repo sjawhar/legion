@@ -66,7 +66,7 @@ func TestSettingsAnswersTheGCPStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api.Register(mux, api.Deps{Policy: cur, SecretsStore: secrets.StoreGCP, SecretsPrefix: prefix, SecretsKMSKeyName: key})
+	api.Register(mux, api.Deps{Policy: cur, SecretsStore: secrets.StoreGCP, SecretsPrefix: prefix, SecretsKMSKey: key})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	resp, err := http.Get(srv.URL + "/v1/settings")
@@ -131,7 +131,7 @@ func TestARereadWhoseRequestEndedLogsNoError(t *testing.T) {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	api.Register(mux, api.Deps{Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN})
+	api.Register(mux, api.Deps{Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN})
 	logged := policytest.CaptureLog(t)
 
 	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil))

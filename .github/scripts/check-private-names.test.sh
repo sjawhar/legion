@@ -55,6 +55,9 @@ internal="internal"
 private_host_suffix="private.example"
 example_host_suffix="example"
 vendored_nats="packages/claude-envoy/dist/envoy-channel.js"
+tailnet_suffix="ts.net"
+tailnet_label="realtailnet"
+tailnet_example="example-tailnet"
 
 # assert_each_refused <fixture-prefix> <label> <array-name> [line]: writes each line of the named
 # array into its own fixture, on the given line (1 by default; 2 is preceded by a filler line), and
@@ -176,6 +179,32 @@ printf 'Point it at api.%s.%s.\n' "$internal" "$example_host_suffix" >> "$root/d
 mkdir -p "$root/$(dirname "$vendored_nats")"
 printf '        this.%s.push(sv);\n' "$internal" > "$root/$vendored_nats"
 git -C "$root" add "$vendored_nats"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+
+echo "case: a Tailscale MagicDNS host is refused, whatever its case"
+# shellcheck disable=SC2034 # read by name through assert_each_refused's nameref
+tailnet_hosts=(
+  "https://nats.$tailnet_label.$tailnet_suffix:4222"
+  "https://nats.${tailnet_label^^}.$tailnet_suffix:4222"
+  "https://nats.$tailnet_label.${tailnet_suffix^^}"
+  "https://a.$tailnet_example.$tailnet_suffix and https://b.$tailnet_label.$tailnet_suffix"
+  "see _nats.$tailnet_label.${tailnet_suffix}_ in italics"
+  "NATS_$tailnet_label.$tailnet_suffix"
+)
+assert_each_refused tailnet "names a Tailscale MagicDNS host" tailnet_hosts
+
+echo "case: the reserved example tailnet passes, under any machine name, and a longer word is not" \
+  "mistaken for one"
+root=$(fixture public-tailnet)
+{
+  printf 'https://nats.%s.%s:4222\n' "$tailnet_example" "$tailnet_suffix"
+  printf 'https://example-host-mx.%s.%s\n' "$tailnet_example" "$tailnet_suffix"
+  printf 'nats://<tailnet>.%s:4222\n' "$tailnet_suffix"
+  printf 'nats://<name>.<tailnet>.%s:4222\n' "$tailnet_suffix"
+  printf 'host.%s.%swork, a longer word the boundary must not mistake for one\n' \
+    "$tailnet_label" "$tailnet_suffix"
+} > "$root/docs/notes.md"
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 

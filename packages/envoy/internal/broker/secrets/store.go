@@ -22,18 +22,24 @@ const (
 // and Read's for a source the store no longer holds or that has no current value.
 var ErrNotFound = errors.New("secret not found in the store")
 
-// Store is what the broker reads agent secrets with. List and Describe answer the metadata the
-// policy decides from, and Read answers a granted value; nothing here writes a secret.
-type Store interface {
-	// List answers every secret whose full name starts with prefix, deleted ones left out or
-	// marked Deleted, in no promised order. A store that answers more is filtered by the policy.
-	List(ctx context.Context, prefix string) ([]Listing, error)
-	// Describe answers one secret by its full name, or ErrNotFound when none exists. A secret
-	// scheduled for deletion is answered with Deleted set.
-	Describe(ctx context.Context, id string) (Listing, error)
+// Reader answers a granted secret's value: what releasing a grant needs, and nothing more.
+type Reader interface {
 	// Read answers the current value of the secret source names (Listing.Source): ErrNotFound
 	// for one the store no longer holds, one scheduled for deletion or one with no current value.
 	Read(ctx context.Context, source string) (string, error)
+}
+
+// Store is what the broker reads agent secrets with. List and Describe answer the metadata the
+// policy decides from, and Read answers a granted value; nothing here writes a secret.
+type Store interface {
+	Reader
+	// List answers every secret whose full name starts with prefix, in no promised order. A secret
+	// scheduled for deletion is one the store does not hold: List leaves it out, Describe and Read
+	// answer ErrNotFound for it. A store that answers more is filtered by the policy.
+	List(ctx context.Context, prefix string) ([]Listing, error)
+	// Describe answers one secret by its full name, or ErrNotFound when none exists or it is
+	// scheduled for deletion.
+	Describe(ctx context.Context, id string) (Listing, error)
 	// ValidName refuses, before any call is made, a full name no secret of this store can carry:
 	// one past its length limit, or outside its character set. The error names the rule and never
 	// wraps a lookup's failure.
@@ -62,7 +68,4 @@ type Listing struct {
 	// HasCurrentValue is whether a read would answer a value: a version labelled AWSCURRENT, or a
 	// Secret Manager versions/latest that is ENABLED.
 	HasCurrentValue bool
-	// Deleted is a secret scheduled for deletion: Secrets Manager's DeletedDate, or Secret
-	// Manager's expire_time, which `agent-secrets secret delete` sets to the recovery window's end.
-	Deleted bool
 }

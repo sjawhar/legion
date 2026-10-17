@@ -41,12 +41,10 @@ type Deps struct {
 	// SecretsStore is BROKER_SECRETS_STORE, the store GET /v1/settings names: secrets.StoreAWS or
 	// secrets.StoreGCP.
 	SecretsStore string
-	// SecretsKMSKeyARN is BROKER_SECRETS_KMS_KEY_ARN, the agent-secrets key GET /v1/settings
-	// answers with its region and account for the AWS store.
-	SecretsKMSKeyARN string
-	// SecretsKMSKeyName is BROKER_SECRETS_KMS_KEY_NAME, the agent-secrets key GET /v1/settings
-	// answers for the GCP store.
-	SecretsKMSKeyName string
+	// SecretsKMSKey is the agent-secrets key GET /v1/settings answers: the AWS store's key ARN
+	// (BROKER_SECRETS_KMS_KEY_ARN), with its region and account, or the GCP store's Cloud KMS key
+	// name (BROKER_SECRETS_KMS_KEY_NAME).
+	SecretsKMSKey string
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means

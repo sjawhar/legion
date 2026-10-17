@@ -1920,14 +1920,16 @@ signs a JWT with each App's key from its `github_apps.<role>.private_key_command
 as the daemon runs it, the key held in that process alone) and reads the App's slug from
 `GET /app`, so the login is `<slug>[bot]`, the one the daemon reads at boot for the identity each
 role commits, pushes and reviews as. The two Apps resolving to one login fail it, as the daemon
-refuses at boot. A stage proof calls it once, after its first `legion.yaml` is written and before
-any check needs a login (Stage 3 and 4b.13b right after the daemon's first start, Stage 4b after
-`--check-config`). `role_app ROLE` then prints the login of the App the role acts as (the implement
-App's for the implementer and the merger, the review App's for every other role, the controller's
-included), as REST and git name it, and `role_app_slug ROLE` the bare slug GraphQL names the bot by;
-either fails, saying so, when `read_app_logins` has not run. `lib/app-logins.test.ts` runs the
-helper against a stand-in GitHub, and `lib/reviewer-thread.test.ts` drives `reviewer_thread` with
-the logins set.
+refuses at boot, and so does a read of either App that does not give a slug, the run failing with
+the reason the helper names by the App's role and id: a GitHub that never answered, an answer that
+is not 2xx, or one with no slug. A stage proof calls it once, after its first `legion.yaml` is
+written and before any check needs a login (Stage 3 and 4b.13b right after the daemon's first
+start, Stage 4b after `--check-config`). `role_app ROLE` then prints the login of the App the role
+acts as (the implement App's for the implementer and the merger, the review App's for every other
+role, the controller's included), as REST and git name it, and `role_app_slug ROLE` the bare slug
+GraphQL names the bot by; either fails, saying so, when `read_app_logins` has not run.
+`lib/app-logins.test.ts` runs the helper, and `read_app_logins` over it, against a stand-in GitHub,
+and `lib/reviewer-thread.test.ts` drives `reviewer_thread` with the logins set.
 
 `clean_smoke_main` is Stage 3's `smoke-main-clean` and the cleanup inside Stage 4b's `done`: one
 fixture pull request, on the branch `proof/clean-main-<project, lowercased>`, that removes the
