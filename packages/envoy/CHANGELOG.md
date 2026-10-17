@@ -18,7 +18,10 @@
 - An issue sits at most 32 links below its root: a create under a parent, or a reparent whose
   subtree's deepest issue would sit deeper, is `409 PARENT_INPUT`. Creating an issue with a parent
   now takes the project's dependency lock, as a reparent does, so two writes cannot together pass
-  the limit.
+  the limit. An earlier release could build a deeper chain, so migration `0113` refuses to apply
+  while any issue sits more than 32 links below its root, or in a parent loop: its census counts
+  them, so the pre-deploy census refuses first, and the migration names up to 20 of them and the
+  repair, `PATCH` an ancestor with `{"parent": null}` on the release still running.
 - The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
   Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
   unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is

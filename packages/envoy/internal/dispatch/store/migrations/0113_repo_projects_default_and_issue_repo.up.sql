@@ -6,6 +6,43 @@
 -- mapping an issue names cannot be deleted or moved to another project (23503, which the API answers
 -- REPO_PROJECT_IN_USE). Resolution through the parent chain is computed on read
 -- (api.issueRepoLateral), as component attachments are (0038).
+--
+-- An issue sits at most 32 links below its root (parentDepthCap, api/issue_parent.go). A release
+-- before this one let a create build a chain of any depth; this one refuses to build one and fails
+-- every read of an issue past the cap. So the migration first refuses while any issue sits deeper,
+-- or in a parent loop, naming up to 20 of them and the repair, and applies nothing. Its census
+-- counts the same issues, so the pre-deploy census refuses first.
+do $$
+declare
+	deep_count bigint;
+	deep_keys text;
+begin
+	with recursive walk as (
+		select key, parent_key, 0 as depth from issues
+		union all
+		select w.key, i.parent_key, w.depth + 1
+		from walk w join issues i on i.key = w.parent_key
+		where w.depth < 32
+	), deep as (
+		select w.key, i.project_key, i.number
+		from walk w join issues i on i.key = w.key
+		where w.depth = 32 and w.parent_key is not null
+	)
+	select count(*), (select string_agg(named.key, ', ') from (select key from deep order by project_key, number limit 20) named)
+	into deep_count, deep_keys
+	from deep;
+	if deep_count > 0 then
+		raise exception using
+			errcode = 'check_violation',
+			message = format(
+				'0113 refuses: %s issue(s) sit more than 32 links below their root, or in a parent loop: %s%s. '
+				'This release refuses a parent chain longer than 32 links and fails every read of an issue past one. '
+				'Detach each chain first, on the release running now: PATCH /api/v1/issues/<ancestor> with {"parent": null}, '
+				'choosing ancestors that leave no issue more than 32 links below its root; then deploy again.',
+				deep_count, deep_keys,
+				case when deep_count > 20 then format(' and %s more', deep_count - 20) else '' end);
+	end if;
+end $$;
 alter table repo_projects add column is_default boolean not null default false;
 create unique index repo_projects_default_per_project on repo_projects (project) where is_default;
 alter table repo_projects add constraint repo_projects_repo_project_key unique (repo, project);
