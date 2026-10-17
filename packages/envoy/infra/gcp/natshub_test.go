@@ -686,6 +686,11 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			err:  []string{`users[0]: machineId and daemon are both set`},
 		},
 		{
+			name: "a user naming both Dispatch and daemon",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[2].Daemon = true },
+			err:  []string{"users[2]: dispatchMachineId and daemon are both set; name one"},
+		},
+		{
 			name: "a user naming both daemon and permissions",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Daemon = true },
 			err:  []string{`users[1]: daemon and permissions are both set`},
