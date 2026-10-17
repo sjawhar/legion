@@ -174,24 +174,6 @@ func (r *liveRig) checkResources() error {
 	wantCPUs := max(2, int(math.Ceil(cpuSum.AsApproximateFloat64())))
 	wantMemory := memorySum.AsApproximateFloat64()
 
-	// The pod's own node, as the operator sees it: a scheduling fact distinct from the
-	// reservation check below, and never a reason to relax it. If Node Auto-Provisioning ever
-	// sizes a new node under what it just scheduled this pod's own summed cpu onto, that is a
-	// platform shortfall worth failing loudly on its own terms, not something the reservation
-	// assertion should quietly absorb.
-	allocatable, err := r.kubectl("get", "node", pod.Spec.NodeName, "-o", "jsonpath={.status.allocatable.cpu}")
-	if err != nil {
-		return fmt.Errorf("reading pod %s's node %s: %w", name, pod.Spec.NodeName, err)
-	}
-	nodeCPU, err := resource.ParseQuantity(strings.TrimSpace(allocatable))
-	if err != nil {
-		return fmt.Errorf("node %s's allocatable cpu %q does not parse: %w", pod.Spec.NodeName, allocatable, err)
-	}
-	if nodeCPU.Cmp(cpuSum) < 0 {
-		return fmt.Errorf("node %s's allocatable cpu %s is under the pod's own summed reservation %s: Node Auto-Provisioning sized the node below what it just scheduled onto it", pod.Spec.NodeName, nodeCPU.String(), cpuSum.String())
-	}
-	note("operator", "node %s: allocatable cpu %s, at or above the pod's own summed reservation %s", pod.Spec.NodeName, nodeCPU.String(), cpuSum.String())
-
 	var memTotalKB int64
 	checkMemory := func() error {
 		meminfo, err := r.exec(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")

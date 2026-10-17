@@ -314,13 +314,13 @@ snapshot "$evidence/namespace-before.txt" || fail "the operator could not list n
 snapshotted=1
 note "[operator] $(wc -l <"$evidence/namespace-before.txt") of the run's objects in $namespace before it starts (labelled with project $project, or unlabelled and named for it)"
 
-begin bridge
 if [ "$pod_reachability" = bridge ]; then
+  begin bridge
   bridge_start "$port" "$session_db_port"
+  pass
 else
-  note "LEGION_E2E_POD_REACHABILITY=aws-private-ip: no bridge needed, pods reach $bind_host directly"
+  note "LEGION_E2E_POD_REACHABILITY=aws-private-ip: no bridge needed, pods reach $bind_host directly (no bridge check: there is nothing to test)"
 fi
-pass
 
 begin session-db
 # postgres-resume's session database: a throwaway Postgres on the devbox, which pods reach as they

@@ -2174,10 +2174,28 @@ key), and either `label_prefix` (the prefix every run label of the proof carries
 | function | does |
 | :--- | :--- |
 | `op ARGS…` | `kubectl --context $operator -n $namespace ARGS…`, bounded at 300 s (`timeout --foreground`, so a Ctrl-C still reaches kubectl) |
-| `snapshot FILE` | writes the run's own Sandboxes, Secrets, PVCs, pods and ConfigMaps (`kinds`), sorted: those labelled with its project, and those with no project label that `run_named` counts as the run's. It fails when either listing does |
+| `snapshot FILE` | writes the run's own Sandboxes, Secrets, PVCs, pods, ConfigMaps and Services (`kinds`), sorted: those labelled with its project, and those with no project label that `run_named` counts as the run's. It fails when either listing does |
 | `run_named LIST` | prints the lines of a `-o name` listing whose object name carries the run's label as written, or as a claim token carries it (every character outside `a-z0-9` dropped): every object the run's daemon and harness create is named from one or the other |
 | `teardown` | runs once and never fails. It refuses a label without `label_prefix`, or other than `label_exact`, so a mistyped label cannot select another run's objects; deletes every recorded Sandbox by name, then the Sandboxes and ConfigMaps labelled with that exact project; then lists the project's objects every 2 s, up to 150 listings, until none is left. Secrets and PVCs the Sandboxes' own deletion has not taken by the 90th listing are deleted by that exact label once, on the first listing from then on that answers; three failed listings in a row end the wait, naming the context and its error |
 | `namespace_clean` | the check `namespace-clean`: a fresh snapshot, written to `$evidence/namespace-after.txt`, must equal `$evidence/namespace-before.txt` |
+
+## lib/bridge-tunnel.sh
+
+The reverse-tunnel bridge a stage proof uses when its pods cannot reach the devbox at all
+(`LEGION_E2E_POD_REACHABILITY=bridge`, GKE's shape). Stage 4a sources it.
+
+```sh
+. "$root/scripts/e2e/lib/bridge-tunnel.sh"     # sourced, never run
+```
+
+The caller sets `op`, `note`, `fail` (from `lib/namespace-rig.sh`, sourced first), `bridge_name`
+(the run's deterministic bridge pod/Service name), `namespace` and `run_label`; it defines
+`bridge_start` and `bridge_stop`.
+
+| function | does |
+| :--- | :--- |
+| `bridge_start PORT SESSION_DB_PORT` | creates a run-labelled Secret (`$bridge_name-auth`, a random `AUTH` value), then a chisel server Pod (`--host 127.0.0.1`, reading `AUTH` from the Secret through `secretKeyRef`, never argv) and a ClusterIP Service naming it, both `create`d so no `last-applied-configuration` annotation ever carries the auth; forwards the devbox's `kubectl port-forward` to the pod's control port, starts a chisel client with `AUTH` in its own environment opening the two reverse listeners pods dial (the worker stream and the session database), and starts the watchdog that restarts a dropped port-forward (up to 60 s) and fails the run if the client's own bounded reconnect budget is exhausted |
+| `bridge_stop` | runs once and never fails: stops the watchdog and the chisel client, kills the port-forward (both the one it is tracking and the current global one, so a restart in flight is never orphaned), and deletes the Secret, the Pod and the Service by their one exact name |
 
 ## lib/secret-leaks.ts
 
