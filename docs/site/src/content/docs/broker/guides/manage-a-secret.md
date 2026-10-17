@@ -154,13 +154,14 @@ $ agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
 agent-secrets secret create: arn:aws:sts::111122223333:assumed-role/example-devbox-instance-role/i-0abc is not a person's Identity Center sign-in: a secret is written under your own sign-in to account 111122223333 (aws sso login, then --profile or AWS_PROFILE), never a machine's role
 ```
 
-GCP's checks are the same shape: a read refuses Application Default Credentials for another
-project, and a write also refuses one that is not a person's `gcloud auth
-application-default login` (a service account key file, or a GCE/GKE metadata-server or workload
-identity, writes no secret).
+GCP write checks are the same shape, with one difference: a write refuses Application Default
+Credentials that are not a person's `gcloud auth application-default login` (a service account
+key file, or a GCE/GKE metadata-server or workload identity, writes no secret). GCP has no
+wrong-account read check: every call already names `projects/<project number>/...` explicitly in
+the resource, so IAM on that resource, not this CLI, is what decides whether a read succeeds.
 
-A read (`list`, `show`) takes any sign-in in the broker's account or project, a machine's role or
-service account included. These
+A read (`list`, `show`) takes any sign-in the cloud's own IAM lets read the namespace's secrets, a
+machine's role or service account included. These
 checks are the CLI's own; what a sign-in may actually read or change is each cloud's IAM to decide,
 and [Operating the broker](/legion/broker/operate/#people-who-manage-secrets) lists the calls each
 form makes.
@@ -218,13 +219,18 @@ broker: serving DEMO_DEPLOY_TOKEN
 ```
 
 Name `--owner`, `--tier` or both. `retag` reads the tags the secret holds and sends both in one
-request, the unchanged one as it is, so an IAM condition on the request's tags (one that lets a
-person tag only their own secret, say) sees both. For a secret missing a tag, name that one too.
+request, the unchanged one as it is: on AWS, so an IAM condition on the request's tags (one that
+lets a person tag only their own secret, say) sees both. GCP has no such condition (an IAM
+condition cannot test an annotation's value the way it can an AWS tag), so GCP's access is
+coarser: anyone granted `secretmanager.secrets.update` on the namespace can retag any secret
+under it, shared ones included. For a secret missing a tag, name that one too.
 
 You can retag your own secret, to `--owner shared` too. Once a secret is shared, its owner and
-tier are an administrator's to change: when AWS refuses a retag of a shared secret, the CLI prints
-AWS's refusal, then `a shared secret's owner and tier are an administrator's to change`, and exits
-1. It prints the same line when AWS refuses a retag to `--owner shared`; for your own secret, that
+tier are an administrator's to change: on AWS, by the IAM condition above; on GCP, because a
+deployment that wants this protection grants `secretmanager.secrets.update` on a shared secret
+only to administrators. When the cloud refuses a retag of a shared secret, the CLI prints that
+refusal, then `a shared secret's owner and tier are an administrator's to change`, and exits 1. It
+prints the same line when the cloud refuses a retag to `--owner shared`; for your own secret, that
 refusal means your access does not include the retag
 ([Troubleshooting](/legion/broker/guides/troubleshooting/#managing-a-secret)).
 

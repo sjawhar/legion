@@ -216,16 +216,15 @@ func gcpServedBy(f *fakeSecretManager, settings Settings) func(name string) Rere
 	}
 }
 
-// useGCPIdentity makes gcpCredentials and gcpUserinfo answer kind/email/project for the rest of t,
-// with no network call. kind is the ADC JSON's "type" ("authorized_user" for a person's sign-in,
+// useGCPIdentity makes gcpCredentials and gcpUserinfo answer kind/email for the rest of t, with no
+// network call. kind is the ADC JSON's "type" ("authorized_user" for a person's sign-in,
 // "service_account" for a key file); "" leaves the JSON empty, as a GCE/GKE metadata or workload
 // identity carries none.
-func useGCPIdentity(t *testing.T, kind, email, project string) {
+func useGCPIdentity(t *testing.T, kind, email string) {
 	t.Helper()
 	restoreCreds, restoreUserinfo := gcpCredentials, gcpUserinfo
 	gcpCredentials = func(context.Context) (*google.Credentials, error) {
 		var creds google.Credentials
-		creds.ProjectID = project
 		if kind != "" {
 			creds.JSON = []byte(`{"type":"` + kind + `"}`)
 		}
@@ -241,7 +240,7 @@ func alwaysServed(name string) Reread { return Reread{Name: name, Served: true} 
 func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	fake := newFakeSecretManager()
 	startFakeSecretManager(t, fake)
-	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
+	useGCPIdentity(t, "authorized_user", "ada@example.com")
 	startSecretBrokerWith(t, gcpTestSettings(), gcpServedBy(fake, gcpTestSettings()))
 	useStdin(t, "shh")
 	stdout, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
@@ -315,7 +314,7 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 // before anything is written.
 func TestGCPSecretCreateRefusesServiceAccount(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "service_account", "robot@acme-agent-infra.iam.gserviceaccount.com", testGCPProject)
+	useGCPIdentity(t, "service_account", "robot@acme-agent-infra.iam.gserviceaccount.com")
 	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
@@ -332,7 +331,7 @@ func TestGCPSecretCreateRefusesServiceAccount(t *testing.T) {
 // or workload identity) is refused the same way.
 func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "", "robot@acme-agent-infra.iam.gserviceaccount.com", testGCPProject)
+	useGCPIdentity(t, "", "robot@acme-agent-infra.iam.gserviceaccount.com")
 	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
@@ -345,53 +344,10 @@ func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
 	}
 }
 
-// TestGCPSecretReadRefusesAnotherProjectNumber: a read under Application Default Credentials
-// whose quota project is a NUMBER other than the broker's is refused, naming both.
-func TestGCPSecretReadRefusesAnotherProjectNumber(t *testing.T) {
-	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", "999999999999")
-	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
-
-	_, stderr, code := runSecret("list")
-	if code != 1 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-	if !strings.Contains(stderr, "999999999999") || !strings.Contains(stderr, testGCPProject) {
-		t.Fatalf("stderr does not name both projects: %q", stderr)
-	}
-}
-
-// TestGCPSecretReadAllowsNoQuotaProject: ADC naming no quota project (the common case for a plain
-// `gcloud auth application-default login`) is not refused.
-func TestGCPSecretReadAllowsNoQuotaProject(t *testing.T) {
-	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", "")
-	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
-
-	_, stderr, code := runSecret("list")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-}
-
-// TestGCPSecretReadAllowsAProjectIDQuotaProject: ADC naming a project-ID-shaped (non-numeric)
-// quota project is not refused, even though it is textually unequal to the broker's project
-// NUMBER: this CLI cannot resolve one from the other without another API call, so it does not try.
-func TestGCPSecretReadAllowsAProjectIDQuotaProject(t *testing.T) {
-	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", "acme-agent-infra")
-	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
-
-	_, stderr, code := runSecret("list")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
-	}
-}
-
 // TestGCPSecretOwnerMeIsTheSignInEmailLowercased: --owner me is the userinfo email, lowercased.
 func TestGCPSecretOwnerMeIsTheSignInEmailLowercased(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "Ada@Example.com", testGCPProject)
+	useGCPIdentity(t, "authorized_user", "Ada@Example.com")
 	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
@@ -408,7 +364,7 @@ func TestGCPSecretOwnerMeIsTheSignInEmailLowercased(t *testing.T) {
 // sending both as one UpdateSecret call (the annotations map is written whole).
 func TestGCPSecretRetagOnlyNamedFieldReplacesHeldOne(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
+	useGCPIdentity(t, "authorized_user", "ada@example.com")
 	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
@@ -430,7 +386,7 @@ func TestGCPSecretRetagOnlyNamedFieldReplacesHeldOne(t *testing.T) {
 func TestGCPSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T) {
 	fake := newFakeSecretManager()
 	startFakeSecretManager(t, fake)
-	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
+	useGCPIdentity(t, "authorized_user", "ada@example.com")
 	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
@@ -457,7 +413,7 @@ func TestGCPSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T)
 // tier and whether it has a value, never the value.
 func TestGCPSecretListShowsOwnerTierAndValue(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
+	useGCPIdentity(t, "authorized_user", "ada@example.com")
 	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
@@ -480,7 +436,7 @@ func TestGCPSecretListShowsOwnerTierAndValue(t *testing.T) {
 // TestCheckSettingsKMSKeyName covers the other checkSettingsKMSKeyName refusals directly.
 func TestGCPSecretReadsRefuseBadSettings(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
+	useGCPIdentity(t, "authorized_user", "ada@example.com")
 	startSecretBrokerWith(t, Settings{
 		Store: secrets.StoreGCP, SecretsPrefix: testGCPPrefix, GCPProject: testGCPProject,
 		KMSKeyName: "not-a-key-name",

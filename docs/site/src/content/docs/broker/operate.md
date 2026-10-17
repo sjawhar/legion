@@ -259,17 +259,19 @@ those two with `AccessDeniedException`.
 
 | Form | Permissions |
 | --- | --- |
-| `list` | `secretmanager.secrets.list` on the project |
+| `list` | `secretmanager.secrets.list` on the project and `secretmanager.versions.get` on each secret (to tell whether its `versions/latest` is `ENABLED`) |
 | `show` | `secretmanager.secrets.get` and `secretmanager.versions.list`, `secretmanager.versions.get` (for its versions and whether `versions/latest` is `ENABLED`) |
-| `create` | `secretmanager.secrets.create` and `secretmanager.versions.add`; `cloudkms.cryptoKeyVersions.useToEncrypt` on the CMEK key (automatic replication encrypts with it) |
+| `create` | `secretmanager.secrets.create` and `secretmanager.versions.add`. Automatic replication encrypts with the CMEK key through Secret Manager's own service agent, not the person's identity: that service agent (`service-<project number>@gcp-sa-secretmanager.iam.gserviceaccount.com`) needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key, granted once at setup, not per person |
 | `set` | `secretmanager.versions.add` |
 | `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update` (both owner and tier annotations in one call, the unchanged one re-sent as the secret holds it) |
 | `delete` | `secretmanager.secrets.update` (sets `expire_time` to 30 days out) |
 | `restore` | `secretmanager.secrets.update` (clears `expire_time`) |
 
-`secretmanager.secrets.get`/`.update` are each granted per secret or per project; a role bound at
-the project scoped to the agent-secrets prefix (an IAM condition on the resource name) is the GCP
-counterpart of AWS's per-tag conditions above.
+Unlike AWS's tags, a GCP IAM condition cannot test an annotation's value, so GCP has no per-secret
+counterpart to AWS's "a person may tag only their own secret" conditions above: whoever is granted
+`secretmanager.secrets.update` on the namespace can retag any secret under it to any owner or
+tier, shared secrets included. A deployment that wants a shared secret's owner and tier reserved to
+administrators grants that permission, for the secrets it protects this way, only to them.
 
 ## Health and logs
 

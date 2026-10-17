@@ -22,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 
@@ -66,12 +65,10 @@ func checkSettingsKMSKeyName(settings Settings) error {
 // gcpIdentityInfo is what the GCP backend knows about the signed-in Application Default
 // Credentials: the ADC JSON's own "type" (google.AuthorizedUser for a person's `gcloud auth
 // application-default login`, google.ServiceAccount for a key file, "" when ADC carries no JSON at
-// all, such as a GCE/GKE metadata-server identity or workload identity), the signed-in email, and
-// the project ADC itself names (its quota project), "" when it names none.
+// all, such as a GCE/GKE metadata-server identity or workload identity), and the signed-in email.
 type gcpIdentityInfo struct {
-	Kind    google.CredentialsType
-	Email   string
-	Project string
+	Kind  google.CredentialsType
+	Email string
 }
 
 // gcpCredentials loads the person's Application Default Credentials. Tests replace it.
@@ -117,7 +114,7 @@ func newGCPBackend(ctx context.Context, settings Settings) (*gcpBackend, error) 
 	if err != nil {
 		return nil, fmt.Errorf("load your Google Cloud Application Default Credentials (run `gcloud auth application-default login`): %w", err)
 	}
-	identity := gcpIdentityInfo{Project: creds.ProjectID}
+	var identity gcpIdentityInfo
 	if len(creds.JSON) > 0 {
 		var parsed struct {
 			Type string `json:"type"`
@@ -159,35 +156,21 @@ func (b *gcpBackend) secretID(slug string) string {
 
 func (b *gcpBackend) displayName(id string) string { return displayName(b.settings.SecretsPrefix, id) }
 
-// gcpProjectNumberPattern matches a GCP project NUMBER (digits only), the form the broker's
-// gcp_project setting takes (it is cut from the secrets' own resource-name prefix,
-// projects/<number>/secrets/<id>).
-var gcpProjectNumberPattern = regexp.MustCompile(`^[0-9]+$`)
+// requireAccount is a no-op for GCP, unlike AWS's: every call this backend makes already names
+// projects/<gcp_project>/... explicitly in the resource, so a wrong-project Application Default
+// Credentials identity gets a real PermissionDenied or NotFound from the API itself rather than
+// silently reading another project's secrets - AWS's ListSecrets takes no project parameter at
+// all, which is the hazard requireAccount guards there. ADC's own project (its quota project, set
+// from the credentials file's project_id, which an `authorized_user` file from `gcloud auth
+// application-default login` does not carry) is in any case not reliably comparable with the
+// broker's gcp_project without a Resource Manager call this CLI does not make.
+func (b *gcpBackend) requireAccount(context.Context) error { return nil }
 
-// requireAccount refuses, before any read, Application Default Credentials naming a project
-// NUMBER other than the broker's: a read there would list another project's secrets as if they
-// were the agent secrets. ADC's own project (its quota project, when one is set) is ordinarily a
-// project ID string, not a number, and resolving one from the other needs a Resource Manager call
-// this CLI does not make, so the check only fires when ADC's project is itself numeric and
-// disagrees with the broker's; a project ID quota project, or none at all, is silent here (the
-// write check, requireWriteSignIn, still refuses a non-person identity regardless).
-func (b *gcpBackend) requireAccount(context.Context) error {
-	if gcpProjectNumberPattern.MatchString(b.identity.Project) && b.identity.Project != b.settings.GCPProject {
-		return fmt.Errorf("your Google Cloud Application Default Credentials are for project %s, but the agent secrets are in project %s: run `gcloud auth application-default login` for the right account, or `gcloud auth application-default set-quota-project %s`",
-			b.identity.Project, b.settings.GCPProject, b.settings.GCPProject)
-	}
-	return nil
-}
-
-// requireWriteSignIn refuses, before any write, Application Default Credentials for another
-// project (requireAccount) or one that is not a person's own `gcloud auth application-default
-// login` (a service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC
-// carries no "authorized_user" JSON); it answers the signed-in person's lowercased email for
-// --owner me.
-func (b *gcpBackend) requireWriteSignIn(ctx context.Context) (string, error) {
-	if err := b.requireAccount(ctx); err != nil {
-		return "", err
-	}
+// requireWriteSignIn refuses, before any write, Application Default Credentials that are not a
+// person's own `gcloud auth application-default login` (a service account key file, or a GCE/GKE
+// metadata-server or workload identity, whose ADC carries no "authorized_user" JSON); it answers
+// the signed-in person's lowercased email for --owner me.
+func (b *gcpBackend) requireWriteSignIn(context.Context) (string, error) {
 	if b.identity.Kind != google.AuthorizedUser {
 		return "", fmt.Errorf("your Google Cloud Application Default Credentials are not a person's sign-in (run `gcloud auth application-default login` instead of using a service account): a secret is written under your own sign-in, never a machine's")
 	}

@@ -783,9 +783,12 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 // cmdSecretRetag changes a secret's owner, tier or both. It always sends both tags, re-sending the
-// one not named as the secret holds it: the deployment repository's IAM (AWS) or administrator
-// policy (GCP) that lets a person tag their own secret conditions on both request tags, so a
-// request carrying one fails.
+// one not named as the secret holds it: on AWS, the deployment repository's IAM policy that lets
+// a person tag their own secret conditions on both request tags, so a request carrying one fails.
+// GCP has no equivalent condition (annotations are not IAM-conditionable the way AWS tags are):
+// anyone with secretmanager.secrets.update on the namespace can retag any secret under it,
+// shared ones included; sending both tags there is for API symmetry with AWS, not an enforced
+// shared-secret protection.
 func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	const form = "secret retag"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
@@ -829,8 +832,10 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	}
 	if err := s.backend.retag(s.ctx, slug, owner, tier); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
-		// IAM (AWS) or the broker's own administrator policy (GCP) leaves a shared secret's owner
-		// and tier to administrators: one held shared, or one a person asked to make shared.
+		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
+		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
+		// so a deployment instead grants that permission at all only to administrators for the
+		// secrets it protects this way.
 		if s.backend.isAccessDenied(err) && (curOwner == policy.OwnerShared || owner == policy.OwnerShared) {
 			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
 		}

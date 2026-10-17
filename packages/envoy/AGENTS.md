@@ -2151,8 +2151,8 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
-Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in the
+broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
@@ -2347,13 +2347,13 @@ name lowercased; create and retag refuse it before writing unless it matches the
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
 (`gcloud auth application-default login`) and calls Secret Manager itself under
 `cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
-write. A read refuses Application Default Credentials whose quota project is itself a project
-NUMBER that disagrees with the broker's `gcp_project` (also a number, cut from the secrets'
-resource-name prefix), naming both (`gcpBackend.requireAccount`); ADC's quota project is ordinarily
-a project ID string, which this check cannot compare against a number without another API call, so
-it is silent for a project-ID quota project or none at all. A write also refuses an identity whose
-ADC JSON is not a person's `authorized_user` type - a service account key file, or a GCE/GKE
-metadata-server or workload identity, whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
+write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
+`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
+the API itself rather than silently reading another project's secrets - the hazard AWS's
+`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
+A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
+service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
+JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
 the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
 lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
