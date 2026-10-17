@@ -52,12 +52,17 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 			})
 			var claimed OutboxRow
 			inTx(t, st, func(tx pgx.Tx) {
-				rows, err := records.ClaimDue(ctx, tx, "LEGION", now, 1, time.Minute)
+				rows, err := records.DueRows(ctx, tx, "LEGION", "", nil, now)
 				must(t, err)
 				if len(rows) != 1 {
-					t.Fatalf("ClaimDue = %#v, want one row", rows)
+					t.Fatalf("DueRows = %#v, want one row", rows)
 				}
-				claimed = rows[0]
+				var ok bool
+				claimed, ok, err = records.ClaimRow(ctx, tx, rows[0].ID, now, time.Minute)
+				must(t, err)
+				if !ok {
+					t.Fatalf("ClaimRow of the one due row claimed nothing")
+				}
 			})
 			got, err := DecodeOutboxPayload(claimed)
 			if err != nil {
@@ -67,6 +72,37 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 				t.Fatalf("payload = %#v, want %#v", got, payload)
 			}
 		})
+	}
+}
+
+// Every kind the outbox stores runs on exactly one lane, and LaneOf names the lane whose kinds
+// list it: a kind on neither lane would be queued and never run, one on both would run twice over.
+func TestEveryOutboxKindIsInExactlyOneLane(t *testing.T) {
+	every := []OutboxKind{OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindSupervise,
+		OutboxKindGateSeed, OutboxKindLingerClose, OutboxKindIssueSuspend, OutboxKindWorkspaceRemove, OutboxKindMergeQueuePublish, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge}
+	lanes := map[OutboxKind][]OutboxLane{}
+	for _, lane := range []OutboxLane{LaneLifecycle, LaneBoard} {
+		for _, kind := range LaneKinds(lane) {
+			lanes[kind] = append(lanes[kind], lane)
+		}
+	}
+	for _, kind := range every {
+		if len(lanes[kind]) != 1 {
+			t.Errorf("%s is on lanes %v, want exactly one", kind, lanes[kind])
+			continue
+		}
+		if got := LaneOf(kind); got != lanes[kind][0] {
+			t.Errorf("LaneOf(%s) = %s, want %s, the lane that lists it", kind, got, lanes[kind][0])
+		}
+	}
+	if len(lanes) != len(every) {
+		t.Errorf("the lanes list %d kinds, want the %d the outbox stores", len(lanes), len(every))
+	}
+	if lane := LaneOf("unsupported"); lane != "" {
+		t.Errorf("LaneOf of a kind that is not one = %q, want none", lane)
+	}
+	if kinds := LaneKinds("fast"); kinds != nil {
+		t.Errorf("LaneKinds of a lane that is not one = %v, want nil", kinds)
 	}
 }
 

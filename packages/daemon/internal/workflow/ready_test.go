@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -185,6 +187,100 @@ func TestAReopenAtTheREADYHeadReusesItsWaitingMergeRow(t *testing.T) {
 	applyRefusingNothing(t, pool, readyEngine(""), intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Reopened: true})
 	if got, want := readyMerges(t, pool), []record.ReadyMerge{{Number: 42, Head: "head"}}; !slices.Equal(got, want) {
 		t.Fatalf("READY merges after the reopen = %v, want one row %v", got, want)
+	}
+}
+
+// The merge is the transition (LEGION-800): the merge queue failing a READY's merge, which the
+// ready_merge row reads from GitHub (intake.MergeFailed), moves the issue from awaiting_merge to
+// implementing as a red head does. The implementer is started with the failing run named, the
+// architect is told checks-red, the READY's withdrawal is posted and published to the merge queue
+// role, and its disarm is queued. Only the READY the issue still awaits moves: another READY head,
+// a READY a person merges, an issue no longer awaiting its merge, a pull request the record holds
+// closed, and a tree that lingers change nothing.
+func TestAMergeTheQueueFailedSendsTheAwaitedREADYBackToImplementing(t *testing.T) {
+	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	const run = "https://github.com/sjawhar/legion/actions/runs/7"
+	const reason = "the merge queue took pull request #42 out at READY's head head at 2026-10-16T05:10:00Z (failed_checks): its merge_group run on group-sha, the commit the queue built for it, failed: integration (failure, " + run + ")"
+	for _, tc := range []struct {
+		name             string
+		at               phase.Phase
+		ready, mergeNote string
+		pr               record.PullRequestState
+		lingers, moves   bool
+	}{
+		{name: "awaiting that READY", at: phase.AwaitingMerge, ready: "head", pr: record.PullRequestOpen, moves: true},
+		{name: "awaiting another READY head", at: phase.AwaitingMerge, ready: "older", pr: record.PullRequestOpen},
+		{name: "awaiting a READY a person merges", at: phase.AwaitingMerge, ready: "head", mergeNote: byHand, pr: record.PullRequestOpen},
+		{name: "back in implementing", at: phase.Implementing, ready: "head", pr: record.PullRequestOpen},
+		{name: "on a pull request the record holds closed", at: phase.AwaitingMerge, ready: "head", pr: record.PullRequestClosed},
+		{name: "in a lingering tree", at: phase.AwaitingMerge, ready: "head", pr: record.PullRequestOpen, lingers: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
+			if tc.lingers {
+				until, parent := time.Now().Add(time.Hour), "LEGION-207"
+				seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "closed root", Phase: phase.Done,
+					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
+				issue.Tree, issue.Parent, issue.Title = "LEGION-207", &parent, "child"
+			}
+			seedIssue(t, pool, issue)
+			seedPR(t, pool, record.PullRequest{State: tc.pr, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: tc.ready, Summary: readyPacket, MergeNote: tc.mergeNote})
+			applyRefusingNothing(t, pool, readyEngine("merge-queue"), intake.MergeFailed{Issue: "LEGION-208", Number: 42, Head: "head", Reason: reason})
+			task := startTask(t, pool, claim.RoleImplementer)
+			publishes := mergeQueuePublishes(t, pool)
+			if !tc.moves {
+				if got := issuePhase(t, pool); got != tc.at || task != "" || len(noticeKinds(t, pool, "LEGION-208")) != 0 || len(publishes) != 0 {
+					t.Fatalf("phase %s, implementer task %q, notices %v, publishes %v; want %s and nothing told", got, task, noticeKinds(t, pool, "LEGION-208"), publishes, tc.at)
+				}
+				return
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("phase %s after the merge queue failed READY's merge, want implementing", got)
+			}
+			if !strings.Contains(task, run) || !strings.Contains(task, "integration") {
+				t.Fatalf("the implementer's task %q, want it to name the failing run", task)
+			}
+			if kinds := noticeKinds(t, pool, "LEGION-208"); !slices.Contains(kinds, "checks-red") {
+				t.Fatalf("notices %v, want the architect told checks-red", kinds)
+			}
+			if len(publishes) != 1 || !strings.Contains(publishes[0].Packet, "READY withdrawn") || !strings.Contains(publishes[0].Packet, run) {
+				t.Fatalf("merge queue publishes %v, want the READY's withdrawal naming the failing run", publishes)
+			}
+			var disarms int
+			if err := pool.QueryRow(context.Background(), "select count(*) from outbox where kind = 'auto_merge_disable'").Scan(&disarms); err != nil || disarms != 1 {
+				t.Fatalf("disarms %d (%v), want the withdrawal's one", disarms, err)
+			}
+		})
+	}
+}
+
+// A merge group with many failing runs makes a long reason, and Dispatch refuses a message over its
+// cap on every attempt (LEGION-800 review). The READY's withdrawal posted on the issue is cut to fit
+// one message, saying so, while the implementer's task, which no cap bounds, carries every run.
+func TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
+	var runs []string
+	for i := range 40 {
+		runs = append(runs, fmt.Sprintf("integration-shard-%02d (failure, https://github.com/sjawhar/legion/actions/runs/700000%02d)", i, i))
+	}
+	reason := "the merge queue took pull request #42 out at READY's head head at 2026-10-16T05:10:00Z (failed_checks): its merge_group run on group-sha, the commit the queue built for it, failed: " + strings.Join(runs, "; ")
+	applyRefusingNothing(t, pool, readyEngine(""), intake.MergeFailed{Issue: "LEGION-208", Number: 42, Head: "head", Reason: reason})
+	var body string
+	if err := pool.QueryRow(context.Background(), "select payload->>'body' from outbox where kind = 'dispatch_message'").Scan(&body); err != nil {
+		t.Fatalf("read the withdrawal: %v", err)
+	}
+	if length := dispatch.MessageBodyLength(body); length > record.MessagePostLimit || !strings.HasPrefix(body, "READY withdrawn for LEGION-208") || !strings.Contains(body, "cut to fit") {
+		t.Fatalf("withdrawal of %d characters (limit %d) %q, want it within one message, saying it was cut", length, record.MessagePostLimit, body)
+	}
+	if task := startTask(t, pool, claim.RoleImplementer); !strings.Contains(task, runs[len(runs)-1]) {
+		t.Fatalf("the implementer's task %q, want every failing run in it", task)
 	}
 }
 

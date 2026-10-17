@@ -502,6 +502,14 @@ func (g *rig) writes() []action {
 	return out
 }
 
+// requests are every request the runtime made, reads included, in order; the informers' lists and
+// watches are never among them (record).
+func (g *rig) requests() []action {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.actions)
+}
+
 func (g *rig) clearActions() {
 	g.mu.Lock()
 	defer g.mu.Unlock()

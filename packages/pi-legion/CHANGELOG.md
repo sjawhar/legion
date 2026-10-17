@@ -45,13 +45,37 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker` and `legion-architect` skills say how the daemon's submission of an accepted
+  READY's merge ends when someone removes what it armed (LEGION-800). Once the daemon has seen
+  READY's head in the merge queue or armed for auto-merge, it never submits that head again after a
+  removal it did not make: the merge queue taking the pull request out because the merge failed
+  (GitHub's reason `failed_checks`, or an unexplained reason with a check that failed, timed out,
+  failed to start, needed action or went stale on the commit the queue built for its `merge_group`
+  CI, every page of its checks read) sends the issue back to `implementing` with the failing run in
+  the implementer's task and the architect's `checks-red`, and any other removal (a person
+  dequeuing it, whose cancelled runs are no failure, a person or GitHub turning auto-merge off, the
+  queue finding a conflict) ends the submission and reaches the architect as the new
+  `merge-removed` notice, whose row says what to do; GitHub turning auto-merge off on its own reads
+  as GitHub's, though GitHub names the daemon's App. The daemon submits again only after its own
+  disarm that GitHub applied late, which takes that App and the reason its disarm leaves
+  (auto-merge `manually_disabled`, or a `manual` dequeue), and after auto-merge a close turned off,
+  which the reopen at READY's head undid. On a base with a merge queue the daemon enqueues the pull
+  request only once GitHub reports it mergeable, so it never arms auto-merge while a required check
+  still runs.
+  A daemon rolled back to a release before this one refuses two outbox payloads this one writes,
+  a `ready_merge` row's `armed` field and the `merge-removed` notice kind, on every retry (and the
+  notice holds every waiting notice of the project). Before starting the older daemon, run against
+  its database, with `<KEY>` the Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'armed' where kind = 'ready_merge' and payload ? 'armed' and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `update outbox set payload = jsonb_set(payload, '{kind}', '"merge-refused"') where kind = 'notice' and payload->>'kind' = 'merge-removed' and split_part(issue, '-', 1) = '<KEY>';`
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
   allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
   reports it mergeable. An arm or queue entry is not the end: the daemon watches it until GitHub
-  reports the merge at READY's head, and submits again if it disappears while the issue still
-  awaits that READY. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  reports the merge at READY's head (a removal it did not make is the entry above). No role runs
+  `gh pr merge`, a design-gate READY needs nobody to submit it
   once the gate opens, and ordinary READY no longer waits for a required check still running or an
   unfinished disarm. A by-hand READY still waits for its pull request's unfinished disarm, so a
   stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new
@@ -60,6 +84,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   permission and merges the pull request. Its new `merge-stalled` row covers a submission that
   ended because GitHub showed the pull request closed, or at another head, while the record still
   awaited READY's head, and GitHub's last change to it was more than 10 minutes old.
+- Daemon API contract 28 (LEGION-694): `legion state` carries `heldOutboxRows`, every due lifecycle
+  outbox row the daemon holds behind its issue's running lifecycle row — its id, kind, issue, how
+  long it has waited since it came due and the row it waits on — never null, and the plain
+  `legion state` names the held rows on one line beside the pending Dispatch status writes. (This
+  branch took 25, then 26 when LEGION-636 landed at 25, and contract 27 reserved 26 for it; but
+  pi-legion v10.3.5 and v10.3.6 were released declaring 27 without the field, so a daemon at 27
+  would pass their boot gate and they would refuse its state. 26 stays a gap no release declares,
+  and this branch takes 28, the number above the released one.) Install this release with a
+  `legion` built from the same commit.
 - Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
   names the repository's default branch (`--default-branch <name>`), which every branch and
   workspace now starts at, whatever its name (`develop`, `release/v7.1`, `release#stable`); an

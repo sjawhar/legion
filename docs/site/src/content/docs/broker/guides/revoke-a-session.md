@@ -93,8 +93,9 @@ approval, or give it another `owner`, so the sessions that had it are no longer 
 Deleting the secret (`agent-secrets secret delete NAME`), or moving it out of
 `BROKER_SECRETS_PREFIX`, ends access altogether
 ([manage a secret](/legion/broker/guides/manage-a-secret/)). Once the broker rereads the secret, at
-once after a write through `agent-secrets secret` and within about ten minutes after one made any
-other way, it refuses each read of a grant given automatically under the old tags with
+once after a write through `agent-secrets secret` and, after one made any other way, within about ten
+minutes on AWS Secrets Manager (on Google Secret Manager usually as soon, but Google bounds its
+listing's lag only at a few hours, so ask for a reread after a `gcloud` write), it refuses each read of a grant given automatically under the old tags with
 `GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
 change applies to every session that got the secret automatically, where revoking a grant of your
 own session in Dispatch withholds it from that session alone.

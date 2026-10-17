@@ -119,6 +119,69 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 	}
 }
 
+// The grants a hub with a listener of its own renders: the listener connects as one user holding
+// ListenerPermissions, and a session presents no credential and becomes the session user, holding
+// SessionPermissions as the server's no_auth_user. The listener reaches healthy, the session
+// registers through it and receives a send, answers a role message's receipt, and is refused a
+// publish its grant does not hold.
+func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
+	listener := buildListener(t)
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startSplitServer(t, image.Ref)
+			process, port := startListener(t, listener, uri, seed)
+			t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port))
+
+			conn, errs := connect(t, uri, "")
+			received, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
+			require.NoError(t, err)
+			_, err = conn.SubscribeSync(contracts.AgentStreamControlSubject(liveSession))
+			require.NoError(t, err)
+			require.NoError(t, conn.Publish(contracts.AgentStreamFramesSubject(liveSession), []byte(`[]`)))
+			require.NoError(t, conn.Flush())
+
+			postListener(t, process, port, "/v1/interests/subscribe", `{"session_id":"`+liveSession+`","topics":[],"self_subscribed":true}`)
+			postListener(t, process, port, "/v1/messages/send", `{"target_session":"`+liveSession+`","message":"example message"}`)
+			sent, _ := nextEnvelope(t, process, received)
+			require.Equal(t, contracts.AgentSubject(liveSession), sent.Topic)
+			require.Equal(t, "example message", sent.PayloadSummary)
+
+			postListener(t, process, port, "/v1/roles/set", `{"session_id":"`+liveSession+`","role":"`+liveRole+`"}`)
+			postListener(t, process, port, "/v1/messages/publish", `{"topic":"`+contracts.RoleTopicPrefix+liveRole+`","message":"example role message"}`)
+			forwarded, msg := nextEnvelope(t, process, received)
+			require.Equal(t, contracts.RoleTopicPrefix+liveRole, forwarded.Topic)
+			require.NotEmpty(t, msg.Reply, "the role forward carries no subject for its receipt")
+			require.NoError(t, msg.Respond(nil))
+
+			// A session may not publish to another session's inbox directly; only the listener does.
+			other := contracts.AgentSubject("s2")
+			require.NoError(t, conn.Publish(other, nil))
+			requireViolation(t, conn, errs, `Publish to "`+other+`"`)
+			for _, v := range violationsOnceLogged(t, server, other) {
+				require.Equal(t, other, v[2], "the server refused what a grant should allow: %s", v[0])
+			}
+		})
+	}
+}
+
+// startSplitServer runs image with two users: the listener's, holding ListenerPermissions for
+// liveMachineID with a seed, and the session user, holding SessionPermissions with no seed, as the
+// server's no_auth_user. It returns the listener's seed, the server and its client URL.
+func startSplitServer(t *testing.T, image string) (string, natsServer, string) {
+	t.Helper()
+	seed, public := testnats.User(t)
+	_, sessionKey := testnats.User(t)
+	listener, session := core.ListenerPermissions(liveMachineID), core.SessionPermissions()
+	config, err := core.Authorization{Users: []core.User{
+		{Name: liveMachineID, NKey: public, Publish: &listener.Publish, Subscribe: &listener.Subscribe, HasSeed: true},
+		{Name: "example-sessions", NKey: sessionKey, Publish: &session.Publish, Subscribe: &session.Subscribe},
+	}, NoAuthUser: "example-sessions"}.Render(nil)
+	require.NoError(t, err)
+	server, uri := testnats.StartImageConfig(t, image, config, hubServerArgs, true)
+	return seed, server, uri
+}
+
 // buildListener builds packages/envoy/cmd/listener from this branch as Envoy's own jobs do, in the
 // workspace of the repository's root go.work, and returns the binary.
 func buildListener(t *testing.T) string {

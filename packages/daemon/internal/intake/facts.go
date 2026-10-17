@@ -287,6 +287,19 @@ type PullRequestClosed struct {
 
 func (PullRequestClosed) isFact() {}
 
+// MergeFailed is the merge queue taking issue's pull request Number out at Head, the head its
+// accepted READY named, because the merge failed (ghautomerge.MergeFailed), as the issue's
+// ready_merge outbox row read it from GitHub: never decoded from an event. Reason names the removal
+// and each failing run of the merge_group CI on the commit the queue built.
+type MergeFailed struct {
+	Issue  string
+	Number int
+	Head   string
+	Reason string
+}
+
+func (MergeFailed) isFact() {}
+
 // Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
 type Push struct {
 	Repo   string
@@ -474,6 +487,14 @@ func OnCommit(ctx context.Context, fn func()) {
 		panic("intake.OnCommit outside a transaction's commit scope (intake.WithCommitHooks)")
 	}
 	*hooks = append(*hooks, fn)
+}
+
+// CommitScoped reports whether ctx is within a transaction's commit scope (WithCommitHooks): a
+// caller that wants a hook to run once the write it just made has committed can tell a transaction
+// that will commit from a write made outside any scope, which has no commit to wait for.
+func CommitScoped(ctx context.Context) bool {
+	_, ok := ctx.Value(commitHooksKey{}).(*[]func())
+	return ok
 }
 
 // Refusal is a committed API response or JetStream log record, never a transaction failure.

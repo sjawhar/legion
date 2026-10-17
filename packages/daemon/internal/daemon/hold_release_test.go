@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -417,7 +416,7 @@ func (f *failingPositionReader) DispatchPosition(context.Context) (intake.Dispat
 // the current ack floor, and the stream sequence stuck behind it.
 func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 	pool := isolatedOutboxPool(t)
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	log := slog.New(slog.NewTextHandler(&logBuf, nil))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)

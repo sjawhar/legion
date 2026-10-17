@@ -2151,8 +2151,8 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
-Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in the
+broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
@@ -2245,27 +2245,51 @@ secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins, logs services in with
 their Kubernetes tokens, and mints the launcher credentials both issue; and
-`internal/broker/secrets` reads the granted value from AWS Secrets
-Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
+`internal/broker/secrets` is the secret store: `secrets.Store`, the one interface the policy lists
+and describes agent secrets through and a grant's value is read through (`List`, `Describe`,
+`Read`, `ValidName`), with `secrets.AWS` over AWS Secrets Manager and KMS, `secrets.GCP` over
+Google Cloud Secret Manager, and, for local development, `secrets.Local`, an in-memory stand-in
+for the AWS calls.
 
-`internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
-`Set.Evaluate` decides each requested name from the secret's `owner` and `tier` tags alone. What
+`internal/broker/policy` reads the policy from the secret store (`policy.Loader` over a
+`secrets.Store`), and `Set.Evaluate` decides each requested name from the secret's `owner` and
+`tier` tags alone (Secret Manager: annotations, since a label's value cannot hold an email). What
 the tags mean, the evaluation table and whose session counts as an owner's own are the docs site's
 concepts page (`docs/site/src/content/docs/broker/concepts.md`, "Owner and tier"); the IAM the
 broker needs, its log lines and every refusal reason are the operate page beside it
 (`operate.md`); the refresh interval and `BROKER_FAKE_SECRETS_FILE`'s format are the generated
 configuration reference (the comments on `config.Config` and in `cmd/broker/main.go`). What the
-code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive prefix match, on
-`BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
-that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
-Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
-on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load;
-whether a secret has a value is read from the same listing's `SecretVersionsToStages` (a version
-labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
-every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
-gives a secret created without a value no version, as Secrets Manager does); and
+code relies on: `Load` calls `Store.List` on `BROKER_SECRETS_PREFIX` and keeps only the names
+`strings.CutPrefix` finds under it, so a lister that answers more serves and logs nothing outside
+the namespace (`secrets.AWS` lists with `ListSecrets`' `name` filter, a case-sensitive prefix
+match, which `secrets.Local` reproduces; `secrets.GCP` with `ListSecrets`' `name:<id prefix>`
+filter, a case-insensitive substring match, then drops every listed name that does not start with
+the prefix byte for byte before any call for it); a name under the prefix
+maps one-to-one to a request name (`slugPattern`); each store answers one `secrets.Listing` per
+secret with `OnKey`, a function the policy calls only after every name and tag check, so a secret
+refused for those costs no key lookup (AWS: the secret's `KmsKeyId`, an alias on it resolved
+through `kms:ListAliases` at most once per `List` or `Describe`, and a failed lookup fails the
+load; GCP: the latest version's
+`kms_key_version_name`, or the replication policy's key for a secret with no version, already read),
+`HasCurrentValue` (AWS: a version labelled `AWSCURRENT` in the same listing's
+`SecretVersionsToStages`, with no call per secret; GCP: `versions/latest` is `ENABLED`, one
+`GetSecretVersion` per listed secret); a secret scheduled for deletion (AWS `DeletedDate`, GCP
+`expire_time`) is one the store does not hold, left out of `List` and `ErrNotFound` from
+`Describe` and `Read`; and the
+value check comes after every other reason, so a secret refused for a tag or its key is logged for
+that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
 an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
-`cmd/broker` fills with `BROKER_SERVICES`' names. A session's `policy.Requester.Service` is the
+`cmd/broker` fills with `BROKER_SERVICES`' names; and `Loader.secretName` asks `Store.ValidName`
+whether a name can exist in the store at all (Secrets Manager's 512-character limit; Secret
+Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
+`secrets.GCP` counts against Secret Manager's 600-a-minute per-project read quota for every call but
+`AccessSecretVersion` (`TestGCPReadQuotaCost` pins a `List` at 1+N, a `Describe` at 2, a `Read` at 1), so
+`Current.RefreshOne` anchors a reread only when it changed the live answer, and `NewGCPClient` retries
+`UNAVAILABLE` (not `RESOURCE_EXHAUSTED`) on `ListSecrets`, `GetSecret` and `GetSecretVersion`.
+`secrets.GCP` opens Secret Manager under Application Default Credentials (`NewGCPClient`: on GKE,
+Workload Identity for the pod's ServiceAccount, no key file), with the client library's logger
+off, since at debug it prints response bodies, a value among them, and logs a failed call's gRPC
+status code alone, never its message, which can quote a request. A session's `policy.Requester.Service` is the
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
@@ -2277,49 +2301,68 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and ARN, is recorded on every request, and a
+SHA-256 of every served secret's name, owner, tier and source (its ARN, or its Secret Manager
+resource name: `policy.Secret.Source`), is recorded on every request, and a
 live grant is re-checked once it has moved, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
 by slug (not by request name, which orders `A0` and `A_B` the other way), for a full load and a
 single-name merge alike, so an unchanged namespace keeps its version (`TestGoldenDigest` pins the
-bytes). `Loader.LoadOne` reads one name with `DescribeSecret` under the same rules and the same
-refusal line, and
+bytes). `Loader.LoadOne` reads one name with `Store.Describe` (`DescribeSecret`, or `GetSecret` and
+`GetSecretVersion`) under the same rules and the same refusal line, and
 `Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one writer lock
 from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
 so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's
 deadline, and each ticker reload is given the refresh interval before it fails. Each full reload
-that begins (its clock read before its listing is fetched) within five minutes of an anchor
-(`listLag`, how far AWS documents `ListSecrets` may lag) reads that name again alone, so a lagging
+that begins (its clock read before its listing is fetched) within the store's `ListLag` of an anchor
+(five minutes for `secrets.AWS`, how far AWS documents `ListSecrets` may lag; six hours for
+`secrets.GCP`, the bound Google documents for Secret Manager's eventually consistent metadata) reads that name again alone, so a lagging
 listing neither drops a secret the reread served nor brings back one it found gone; a name is
-anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
-the answer differed from what the live set held, so a change no reread caught (a console delete, a
-tag that now refuses the secret) is kept for `listLag` from the reload that caught it rather than
-flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
-a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
-invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no
-secret under the prefix can carry - not `namePattern`'s form, or one whose name under the prefix
-would pass Secrets Manager's 512-character limit - is `policy.ErrNameInvalid` before any AWS call,
+anchored by a reread or a reload's own re-describe that found the answer differed from what the
+live set held, so a change no reread caught (a console delete, a
+tag that now refuses the secret) is kept for `ListLag` from the reload that caught it rather than
+flipping back when the first anchor runs out. `RefreshOne` keeps no record of a reread that matched
+the live set (a name it already served as found, or an absent name it did not serve): that changed
+nothing, and anyone can ask for a reread, so each would otherwise cost every reload in `ListLag` a
+describe under the lock. A name no
+secret under the prefix can carry - not `namePattern`'s form, or one the store's `ValidName`
+refuses - is `policy.ErrNameInvalid` before any store call,
 before the writer lock and before a miss-path reread token (`Loader.secretName`, which
 `Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
 `POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
 `RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
-answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
+answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,
+the key ARN with its region and account (`secrets.AWSKeyARNParts`) or the Cloud KMS key name with the
+project number (`secrets.GCPProject`), the other store's fields omitted.
 
 `agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
-its AWS side in `secret_aws.go`) is the person's side of that reread. Each form reads the broker's
-settings from `AGENT_SECRETS_URL`, loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`,
-else the SDK's default chain) pinned to the key's region, and calls Secrets Manager itself, so IAM
-in that account, not the broker, decides what the person may read or write; it needs no session
-identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
-account than the key's, naming both (`requireAccount`, so a read never lists another account's
-secrets as if they were the agent secrets), and a write also refuses any ARN but
-`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
-in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
-before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
+its AWS side in `secret_aws.go`, its GCP side in `secret_gcp.go`) is the person's side of that
+reread. Each form reads the broker's settings from `AGENT_SECRETS_URL`, whose `store` field
+(`aws-secrets-manager` or absent, `gcp-secret-manager`) chooses the backend
+(`openSecretBackend`), both behind one `secretBackend` interface the forms call through. AWS:
+loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`, else the SDK's default chain)
+pinned to the key's region, and calls Secrets Manager itself, so IAM in that account, not the
+broker, decides what the person may read or write; it needs no session identity. `GetCallerIdentity`
+runs before anything else: every form refuses a sign-in in another account than the key's, naming
+both (`requireAccount`, so a read never lists another account's secrets as if they were the agent
+secrets), and a write also refuses any ARN but `assumed-role/AWSReservedSSO_*/<session>` in that
+account (`requireWriteSignIn`, naming the ARN, in any AWS partition). `--owner me` is that session
+name lowercased; create and retag refuse it before writing unless it matches the broker's email
+rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
+(`gcloud auth application-default login`) and calls Secret Manager itself under
+`cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
+write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
+`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
+the API itself rather than silently reading another project's secrets - the hazard AWS's
+`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
+A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
+service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
+JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
+the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
+lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2412,24 +2455,37 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-`create` writes on the settings' key with both tags
+AWS `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
 secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
-recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. Every write is
+recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
+the secret with automatic replication under the broker's `kms_key_name` and both tags as
+annotations (owner and tier are annotations, never labels, so they carry no GCP label naming
+rules), then adds the value as its first version; `set` adds a version to a secret already held;
+`retag` sends both annotations in one `UpdateSecret` (field mask `annotations`), so a partial
+update can never leave one stale; `delete` sets `expire_time` to now plus 30 days in one
+`UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
+way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
+deletes them for good once it passes, with no further restore - and `restore` clears `expire_time`
+(same field mask, no value) to undo it. Every write is
 followed by the broker's reread of that name (`rereadAfter`): exit 0 when it serves the secret, or
 no longer serves it after a delete; 1 when its answer contradicts the write (a refusal names its
 reason); and 1 when the broker cannot be asked (an unreachable broker, `429 RATE_LIMITED`), saying
-the write stands and is served only from the next reload. `list` (`ListSecrets` with
-`IncludePlannedDeletion`) and `show` never print a
-value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
-plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
-and neither call answers the window it chose: a reader told that date never waits past the purge.
-`earliestPurge` is the one place `DeletedDate` is read. The forms' unit tests run in-process
-against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secret_e2e_test.go`
-runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
+the write stands and is served only from the next reload. `list` (AWS `ListSecrets` with
+`IncludePlannedDeletion`, GCP `ListSecrets` filtered in Go to the prefix) and `show` never print a
+value; for a secret scheduled for deletion they print its deletion moment and, AWS only,
+`earliestPurge` - `DeletedDate` plus 7 days, Secrets Manager's shortest recovery window, since
+`DeletedDate` is when the delete ran and neither call answers the window it chose: a reader told
+that date never waits past the purge (`earliestPurge` is the one place `DeletedDate` is read).
+GCP's deletion moment is `expire_time` itself, the exact purge moment, so `show` and `list` print
+only it, with no separate earliest-purge line. The forms' unit tests run in-process against
+`secrets.Local` and a fake STS and broker (`secret_test.go`) for AWS, and against a fake Secret
+Manager gRPC server and fake Application Default Credentials (`secret_gcp_test.go`) for GCP; AWS's
+`secret_e2e_test.go` runs create, delete, restore and retag against `brokertest.NewRig`'s real
+broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
@@ -2580,8 +2636,15 @@ imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new c
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
-`BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
-`BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
+`BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
+which store the secrets live in, deciding the prefix's form and which key variable is read),
+`BROKER_SECRETS_PREFIX` (required; the namespace: a Secrets Manager name prefix ending in `/`, or
+a Secret Manager one, `projects/<project number>/secrets/<id prefix>-`, the project by its number
+since the API answers resource names with it), `BROKER_SECRETS_KMS_KEY_ARN` (required with the AWS
+store, refused with the GCP one; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
+`BROKER_SECRETS_KMS_KEY_NAME` (required with the GCP store, refused with the AWS one; the
+agent-secrets key's resource name in the `global` location, the only one automatic replication
+takes),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
 entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
 to one name, never a namespace's `default` account (every pod there that names no account runs as
@@ -2623,14 +2686,18 @@ literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
-absolute URL with no path; a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or
-holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed
-elsewhere, and a bare key id names no account); exactly one of
+absolute URL with no path; a `BROKER_SECRETS_STORE` that is neither store's name; with the AWS
+store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or holds white space,
+and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
+bare key id names no account); with the GCP store, a prefix not of its form (a project id in place
+of the number among them) and a key name outside `global`; the other store's key variable set; exactly one of
 `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
-else `method=password`), and reads one thing `config.Load` does not:
+else `method=password`), then which store it built and under what (`secret store store=<store>
+credentials=aws-sdk|application-default|fake secrets file`; the AWS config is loaded only for the
+AWS store or an RDS-form database URL), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
 
@@ -2851,7 +2918,8 @@ cancelled with no cancelled event on its record, the shape an ended enrollment's
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
 `anyone`) for every approver. `Values` releases a
-live grant's values, each read from the secret its request froze (the ARN), re-checking the
+live grant's values, each read from the secret its request froze (its source: the ARN, or the
+Secret Manager resource name), re-checking the
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
 since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
 not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
@@ -2864,7 +2932,7 @@ withheld from the session that its request got automatically is judged as an app
 let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
-(`secrets.AWS.Read` reads both as `ErrNotFound`, and `secrets.Local` answers each as it does).
+(`secrets.AWS.Read` reads both as `ErrNotFound`, `secrets.GCP.Read` reads `NOT_FOUND` and a disabled or destroyed latest version's `FAILED_PRECONDITION` the same way, and `secrets.Local` answers each as it does).
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
@@ -2911,7 +2979,7 @@ its launcher revoked, or a machine login or grant its operator ended through `/v
 `RevokeByApprover` take theirs from their caller, and record it on every row they write
 (`grants.revoked_by`, a cancelled request's `decided_by` and event, each audit row). The granted
 value itself is read fresh from
-`secrets.Reader` on release and never persisted.
+the `secrets.Store` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`

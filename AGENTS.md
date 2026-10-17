@@ -126,7 +126,7 @@ projects:
 - **Tests** — co-located `__tests__/` dirs, Bun test runner (`bun:test`)
 - **Release jobs keep credentials away from dependency code** — in `release.yaml`, `release-envoy-listener.yaml` and `release-envoy-infra.yaml`, a job that holds `contents: write`, `id-token: write`, `attestations: write` or the deploy key runs no dependency code (no `bun`, `go`, `node`, no built binary, no `scripts/` program) and restores no cache (`cache-mode: none`); every checkout sets `persist-credentials: false`; the deploy key reaches only the `env:` of the steps that run `release-push.sh push-tag` or `push-main`; every version is one `release-push.sh version` call in the build job, which ends with the tripwire `release-push.sh no-credential`; a job whose `if:` calls `always()` tests `needs.<job>.result` for every job whose outputs it reads, and a job whose `if:` calls no `always()` has no upstream job that carries an `if:` of its own (GitHub's implicit `success()` would skip it with that job, whatever its condition says). `.github/scripts/check-release-credentials.sh` fails the build otherwise
 - **Point to other guides by plain path** — write another `AGENTS.md` as `` `packages/x/AGENTS.md` ``, never `@packages/x/AGENTS.md`: Oh My Pi and Claude Code read an `@path` outside code as an include and paste the whole file into every session started in this repository, Legion's own phase workers included
-- **This repository is public** — no name from the private infrastructure it deploys into goes in the tree or a commit message: no hostname or tailnet machine name, account id, IAM role, admission-policy name, token audience, secret-store id, bucket or alert channel. A test or example uses a placeholder (`<name>.internal.example` hosts, `example-host-<name>` machines, `example/<service>/<name>` secret ids, `<placeholder>` in a shell example); a value a live script needs is a required operator input the script refuses to start without, never a literal. Legion's own names (the `legion` namespace, `legion-worker`, `legion-daemon`, `LEGSMOKE`), its own issue keys (`LEGION-<n>`) and repository paths are not in this class. The private repository Legion is deployed from and the company that runs it are named nowhere either — not the repository, its Dispatch project key or issue keys, the company or its hostnames, and not in a file or directory name, a pull request title, body, branch name, commit message, comment or review, or a release note: write "the deployment repository" or `<deployment repo>`, and a neutral project key such as `ACME` in a fixture or example. `.github/scripts/check-private-names.sh` fails the build on any text file or path that names either or a private internal host, and `docs.yaml` runs it over the built site too. `.github/scripts/check-pr-text.sh` runs it over a pull request's title, body, branch name, commits (each one's message, author and committer), issue comments, reviews and review comments, in the required lint job at every push and in `pr-title.yaml` when the pull request is edited or a comment, review or review comment is posted, edited or deleted: with this repository's squash settings a commit subject or the title becomes main's subject and the commit messages its body, the generated release notes list merged titles, and a comment is public on the pull request's page once posted. Only a comment from a trusted author counts: one posted as a Bot (an App installed on this repository, such as Legion's role Apps, or github-actions) or by the repository's owner, a member of its organization or a collaborator. Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required. It names a comment it refuses by kind and id (`comment:<id>`, `review:<id>`, `review-comment:<id>`), never its text; delete that comment, since an edit leaves the old text in its edit history
+- **This repository is public** — no name from the private infrastructure it deploys into goes in the tree or a commit message: no hostname or tailnet machine name, account id, IAM role, admission-policy name, token audience, secret-store id, bucket or alert channel. A test or example uses a placeholder (`<name>.internal.example` hosts, `<tailnet>.ts.net`, `<name>.<tailnet>.ts.net`, or `example-tailnet.ts.net` tailnet hosts, `example-host-<name>` machines, `example/<service>/<name>` secret ids, `<placeholder>` in a shell example); a value a live script needs is a required operator input the script refuses to start without, never a literal. Legion's own names (the `legion` namespace, `legion-worker`, `legion-daemon`, `LEGSMOKE`), its own issue keys (`LEGION-<n>`) and repository paths are not in this class. The private repository Legion is deployed from and the company that runs it are named nowhere either — not the repository, its Dispatch project key or issue keys, the company or its hostnames, and not in a file or directory name, a pull request title, body, branch name, commit message, comment or review, or a release note: write "the deployment repository" or `<deployment repo>`, and a neutral project key such as `ACME` in a fixture or example. `.github/scripts/check-private-names.sh` fails the build on any text file or path that names either, and on any text that names a private internal host or a Tailscale MagicDNS host, and `docs.yaml` runs it over the built site too. `.github/scripts/check-pr-text.sh` runs it over a pull request's title, body, branch name, commits (each one's message, author and committer), issue comments, reviews and review comments, in the required lint job at every push and in `pr-title.yaml` when the pull request is edited or a comment, review or review comment is posted, edited or deleted: with this repository's squash settings a commit subject or the title becomes main's subject and the commit messages its body, the generated release notes list merged titles, and a comment is public on the pull request's page once posted. Only a comment from a trusted author counts: one posted as a Bot (an App installed on this repository, such as Legion's role Apps, or github-actions) or by the repository's owner, a member of its organization or a collaborator. Anyone else's is skipped, with a `skipped <kind>:<id>` line naming its author and not its text, because anyone signed in can comment on a public pull request and the check is required. It names a comment it refuses by kind and id (`comment:<id>`, `review:<id>`, `review-comment:<id>`), never its text; delete that comment, since an edit leaves the old text in its edit history
 
 ## Issue Lifecycle
 
@@ -205,23 +205,34 @@ arm it, and the repository's authorized person merges it. A by-hand READY refuse
 the stale arm must be gone before the person-only head is accepted. Ordinary READY does not wait for
 that row. Otherwise, on acceptance the daemon queues a
 `ready_merge` outbox row for READY's head, which submits the merge as the implement App with that head
-as GitHub's expected head: a merge queue enqueues it, a pull request GitHub reports mergeable merges
-at once, a repository that allows auto-merge arms it, and in one that allows neither the row waits
-until GitHub reports the pull request mergeable and then merges it. An arm or queue entry is not the
-end: the row keeps reading GitHub until it reports the pull request merged at READY's head, and
-submits again when the arm or entry is gone while the record still awaits READY (a disarm sent
-before READY that GitHub applied late, a queue that dropped it). The repository's required reviews
-and checks decide when it merges; Legion bypasses none, and a review only a person can give is waited
-for. READY accepts a head whose required checks are still running, and refuses one whose required
-check failed or never reported. The row reads GitHub, then the record, and submits nothing once the
-record shows the issue has left that READY or applied a close; while the record still awaits it, a
-pull request GitHub shows closed or at another head waits for the two to agree. The bound is
-GitHub's own clock: once GitHub's last change to the pull request (its `updatedAt`) is more than 10
-minutes old, a webhook never arrived, so the row ends and tells the architect once
-(`merge-stalled`); routine waits and rate-limit deferrals never count toward it. A reopen at READY's
-head reuses that row and takes it from any worker still holding it, so the merge is never lost. A
-refusal GitHub would repeat on a retry ends the row and is told to the architect once
-(`merge-refused`).
+as GitHub's expected head: a merge queue enqueues it once GitHub reports it mergeable, a pull request
+GitHub reports mergeable merges at once, a repository that allows auto-merge arms it, and in one that
+allows neither the row waits until GitHub reports the pull request mergeable and then merges it. On a
+merge-queue base the row never arms auto-merge: GitHub's enable arms a pull request it does not
+report mergeable rather than enqueueing it, and a required check may judge the arm, so the row waits,
+logged at debug, while a required check still runs. An arm or queue entry is not the end: the row
+keeps reading GitHub until it reports the pull request merged at READY's head, and once it has seen
+the arm or entry it never submits again after a removal it did not make. The merge queue taking the
+pull request out because the merge failed (GitHub's reason `failed_checks`, or an unexplained reason
+with a check that failed, timed out, failed to start, needed action or went stale on the commit the
+queue built for its `merge_group` CI, every page of its checks read) sends the issue from `awaiting_merge` back to
+`implementing`, its implementer told the failing run, as a red head does; any other removal (a person
+dequeuing it, whose cancelled runs are no failure, or a person or GitHub turning auto-merge off) ends
+the row and tells the architect once (`merge-removed`). Two removals are submitted again: the
+implement App's own disarm sent before READY that GitHub applied late (auto-merge
+`manually_disabled`, or a `manual` dequeue, by that App), and auto-merge a close turned off
+(`closed`), which the reopen at READY's head undid. The repository's required reviews and checks
+decide when it merges; Legion bypasses
+none, and a review only a person can give is waited for. READY accepts a head whose required checks
+are still running, and refuses one whose required check failed or never reported. The row reads
+GitHub, then the record, and submits nothing once the record shows the issue has left that READY or
+applied a close; while the record still awaits it, a pull request GitHub shows closed or at another
+head waits for the two to agree. The bound is GitHub's own clock: once GitHub's last change to the
+pull request (its `updatedAt`) is more than 10 minutes old, a webhook never arrived, so the row ends
+and tells the architect once (`merge-stalled`); routine waits and rate-limit deferrals never count
+toward it. A reopen at READY's head reuses that row, starts it over as though nothing had been armed,
+and takes it from any worker still holding it, so the merge is never lost. A refusal GitHub would
+repeat on a retry ends the row and is told to the architect once (`merge-refused`).
 GitHub checks the expected head only when auto-merge is enabled, and arming is right only for an
 awaiting issue's READY head, so the daemon queues an `auto_merge_disable` outbox row on every other
 push or reopen, when a child is set back to
@@ -230,9 +241,9 @@ only while the issue awaits its merge, its READY is not by hand, and the pull re
 merger's READY commit, and otherwise disables auto-merge and removes the merge-queue entry, as the
 implement App; READY is refused (`READY_HEAD_MOVED`) when the head moved past its commit. When a push
 or reopen moves the head past
-the one READY named, the head's own CI turns red before the merge, or the head starts conflicting
-with its base (GitHub computes no merge
-ref for a conflicting head and runs no checks on it at all), the daemon sends the issue back to
+the one READY named, the head's own CI turns red before the merge, the head starts conflicting
+with its base (GitHub computes no merge ref for a conflicting head and runs no checks on it at all),
+or the merge queue fails its merge, the daemon sends the issue back to
 `implementing`, disarms the pull request, posts the READY's withdrawal on the Dispatch issue, and
 publishes it to that role. GitHub's own merge queue (`merge_group`
 trigger) is a repository setting Legion does not modify. No lifecycle labels exist; GitHub issues

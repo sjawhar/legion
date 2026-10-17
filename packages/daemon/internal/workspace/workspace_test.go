@@ -463,7 +463,7 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 
 // assertCredentialedEnvironmentBounded is assertCredentialedEnvironment, but for a command bounded
 // by timeout instead of the runner's slow-command budget (the fetch's clone, bounded by
-// FetchTimeout).
+// FetchTimeout, and the shared clone's clone, bounded by CloneTimeout).
 func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout time.Duration) {
 	t.Helper()
 	if commandEnv(command, "LEGION_PROVISIONING_TOKEN_FILE") == "" {
@@ -550,7 +550,7 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 	if !strings.HasPrefix(clone.Argv[4], filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")+".clone-") {
 		t.Errorf("clone target = %q, want temporary sibling", clone.Argv[4])
 	}
-	assertCredentialedEnvironment(t, clone)
+	assertCredentialedEnvironmentBounded(t, clone, CloneTimeout)
 	fetch := findCall(t, run.Calls(), "jj", "git", "fetch")
 	assertCredentialedEnvironment(t, fetch)
 
@@ -706,6 +706,31 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	provision("WIDGETS-43")
 	if fetched := strings.TrimSpace(runSetup(t, cloneDir, "jj", "log", "-r", "main@origin", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", cloneDir)); fetched != head {
 		t.Errorf("after the next pod's fetch the shared clone's main@origin is %s, want the remote's %s", fetched, head)
+	}
+}
+
+// The shared clone's clone runs under CloneTimeout; every other provisioning command keeps the
+// runner's slow-command budget.
+func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
+	run := newLocalRunner(t)
+	req := feedRequest(t, run, provisionRequest(t))
+	before := len(run.Calls())
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("provision from the feed: %v", err)
+	}
+	clones := 0
+	for _, call := range run.Calls()[before:] {
+		want := testTimeout
+		if isClone(call.Argv) {
+			clones++
+			want = CloneTimeout
+		}
+		if call.Timeout != want {
+			t.Errorf("%q ran under %s, want %s", call.Argv, call.Timeout, want)
+		}
+	}
+	if clones != 1 {
+		t.Errorf("provisioning ran %d shared-clone clones, want 1", clones)
 	}
 }
 

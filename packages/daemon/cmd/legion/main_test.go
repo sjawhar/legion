@@ -1207,6 +1207,51 @@ func TestPlainStateSummarizesThePendingStatusWrites(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told how many lifecycle rows wait behind their
+// issues' running ones and which has waited longest: its kind, id, issue, wait and the row it waits
+// on, on one line. With none held the line says so.
+func TestPlainStateSummarizesTheHeldLifecycleRows(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	for _, tc := range []struct {
+		name, held, want string
+	}{
+		{
+			name: "one",
+			held: `[{"id":802,"kind":"supervise","issue":"LEGION-208","waitedSeconds":150,"waitsOn":801}]`,
+			want: "held lifecycle rows: 1; the longest waiting, supervise row 802 of LEGION-208, has waited 2m30s behind row 801\n",
+		},
+		{
+			name: "several, the longest waiting not the first",
+			held: `[{"id":802,"kind":"supervise","issue":"LEGION-208","waitedSeconds":150,"waitsOn":801},` +
+				`{"id":811,"kind":"workspace_remove","issue":"LEGION-209","waitedSeconds":3725,"waitsOn":810},` +
+				`{"id":812,"kind":"supervise","issue":"LEGION-209","waitedSeconds":3725,"waitsOn":810}]`,
+			want: "held lifecycle rows: 3; the longest waiting, workspace_remove row 811 of LEGION-209, has waited 1h2m5s behind row 810\n",
+		},
+		{name: "none", held: `[]`, want: "held lifecycle rows: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"heldOutboxRows":` + tc.held + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.

@@ -3,11 +3,13 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"unicode/utf16"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -36,6 +38,30 @@ func (e *Engine) queueReadyMerge(ctx context.Context, tx pgx.Tx, issue string, m
 		return nil
 	}
 	return e.enqueue(ctx, tx, issue, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
+}
+
+// mergeFailed sends an issue back to implementing when the merge queue took its pull request out
+// at its READY's head because the merge failed (intake.MergeFailed): the merge is the transition,
+// so a merge the repository refuses moves the issue as a red head does, on the same awaiting_merge
+// row (TriggerChecksRed). The implementer's task and the architect's checks-red notice name the
+// failing merge_group run, and the READY's withdrawal is told with its disarm (withdrawReady). Only
+// an issue still awaiting that READY, on the open pull request the fact names, moves: one that has
+// left it, a by-hand READY, or another READY head changes nothing, and a tree that lingers holds the
+// issue where it is (transition).
+func (e *Engine) mergeFailed(ctx context.Context, tx pgx.Tx, fact intake.MergeFailed) (intake.Result, error) {
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge {
+		return intake.Result{}, err
+	}
+	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
+	if err != nil || merger.MergeNote != "" || merger.HandoffCommit != fact.Head {
+		return intake.Result{}, err
+	}
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil || pr == nil || pr.Number != fact.Number || pr.State != record.PullRequestOpen {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, fact.Reason)
 }
 
 // holdReadyToItsHead holds a merger's READY to the pull request's head before anything of it is
@@ -84,17 +110,40 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 }
 
 // withdrawReady tells the READY's audience (tellReadyAudience) that the READY no longer stands:
-// the head's own CI turned red, it started conflicting with its base, or a push moved it past the
-// head READY named (reason, which names the cause; classify.RedWithdrawsReady,
-// classify.ConflictWithdrawsReady, withdrawMovedReady), so the issue left awaiting_merge for
-// implementing, and a new READY follows once the work comes back through testing and review. It
-// queues the disarm of the merge armed for the READY (disarm) before it tells anyone, so no
-// withdrawal leaves that merge armed. The architect hears it through its checks-red notice.
+// the head's own CI turned red, it started conflicting with its base, a push moved it past the
+// head READY named, or the merge queue failed its merge (reason, which names the cause;
+// classify.RedWithdrawsReady, classify.ConflictWithdrawsReady, withdrawMovedReady, mergeFailed), so
+// the issue left awaiting_merge for implementing, and a new READY follows once the work comes back
+// through testing and review. It queues the disarm of the merge armed for the READY (disarm) before
+// it tells anyone, so no withdrawal leaves that merge armed. The architect hears it through its
+// checks-red notice.
 func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reason string) error {
 	if err := e.disarm(ctx, tx, issue.Key, pr); err != nil {
 		return err
 	}
-	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
+	return e.tellReadyAudience(ctx, tx, issue, withdrawal(issue.Key, pr.Number, reason))
+}
+
+// withdrawal is the READY's withdrawal for issue's pull request number, for reason, within the one
+// Dispatch message the outbox can post (record.MessagePostLimit, in UTF-16 units as Dispatch counts
+// them): a reason that would carry it past that, a merge group's many failing runs say, is cut, and
+// the withdrawal says so. The implementer's task and the architect's checks-red carry it whole.
+func withdrawal(issue string, number int, reason string) string {
+	text := func(reason string) string {
+		return fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue, number, reason)
+	}
+	body := text(reason)
+	if dispatch.MessageBodyLength(body) <= record.MessagePostLimit {
+		return body
+	}
+	const cut = " … (cut to fit one Dispatch message; the implementer's task and the architect's checks-red carry it whole)"
+	over := dispatch.MessageBodyLength(text(reason+cut)) - record.MessagePostLimit
+	runes := []rune(reason)
+	for over > 0 && len(runes) > 0 {
+		over -= utf16.RuneLen(runes[len(runes)-1])
+		runes = runes[:len(runes)-1]
+	}
+	return text(string(runes) + cut)
 }
 
 // headMoved answers a move of pr's head: a push, or a reopen (reopened), which can carry a head

@@ -144,6 +144,24 @@ func TestOnCommitRunsOnlyAfterTheFactCommits(t *testing.T) {
 	}
 }
 
+// CommitScoped is true only on a context WithCommitHooks scoped, so a write that wakes a reader
+// on commit can tell a transaction that will commit from one made outside any scope.
+func TestCommitScopedIsTrueOnlyWithinWithCommitHooks(t *testing.T) {
+	ctx := context.Background()
+	if CommitScoped(ctx) {
+		t.Fatal("CommitScoped is true outside WithCommitHooks")
+	}
+	scoped, _ := WithCommitHooks(ctx)
+	if !CommitScoped(scoped) {
+		t.Fatal("CommitScoped is false within WithCommitHooks")
+	}
+	child, cancel := context.WithCancel(scoped)
+	defer cancel()
+	if !CommitScoped(child) {
+		t.Fatal("CommitScoped is false on a child of a scoped context")
+	}
+}
+
 func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	cases := []struct {
