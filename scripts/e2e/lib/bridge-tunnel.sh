@@ -185,12 +185,13 @@ bridge_stop() {
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local i pod_read svc_read
-  # 600 iterations at 2s: confirmed live, 2026-10-17, that this bridge pod's own termination (on
-  # a Node-Auto-Provisioning node this run's only pod occupied, so NAP may be reclaiming the whole
-  # node rather than just the pod) can run well past 300s and even past the 20-minute total this
-  # script's earlier 150-iteration budget plus its post-teardown settle delay gave it, while still
-  # finishing well under this one's 20-minute ceiling once it was given room to.
-  for i in $(seq 1 600); do
+  # 150 iterations at 2s (5 minutes): generous over the pod's ordinary termination time (a lone
+  # chisel pod deleted by hand elsewhere on this cluster took under 6s). A run that still sees it
+  # after 5 minutes is almost always this devbox's own intermittent connectivity to the cluster
+  # (confirmed live, 2026-10-17: the same run's operator gcloud auth plugin failed mid-test with
+  # "internal_failure", a transient Google-side hiccup, not a slow pod) — worth surfacing, never
+  # worth an unbounded wait, since namespace-clean catches a real leftover either way.
+  for i in $(seq 1 150); do
     pod_read=$(op get pod "$bridge_name" -o name 2>&1)
     svc_read=$(op get service "$bridge_name" -o name 2>&1)
     case "$pod_read" in *NotFound*)
@@ -198,5 +199,5 @@ bridge_stop() {
     esac
     sleep 2
   done
-  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 1200s: pod: $pod_read; service: $svc_read; it may remain"
+  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 300s: pod: $pod_read; service: $svc_read; it may remain"
 }

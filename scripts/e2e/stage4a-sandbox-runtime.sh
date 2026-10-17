@@ -173,28 +173,25 @@ cleanup() {
   teardown
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
-  # namespace_clean's snapshot is a LIST by label, not a GET by name; on this cluster a single
-  # empty LIST, moments later, has not predicted what namespace_clean's own next LIST of the exact
-  # same query sees — confirmed live, 2026-10-17, five separate runs, the identical query flipping
-  # between empty and still-showing-the-bridge-pod across consecutive calls a few seconds apart,
-  # consistent with a load-balanced API server whose replicas disagree (one's watch cache caught
-  # up, another's has not) rather than a single slow object. No fixed wait fixes that: which
-  # replica answers is luck per call. Instead this requires five consecutive empty reads, 2s
-  # apart, before trusting the object is gone everywhere, not just on whichever replica answered
-  # last; a non-empty read resets the count. Never a retry loop around namespace_clean itself,
-  # shared with Stage 4b.
+  # namespace_clean's snapshot is a LIST by label; a brief settle here absorbs the ordinary gap
+  # between a delete landing and the next LIST reflecting it. Three consecutive empty reads, 2s
+  # apart, before trusting it — a non-empty read resets the count. The one run that still failed
+  # namespace-clean after this (2026-10-17) had its operator gcloud auth plugin fail mid-test with
+  # a transient "internal_failure" — this devbox's own intermittent reach to the cluster, not
+  # something a longer local wait fixes. Never a retry loop around namespace_clean itself, shared
+  # with Stage 4b.
   local settle_deadline settle_left settle_streak=0
-  settle_deadline=$(($(date +%s) + 600))
+  settle_deadline=$(($(date +%s) + 60))
   while :; do
     settle_left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>/dev/null) || settle_left=unknown
     if [ -z "$settle_left" ]; then
       settle_streak=$((settle_streak + 1))
-      [ "$settle_streak" -lt 5 ] || break
+      [ "$settle_streak" -lt 3 ] || break
     else
       settle_streak=0
     fi
     [ "$(date +%s)" -lt "$settle_deadline" ] || {
-      echo "   [operator] namespace-clean's own listing still shows $settle_left after 10 extra minutes past teardown; proceeding to the snapshot anyway"
+      echo "   [operator] namespace-clean's own listing still shows $settle_left after 60s; proceeding to the snapshot anyway"
       break
     }
     sleep 2
