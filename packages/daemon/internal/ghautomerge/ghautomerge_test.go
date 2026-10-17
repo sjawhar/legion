@@ -450,11 +450,10 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		// many such reads Submit makes.
 		failPages bool
 		pages     int
-		// failed names what MergeFailed must name; removed what Removed must; wait the wait, and
-		// whether it is routine; resubmit is a second submission.
+		// failed names what MergeFailed must name; removed what Removed must; wait the wait, merging
+		// (GitHub's own merge, routine) or disappeared (not routine); resubmit is a second submission.
 		failed, removed []string
 		wait            string
-		routine         bool
 		resubmit        bool
 	}{
 		{name: "a person dequeues it while its merge group runs", queue: true, timeline: []string{enqueued, dequeued("manual", "a-maintainer", cancelled)},
@@ -472,7 +471,7 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		{name: "the merge queue finds a conflict in a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merge_conflict", "github-merge-queue", pagedChecks)},
 			failPages: true, removed: []string{"github-merge-queue", "merge queue", "merge_conflict"}},
 		{name: "the merge queue takes it out to merge a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", pagedChecks)},
-			failPages: true, wait: "disappeared", routine: true},
+			failPages: true, wait: "merging"},
 		{name: "the merge queue removes it for failed_checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", red)},
 			failed: []string{"#42", "head", "failed_checks", "group-sha", "integration (timed_out, " + failedRun + ")"}},
 		{name: "the merge queue removes it for an unexplained reason on a red merge group", queue: true, timeline: []string{enqueued, dequeued(unexplained, "github-merge-queue", red)},
@@ -496,7 +495,7 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			removed: []string{"a-maintainer", "merge queue", "manual"}},
 		{name: "a person's removal before the last arm, then the daemon's own", timeline: []string{enabled, disabled("manually_disabled", "a-maintainer"), enabled, disabled("manually_disabled", "legion-implementer")}, resubmit: true},
 		{name: "a close a reopen at READY's head undid", timeline: []string{enabled, disabled("closed", "a-maintainer")}, resubmit: true},
-		{name: "the merge queue takes it out to merge it", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", green)}, wait: "disappeared", routine: true},
+		{name: "the merge queue takes it out to merge it", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", green)}, wait: "merging"},
 		{name: "the timeline names no removal since the arm", queue: true, timeline: []string{dequeued("failed_checks", "github-merge-queue", red), enqueued}, wait: "disappeared"},
 		{name: "the timeline names no arm or removal at all", wait: "disappeared"},
 	} {
@@ -513,7 +512,9 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
 			var failed *MergeFailed
 			var removed *Removed
+			var merging *Merging
 			var disappeared *Disappeared
+			var routine interface{ Routine() bool }
 			var armed *Armed
 			switch {
 			case tc.failed != nil:
@@ -542,9 +543,16 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 						t.Fatalf("Removed %q, want it to name %q", err, want)
 					}
 				}
-			case tc.wait != "":
-				if !errors.As(err, &disappeared) || !errors.Is(err, wait.ErrWaiting) || disappeared.Routine() != tc.routine {
-					t.Fatalf("Submit = %v (%T), want a Disappeared wait, routine %t", err, err, tc.routine)
+				if (removed.Detail == "") != removed.Queue {
+					t.Fatalf("Removed %q with Detail %q, want GitHub's sentence in Detail for an auto-merge disable and none for a queue removal", err, removed.Detail)
+				}
+			case tc.wait == "merging":
+				if !errors.As(err, &merging) || !errors.Is(err, wait.ErrWaiting) || !merging.Routine() {
+					t.Fatalf("Submit = %v (%T), want a routine Merging wait", err, err)
+				}
+			case tc.wait == "disappeared":
+				if !errors.As(err, &disappeared) || !errors.Is(err, wait.ErrWaiting) || errors.As(err, &routine) && routine.Routine() {
+					t.Fatalf("Submit = %v (%T), want a Disappeared wait that is not routine", err, err)
 				}
 			case tc.resubmit:
 				if !errors.As(err, &armed) {

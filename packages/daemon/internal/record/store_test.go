@@ -590,9 +590,9 @@ func TestRenewOutboxLeaseRenewsOnlyUnderItsToken(t *testing.T) {
 }
 
 // A ready_merge row records that it saw READY's head armed (ReadyMerge.Armed) only under its own
-// lease: a wrong token replaces nothing. A queue of the same issue and head, a reopen at READY's
-// head, starts the row over unarmed and takes it from the worker holding it, whose replacement then
-// touches nothing.
+// lease: a wrong token replaces nothing, and a payload of another kind is an error, never taken for a
+// lease lost. A queue of the same issue and head, a reopen at READY's head, starts the row over
+// unarmed and takes it from the worker holding it, whose replacement then touches nothing.
 func TestAREADYMergeRowsArmIsItsLeaseHoldersAndAReopenStartsItOver(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -621,6 +621,10 @@ func TestAREADYMergeRowsArmIsItsLeaseHoldersAndAReopenStartsItOver(t *testing.T)
 		must(t, err)
 		if replaced || armed(tx) {
 			t.Fatalf("a replacement under a wrong token = %v, armed %v; want neither", replaced, armed(tx))
+		}
+		replaced, err = records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, AutoMergeDisable{Number: 42})
+		if err == nil || replaced || armed(tx) {
+			t.Fatalf("a replacement of another kind under the lease's token = %v, %v, armed %v; want an error and nothing replaced", replaced, err, armed(tx))
 		}
 		replaced, err = records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, seen)
 		must(t, err)

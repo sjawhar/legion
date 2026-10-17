@@ -912,12 +912,21 @@ func (s *Postgres) ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64
 	if err != nil {
 		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
 	}
-	tag, err := tx.Exec(ctx, "update outbox set payload = $4 where id = $1 and lease_token = $2 and kind = $3",
-		id, leaseToken, string(payload.OutboxKind()), string(encoded))
+	var kind string
+	err = tx.QueryRow(ctx, "select kind from outbox where id = $1 and lease_token = $2 for update", id, leaseToken).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
 	}
-	return tag.RowsAffected() == 1, nil
+	if kind != string(payload.OutboxKind()) {
+		return false, fmt.Errorf("replace the payload of outbox row %d: the row is %s, and the payload %s", id, kind, payload.OutboxKind())
+	}
+	if _, err := tx.Exec(ctx, "update outbox set payload = $2 where id = $1", id, string(encoded)); err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	return true, nil
 }
 
 // RoleRun reads one role's run of an issue generation as the store holds it. RoleRuns owns the

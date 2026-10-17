@@ -71,16 +71,16 @@ const moreChecks = `query MergeGroupContexts($owner: String!, $name: String!, $o
 // removal is what took pull request number of repo's arm or merge-queue entry away at READY's
 // head, after Submit saw one there, as GitHub's timeline records it: the removals since the last
 // arm or entry. The merge queue's removal for the merge itself is a wait for GitHub to show the
-// merge (Disappeared, Merging), whatever else the timeline shows, and reads no check. A queue
-// removal whose reason leaves it to the checks on the commit the queue built
-// (timelineItem.judgedByChecks) is judged on every page of them (mergeGroupCommit.checks): one for
-// failed_checks, or for an unexplained reason with a run that failed there (failingRuns), is
-// MergeFailed. Two removals restart the submission, and removal answers nil when they are all there
-// is, for Submit to submit again (timelineItem.restarts): the daemon's own disarm landing late, and
-// auto-merge a close turned off, which the pull request's reopen at READY's head undid. Any other is
-// Removed, the latest of them: GitHub's own (Removed.ByGitHub) when it names the account the token
-// acts as, whose own disarm leaves no other reason. A timeline that shows no removal since the last
-// arm is behind the read of the pull request (Disappeared).
+// merge (Merging), whatever else the timeline shows, and reads no check. A queue removal whose
+// reason leaves it to the checks on the commit the queue built (timelineItem.judgedByChecks) is
+// judged on every page of them (mergeGroupCommit.checks): one for failed_checks, or for an
+// unexplained reason with a run that failed there (failingRuns), is MergeFailed. Two removals
+// restart the submission, and removal answers nil when they are all there is, for Submit to submit
+// again (timelineItem.restarts): the daemon's own disarm landing late, and auto-merge a close turned
+// off, which the pull request's reopen at READY's head undid. Any other is Removed, the latest of
+// them: GitHub's own (Removed.ByGitHub) when it names the account the token acts as, whose own
+// disarm leaves no other reason. A timeline that shows no removal since the last arm is behind the
+// read of the pull request (Disappeared).
 func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string) error {
 	var answer struct {
 		Viewer struct {
@@ -110,7 +110,7 @@ func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Reposito
 	removed := items[since:]
 	for _, item := range removed {
 		if item.Type == "RemovedFromMergeQueueEvent" && item.Reason == "merged" {
-			return &Disappeared{Number: number, Repo: repo, Head: head, Merging: true}
+			return &Merging{Number: number, Repo: repo, Head: head}
 		}
 	}
 	self := strings.TrimSuffix(answer.Viewer.Login, "[bot]")
@@ -141,7 +141,7 @@ func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Reposito
 		return &MergeFailed{Number: number, Head: head, Reason: failed.Reason, Commit: commit,
 			Runs: runs, Event: failed.ID, At: failed.CreatedAt}
 	case other != nil:
-		return &Removed{Number: number, Head: head, Actor: other.actor(), Reason: other.removalReason(), Detail: other.Reason,
+		return &Removed{Number: number, Head: head, Actor: other.actor(), Reason: other.removalReason(), Detail: other.detail(),
 			Queue: other.Type == "RemovedFromMergeQueueEvent", ByGitHub: self != "" && other.actor() == self, At: other.CreatedAt}
 	case since == len(items):
 		return &Disappeared{Number: number, Repo: repo, Head: head}
@@ -213,6 +213,15 @@ func (t *timelineItem) removalReason() string {
 		return t.ReasonCode
 	}
 	return t.Reason
+}
+
+// detail is GitHub's sentence for an auto-merge turned off, and none for a queue removal, whose
+// reason is all GitHub says of it.
+func (t *timelineItem) detail() string {
+	if t.Type == "AutoMergeDisabledEvent" {
+		return t.Reason
+	}
+	return ""
 }
 
 // failingRuns is each of checks, every check on the commit the merge queue built for a queue

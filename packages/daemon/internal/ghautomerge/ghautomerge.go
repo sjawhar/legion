@@ -353,9 +353,10 @@ func (f *MergeFailed) Error() string {
 // off, at READY's Head without a merge, not because its merge failed (MergeFailed) and not by the
 // submitting App's own disarm: by a person, Actor, the account GitHub names ("" when it names none),
 // or by GitHub on its own (ByGitHub), which names the App that submitted the merge as Actor of its
-// own disables (a merge method the repository blocks, a base switch). Reason is GitHub's reason
-// (for auto-merge, its reason code, and Detail its sentence), and At when it was made. The
-// submission is over: the removal stands, and the row ends rather than undo it.
+// own disables (a merge method the repository blocks, a base switch). Reason is GitHub's reason: a
+// queue removal's, or an auto-merge disable's reason code, with Detail its sentence for it (none for
+// a queue removal). At is when it was made. The submission is over: the removal stands, and the row
+// ends rather than undo it.
 type Removed struct {
 	Number                      int
 	Head, Actor, Reason, Detail string
@@ -380,32 +381,41 @@ func (r *Removed) Error() string {
 	return text + " without merging it: the daemon submits it no further, and the issue stays in awaiting_merge"
 }
 
+// Merging is the merge queue having taken pull request Number of Repo out at READY's Head to merge
+// it, after the row saw it queued there, while GitHub has yet to show it merged. It is a wait
+// (wait.ErrWaiting) on GitHub's own merge.
+type Merging struct {
+	Number int
+	Repo   ghrepo.Repository
+	Head   string
+}
+
+func (m *Merging) Error() string {
+	return fmt.Sprintf("the merge queue took pull request #%d of %s out at READY's head %s to merge it: the daemon waits for GitHub to show it merged",
+		m.Number, m.Repo, m.Head)
+}
+
+func (m *Merging) Is(target error) bool { return target == wait.ErrWaiting }
+
+// Routine is always true: only GitHub's own merge holds the wait back.
+func (m *Merging) Routine() bool { return true }
+
 // Disappeared is pull request Number of Repo open at READY's Head with nothing armed after the row
-// saw it armed or queued there, while GitHub's timeline names no removal since that ends the
-// submission: none at all yet, GitHub's read of the pull request ahead of its timeline, or the merge
-// queue's removal for the merge itself (Merging), which GitHub has yet to show as merged. It is a
-// wait (wait.ErrWaiting); only the merge's is routine, and a removal the timeline never explains
-// waits on someone.
+// saw it armed or queued there, while GitHub's timeline names no removal since: none at all yet, or
+// GitHub's read of the pull request ahead of its timeline. It is a wait (wait.ErrWaiting), and not a
+// routine one: a removal the timeline never explains waits on someone.
 type Disappeared struct {
-	Number  int
-	Repo    ghrepo.Repository
-	Head    string
-	Merging bool
+	Number int
+	Repo   ghrepo.Repository
+	Head   string
 }
 
 func (d *Disappeared) Error() string {
-	if d.Merging {
-		return fmt.Sprintf("the merge queue took pull request #%d of %s out at READY's head %s to merge it: the daemon waits for GitHub to show it merged",
-			d.Number, d.Repo, d.Head)
-	}
 	return fmt.Sprintf("pull request #%d of %s is no longer armed or queued at READY's head %s, and its timeline names no removal since: the daemon waits for GitHub to record one",
 		d.Number, d.Repo, d.Head)
 }
 
 func (d *Disappeared) Is(target error) bool { return target == wait.ErrWaiting }
-
-// Routine says whether only GitHub's own merge holds the wait back.
-func (d *Disappeared) Routine() bool { return d.Merging }
 
 // submission is the mutation Submit sends for a pull request, what it asks GitHub to do, and
 // whether GitHub's acceptance of it merges the pull request now.

@@ -430,7 +430,8 @@ type Store interface {
 	// ReplaceOutboxPayload replaces row id's payload with payload while leaseToken holds it: what a
 	// running row learned that its next run must know (a ready_merge row having seen READY's head
 	// armed, ReadyMerge.Armed). False is a lease no longer the caller's, a row another worker or a
-	// reopen's queue now holds, which keeps its own payload. Payload must be of the row's kind.
+	// reopen's queue now holds, which keeps its own payload. A payload of another kind than the row
+	// it holds is an error, and replaces nothing.
 	ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, payload OutboxPayload) (bool, error)
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
 	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
