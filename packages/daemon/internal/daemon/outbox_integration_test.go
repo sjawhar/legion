@@ -81,49 +81,56 @@ func TestOutboxRetryBacksOffFailedEffect(t *testing.T) {
 	}
 }
 
+// The boot sweep alone recovers what a restart finds in the outbox, with no wake and no poll: a due
+// row no one leased, and a row a runner that died mid-run left under a lease nobody holds, run as
+// soon as the lease has lapsed; a row due later runs when its moment comes on the clock, and the
+// sweep's tick before then leaves it alone.
 func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	now := time.Now().UTC()
-	// Two issues: one issue's status rows run one at a time, so a second row of the same issue would
-	// wait for the leased one by design.
+	clock := microClock()
+	now := clock.Now()
+	// Three issues: one issue's status rows run one at a time by design, so each row is on a lane
+	// of its own and none waits for another.
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
-
-	var claimed record.OutboxRow
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		rows, err := records.ClaimDue(context.Background(), tx, "LEGION", now, 1, outboxLease)
-		if err != nil {
-			return err
-		}
-		if len(rows) != 1 {
-			return errors.New("expected one row to be leased before restart")
-		}
-		claimed = rows[0]
-		return nil
-	}); err != nil {
-		t.Fatalf("lease row before restart: %v", err)
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now.Add(time.Hour)))
+	if _, err := pool.Exec(context.Background(), "update outbox set lease_token = 'a-runner-that-died', lease_until = $2 where issue = $1",
+		"LEGION-209", now.Add(-time.Second)); err != nil {
+		t.Fatalf("leave a lapsed lease on LEGION-209's row: %v", err)
 	}
 
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
-	restarted := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: func() time.Time { return now }}
-	if err := restarted.RunOnce(context.Background()); err != nil {
-		t.Fatalf("drain due row after restart: %v", err)
-	}
-	if got := client.count(); got != 1 {
-		t.Fatalf("writes before lease expiry = %d, want one due row", got)
+	restarted := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
+	runLanes(t, restarted, clock)
+
+	testwait.Eventually(t, "the due row and the lapsed lease's row ran on the boot sweep", func() bool {
+		return client.count() == 2 && outboxRows(t, pool) == 1
+	})
+	testwait.Eventually(t, "the later row's lane armed its wait for the hour", func() bool {
+		live, _ := clock.armed(time.Hour)
+		return live == 1
+	})
+
+	// The sweep's tick before the hour wakes the later row's lane, which finds nothing due and arms
+	// its wait again; the row stays.
+	fireSweep(t, clock)
+	testwait.Eventually(t, "the sweep ran and the later row's lane looked again", func() bool {
+		live, total := clock.armed(time.Hour)
+		_, sweeps := clock.armed(outboxLease)
+		return live == 1 && total == 2 && sweeps == 2
+	})
+	if got, remaining := client.count(), outboxRows(t, pool); got != 2 || remaining != 1 {
+		t.Fatalf("after the sweep before the hour: writes = %d with %d rows left, want two and the later row", got, remaining)
 	}
 
-	restarted.now = func() time.Time { return claimed.LeaseUntil.Add(time.Nanosecond) }
-	if err := restarted.RunOnce(context.Background()); err != nil {
-		t.Fatalf("drain expired lease after restart: %v", err)
+	clock.advance(time.Hour)
+	if fired := clock.fire(time.Hour); fired != 1 {
+		t.Fatalf("hour timers fired = %d, want the later row's lane's", fired)
 	}
-	if got := client.count(); got != 2 {
-		t.Fatalf("writes after lease expiry = %d, want both rows", got)
-	}
-	if remaining := outboxRows(t, pool); remaining != 0 {
-		t.Fatalf("outbox rows = %d, want both completed", remaining)
-	}
+	testwait.Eventually(t, "the later row ran at its hour", func() bool {
+		return client.count() == 3 && outboxRows(t, pool) == 0
+	})
 }
 
 func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
@@ -132,33 +139,8 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 	now := time.Now().UTC()
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
 
-	var first, second record.OutboxRow
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		rows, err := records.ClaimDue(context.Background(), tx, "LEGION", now, 1, outboxLease)
-		if err != nil {
-			return err
-		}
-		if len(rows) != 1 {
-			return errors.New("expected first lease")
-		}
-		first = rows[0]
-		return nil
-	}); err != nil {
-		t.Fatalf("claim first lease: %v", err)
-	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		rows, err := records.ClaimDue(context.Background(), tx, "LEGION", first.LeaseUntil.Add(time.Nanosecond), 1, outboxLease)
-		if err != nil {
-			return err
-		}
-		if len(rows) != 1 {
-			return errors.New("expected replacement lease")
-		}
-		second = rows[0]
-		return nil
-	}); err != nil {
-		t.Fatalf("claim replacement lease: %v", err)
-	}
+	first := claimDueOutboxRow(t, pool, records, now)
+	second := claimDueOutboxRow(t, pool, records, first.LeaseUntil.Add(time.Nanosecond))
 	if first.LeaseToken == second.LeaseToken {
 		t.Fatal("replacement lease reused the stale token")
 	}
@@ -170,6 +152,34 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 	if remaining := outboxRows(t, pool); remaining != 1 {
 		t.Fatalf("outbox rows after stale finish = %d, want one row under replacement lease", remaining)
 	}
+}
+
+// claimDueOutboxRow leases the first row of the project due at now, as a lane does: listed, then
+// claimed by its id.
+func claimDueOutboxRow(t *testing.T, pool *pgxpool.Pool, records record.Store, now time.Time) record.OutboxRow {
+	t.Helper()
+	var claimed record.OutboxRow
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		due, err := records.DueRows(context.Background(), tx, "LEGION", "", nil, now)
+		if err != nil {
+			return err
+		}
+		if len(due) == 0 {
+			return errors.New("no row is due")
+		}
+		row, ok, err := records.ClaimRow(context.Background(), tx, due[0].ID, now, outboxLease)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("row %d was not claimed", due[0].ID)
+		}
+		claimed = row
+		return nil
+	}); err != nil {
+		t.Fatalf("claim the due outbox row: %v", err)
+	}
+	return claimed
 }
 
 func mustOutboxRow(t *testing.T, issue string, payload record.OutboxPayload, now time.Time) record.OutboxRow {
@@ -467,63 +477,71 @@ func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, er
 	return dispatch.Approval{}, nil
 }
 
-// A failed transaction is one tick's failure, never the runner's end: a Postgres restart drops the
-// pool's connections, and the outbox has to keep draining once they are back. A claim that fails is
-// tried again on the next tick; a row whose finish fails keeps its lease, and runs again once the
-// lease expires.
+// A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
+// pool's connections, and the outbox has to keep draining once they are back. A claim that fails
+// leaves the row due for the sweep, whose next tick runs it; a row whose finish fails keeps its
+// lease, under which no sweep runs it, and the sweep after the lease lapses runs it again. The
+// row's effect is written once before the failed finish and once after.
 func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := &flakyOutboxStore{Store: record.NewStore(), claimFailures: 1, finishFailures: 1}
-	var mu sync.Mutex
-	now := time.Now().UTC()
-	clock := func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		return now
-	}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	clock := microClock()
 	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, now: clock, log: quietLogger()}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		runner.Run(ctx)
-		close(done)
-	}()
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, dispatch: client, log: quietLogger()}
+	runLanes(t, runner, clock)
 
+	// This outbox has no workflow writing through projectRecords, so the test wakes the lane the
+	// way the committed write would.
+	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, clock.Now())
+	enqueueOutbox(t, pool, records, row)
+	runner.wake(row.Issue, row.Kind)
+	testwait.Eventually(t, "the claim failed", func() bool { return records.failedClaims() == 1 })
+	if got := client.count(); got != 0 {
+		t.Fatalf("status writes after the failed claim = %d, want none", got)
+	}
+
+	fireSweep(t, clock)
 	testwait.Eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
-	mu.Lock()
-	now = now.Add(outboxLease + time.Second)
-	mu.Unlock()
-	testwait.Eventually(t, "the row finished after its lease expired", func() bool { return outboxRows(t, pool) == 0 })
-	cancel()
-	<-done
+
+	// Under the lease the failed finish left, the row is no one's to run: the sweep before the
+	// lapse wakes its lane, which finds nothing due and exits.
+	fireSweep(t, clock)
+	testwait.Eventually(t, "the lane exited with the row under its lapsed run's lease", func() bool { return liveLanes(runner) == 0 })
+	if got, remaining := client.count(), outboxRows(t, pool); got != 1 || remaining != 1 {
+		t.Fatalf("before the lease lapsed: writes = %d with %d rows left, want one and the leased row", got, remaining)
+	}
+
+	clock.advance(outboxLease + time.Second)
+	fireSweep(t, clock)
+	testwait.Eventually(t, "the row finished after its lease lapsed", func() bool { return outboxRows(t, pool) == 0 })
 	if got := client.count(); got != 2 {
-		t.Fatalf("status writes = %d, want the first run and the one after the lease expired", got)
+		t.Fatalf("status writes = %d, want the first run and the one after the lease lapsed", got)
 	}
 }
 
-// flakyOutboxStore fails the first claimFailures ClaimDue and finishFailures FinishOutbox calls the
+// flakyOutboxStore fails the first claimFailures ClaimRow and finishFailures FinishOutbox calls the
 // way a dropped connection does, and passes every later call to the real store.
 type flakyOutboxStore struct {
 	record.Store
 	mu             sync.Mutex
 	claimFailures  int
 	finishFailures int
+	claimsFailed   int
 	finishesFailed int
 }
 
-func (s *flakyOutboxStore) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]record.OutboxRow, error) {
+func (s *flakyOutboxStore) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.Time, leaseFor time.Duration) (record.OutboxRow, bool, error) {
 	s.mu.Lock()
 	fail := s.claimFailures > 0
 	if fail {
 		s.claimFailures--
+		s.claimsFailed++
 	}
 	s.mu.Unlock()
 	if fail {
-		return nil, errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
+		return record.OutboxRow{}, false, errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
 	}
-	return s.Store.ClaimDue(ctx, tx, project, now, limit, leaseFor)
+	return s.Store.ClaimRow(ctx, tx, id, now, leaseFor)
 }
 
 func (s *flakyOutboxStore) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
@@ -531,6 +549,12 @@ func (s *flakyOutboxStore) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64
 		return err
 	}
 	return s.Store.FinishOutbox(ctx, tx, id, leaseToken)
+}
+
+func (s *flakyOutboxStore) failedClaims() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.claimsFailed
 }
 
 func (s *flakyOutboxStore) FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {

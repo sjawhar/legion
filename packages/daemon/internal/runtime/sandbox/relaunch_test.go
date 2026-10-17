@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -1496,16 +1497,25 @@ func supervisedSandboxMachine(
 }
 
 // restoredSandboxMachine is supervisedSandboxMachine over c, a claim as a daemon reads it back from
-// its store at boot, on the rig's runtime as it is now.
+// its store at boot, on the rig's runtime as it is now; its log is discarded.
 func restoredSandboxMachine(
 	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim,
+) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
+	t.Helper()
+	return loggedSandboxMachine(t, g, spec, c, io.Discard)
+}
+
+// loggedSandboxMachine is restoredSandboxMachine with the machine's log written to w, for a test
+// that reads what the machine says of a launch.
+func loggedSandboxMachine(
+	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim, w io.Writer,
 ) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
 	t.Helper()
 	store := &supervisedSandboxStore{claim: c}
 	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
 		Runtime: g.r, Conns: g.conns, Store: store, Specs: specs, Clock: sandboxMachineClock{},
-		Log:    slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		Log:    slog.New(slog.NewTextHandler(w, nil)),
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
 		Timeouts: supervise.Timeouts{
 			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour, LaunchBackoff: time.Millisecond,

@@ -194,6 +194,20 @@ const legionStrandedClaim = z.strictObject({
   state: z.enum(["suspended", "failed"]),
 });
 
+/** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
+ * because another lifecycle row of the issue is running (`record.Store.HeldRows`, contract 28):
+ * the lane runs an issue's lifecycle rows one at a time, in the order they were queued. `waitedSeconds`
+ * counts from the moment the row became due, so a retried row's earlier backoffs are not counted as
+ * waiting on its sibling; `waitsOn` is the id of the running row — or, for a role's start fenced
+ * behind its issue's branch row, that branch row while it runs. */
+const legionHeldOutboxRow = z.strictObject({
+  id: z.number().int().positive(),
+  kind: nonEmptyString,
+  issue: nonEmptyString,
+  waitedSeconds: z.number().int().nonnegative(),
+  waitsOn: z.number().int().positive(),
+});
+
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
  * (Zod's plain `record` over an enum demands every key). */
 const legionIssue = z.strictObject({
@@ -276,12 +290,15 @@ const legionCapabilityState = z.strictObject({
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
- * claim nothing will wake, by issue and then role, never null (contract 23). */
+ * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
+ * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
+ * id, never null (contract 28). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
   issues: z.record(z.string(), legionIssue),
   pendingStatusWrites: z.array(legionPendingStatusWrite),
+  heldOutboxRows: z.array(legionHeldOutboxRow),
   strandedClaims: z.array(legionStrandedClaim),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),

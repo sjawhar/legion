@@ -7,7 +7,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- Daemon API contract 31 and plugin interface version 3 (sjawhar/legion#1998): the daemon-launched
+- Daemon API contract 32 and plugin interface version 3 (sjawhar/legion#1998): the daemon-launched
   controller is told the project's Slack channels as `LEGION_SLACK_CHANNELS`, always set (empty for
   none), and the plugin subscribes to each channel's mention topic while the session holds the
   controller role, registering none with the listener. A resume first drops, from the listener and
@@ -15,7 +15,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   not name, so it hears the channels its launch names and no others. Any other controller ignores
   the variable. The controller skill answers each mention in its thread with `slack_post`
   (`references/slack-mentions.md`). Under `runtime.kubernetes.agent_secrets` the controller's pod is
-  enrolled with the secrets broker. Install this release's pair with a daemon at 31.
+  enrolled with the secrets broker. Install this release's pair with a daemon at 32.
 - The `dispatch-envoy-tools` capability row expects `slack_post` among the Envoy tools, eleven in
   all.
 - Every root architect's and phase worker's session measures six live capabilities as it boots
@@ -71,6 +71,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   permission and merges the pull request. Its new `merge-stalled` row covers a submission that
   ended because GitHub showed the pull request closed, or at another head, while the record still
   awaited READY's head, and GitHub's last change to it was more than 10 minutes old.
+- Daemon API contract 28 (LEGION-694): `legion state` carries `heldOutboxRows`, every due lifecycle
+  outbox row the daemon holds behind its issue's running lifecycle row — its id, kind, issue, how
+  long it has waited since it came due and the row it waits on — never null, and the plain
+  `legion state` names the held rows on one line beside the pending Dispatch status writes. (This
+  branch took 25, then 26 when LEGION-636 landed at 25, and contract 27 reserved 26 for it; but
+  pi-legion v10.3.5 and v10.3.6 were released declaring 27 without the field, so a daemon at 27
+  would pass their boot gate and they would refuse its state. 26 stays a gap no release declares,
+  and this branch takes 28, the number above the released one.) Install this release with a
+  `legion` built from the same commit.
 - Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
   names the repository's default branch (`--default-branch <name>`), which every branch and
   workspace now starts at, whatever its name (`develop`, `release/v7.1`, `release#stable`); an

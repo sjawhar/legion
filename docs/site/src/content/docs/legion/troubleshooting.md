@@ -497,6 +497,25 @@ pending Dispatch status writes: 2; the oldest, for WIDGETS-12, has failed 4 atte
 
 The writes are retried in order; the error at the end of the line is Dispatch's answer.
 
+## An issue's stop or start waits behind its own launch
+
+An issue's lifecycle rows — its starts, stops and suspensions, its branch, its workspace removal —
+run one at a time, oldest due first, so a stop, suspension or later start of an issue waits while
+the row it names runs. Most often that row is a start whose pod is still launching
+([A pod does not come up](/legion/legion/troubleshooting/#a-pod-does-not-come-up)). Other issues
+are not held, and the issue's own status writes, messages and notices run meanwhile.
+`legion state` says so on its fourth line, naming the row that has waited longest:
+
+```text
+held lifecycle rows: 1; the longest waiting, supervise row 802 of WIDGETS-12, has waited 2m30s behind row 801
+```
+
+`legion state --json` lists each under `heldOutboxRows`, with its `id`, `kind` and `issue`,
+`waitedSeconds` counted from when the row came due, and `waitsOn`, the id of the running row. Once
+such a wait passes two minutes the daemon logs a warning, `outbox row held behind its issue's
+running lifecycle row`, with `row`, `kind`, `issue`, `waitsOn` and `waited`: search the log for
+it, then look at what the row `waitsOn` names is doing.
+
 ## GitHub, NATS and the Secrets Broker
 
 - **`github_app_not_installed: <role> not installed on <owner>`.** Install that GitHub App (the

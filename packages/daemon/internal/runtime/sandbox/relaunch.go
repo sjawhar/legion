@@ -75,6 +75,12 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // this creates. Every Kubernetes request of the launch is sent again while the API server answers
 // it overloaded, up to the launch's own deadline for it (launching, resend), so a server under load
 // slows the launch rather than failing it.
+// The try is bounded on the runtime's own account from the moment it holds the pod's launch turn
+// (launchBound, LaunchBound): a try that never answers ends at the bound with an error naming it,
+// which the supervisor charges as a launch failure and tries again; one the caller's own context
+// ends is not the bound's, and the supervisor charges it nothing. The cleanups of a failed try
+// (suspendFailedLaunch, stopIssuedChild) run on the caller's context with bounds of their own,
+// since the try's bound may be what ended it.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
 // not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
@@ -89,16 +95,18 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if err != nil {
 		return runtime.Locator{}, err
 	}
-	fail := func(step string, err error) (runtime.Locator, error) {
-		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
-	}
 	r.forget(spec.Claim)
 	release, err := r.lockPod(ctx, l.name)
 	if err != nil {
-		return fail("take its pod's launch turn", err)
+		return runtime.Locator{}, fmt.Errorf("launch %s: take its pod's launch turn: %w", spec.Claim, err)
 	}
 	defer release()
-	s, err := r.ensureSandbox(ctx, l)
+	bounded, cancel := context.WithTimeout(ctx, r.launchBound)
+	defer cancel()
+	fail := func(step string, err error) (runtime.Locator, error) {
+		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, boundRanOut(ctx, bounded, r.launchBound, err))
+	}
+	s, err := r.ensureSandbox(bounded, l)
 	if err != nil {
 		return fail("ensure its sandbox", err)
 	}
@@ -110,7 +118,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	replace := !live || (drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
-		bound, err := r.launcherBound(ctx, s, pod, l.roles)
+		bound, err := r.launcherBound(bounded, s, pod, l.roles)
 		if err != nil {
 			return fail("read its pod's launcher bindings", err)
 		}
@@ -124,26 +132,26 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		switch {
 		case live:
-			if err := r.suspendDisplacing(ctx, s, pod.UID); err != nil {
+			if err := r.suspendDisplacing(bounded, s, pod.UID); err != nil {
 				return fail("suspend its sandbox", err)
 			}
 		case s.mode() != modeSuspended:
-			if err := r.setMode(ctx, s, modeSuspended); err != nil {
+			if err := r.setMode(bounded, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
 			}
 		}
-		old, err := r.awaitPodGone(ctx, s)
+		old, err := r.awaitPodGone(bounded, s)
 		if err != nil {
 			return fail("wait out its previous pod", err)
 		}
-		if err := l.kind.provision(ctx, r, &l, s); err != nil {
-			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, err)
+		if err := l.kind.provision(bounded, r, &l, s); err != nil {
+			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, boundRanOut(ctx, bounded, r.launchBound, err))
 		}
-		if err := r.writeLauncherSecrets(ctx, s, l); err != nil {
+		if err := r.writeLauncherSecrets(bounded, s, l); err != nil {
 			return fail("write its launcher secrets", err)
 		}
 		template := r.podTemplate(l)
-		running, err := r.patch(ctx, s,
+		running, err := r.patch(bounded, s,
 			jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 			jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
 		)
@@ -151,22 +159,22 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			r.suspendFailedLaunch(ctx, spec.Claim, s)
 			return fail("set its sandbox running", err)
 		}
-		pod, err = r.awaitNewPod(ctx, running, old)
+		pod, err = r.awaitNewPod(bounded, running, old)
 		if err != nil {
 			r.suspendFailedLaunch(ctx, spec.Claim, s)
 			return fail("wait for its new pod", err)
 		}
 		s = running
-		if err := r.bindLauncherSecrets(ctx, s, l, string(pod.UID)); err != nil {
+		if err := r.bindLauncherSecrets(bounded, s, l, string(pod.UID)); err != nil {
 			return fail("bind its role launchers to the new pod", err)
 		}
 	}
 	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
-	ended, deadline, err := r.awaitRoleLauncher(ctx, loc)
+	ended, deadline, err := r.awaitRoleLauncher(bounded, loc)
 	if err != nil {
 		return fail("wait for its role launcher", err)
 	}
-	starting, cancel := context.WithDeadline(ctx, deadline.Add(r.terminationGrace))
+	starting, cancel := context.WithDeadline(bounded, deadline.Add(r.terminationGrace))
 	defer cancel()
 	if ended {
 		// A real failed init proves no role could start. Return its recorded pod so supervision
@@ -212,6 +220,57 @@ func (r *Runtime) stopIssuedChild(ctx context.Context, token claim.Token, podUID
 	return nil
 }
 
+// boundRanOut is err with a note that the launch try's bound ran out, when it did: the bounded
+// context has ended while the caller's own, parent, is alive, and err is a deadline exceeded. Any
+// other err is returned as it is — a step's own deadline (apiTimeout's call, the start frame's
+// grace), or the caller's context ending, which the supervisor tells apart by that context's own
+// error and charges nothing.
+func boundRanOut(parent, bounded context.Context, bound time.Duration, err error) error {
+	if bounded.Err() != nil && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w (the launch try's bound of %s ran out)", err, bound)
+	}
+	return err
+}
+
+// relaunchCalls is the most bounded calls one replacing launch try makes between its waits —
+// client requests, each bounded by apiTimeout once the limiter lets it go (requestConfig), the
+// mints bounded by call, and the store reads and launcher frames bounded by their context alone,
+// the try's — counted generously, every retry and rare branch included, since the bound they size
+// (launchBound) must never be shorter than a legitimate try. Per try (relaunchPodCalls):
+// ensureSandbox's Get, its Create or relabel patch and that relabel's store read, and for a Sandbox
+// being deleted the wait's last Get, past its deadline, and the Get and Create after it (6); the
+// suspension patch (1); awaitPodGone's confirming Get, which may begin just before its deadline
+// (1); provision's retained-sessions store read, its token mint and its Secret upsert's Get,
+// Delete and Create (5); the Running patch (1); the stop of an earlier generation (1); the address
+// record patch (1); the Start frame (1). Per launcher role of the pod (relaunchRoleCalls, claim.Roles
+// for an issue pod, the most any pod has): launcherBound's Secret Get (1); writeLauncherSecrets'
+// credential mint and its upsert's Get, Delete and Create (4); bindLauncherSecrets' Get and Update,
+// and both again on a conflict (4).
+var relaunchCalls = relaunchPodCalls + relaunchRoleCalls*len(claim.Roles)
+
+const (
+	relaunchPodCalls  = 17
+	relaunchRoleCalls = 9
+)
+
+// launchBound is the longest one launch try may run once it holds its pod's launch turn, from the
+// runtime's boot timeout, ProvisionBound and termination grace (LaunchBound): the sum of a
+// replacing try's waits — ensureSandbox's wait for a Sandbox being deleted, awaitPodGone and
+// awaitNewPod, the boot timeout each; awaitRoleLauncher's backstop; the termination grace the
+// start frame has past the launcher deadline — and of its relaunchCalls calls at apiTimeout each.
+func launchBound(bootTimeout, provisionBound, terminationGrace time.Duration) time.Duration {
+	waits := 3*bootTimeout + launcherBackstop(bootTimeout, provisionBound) + terminationGrace
+	return waits + time.Duration(relaunchCalls)*apiTimeout
+}
+
+// launcherBackstop is await's own budget for a role launcher's wait (awaitRoleLauncher), given the
+// boot timeout and ProvisionBound: no launcher deadline lies past twice the boot timeout plus
+// ProvisionBound from the wait's start (launcherDeadline), and two recheck intervals more let the
+// wait's own check end it first.
+func launcherBackstop(boot, bound time.Duration) time.Duration {
+	return 2*boot + bound + 2*recheckInterval
+}
+
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
 // launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
@@ -226,12 +285,11 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 	deadline := start.Add(r.bootTimeout)
 	var first time.Time
 	ended := false
-	// await's own budget is only a backstop. The check below runs at every informer event and at
-	// least every recheckInterval, and it ends the wait before it extends the deadline, so the pod
-	// is first seen provisioning within the boot timeout of the start or never, and no deadline lies
-	// past twice the boot timeout plus ProvisionBound from the start. Two recheck intervals more let
-	// that check end the wait first.
-	backstop := 2*r.bootTimeout + r.ProvisionBound() + 2*recheckInterval
+	// await's own budget is only a backstop (launcherBackstop). The check below runs at every
+	// informer event and at least every recheckInterval, and it ends the wait before it extends the
+	// deadline, so the pod is first seen provisioning within the boot timeout of the start or never,
+	// and no deadline lies past twice the boot timeout plus ProvisionBound from the start.
+	backstop := launcherBackstop(r.bootTimeout, r.ProvisionBound())
 	err := r.await(ctx, backstop, what, func(context.Context) (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
 		if serverBusy(err) && time.Now().Before(deadline) {

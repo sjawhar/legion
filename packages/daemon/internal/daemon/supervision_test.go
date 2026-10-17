@@ -351,9 +351,10 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	}
 }
 
-// heldClock is the machines' time held still until the test fires the timers armed for one wait,
-// so a daemon test sees the deadline it fires and nothing else. Its time is the wall clock, or at
-// when set, so a deadline the daemon names as a time is armed as an exact wait from at.
+// heldClock is the machines' and the outbox's time held still until the test fires the timers
+// armed for one wait, so a daemon test sees the deadline it fires and nothing else. Its time is the
+// wall clock, or at when set, so a deadline the daemon names as a time is armed as an exact wait
+// from at; advance moves at, so a lease or a backoff the daemon measured from it lapses.
 type heldClock struct {
 	mu     sync.Mutex
 	at     time.Time
@@ -368,10 +369,39 @@ type heldTimer struct {
 }
 
 func (c *heldClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if !c.at.IsZero() {
 		return c.at
 	}
 	return time.Now()
+}
+
+// advance moves the held time forward by d; a clock still on the wall clock holds it first.
+func (c *heldClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.at.IsZero() {
+		c.at = time.Now()
+	}
+	c.at = c.at.Add(d)
+}
+
+// armed counts the timers armed for after: those still armed, and every one armed so far, the
+// fired and the stopped included, so a test can tell a timer re-armed from one left alone.
+func (c *heldClock) armed(after time.Duration) (live, total int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, timer := range c.timers {
+		if timer.after != after {
+			continue
+		}
+		total++
+		if !timer.done {
+			live++
+		}
+	}
+	return live, total
 }
 
 func (c *heldClock) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }

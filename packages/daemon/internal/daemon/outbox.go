@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -32,30 +33,39 @@ import (
 )
 
 const (
-	outboxBatchSize = 32
 	// outboxDeliveryPrefix namespaces a delivery id the outbox mints from its row id, so a row's
 	// id cannot collide with a minted one. What a delivery is for is its phase, not its id: the
 	// id is rotated by a prompt retry.
 	outboxDeliveryPrefix = "outbox:"
-	outboxLease          = 30 * time.Second
-	outboxPoll           = 100 * time.Millisecond
-	// outboxFailedTickWait spaces the ticks while the database refuses, so an outage logs once a
-	// second rather than ten times.
-	outboxFailedTickWait = time.Second
-	messageReadSkew      = 5 * time.Second
+	// outboxLease is how long a claim holds a row, and the sweep's interval (outbox_lanes.go): a
+	// running row renews its lease every third of it, so a lease lapses only on a run that ended
+	// without its finish or retry recorded, and the sweep finds the lapsed row within one more.
+	outboxLease = 30 * time.Second
+	// outboxSettleTimeout bounds a row's finish or retry once the daemon's stop has cancelled the
+	// lane's context: the row's effect ran, and a settle that waits for the stop's context would
+	// never be recorded, leaving the row to run again at the next boot as though it had not.
+	outboxSettleTimeout = 5 * time.Second
+	// heldWarnAfter is how long a due lifecycle row waits behind its issue's running lifecycle row
+	// before the running row's lease renewal logs it: a start pulling an image holds the stop
+	// behind it for a minute without anything being wrong, and longer than this an operator
+	// should look at what the running row is doing.
+	heldWarnAfter   = 2 * time.Minute
+	messageReadSkew = 5 * time.Second
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
 	// operator should look. A READY merge only GitHub's own rules hold back (routineWait) stays
 	// debug at every attempt.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
-	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
-	// effect behind it.
+	// the row runs on its issue's lifecycle lane, one row at a time, so a call GitHub never
+	// answers would hold the lane and every later lifecycle row of the issue behind it — the
+	// starts that wait for the branch first of all.
 	issueBranchTimeout = 30 * time.Second
 )
 
-// outbox runs each effect that the workflow transaction committed. Claiming and finishing have
-// separate transactions so a slow external service never holds an issue transition lock.
+// outbox runs each effect that the workflow transaction committed, one lane per issue and kind of
+// work (outbox_lanes.go). Claiming and finishing have separate transactions so a slow external
+// service never holds an issue transition lock.
 type outbox struct {
 	pool       *pgxpool.Pool
 	records    record.Store
@@ -72,19 +82,41 @@ type outbox struct {
 	stateDir        string
 	repo            ghrepo.Repository
 	log             *slog.Logger
-	now             func() time.Time
-	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
-	remove          func(context.Context, workspace.Workspace) error
+	// now is the moment a row is listed, claimed, renewed and retried at; clock arms the lanes'
+	// timers — the sweep's, a lane's wait for its next due row, a running row's lease renewal.
+	// Both are the wall clock in production, and a test holds both still (heldClock). A test that
+	// builds the outbox by hand and only drains it (RunOnce) leaves clock nil, which is the wall
+	// clock (timers).
+	now       func() time.Time
+	clock     supervise.Clock
+	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
+	remove    func(context.Context, workspace.Workspace) error
+	// provisionMu runs the workspace provisions and removals one at a time: every issue's
+	// workspace of this outbox is a jj workspace of one shared clone, and the clone's `jj git
+	// fetch` and `workspace add` corrupt it when two run at once. Lanes run issues side by side,
+	// so without it two issues' starts could both be provisioning.
+	provisionMu sync.Mutex
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
-	// limits is every GitHub rate limit a row met, by the budget it exhausted, held across batches
-	// until its deadline: a row that spends one of those budgets waits for the latest deadline among
-	// them (standingLimit) rather than meet a limit again. Run's one goroutine owns it.
-	limits map[githubrest.Budget]rateLimit
+	// limits is every GitHub rate limit a row met, by the budget it exhausted, held until its
+	// deadline: a row that spends one of those budgets waits for the latest deadline among them
+	// (standingLimit) rather than meet a limit again. The lanes run rows on many goroutines, so
+	// limitsMu guards it (deferral, noteLimit).
+	limitsMu sync.Mutex
+	limits   map[githubrest.Budget]rateLimit
 	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of): the
 	// base an issue's branch is created at and its workspace provisioned from.
 	defaultBranch func(context.Context, ghrepo.Repository) (string, error)
+	// The lane registry (outbox_lanes.go). mu guards running, laneCtx and lanes; running is true
+	// between Run's start and its stop, laneCtx is Run's context, which every lane runs under, and
+	// lanes is each live lane by its key. wg counts the lane goroutines, so Run returns only once
+	// every lane has.
+	mu      sync.Mutex
+	running bool
+	laneCtx context.Context
+	lanes   map[record.LaneKey]*outboxLane
+	wg      sync.WaitGroup
 }
 
 // outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
@@ -103,7 +135,7 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
-		defaultBranch: defaultBranch, log: log, now: time.Now,
+		defaultBranch: defaultBranch, log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -120,32 +152,12 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 	}
 }
 
-// Run keeps due effects draining until the daemon stops. It runs immediately so a restart never
-// waits one poll interval before recovering a row whose prior lease expired. A tick whose claim
-// fails (a Postgres restart drops the pool's connections) is logged and tried again after
-// outboxFailedTickWait, so the runner outlives the failure instead of ending with it.
-func (r *outbox) Run(ctx context.Context) {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-		wait := outboxPoll
-		if err := r.RunOnce(ctx); err != nil && ctx.Err() == nil {
-			r.log.Error("outbox tick failed; the next tick tries again", "error", err)
-			wait = outboxFailedTickWait
-		}
-		timer.Reset(wait)
-	}
-}
-
-// RunOnce claims currently due rows, executes each side effect outside the lease transaction, and
-// finishes or retries only while its lease token still matches. A row whose finish or retry fails
-// is logged and left leased: its lease expires and the row is due again, so one row's failed
-// transaction never stops the rows after it.
+// RunOnce drains every row of the project due now, in the order the lanes would run them within
+// one issue (next_at, then id), on the caller's goroutine: the tests' synchronous drain. Production
+// runs the lanes (Run, outbox_lanes.go), which this never starts. Each row is claimed by id as its
+// turn comes (runRow), so a row another runner has leased since the list is skipped; and the list
+// is made once, so a row that a listed row's finish makes claimable — an issue's second status
+// write, once its first is done — runs on the next drain, as it did when the drain claimed a batch.
 func (r *outbox) RunOnce(ctx context.Context) error {
 	if r.log == nil {
 		r.log = slog.Default()
@@ -153,67 +165,85 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	if r.pool == nil || r.records == nil {
 		return errors.New("outbox requires Postgres and its record store")
 	}
+	rows, err := r.listDue(ctx, "", nil, r.now().UTC())
+	if err != nil {
+		return fmt.Errorf("list due outbox rows: %w", err)
+	}
+	for _, row := range rows {
+		// A claim that fails is logged by runRow and its row left for the next drain, as a lane leaves
+		// it for the next wake or sweep.
+		_ = r.runRow(ctx, row)
+	}
+	return nil
+}
+
+// settle records what a row's run came to, under the lease the run held: a wait or a failure is
+// retried on the row's backoff (or after the wait GitHub asks for), a failure no retry repairs is
+// finished refused with its follow-up (permanentRefusal, finishRefused), and anything else is
+// finished. A row whose finish or retry fails is logged and left leased: its lease expires and the
+// row is due again, so one row's failed transaction never stops the rows after it.
+func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
+	if err != nil {
+		r.noteLimit(row, err)
+		if errors.Is(err, wait.ErrWaiting) {
+			// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
+			// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
+			// a close waiting for its stops, or a READY merge GitHub does not allow, or has not
+			// made, yet. The row runs again on its backoff, logged when it first waits and as a
+			// warning once it has waited long, unless only GitHub's own rules hold it back.
+			level := slog.LevelDebug
+			switch {
+			case row.Attempts == 0:
+				level = slog.LevelInfo
+			case row.Attempts >= waitWarnAttempts && !routineWait(err):
+				level = slog.LevelWarn
+			}
+			r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
+				"attempts", row.Attempts, "error", err)
+		} else {
+			r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
+		}
+		if permanentRefusal(row, err, r.now().UTC()) {
+			if err := r.finishRefused(ctx, row, err); err != nil {
+				r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+			}
+			return
+		}
+		if err := r.retry(ctx, row, err); err != nil {
+			r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+		}
+		return
+	}
+	if err := r.finish(ctx, row); err != nil {
+		r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+	}
+}
+
+// deferral is the GitHub rate limit a row of kind would meet at now, if one stands (standingLimit),
+// read under limitsMu: the lanes run rows on many goroutines, and a limit one row met holds every
+// row of the kinds that spend its budget, whichever lane runs them.
+func (r *outbox) deferral(kind record.OutboxKind, now time.Time) (rateLimit, bool) {
+	r.limitsMu.Lock()
+	defer r.limitsMu.Unlock()
+	return standingLimit(r.limits, kind, now)
+}
+
+// noteLimit records the GitHub rate limit err carries, when it does, under the budget it exhausted:
+// the latest deadline for a budget wins.
+func (r *outbox) noteLimit(row record.OutboxRow, err error) {
+	after, budget := githubrest.RetryAfter(err)
+	if after <= 0 {
+		return
+	}
+	until := r.now().UTC().Add(after)
+	r.limitsMu.Lock()
+	defer r.limitsMu.Unlock()
 	if r.limits == nil {
 		r.limits = map[githubrest.Budget]rateLimit{}
 	}
-	now := r.now().UTC()
-	var rows []record.OutboxRow
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		var err error
-		rows, err = r.records.ClaimDue(ctx, tx, r.dispatchProject, now, outboxBatchSize, outboxLease)
-		return err
-	}); err != nil {
-		return fmt.Errorf("claim due outbox rows: %w", err)
+	if held, ok := r.limits[budget]; !ok || until.After(held.until) {
+		r.limits[budget] = rateLimit{row: row.ID, err: err, until: until}
 	}
-	for _, row := range rows {
-		if limit, ok := standingLimit(r.limits, row.Kind, r.now().UTC()); ok {
-			cause := fmt.Errorf("deferred until %s behind row %d's GitHub rate limit: %w", limit.until.Format(time.RFC3339), limit.row, limit.err)
-			if err := r.retryAt(ctx, row, limit.until, cause); err != nil {
-				r.log.Error("outbox row deferral not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
-			}
-			continue
-		}
-		if err := r.execute(ctx, row); err != nil {
-			if after, budget := githubrest.RetryAfter(err); after > 0 {
-				until := r.now().UTC().Add(after)
-				if held, ok := r.limits[budget]; !ok || until.After(held.until) {
-					r.limits[budget] = rateLimit{row: row.ID, err: err, until: until}
-				}
-			}
-			if errors.Is(err, wait.ErrWaiting) {
-				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
-				// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
-				// a close waiting for its stops, or a READY merge GitHub does not allow, or has not
-				// made, yet. The row runs again on its backoff, logged when it first waits and as a
-				// warning once it has waited long, unless only GitHub's own rules hold it back.
-				level := slog.LevelDebug
-				switch {
-				case row.Attempts == 0:
-					level = slog.LevelInfo
-				case row.Attempts >= waitWarnAttempts && !routineWait(err):
-					level = slog.LevelWarn
-				}
-				r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
-					"attempts", row.Attempts, "error", err)
-			} else {
-				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
-			}
-			if permanentRefusal(row, err, r.now().UTC()) {
-				if err := r.finishRefused(ctx, row, err); err != nil {
-					r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
-				}
-				continue
-			}
-			if err := r.retry(ctx, row, err); err != nil {
-				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
-			}
-			continue
-		}
-		if err := r.finish(ctx, row); err != nil {
-			r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
-		}
-	}
-	return nil
 }
 
 func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
@@ -235,12 +265,15 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 // lands, so no admission consumes the fence, and one left behind would keep naming the child's own
 // tree as its Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until
 // a person labels it, which admits it as an orphan. A READY merge row tells the issue's architect
-// why it ended without a merge (readyMergeEnded).
+// why it ended without a merge (readyMergeEnded): its notice row is written in the finish's own
+// transaction, which owns the commit hook that write registers (projectRecords, intake.OnCommit),
+// so the notice's lane is woken as the finish commits and the notice is published without a sweep.
 func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause error) error {
 	payload, err := record.DecodeOutboxPayload(row)
 	if err != nil {
 		return fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 	}
+	scoped, committed := intake.WithCommitHooks(ctx)
 	// follow is what the transaction does beside the finish, and told the line logged once it commits.
 	var follow func(pgx.Tx) error
 	var told func()
@@ -251,7 +284,7 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 			"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", cause)
 		if value.HandOver {
 			follow = func(tx pgx.Tx) error {
-				return r.records.DeleteHandoverAt(ctx, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
+				return r.records.DeleteHandoverAt(scoped, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
 			}
 			told = func() {
 				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
@@ -263,21 +296,22 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 		if err != nil {
 			return err
 		}
-		follow = func(tx pgx.Tx) error { return r.records.Enqueue(ctx, tx, notice) }
+		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
 		told = func() {
 			r.log.Error("outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
 		}
 	}
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
 		if follow != nil {
 			if err := follow(tx); err != nil {
 				return err
 			}
 		}
-		return r.records.FinishLeasedOutbox(ctx, tx, row.ID, row.LeaseToken)
+		return r.records.FinishLeasedOutbox(scoped, tx, row.ID, row.LeaseToken)
 	}); err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
 	}
+	committed()
 	if told != nil {
 		told()
 	}
@@ -1059,6 +1093,11 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
+	// One provision at a time (provisionMu): the issue's workspace is added to the clone every
+	// issue of this project shares, and a second issue's lane provisioning beside this one would
+	// have the clone fetching and adding under both.
+	r.provisionMu.Lock()
+	defer r.provisionMu.Unlock()
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, DefaultBranch: base, CredentialHelper: workspace.GitHubCredentialHelper,
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
@@ -1107,10 +1146,11 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 // branch, so no role's push is the one that creates it: GitHub can refuse such a push on a large
 // repository (its check for changed workflow files, which it runs for an App without the workflows
 // permission, times out on a new ref), where it takes one that moves the branch. A branch GitHub
-// already has is left where it is. A start of the issue waits for this row
-// (record.Store.ClaimDue), so a create GitHub refuses holds back the issue's roles, each attempt
-// logged with GitHub's answer, until one passes. A row of a generation the issue has left, or of a
-// tree that lingers, finishes without acting: the starts it held back act on neither.
+// already has is left where it is. A start of the issue waits for this row (the lifecycle lane's
+// ordering rule, record.Store.DueRows and ClaimRow), so a create GitHub refuses holds back the
+// issue's roles, each attempt logged with GitHub's answer, until one passes. A row of a generation
+// the issue has left, or of a tree that lingers, finishes without acting: the starts it held back
+// act on neither.
 func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload record.IssueBranch) error {
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
@@ -1195,6 +1235,10 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if err != nil {
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}
+	// The removal forgets the workspace in the same shared clone a provision adds to, so it takes
+	// the provision's turn (provisionMu) rather than running under another issue's provision.
+	r.provisionMu.Lock()
+	defer r.provisionMu.Unlock()
 	if err := r.remove(ctx, working); err != nil {
 		return fmt.Errorf("remove workspace for %s: %w", row.Issue, err)
 	}

@@ -215,7 +215,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	record := &built{}
 	o := fakeRuntime(fake.NewRuntime(), record)
 	o.workflowTokens = tokens
-	var logged bytes.Buffer
+	var logged syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
