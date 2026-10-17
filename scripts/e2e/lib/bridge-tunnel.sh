@@ -185,7 +185,12 @@ bridge_stop() {
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local i pod_read svc_read
-  for i in $(seq 1 150); do
+  # 600 iterations at 2s: confirmed live, 2026-10-17, that this bridge pod's own termination (on
+  # a Node-Auto-Provisioning node this run's only pod occupied, so NAP may be reclaiming the whole
+  # node rather than just the pod) can run well past 300s and even past the 20-minute total this
+  # script's earlier 150-iteration budget plus its post-teardown settle delay gave it, while still
+  # finishing well under this one's 20-minute ceiling once it was given room to.
+  for i in $(seq 1 600); do
     pod_read=$(op get pod "$bridge_name" -o name 2>&1)
     svc_read=$(op get service "$bridge_name" -o name 2>&1)
     case "$pod_read" in *NotFound*)
@@ -193,5 +198,5 @@ bridge_stop() {
     esac
     sleep 2
   done
-  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 300s: pod: $pod_read; service: $svc_read; it may remain"
+  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 1200s: pod: $pod_read; service: $svc_read; it may remain"
 }
