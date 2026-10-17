@@ -155,7 +155,7 @@ refusal: create both consumers, restart onto them, and have Dispatch and GitHub 
 acknowledged. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
 subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that
-proof against the server images the hub runs: it reads every subject the daemon published and
+proof against NATS 2.10 and the hub's image: it reads every subject the daemon published and
 subscribed to from the server's trace and requires each entry of the grant to admit one of them,
 shows that removing an entry the daemon uses brings its refusal, and shows the grant refusing
 another consumer's create and a subscription to `_INBOX.>`. `docs/kubernetes.md` says how the
