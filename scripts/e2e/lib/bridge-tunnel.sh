@@ -268,6 +268,11 @@ YAML
       if ! kill -0 "$bridge_client_pid" 2>/dev/null; then
         [ -f "$work/bridge-stopping" ] && exit 0
         echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted); terminating the run: $(cat "$work/bridge-chisel-client.log")" >&2
+        # The port-forward itself is still up here (the outer branch above only reaches this
+        # check once kill -0 "$pf_pid" confirmed it); this path's own exit, unlike a received
+        # TERM, never runs the trap above, so without this it would be the one way the watchdog
+        # could orphan a live port-forward process.
+        kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null
         kill_harness
         kill -TERM "$$" 2>/dev/null
         exit 1
@@ -305,8 +310,20 @@ bridge_stop() {
   wait "$bridge_watchdog_pid" 2>/dev/null || true
   { [ -z "$bridge_client_pid" ] || kill "$bridge_client_pid" 2>/dev/null; } || true
   wait "$bridge_client_pid" 2>/dev/null || true
-  { [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null; } || true
-  wait "$bridge_portforward_pid" 2>/dev/null || true
+  # bridge_portforward_pid here is this shell's own copy, set once by bridge_start's first call
+  # and never updated again in this scope: every later restart runs inside the watchdog's own
+  # subshell above, which gets its own copy of the variable at fork and updates only that copy.
+  # Once a watchdog exists, its own TERM trap (fired by the kill above, or already run on its own
+  # exit path before this point — both now kill whichever port-forward is actually current) is
+  # the only correct owner of that pid; killing this shell's stale one too would either hit a
+  # process already gone (harmless) or, worse, one the OS has since reused for something else
+  # entirely. Only with no watchdog at all (bridge_start failed before starting one) is this
+  # shell's own bridge_portforward_pid both the only port-forward that ever ran and still this
+  # shell's to kill.
+  if [ -z "$bridge_watchdog_pid" ]; then
+    { [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null; } || true
+    wait "$bridge_portforward_pid" 2>/dev/null || true
+  fi
   [ -n "$bridge_name" ] || return 0
   op delete secret "$bridge_name-auth" --ignore-not-found >/dev/null 2>&1 || true
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true

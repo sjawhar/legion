@@ -111,21 +111,23 @@ func (r *liveRig) checkGVisor() error {
 // memory with the request equal to the limit and equal to what the rig configured for the
 // container's role (liveResources: some roles from liveOverrides, the rest from
 // config.DefaultResources(), and the root pod carries both), so the pod is Guaranteed; carries the
-// ephemeral-storage limit and request configured for it — the request under the limit on AWS (the
-// tester's limit from liveOverrides, every other role's bound the default), the two equal on GKE
-// (liveResources' own doc comment has the evidence and the production gap this equalization
-// stands in for); and carries no affinity but GKE Autopilot's own extended-duration one
-// (isGKEExtendedDurationAffinity's doc comment) under LEGION_E2E_PLATFORM=gke-autopilot. The init
-// containers take the reservation of the role whose launch created the pod
-// (issuePod.initContainers): the root's own Spawn at root-ready, which no later launch of the
-// issue replaces. Inside the pod, gVisor sizes the sandbox from the pod's cgroup, which the kubelet
-// sets to the regular containers' summed limits once the init containers are done (the pod's
-// effective request is max(the largest init container, the sum of the containers), and no init
-// container's reservation exceeds the sum): nproc is max(2, ceil(Σ cpu limits)) and /proc/meminfo's
-// MemTotal is within 3% of Σ memory limits — except on GKE, where nproc reflects gVisor's own
-// host-vCPU presentation rather than the pod's own cgroup (gvisorCPUFloor's doc comment), so the
-// cgroup's own cpu.cfs_quota_us/cpu.cfs_period_us are read directly there instead, confirmed live
-// to track the configured sum exactly.
+// ephemeral-storage limit and request configured for it — the request under the limit for every
+// role except the tester, whose liveOverrides sets both explicitly and equal. On GKE the admitted
+// limit is the request, not whatever higher limit was configured, for every role where the two
+// differ (gkeEphemeralStorageClamped's and liveResources' own doc comments have the live evidence
+// and the capacity gap this clamp stands in for); checkResources asserts that admitted reality,
+// not the originally-configured bound, there. And carries no affinity but GKE Autopilot's own
+// extended-duration one (isGKEExtendedDurationAffinity's doc comment) under
+// LEGION_E2E_PLATFORM=gke-autopilot. The init containers take the reservation of the role whose
+// launch created the pod (issuePod.initContainers): the root's own Spawn at root-ready, which no
+// later launch of the issue replaces. Inside the pod, gVisor sizes the sandbox from the pod's
+// cgroup, which the kubelet sets to the regular containers' summed limits once the init containers
+// are done (the pod's effective request is max(the largest init container, the sum of the
+// containers), and no init container's reservation exceeds the sum): nproc is max(2, ceil(Σ cpu
+// limits)) and /proc/meminfo's MemTotal is within 3% of Σ memory limits — except on GKE, where
+// nproc reflects gVisor's own host-vCPU presentation rather than the pod's own cgroup
+// (gvisorCPUFloor's doc comment), so the cgroup's own cpu.cfs_quota_us/cpu.cfs_period_us are read
+// directly there instead, confirmed live to track the configured sum exactly.
 func (r *liveRig) checkResources() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -142,7 +144,7 @@ func (r *liveRig) checkResources() error {
 		byContainer[c.Name] = want[claim.Role(c.Name)]
 	}
 	init := want[root.role]
-	if err := guaranteedPod(pod, byContainer, &init, resource.Quantity{}, false, r.gke()); err != nil {
+	if err := guaranteedPod(pod, byContainer, &init, resource.Quantity{}, r.gkeEphemeralStorageClamped(), r.gke()); err != nil {
 		return fmt.Errorf("pod %s: %w", name, err)
 	}
 	var cpuSum, memorySum resource.Quantity
@@ -293,13 +295,17 @@ func (r *liveRig) gke() bool {
 // limit = 1Gi, its configured EphemeralStorageRequest, though config.DefaultResources() and
 // liveOverrides ask several of them for limits of 10Gi, 20Gi or 30Gi) — a gVisor-sandboxed pod's
 // ephemeral storage is never burstable on this cluster, cpu and memory floors notwithstanding.
-// AWS admits the configured limit unchanged. Only checkImageProbe passes this to guaranteedPod:
-// its reservation (probeReservation, manifest_test.go) is the daemon's own fixed, hardcoded value,
-// not something this rig configures, so the clamp is a genuine platform fact to tolerate, not a
-// gap this harness can close. checkResources instead closes the gap itself, at the source
-// (liveResources' own doc comment): it equalizes the request to the limit before ever asking
-// guaranteedPod to check anything, so GKE's clamp never fires there and the configured bound is
-// asserted exactly like every other platform.
+// AWS admits the configured limit unchanged. checkImageProbe and checkResources both pass this to
+// guaranteedPod, and for the same reason: checkImageProbe's reservation (probeReservation,
+// manifest_test.go) is the daemon's own fixed, hardcoded value, and checkResources' is
+// config.DefaultResources()'s own per-role default, for every role liveOverrides does not give a
+// matching EphemeralStorageRequest of its own — in both cases a configured limit this rig cannot
+// (and, for the daemon's hardcoded probe reservation, should not) simply raise the request to
+// match, so the clamp is the real, admitted bound to assert, not the originally-configured one.
+// liveOverrides' tester entry is the one role this rig does ask for a matching request on, which
+// defeats the clamp for it alone (its own doc comment has why that cannot extend to every role at
+// once): guaranteedPod's clamp only replaces a container's wantLimit with its own wantRequest, so
+// a container whose want already carries request = limit sees no change from either value.
 func (r *liveRig) gkeEphemeralStorageClamped() bool {
 	return r.gke()
 }

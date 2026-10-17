@@ -129,37 +129,48 @@ var liveIssueVolume = resource.MustParse("20Gi")
 
 // liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
 // `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
-// and memory, the tester's ephemeral-storage limit beside them, the reviewer's memory alone (its
-// cpu stays the default). The architect, planner and merger keep config.DefaultResources(), so the
-// root's pod carries a reservation from each path — an override, a default, and one with a field
-// of each — and the `resources` check tells them apart, the disk bound's two paths included. The
-// stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and 19 GiB to
-// 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod are then checked against.
+// and memory, the tester's ephemeral-storage limit AND request beside them (both explicitly
+// configured and equal — see liveResources' own doc comment for why only one role gets this), the
+// reviewer's memory alone (its cpu stays the default). The architect, planner and merger keep
+// config.DefaultResources(), so the root's pod carries a reservation from each path — an
+// override, a default, and one with a field of each — and the `resources` check tells them apart,
+// the disk bound's two paths included. The stub agent sleeps, so the overrides size the pods down
+// from the defaults' 3 CPU and 19 GiB to 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod
+// are then checked against.
 var liveOverrides = map[claim.Role]config.RoleResources{
 	claim.RoleImplementer: {CPU: "500m", Memory: "1Gi"},
-	claim.RoleTester:      {CPU: "500m", Memory: "1Gi", EphemeralStorage: "30Gi"},
+	claim.RoleTester:      {CPU: "500m", Memory: "1Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "2Gi"},
 	claim.RoleReviewer:    {Memory: "1Gi"},
 }
 
 // liveResources are the reservations the rig hands the runtime (Options.Resources): the daemon's
 // defaults as it translates them (reservations, manifest_test.go) with liveOverrides applied field
 // by field, as resolveKubernetes settles a file's `resources` block. Cpu and memory are each the
-// request and the limit alike; the ephemeral-storage limit and request are set apart, as the file
-// sets them, except under GKE: confirmed live, 2026-10-17, a container's ephemeral-storage limit
-// is admitted equal to its request there regardless of what limit was configured (a bare debug pod
-// and a real production pod's six role containers all confirmed this; production's own
-// config.DefaultResources() leaves EphemeralStorageRequest at 1Gi for every role, so a real GKE
-// deployment's issue pods are holding only 1Gi of disk today, not the 10-30Gi
-// config.DefaultResources()/liveOverrides ask for — a capability gap worth raising with whoever
-// owns that deployment, not something this harness can fix from a test rig). What this rig CAN do,
-// since it is itself the stand-in for an operator's own `runtime.kubernetes.resources.<role>`
-// configuration: ask for the ephemeral-storage request an operator who knew this limit would set,
-// equal to the limit, so the disk this run's own pods actually get matches what was configured
-// instead of silently settling for 1Gi. The `resources` check then asserts the configured bound
-// exactly, on every platform, with no clamping tolerance of its own — the image probe's own fixed
-// reservation (probeReservation, manifest_test.go, daemon-hardcoded and not something this rig
-// configures) is the one place a clamping tolerance still belongs (gvisorCPUFloor and
-// gkeEphemeralStorageClamped's doc comments).
+// request and the limit alike; the ephemeral-storage limit and request are set apart except where
+// liveOverrides gives both explicitly (the tester, above) — every other role keeps
+// config.DefaultResources()'s own split, EphemeralStorageRequest 1Gi under whatever limit the role
+// (default or liveOverrides) configures.
+//
+// GKE admits a container's ephemeral-storage limit equal to its request, discarding whatever
+// higher limit was configured (confirmed live, 2026-10-17, on a bare debug pod and every role
+// container of a real production issue pod); `checkResources`' own ephemeralStorageClamped
+// parameter asserts that admitted reality rather than the originally-configured limit, for every
+// role whose request and limit differ. Raising a role's own ephemeral_storage_request to match its
+// limit — this rig's own tester override — defeats that clamp for that one role alone, proving the
+// mechanism an operator would reach for works correctly. It cannot be the fix for every role at
+// once, and that is its own, separate, structural finding, confirmed live the same day: equalizing
+// every role's request to its own configured limit (architect/planner/reviewer/merger at 10Gi,
+// implementer at 20Gi, tester at 30Gi, the two workspace-init containers already at 10Gi each) sums
+// to roughly 110Gi requested across the root pod's eight containers, and GKE Autopilot's Warden
+// admission webhook refused to schedule the pod at all: "Total ephemeral-storage requested by
+// containers … is higher than the Autopilot maximum of 10Gi" (autogke-pod-limit-constraints).
+// Because Legion runs every role of one issue in containers of a single pod, that 10Gi is a shared
+// budget across all six roles together, not a per-role one — config.DefaultResources()'s 10-30Gi
+// per-role bounds, meant as the per-role disk ceiling, cannot be realized simultaneously for more
+// than a small fraction of the roles on GKE Autopilot as the runtime is architected today, whatever
+// an operator configures: a gap for the daemon's resource model or its pod layout to resolve, not
+// something a deployment's `legion.yaml` can configure around, and not something this harness can
+// fix from a test rig.
 func (r *liveRig) liveResources() map[claim.Role]corev1.ResourceRequirements {
 	resources := reservations()
 	for role, override := range liveOverrides {
@@ -179,13 +190,6 @@ func (r *liveRig) liveResources() map[claim.Role]corev1.ResourceRequirements {
 			requirements.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorageRequest)
 		}
 		resources[role] = requirements
-	}
-	if r.gke() {
-		for role, requirements := range resources {
-			limit := requirements.Limits[corev1.ResourceEphemeralStorage]
-			requirements.Requests[corev1.ResourceEphemeralStorage] = limit.DeepCopy()
-			resources[role] = requirements
-		}
 	}
 	return resources
 }

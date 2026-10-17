@@ -762,7 +762,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `image-probe-capability-negative` | on a second runtime built from the run's Options with `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium` added to the operator's pod env (the shared runtime's pod untouched), `ProbeImage` on the same image is refused naming `capability browser is missing`: the probe runs the browser the variable names as Oh My Pi would, so a wrong value in an operator's pod env is caught at boot; the probe Sandbox is deleted |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned locator's `podUid`, role container and process incarnation, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
-| `resources` | every container of the root's pod, the two init containers included, reserves cpu and memory with request equal to limit and equal to what the rig configured for its role (`liveResources`: the implementer's and tester's both overridden, the reviewer's memory overridden, the rest `config.DefaultResources()`; the init containers carry the root's own reservation, the role whose Spawn created the pod), so the pod is `Guaranteed`; carries the ephemeral-storage limit and request configured for its role, the request under the limit (the tester's 30Gi limit from `liveOverrides`, every other role's bound the daemon's default — the node-disk bound between pods of unrelated trees, which QoS does not read); and it carries no affinity; inside the pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal` is within 3 % of Σ memory of the role containers, as gVisor sizes the sandbox from the pod cgroup (a gVisor pod exposes no cgroup files, so each container's values are read from the API) |
+| `resources` | every container of the root's pod, the two init containers included, reserves cpu and memory with request equal to limit and equal to what the rig configured for its role (`liveResources`: the implementer's and tester's both overridden, the reviewer's memory overridden, the rest `config.DefaultResources()`; the init containers carry the root's own reservation, the role whose Spawn created the pod), so the pod is `Guaranteed`; carries the ephemeral-storage limit and request configured for its role, the request under the limit for every role but the tester, whose `liveOverrides` sets both explicitly and equal (every other role's bound the daemon's default — the node-disk bound between pods of unrelated trees, which QoS does not read); and it carries no affinity but GKE Autopilot's own extended-duration one under `LEGION_E2E_PLATFORM=gke-autopilot`; inside the pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal` is within 3 % of Σ memory of the role containers — on AWS, as gVisor sizes the sandbox from the pod's own cgroup; on GKE, from the pod's cgroup cpu quota, read directly (`/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us`), since `nproc` there reflects gVisor's own host-vCPU presentation instead |
 | `operator-token` | under `LEGION_E2E_MODEL_ROUTE=gateway`: the root pod runs as the fixture's ServiceAccount with `automountServiceAccountToken: false` and no API server token; the fixture's one projected token, at its mount, is a JWT for the fixture's audience, subject the pod's ServiceAccount, and exactly the fixture's lifetime, read into the harness's memory and only its claims printed. Under `=key-file`: `SKIPPED-BLOCKED` — `pod-key-file.yml` mounts no projected token, there being no gateway to authenticate to |
 | `pod-baseline` | the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's turn-scoping overlay on the state volume, then the operator's; `PI_CONFIG_DIR=.omp`, `OMP_SESSION_STORAGE=file`, `XDG_STATE_HOME=/home/legion/.local/state/architect` (the root claim's role: a state home per role container, so Oh My Pi's browser broker lock, an abstract unix socket named from a path under the state root, is one name per container of the pod rather than one across it), and the operator's other variables; neither `OTEL_SDK_DISABLED` nor `PI_AUTO_QA` (no baseline sets them); `/home/legion/.local/state/architect/omp/profiles/legion` is a directory in the root's container (the shim makes it before Oh My Pi starts; Oh My Pi reads the state home only where it already exists); the shim itself (the agent's parent `legion worker-shim`; the container's PID 1 is its `legion launcher`) has the operator's `PI_CONFIG_FILES` alone; the overlay is mode `444`; and the image's `omp config get`, run under the agent's environment in a repository whose `.omp/config.yml` sets both, reads `compaction.remoteEndpoint` as the repository set it and `bash.autoBackground.enabled` as `false`, and with an operator overlay setting the endpoint named after the agent's overlays reads the operator's endpoint |
 | `provider-key` | the stub agent's environment (`/proc/<pid>/environ`) carries `STAGE4A_PROVIDER_KEY` equal to the run's providers Secret's `stage4a` key, read back through the admin context and never printed; the shim's (the agent's parent) carries no such variable |
@@ -824,12 +824,24 @@ production issue pod as well as this run's own:
   containers already sum well past that, is admitted at exactly its configured per-container cpu,
   unchanged. The harness floors only the probe's expectation to match
   (`gvisorCPUFloor`, `live_lifecycle_test.go`).
-- **Every container's ephemeral-storage limit is clamped to its request.** Confirmed on both a bare
-  debug pod and a real production pod's six role containers: all request = limit = 1Gi (the
-  configured `EphemeralStorageRequest`), though `config.DefaultResources()` and `liveOverrides` ask
-  several roles for limits of 10–30Gi. A gVisor-sandboxed pod's ephemeral storage is never
-  burstable here; the harness checks the request's value in place of the configured limit
-  (`gkeEphemeralStorageClamped`).
+- **Every container's ephemeral-storage limit is clamped to its request, and GKE Autopilot caps a
+  whole pod's summed requests at 10Gi regardless.** Confirmed live on a bare debug pod and a real
+  production pod's six role containers: all request = limit = 1Gi (the configured
+  `EphemeralStorageRequest`), though `config.DefaultResources()` and `liveOverrides` ask several
+  roles for limits of 10–30Gi; a gVisor-sandboxed pod's ephemeral storage is never burstable here,
+  so the harness checks the request's value in place of the configured limit
+  (`gkeEphemeralStorageClamped`) for every role but the tester, whose `liveOverrides` asks for a
+  small (2Gi) request matching its own limit instead, proving the clamp lifts when an operator
+  raises the request to match. Raising every role's request to its own configured limit at once —
+  tried live the same day — hits a second, harder limit first: GKE Autopilot's Warden admission
+  webhook refused to schedule the root pod at all, naming `autogke-pod-limit-constraints` and a
+  summed ephemeral-storage request of roughly 110Gi across the pod's eight containers, "higher than
+  the Autopilot maximum of 10Gi". Because Legion runs every role of one issue in containers of a
+  single pod, that 10Gi is a shared budget across all six roles together, not a per-role one —
+  `config.DefaultResources()`'s 10–30Gi per-role bounds cannot be realized simultaneously for more
+  than a small fraction of the roles on GKE Autopilot as the runtime is architected today, whatever
+  an operator configures in `legion.yaml`: a capability gap for the daemon's resource model or its
+  pod layout to resolve, not something this harness or a deployment's configuration can fix.
 - **GKE Autopilot adds its own NodeAffinity to every issue pod.** Any pod carrying
   `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` (every issue pod's annotation; the
   image probe omits it) is given a `cloud.google.com/extended-duration-pods` NodeAffinity on
@@ -845,10 +857,6 @@ production issue pod as well as this run's own:
   and `cpu.cfs_period_us` (one gVisor sandbox covers the whole pod), tracked the configured sum
   exactly in both debug pods and is what `resources` now asserts on GKE; `nproc` is logged, never
   asserted, there. AWS keeps the original `nproc` assertion, proven reliable there.
-- **A pod's own node is worth reading as a fact in its own right.** `resources` reads the pod's
-  node's allocatable cpu and fails loudly, by name, if it is under the pod's own summed
-  reservation — a Node-Auto-Provisioning shortfall, never something the reservation check above
-  should quietly explain away.
 - **The harness's own direct Postgres connection needs the bind host, not the advertise host.**
   `postgres-resume`'s `writeSession` dials the scratch database directly from the devbox; under
   `bridge` mode the pod-facing advertise host is the bridge's cluster-DNS name, which the devbox
