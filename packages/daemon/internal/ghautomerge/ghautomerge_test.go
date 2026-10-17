@@ -50,6 +50,7 @@ type github struct {
 	viewer                         string
 	timeline                       []string
 	timelineReads                  int
+	contextPages                   map[string]string
 	mutations                      []string
 }
 
@@ -112,6 +113,12 @@ func (g *github) serve(t *testing.T) string {
 				g.state = "MERGED"
 			}
 			_, _ = w.Write([]byte(`{"data":{}}`))
+		case strings.Contains(request.Query, "MergeGroupContexts"):
+			page, ok := g.contextPages[fmt.Sprint(request.Variables["after"])]
+			if !ok || request.Variables["oid"] != "group-sha" {
+				t.Errorf("checks page read of %v, want a page this fake lists", request.Variables)
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"object":{"oid":"group-sha","statusCheckRollup":{"contexts":%s}}}}}`, page)
 		case strings.Contains(request.Query, "timelineItems"):
 			g.timelineReads++
 			if request.Variables["owner"] != "acme" || request.Variables["name"] != "widgets" || request.Variables["number"] != float64(42) {
@@ -357,6 +364,21 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"TIMED_OUT","detailsUrl":"` + failedRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
 		`{"__typename":"StatusContext","context":"freeze","state":"SUCCESS","targetUrl":"https://example.com/freeze"}]}}}`
 	green := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}}}`
+	// cancelled is the queue's commit after a person dequeues it while its merge_group runs are in
+	// flight: they end cancelled, which is no failed merge.
+	cancelled := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
+		`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
+		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"CANCELLED","detailsUrl":"` + failedRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
+		`{"__typename":"CheckRun","name":"e2e","status":"COMPLETED","conclusion":"SKIPPED","detailsUrl":"` + failedRun + `/job/3","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}}}`
+	// paged is a queue's commit whose checks GitHub lists over two pages: the first, cut at 100,
+	// all passed, and its integration failure is on the second (moreContexts).
+	var passing []string
+	for i := range 100 {
+		passing = append(passing, fmt.Sprintf(`{"__typename":"CheckRun","name":"check-%d","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"%s/job/%d","checkSuite":{"workflowRun":{"url":"%s"}}}`, i, failedRun, i, failedRun))
+	}
+	paged := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":true,"endCursor":"after-100"},"nodes":[` + strings.Join(passing, ",") + `]}}}`
+	secondPage := `{"pageInfo":{"hasNextPage":false,"endCursor":"after-101"},"nodes":[` +
+		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"` + failedRun + `/job/200","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}`
 	enqueued := `{"__typename":"AddedToMergeQueueEvent","createdAt":"2026-10-16T05:00:00Z"}`
 	enabled := `{"__typename":"AutoMergeEnabledEvent","createdAt":"2026-10-16T05:00:00Z"}`
 	dequeued := func(reason, actor, commit string) string {
@@ -380,6 +402,14 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		routine         bool
 		resubmit        bool
 	}{
+		{name: "a person dequeues it while its merge group runs", queue: true, timeline: []string{enqueued, dequeued("manual", "a-maintainer", cancelled)},
+			removed: []string{"a-maintainer", "merge queue", "manual"}},
+		{name: "the merge queue removes it on a merge group that only cancelled", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", cancelled)},
+			removed: []string{"github-merge-queue", "merge queue", "timed_out"}},
+		{name: "the merge queue removes it for failed_checks, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", paged)},
+			failed: []string{"failed_checks", "integration (failure, " + failedRun + ")"}},
+		{name: "GitHub turns off the auto-merge the daemon enabled, naming it", timeline: []string{enabled, disabled("merge_commit_blocked", "legion-implementer")},
+			removed: []string{"legion-implementer", "auto-merge", "merge_commit_blocked"}},
 		{name: "the merge queue removes it for failed_checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", red)},
 			failed: []string{"#42", "head", "failed_checks", "group-sha", "integration (timed_out, " + failedRun + ")"}},
 		{name: "the merge queue removes it on a red merge group whatever its reason", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", red)},
@@ -394,8 +424,8 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			removed: []string{"github-merge-queue", "merge queue", "merge_conflict"}},
 		{name: "a person turns its auto-merge off", timeline: []string{enabled, disabled("manually_disabled", "a-maintainer")},
 			removed: []string{"a-maintainer", "auto-merge", "manually_disabled", "Manually disabled by user"}},
-		{name: "GitHub turns its auto-merge off", timeline: []string{enabled, disabled("merge_commit_blocked", "")},
-			removed: []string{"someone", "auto-merge", "merge_commit_blocked"}},
+		{name: "GitHub turns its auto-merge off", timeline: []string{enabled, disabled("merge_commit_blocked", "a-maintainer")},
+			removed: []string{"a-maintainer", "auto-merge", "merge_commit_blocked"}},
 		{name: "the daemon's own disarm lands late", timeline: []string{enabled, disabled("manually_disabled", "legion-implementer")}, resubmit: true},
 		{name: "the daemon's own disarm, then a person's dequeue", queue: true, timeline: []string{enqueued, disabled("manually_disabled", "legion-implementer"), dequeued("manual", "a-maintainer", "null")},
 			removed: []string{"a-maintainer", "merge queue", "manual"}},
@@ -412,7 +442,8 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			if tc.queue {
 				mergeState = "CLEAN"
 			}
-			g := &github{head: "head", mergeState: mergeState, queueRequired: tc.queue, autoMergeOK: true, timeline: tc.timeline}
+			g := &github{head: "head", mergeState: mergeState, queueRequired: tc.queue, autoMergeOK: true, timeline: tc.timeline,
+				contextPages: map[string]string{"after-100": secondPage}}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
 			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
 			var failed *MergeFailed

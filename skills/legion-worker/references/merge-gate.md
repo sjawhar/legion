@@ -149,12 +149,15 @@ reviewing until you finish.
   arm or a queue entry is not the end: the row keeps reading GitHub until GitHub reports the pull
   request merged at READY's head. Once it has seen the arm or entry, it never submits that head
   again after someone else removes it: the merge queue taking the pull request out because the merge
-  failed (GitHub's reason `failed_checks`, or a red run on the commit the queue built for its
-  `merge_group` CI) sends the issue back to `implementing`, the implementer's task naming each
-  failing check and its run, as a red head does; any other removal (a person dequeues it or turns
-  auto-merge off, the queue finds a conflict) ends the row and is told to the architect once
-  (`merge-removed`). Only a removal the implement App made itself, a disarm sent before READY that
-  GitHub applied late, is submitted again. GitHub's rules decide each answer: the daemon bypasses
+  failed (GitHub's reason `failed_checks`, or an unexplained reason with a check that failed, timed
+  out or failed to start on the commit the queue built for its `merge_group` CI) sends the issue back
+  to `implementing`, the implementer's task naming each failing check and its run, as a red head
+  does; any other removal (a person dequeues it, cancelling its runs, or turns auto-merge off, GitHub
+  turns it off, the queue finds a conflict) ends the row and is told to the architect once
+  (`merge-removed`). Two removals are submitted again: the implement App's own disarm sent before
+  READY that GitHub applied late (auto-merge `manually_disabled`, or a `manual` dequeue, by that
+  App), and auto-merge a close turned off, which the reopen at READY's head undid. GitHub's
+  rules decide each answer: the daemon bypasses
   none, and a person may merge it first. A refusal a retry would meet again (squash merges disabled,
   a permission the App lacks) ends the row and is told to the architect once (`merge-refused`), with
   GitHub's message. While the record still awaits READY's head, GitHub showing the pull request

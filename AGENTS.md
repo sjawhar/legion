@@ -213,12 +213,16 @@ report mergeable rather than enqueueing it, and a required check may judge the a
 logged at debug, while a required check still runs. An arm or queue entry is not the end: the row
 keeps reading GitHub until it reports the pull request merged at READY's head, and once it has seen
 the arm or entry it never submits again after a removal it did not make. The merge queue taking the
-pull request out because the merge failed (GitHub's reason `failed_checks`, or a red run on the
-commit the queue built for its `merge_group` CI) sends the issue from `awaiting_merge` back to
+pull request out because the merge failed (GitHub's reason `failed_checks`, or an unexplained reason
+with a check that failed, timed out or failed to start on the commit the queue built for its
+`merge_group` CI, every page of its checks read) sends the issue from `awaiting_merge` back to
 `implementing`, its implementer told the failing run, as a red head does; any other removal (a person
-dequeuing it or turning auto-merge off) ends the row and tells the architect once (`merge-removed`).
-Only the implement App's own removal, a disarm sent before READY that GitHub applied late, is
-submitted again. The repository's required reviews and checks decide when it merges; Legion bypasses
+dequeuing it, whose cancelled runs are no failure, or a person or GitHub turning auto-merge off) ends
+the row and tells the architect once (`merge-removed`). Two removals are submitted again: the
+implement App's own disarm sent before READY that GitHub applied late (auto-merge
+`manually_disabled`, or a `manual` dequeue, by that App), and auto-merge a close turned off
+(`closed`), which the reopen at READY's head undid. The repository's required reviews and checks
+decide when it merges; Legion bypasses
 none, and a review only a person can give is waited for. READY accepts a head whose required checks
 are still running, and refuses one whose required check failed or never reported. The row reads
 GitHub, then the record, and submits nothing once the record shows the issue has left that READY or
