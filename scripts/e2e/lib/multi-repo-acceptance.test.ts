@@ -1054,6 +1054,93 @@ esac`;
     expect(stdout).toContain("CHECK second-owner: PASS");
   });
 
+  // M2's own reproduction, the install-wrapper half: a supported plugin-reinstall launch wraps
+  // the shim's post-"--" argv in installArgv (internal/runtime/sandbox/plugins.go:120-131),
+  // `/bin/sh -c <script> legion-plugins <agent argv>`, whose own final line `exec "$@"`
+  // (installScript, plugins.go:108) replaces that process's image with the real agent — the
+  // shim's own recorded argv never changes, but the agent's real /proc/<pid>/cmdline becomes just
+  // `<agent argv>` again. This spawns a real process through exactly that shape (a real `sh -c
+  // 'exec "$@"' legion-plugins sleep 999`, a real kernel exec, not two hand-written argv arrays
+  // standing in for before and after) and copies its real post-exec /proc/<pid>/cmdline bytes
+  // into the fake tree, so the match is checked against genuine kernel-produced argv.
+  test("an install-wrapper exec transition: the agent's real post-exec argv still resolves: PASS", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const bin = roleBin();
+    fakeRoleGh(bin);
+    fakeRoleGit(
+      bin,
+      `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
+    );
+
+    // A real process that starts as the wrapper's own child and execs into "sleep 999" — the
+    // real-exec stand-in for the agent's own eventual argv, whichever it is.
+    const realProc = Bun.spawn(["sh", "-c", 'exec "$@"', "legion-plugins", "sleep", "999"], {
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    let postExecCmdline: Buffer | undefined;
+    // Real wait: the exec is a real kernel transition on a real pid, not an in-process timer —
+    // deterministic fake-timer control cannot stand in for the kernel actually completing it.
+    for (let i = 0; i < 500; i++) {
+      try {
+        const buf = await Bun.file(`/proc/${realProc.pid}/cmdline`).arrayBuffer();
+        if (Buffer.from(buf).equals(Buffer.from("sleep\x00999\x00"))) {
+          postExecCmdline = Buffer.from(buf);
+          break;
+        }
+      } catch {
+        /* the process may not be visible yet */
+      }
+      await Bun.sleep(20);
+    }
+    try {
+      expect(postExecCmdline).toEqual(Buffer.from("sleep\x00999\x00"));
+
+      const root = join(dir, `proc-${++runs}`);
+      mkdirSync(root, { recursive: true });
+      writeProcEntry(root, "1", { ppid: "0", cmdline: ["launcher"] });
+      writeProcEntry(root, "7", {
+        ppid: "1",
+        cmdline: [
+          "legion",
+          "worker-shim",
+          "--connect",
+          "tcp://x:1",
+          "--",
+          "/bin/sh",
+          "-c",
+          'set -eu\n{ echo installing; } 1>&2\nexec "$@"\n',
+          "legion-plugins",
+          "sleep",
+          "999",
+        ],
+        environ: fixtureEnv(bin),
+      });
+      const agentDir = join(root, "9");
+      mkdirSync(agentDir, { recursive: true });
+      writeFileSync(join(agentDir, "status"), "Name:\tproc9\nPPid:\t7\n");
+      writeFileSync(join(agentDir, "cmdline"), postExecCmdline as Buffer);
+      const pairs = Object.entries(fixtureEnv(bin)).map(([k, v]) => `${k}=${v}`);
+      writeFileSync(join(agentDir, "environ"), `${pairs.join("\0")}\0`);
+      writeProcEntry(root, "10", { ppid: "9", cmdline: ["bash", "-c", "sleep 1"] });
+      writeProcEntry(root, "15", { ppid: "9", cmdline: ["zombie"], environ: {} });
+
+      const { status, stdout } = await runSecondOwner(env, root, {
+        gh: goodGh,
+        kubectl: podLabelKubectl,
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("CHECK second-owner: PASS");
+    } finally {
+      realProc.kill();
+    }
+  });
+
   // M2's own reproduction, the refusal half: two children of the shim whose own argv both equal
   // its post-"--" argv (e.g. a stale incarnation briefly overlapping a fresh one) refuses by name,
   // never picking either arbitrarily.
@@ -1071,7 +1158,7 @@ esac`;
     });
     expect(status).not.toBe(0);
     expect(stderr).toContain(
-      "expected exactly one child of worker-shim 7 matching its own argv, found 2"
+      "expected exactly one child of worker-shim 7 matching its own argv (directly, or through the install wrapper's exec), found 2"
     );
     expect(stderr).toContain("9");
     expect(stderr).toContain("12");
@@ -1158,6 +1245,14 @@ esac`;
     expect(stderr).toContain("CHECK second-owner: FAIL");
   });
 
+  // cmdlineSha256 mirrors how writeProcEntry writes a /proc/<pid>/cmdline file (NUL-joined argv,
+  // trailing NUL, UTF-8 bytes): the digest the observer computes over the whole file.
+  function cmdlineSha256(argv: string[]): string {
+    return createHash("sha256")
+      .update(Buffer.from(`${argv.join("\0")}\0`, "utf8"))
+      .digest("hex");
+  }
+
   test("production_check, merged, role read succeeds, O's push succeeds, T's push refused 403: PASS, pid and cmdline recorded", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
     dispatchServer = dispatchStub({});
@@ -1183,16 +1278,22 @@ esac`;
     // L1: the proc root this run actually scanned is in the evidence, so a live run's reader can
     // see it was really /proc (or, in a test, the fake tree it was told to scan).
     expect(written).toContain(`proc root: ${procRoot}`);
-    // R3: the resolved pid (9, the agent — worker-shim's own child) and its cmdline are recorded.
+    // R3: the resolved pid (9, the agent — worker-shim's own child) and its cmdline digest are
+    // recorded — M3: never the cmdline's own values.
     expect(written).toContain("role pid: 9");
-    expect(written).toContain("role cmdline: omp --mode rpc");
+    expect(written).toContain(
+      `role cmdline: argv0=omp argc=3 sha256=${cmdlineSha256(["omp", "--mode", "rpc"])}`
+    );
   });
 
   // M3's own reproduction: a pod agent's real cmdline carries
   // --append-system-prompt <the whole composed prompt, deployment instructions included>. The
-  // evidence must never hold that text — only the pid, the arguments before the flag, and the
-  // value's byte count and sha256.
-  test("the agent's --append-system-prompt value is never in evidence, only its byte count and sha256: PASS", async () => {
+  // evidence must never hold that text, nor any other argument's value, nor the environment
+  // values the check compares — only the pid, argv[0], the argument count, and a sha256 of the
+  // whole /proc/<pid>/cmdline file, computed by one Python parse that reads the file once and
+  // cannot restart mid-argv (unlike the xargs-based redaction this round's reviews found could
+  // print a prompt verbatim once it pushed xargs past its own batching limit).
+  test("the agent's cmdline never reaches evidence as values, only pid/argv0/argc/sha256: PASS", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
     dispatchServer = dispatchStub({});
     const env = fullInputs(
@@ -1216,13 +1317,99 @@ esac`;
     expect(status).toBe(0);
     expect(stdout).toContain("CHECK second-owner: PASS");
     const written = readFileSync(join(evidence, "second-owner.txt"), "utf8");
-    const bytes = Buffer.byteLength(prompt, "utf8");
-    const sha256 = createHash("sha256").update(prompt, "utf8").digest("hex");
     expect(written).not.toContain(marker);
     expect(written).not.toContain(prompt);
-    expect(written).toContain(
-      `role cmdline: omp --mode rpc --append-system-prompt <redacted: ${bytes} bytes, sha256 ${sha256}>`
+    expect(written).not.toContain("--append-system-prompt");
+    expect(written).toContain(`role cmdline: argv0=omp argc=5 sha256=${cmdlineSha256(agentArgv)}`);
+  });
+
+  // M3's own near-limit reproduction: a prompt just under the runtime's 131,072-byte argument
+  // bound (packages/daemon/internal/runtime/sandbox/manifest.go:53-55,248-257) is large enough
+  // that the old xargs-based redactor (round 5) could invoke its command more than once, losing
+  // the "the previous argument was --append-system-prompt" state across invocations and printing
+  // the prompt as an ordinary argument. The Python parser reads the whole file once; a near-limit
+  // prompt proves it never restarts.
+  test("a ~130 KB prompt, near the runtime's own argument bound, is never in evidence: PASS", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
     );
+    const bin = roleBin();
+    fakeRoleGh(bin);
+    fakeRoleGit(
+      bin,
+      `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
+    );
+    const marker = "DEPLOYMENT-INSTRUCTIONS-MARKER-must-not-leak";
+    const prompt = marker + "-".repeat(130400 - marker.length);
+    expect(prompt.length).toBe(130400);
+    const agentArgv = ["omp", "--mode", "rpc", "--append-system-prompt", prompt];
+    const procRoot = fakeProcTree(fixtureEnv(bin), { agentArgv });
+    const { status, stdout, evidence } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK second-owner: PASS");
+    const written = readFileSync(join(evidence, "second-owner.txt"), "utf8");
+    expect(written).not.toContain(marker);
+    expect(written).not.toContain(prompt);
+    expect(written).toContain(`role cmdline: argv0=omp argc=5 sha256=${cmdlineSha256(agentArgv)}`);
+  });
+
+  // Grep every evidence file this observation wrote (summary and raw alike) for the prompt,
+  // deployment-instruction and environment markers — not only second-owner.txt, which the README
+  // names, but anything a future change might also write.
+  test("no evidence file carries the prompt marker, the instruction marker, or the live environment values", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const bin = roleBin();
+    fakeRoleGh(bin);
+    fakeRoleGit(
+      bin,
+      `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
+    );
+    const promptMarker = "PROMPT-MARKER-xyz";
+    const instructionMarker = "DEPLOYMENT-INSTRUCTIONS-MARKER-xyz";
+    const resumeMarker = "/var/run/legion/sessions/resume-marker-xyz.json";
+    const prompt = `${promptMarker}\n${instructionMarker}\n`;
+    const agentArgv = [
+      "omp",
+      "--mode",
+      "rpc",
+      "--resume",
+      resumeMarker,
+      "--append-system-prompt",
+      prompt,
+    ];
+    const ownersDirMarker = "/gh/owners-dir-marker-xyz";
+    const procRoot = fakeProcTree(
+      {
+        ...fixtureEnv(bin),
+        LEGION_GH_OWNERS_DIR: ownersDirMarker,
+        GH_CONFIG_DIR: `${ownersDirMarker}/zeta`,
+      },
+      { agentArgv }
+    );
+    const { status, stdout, evidence } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK second-owner: PASS");
+    for (const name of readdirSync(evidence)) {
+      const content = readFileSync(join(evidence, name), "utf8");
+      expect(content).not.toContain(promptMarker);
+      expect(content).not.toContain(instructionMarker);
+      expect(content).not.toContain(resumeMarker);
+      expect(content).not.toContain(ownersDirMarker);
+    }
   });
 
   // L1's own reproduction: MULTIREPO_PROC_ROOT set without the test suite's own marker is refused

@@ -468,102 +468,149 @@ require_pod_for_issue() {
 # parent-is-worker-shim test would also match, refusing by ambiguity every enrolled pod. The agent
 # is instead the one child of the shim whose own argv equals the shim's own argv after its first
 # `--` (legion worker-shim ... -- <omp argv>): the shim starts the agent with exactly that argv
-# (shim.go, launcher.go), and none of its other children share it. The shim itself is the one
-# process whose own cmdline carries the element `worker-shim` and whose own parent is PID 1, never
-# the first lexical match a scan happens to find.
-
-# as_role_find_and_run is the POSIX-sh fragment a single `kubectl exec ... -- sh -c` sends into the
-# pod: resolve the shim (above), resolve its one agent child by argv, record the agent's pid and a
-# redacted form of its cmdline into the output — never the raw value, which carries
+# (shim.go, launcher.go). A supported plugin-reinstall launch wraps that argv in the install
+# script (installArgv, internal/runtime/sandbox/plugins.go:120-131): the shim's own post-`--` argv
+# is then `/bin/sh -c <script> legion-plugins <agent argv...>`, and once the wrapper's own
+# `exec "$@"` (installScript, plugins.go:108) replaces it, the agent's real cmdline is the trailing
+# `<agent argv...>` again, which the shim's own recorded argv no longer equals directly — so a
+# match against either the shim's own post-`--` argv, or (when it has that four-element wrapper
+# shape) the argv after it, is required. The shim itself is the one process whose own cmdline
+# carries the element `worker-shim` and whose own parent is PID 1, never the first lexical match a
+# scan happens to find.
+#
+# Resolution and the agent's cmdline redaction (M3) both run as one `python3` script, reading
+# `/proc/<pid>/cmdline` as raw NUL-delimited bytes throughout: a shell pipeline through `xargs -0`
+# can invoke its command more than once when an argument list is long (every argument still
+# arrives whole, never split mid-argument, but the split between two whole arguments can fall
+# between a flag and its value), and state meant to carry across that split — "the previous
+# argument was --append-system-prompt" — does not survive the second invocation, so a value that
+# should never be printed was printed as an ordinary argument once a real prompt pushed the shim's
+# own argv past that limit. One Python process reads the whole file once and never restarts
+# mid-parse. It is a guaranteed pod dependency: every role container's own image is checked for it
+# at boot (internal/capabilities/image.go, the Dockerfile's own `python3 --version` build check).
+#
+# The agent's full cmdline never crosses back out of the pod: Python resolves the pid, then emits
+# only `argv0=<program> argc=<count> sha256=<of the whole /proc/<pid>/cmdline bytes>` — never an
+# argument's own value, since the agent runs with
 # `--append-system-prompt <the role prompts, the addressing, then the deployment's own
-# instructions>`, inlined, and may name the deployment's own private hosts (the same value follows
-# the shim's own `--`, so this redaction covers both) — then re-exec the given script under exactly
-# the agent's own environment with `env -i`, exactly as asAgent's xargs/env -i pattern does.
-# Single-quoted deliberately: every $-expansion inside runs in the pod's own remote shell, never
-# this one.
+# instructions>`, inlined, which may name the deployment's own private hosts, and a resumed
+# session may similarly carry its own session file argument; the digest is enough to tell one
+# invocation's identity from another without ever naming what it ran.
 # shellcheck disable=SC2016
 as_role_find_and_run='
 proc_root=$1
 script=$2
 
-shim_candidates=""
-for d in "$proc_root"/[0-9]*; do
-  pid=${d##*/}
-  [ -r "$d/cmdline" ] || continue
-  tr "\0" "\n" <"$d/cmdline" 2>/dev/null | grep -qx worker-shim || continue
-  [ -r "$d/status" ] || continue
-  ppid=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-  [ "$ppid" = "1" ] || continue
-  shim_candidates="$shim_candidates $pid"
-done
-shim_candidates=$(printf "%s" "$shim_candidates" | sed "s/^ *//;s/ *$//")
-shim_count=0
-for c in $shim_candidates; do shim_count=$((shim_count + 1)); done
-if [ "$shim_count" -ne 1 ]; then
-  echo "as_role: expected exactly one worker-shim process whose own parent is PID 1, found $shim_count ($shim_candidates)" >&2
-  exit 1
-fi
-shim_pid=$shim_candidates
+resolved=$(python3 - "$proc_root" <<"PYEOF"
+import hashlib
+import os
+import sys
 
-shim_cmdfile="$proc_root/$shim_pid/cmdline"
-agent_argv=$(tr "\0" "\n" <"$shim_cmdfile" 2>/dev/null | sed -n "/^--\$/,\$p" | sed "1d")
-if [ -z "$agent_argv" ]; then
-  echo "as_role: worker-shim $shim_pid own cmdline carries no -- separator, so its agent argv is unknown" >&2
-  exit 1
-fi
+proc_root = sys.argv[1]
 
-candidates=""
-for d in "$proc_root"/[0-9]*; do
-  pid=${d##*/}
-  [ "$pid" = "$shim_pid" ] && continue
-  [ -r "$d/status" ] || continue
-  ppid=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-  [ "$ppid" = "$shim_pid" ] || continue
-  [ -r "$d/cmdline" ] || continue
-  this_argv=$(tr "\0" "\n" <"$d/cmdline" 2>/dev/null)
-  if [ "$this_argv" = "$agent_argv" ]; then
-    candidates="$candidates $pid"
-  fi
-done
-candidates=$(printf "%s" "$candidates" | sed "s/^ *//;s/ *$//")
-count=0
-for c in $candidates; do count=$((count + 1)); done
-if [ "$count" -ne 1 ]; then
-  echo "as_role: expected exactly one child of worker-shim $shim_pid matching its own argv, found $count ($candidates)" >&2
-  exit 1
-fi
-pid=$candidates
 
-cmdline_summary=$(xargs -0 sh -c '"'"'
-before=""
-redacted=""
-found=0
-for a in "$@"; do
-  if [ "$found" = 1 ]; then
-    bytes=$(printf "%s" "$a" | wc -c)
-    sha=$(printf "%s" "$a" | sha256sum | cut -d" " -f1)
-    redacted="--append-system-prompt <redacted: $bytes bytes, sha256 $sha>"
-    found=2
-    continue
-  fi
-  if [ "$found" = 0 ] && [ "$a" = "--append-system-prompt" ]; then
-    found=1
-    continue
-  fi
-  if [ "$found" = 0 ]; then
-    before="${before:+$before }$a"
-  fi
-done
-if [ "$found" = 0 ]; then
-  printf "%s" "$before"
-else
-  printf "%s %s" "$before" "$redacted"
-fi
-'"'"' agent-argv0 <"$proc_root/$pid/cmdline")
-echo "@@@PID@@@"
-echo "$pid"
-echo "@@@CMDLINE@@@"
-echo "$cmdline_summary"
+def cmdline_bytes(pid):
+    with open(os.path.join(proc_root, pid, "cmdline"), "rb") as f:
+        return f.read()
+
+
+def fields_of(raw):
+    fields = raw.split(b"\x00")
+    if fields and fields[-1] == b"":
+        fields = fields[:-1]
+    return fields
+
+
+def ppid_of(pid):
+    with open(os.path.join(proc_root, pid, "status"), "rb") as f:
+        for line in f:
+            if line.startswith(b"PPid:"):
+                return line.split()[1].decode()
+    return None
+
+
+try:
+    pids = [d for d in os.listdir(proc_root) if d.isdigit()]
+except OSError as e:
+    sys.stderr.write("as_role: could not list %s: %s\n" % (proc_root, e))
+    sys.exit(1)
+
+shims = []
+for pid in pids:
+    try:
+        fields = fields_of(cmdline_bytes(pid))
+    except OSError:
+        continue
+    if b"worker-shim" not in fields:
+        continue
+    try:
+        ppid = ppid_of(pid)
+    except OSError:
+        continue
+    if ppid == "1":
+        shims.append(pid)
+
+if len(shims) != 1:
+    sys.stderr.write(
+        "as_role: expected exactly one worker-shim process whose own parent is PID 1, found %d (%s)\n"
+        % (len(shims), " ".join(sorted(shims)))
+    )
+    sys.exit(1)
+
+shim_pid = shims[0]
+shim_fields = fields_of(cmdline_bytes(shim_pid))
+if b"--" not in shim_fields:
+    sys.stderr.write(
+        "as_role: worker-shim %s own cmdline carries no -- separator, so its agent argv is unknown\n"
+        % shim_pid
+    )
+    sys.exit(1)
+direct_agent = shim_fields[shim_fields.index(b"--") + 1 :]
+expected = [direct_agent]
+if (
+    len(direct_agent) >= 5
+    and direct_agent[0] == b"/bin/sh"
+    and direct_agent[1] == b"-c"
+    and direct_agent[3] == b"legion-plugins"
+):
+    expected.append(direct_agent[4:])
+
+candidates = []
+for pid in pids:
+    if pid == shim_pid:
+        continue
+    try:
+        ppid = ppid_of(pid)
+    except OSError:
+        continue
+    if ppid != shim_pid:
+        continue
+    try:
+        fields = fields_of(cmdline_bytes(pid))
+    except OSError:
+        continue
+    if any(fields == e for e in expected):
+        candidates.append(pid)
+
+if len(candidates) != 1:
+    sys.stderr.write(
+        "as_role: expected exactly one child of worker-shim %s matching its own argv (directly, or through the install wrapper'"'"'s exec), found %d (%s)\n"
+        % (shim_pid, len(candidates), " ".join(sorted(candidates)))
+    )
+    sys.exit(1)
+
+pid = candidates[0]
+raw = cmdline_bytes(pid)
+fields = fields_of(raw)
+argv0 = fields[0].decode("utf-8", "replace") if fields else ""
+print("@@@PID@@@")
+print(pid)
+print("@@@CMDLINE@@@")
+print("argv0=%s argc=%d sha256=%s" % (argv0, len(fields), hashlib.sha256(raw).hexdigest()))
+PYEOF
+) || exit 1
+printf "%s\n" "$resolved"
+pid=$(printf "%s\n" "$resolved" | sed -n "/^@@@PID@@@\$/{n;p;}")
 xargs -0 sh -c '"'"'inner=$1; shift; exec env -i "$@" sh -c "$inner"'"'"' agent-env "$script" <"$proc_root/$pid/environ"
 '
 
@@ -636,13 +683,21 @@ second_owner() {
     merged=$(gh api "repos/$LEGION_E2E_REPO_O/pulls/$pr_number" --jq .merged) || merged=false
   fi
   [ "$merged" = true ] || ok=0
-
   local probe_branch push_flags
   probe_branch="legion-probe-$$-$(date +%s)"
   push_flags='-c core.hooksPath=/dev/null push --no-verify --dry-run'
+  # The directory comparison runs inside the pod and reports only whether it matched — never the
+  # directories' own values (M3): $o_owner is the operator's own LEGION_E2E_REPO_O owner, already
+  # known and non-sensitive, so it is the only literal this host interpolates into the remote
+  # script; everything else here is the pod's own live environment, read and compared, never
+  # echoed.
   local combined
   combined="
-env_check=\"\$LEGION_GH_OWNERS_DIR|\$GH_CONFIG_DIR\"
+if [ -n \"\$LEGION_GH_OWNERS_DIR\" ] && [ \"\$GH_CONFIG_DIR\" = \"\$LEGION_GH_OWNERS_DIR/$o_owner\" ]; then
+  env_match=true
+else
+  env_match=false
+fi
 read_out=\$(gh api repos/$LEGION_E2E_REPO_T --jq .full_name 2>&1)
 read_status=\$?
 push_o_out=\$(git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_O\" \"HEAD:refs/heads/$probe_branch\" 2>&1)
@@ -650,7 +705,7 @@ push_o_status=\$?
 push_t_out=\$(git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_T\" \"HEAD:refs/heads/$probe_branch\" 2>&1)
 push_t_status=\$?
 echo '@@@ENV@@@'
-echo \"\$env_check\"
+echo \"\$env_match\"
 echo '@@@READ@@@'
 echo \"\$read_out\"
 echo '@@@READ_STATUS@@@'
@@ -671,14 +726,11 @@ echo '@@@END@@@'
   combined_out=$(as_role "$pod" "$container" "$proc_root" "$combined") ||
     fail "second-owner: could not identify or run as the role's own process in $pod ($container)"
 
-  local pid cmdline env_check owners_dir config_dir want_config_dir
+  local pid cmdline env_match
   pid=$(extract_section "$combined_out" PID CMDLINE)
   cmdline=$(extract_section "$combined_out" CMDLINE ENV)
-  env_check=$(extract_section "$combined_out" ENV READ)
-  owners_dir=${env_check%%|*}
-  config_dir=${env_check#*|}
-  want_config_dir="$owners_dir/$o_owner"
-  [ -n "$owners_dir" ] && [ "$config_dir" = "$want_config_dir" ] || ok=0
+  env_match=$(extract_section "$combined_out" ENV READ)
+  [ "$env_match" = true ] || ok=0
 
   local read_out read_status
   read_out=$(extract_section "$combined_out" READ READ_STATUS)
@@ -714,7 +766,7 @@ merged (GitHub, repos/$LEGION_E2E_REPO_O/pulls/$pr_number): $merged
 proc root: $proc_root
 role pid: $pid
 role cmdline: $cmdline
-role env: LEGION_GH_OWNERS_DIR=$owners_dir GH_CONFIG_DIR=$config_dir (want $want_config_dir)
+role env: LEGION_GH_OWNERS_DIR/GH_CONFIG_DIR name the issue's own owner directory: $env_match
 as role: gh api repos/$LEGION_E2E_REPO_T --jq .full_name = $read_out (exit $read_status)
 positive control: dry-run push to $LEGION_E2E_REPO_O as role, exit $push_o_status
 ---
