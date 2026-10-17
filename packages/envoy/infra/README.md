@@ -1581,15 +1581,16 @@ on the server gets, key-value reads and watch updates included, such as the list
 this set; its seed belongs to the daemon, not to a host or session.
 
 `DispatchPermissions(machineID)` is the grant of Dispatch's one NATS user, shared by
-`envoy-dispatch` and the listener beside it. It adds to `HostPermissions(machineID)` the info,
+`envoy-dispatch` and the listener beside it. It adds to `ListenerPermissions(machineID)` the info,
 filtered create, delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
 durables; the key-value calls for `envoy_webhook_redelivery`; publication of every session's
 agent-stream control subject; and subscription to every session's agent-stream frames. A
-`gcp:NatsHub` user with `dispatchMachineId` holds it. Whatever holds its seed, `envoy-dispatch` or
-the listener beside it, can read every session's agent-stream frames, send control to any session,
-and, through `HostPermissions`, publish frames as any session, so the seed is as sensitive as every
-session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and
-2.15.1 in `core/dispatch_permissions_live_test.go`.
+`gcp:NatsHub` user with `dispatchMachineId` holds it. No session shares the user, so it holds none
+of `SessionPermissions`: whatever holds its seed, `envoy-dispatch` or the listener beside it, can
+read every session's agent-stream frames and send control to any session, but cannot publish
+frames as a session. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and
+2.15.1 in `core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is
+refused a publish to a session's frames.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by

@@ -63,10 +63,20 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireAgentStreamRelayed(t, live.conn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
+				// Dispatch's own user holds no session entry: a publish to a session's frames is
+				// refused, so whoever holds its seed cannot fake a session's conversation.
+				frames := contracts.AgentStreamFramesSubject(dispatchSessionID)
+				require.NoError(t, live.dispatch.Publish(frames, []byte(`{"v":1,"kind":"message","seq":2}`)))
+				requireViolation(t, live.dispatch, live.dispatchErrs, `Publish to "`+frames+`"`)
+
+				// Every allowed operation came first, so the two expected refusals are the only
+				// violations the server logged: the frames publish above and the test client's canary.
 				require.NoError(t, live.conn.Publish("outside.example", nil))
 				requireViolation(t, live.conn, live.errs, `Publish to "outside.example"`)
+				expected := []string{frames, "outside.example"}
+				violationsOnceLogged(t, live.server, frames)
 				for _, violation := range violationsOnceLogged(t, live.server, "outside.example") {
-					require.Equal(t, "outside.example", violation[2], "the server refused what Dispatch needs: %s", violation[0])
+					require.Contains(t, expected, violation[2], "the server refused what a grant needs: %s", violation[0])
 				}
 			})
 			t.Run("without the delivery consumer create Dispatch leaves only that intake unbound", func(t *testing.T) {
@@ -91,34 +101,86 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 	}
 }
 
-// liveDispatch is one envoy-dispatch process started under a grant: the NATS server holding the
-// grant as its whole authorization, the fake GitHub App API behind Dispatch, and a test client
-// connected as Dispatch's own NATS user.
+// liveDispatch is one envoy-dispatch process started under a grant: the NATS server holding two
+// users, Dispatch's (the grant) and the test client's (testClientPermissions), the fake GitHub App
+// API behind Dispatch, the test client's connection, and a connection as Dispatch's own user for
+// the checks of that grant itself.
 type liveDispatch struct {
 	server  natsServer
 	github  *dispatchGitHub
 	process *cmdtest.Process
 	port    int
-	conn    *natsgo.Conn
-	errs    <-chan error
-	js      natsgo.JetStreamContext
+	// conn is the test client's connection: a second user, so no check leans on Dispatch's grant.
+	conn *natsgo.Conn
+	errs <-chan error
+	js   natsgo.JetStreamContext
+	// dispatch is a connection as Dispatch's own user.
+	dispatch     *natsgo.Conn
+	dispatchErrs <-chan error
 }
 
-// startLiveDispatch starts a NATS server holding grant as its whole authorization, seeds the
-// delivery settings in a fresh Postgres, starts envoy-dispatch against both, waits for it to
-// answer healthy, and connects the test client as the same NATS user.
+// startLiveDispatch starts a NATS server whose authorization holds Dispatch's user (grant) and the
+// test client's (testClientPermissions), seeds the delivery settings in a fresh Postgres, starts
+// envoy-dispatch against both, waits for it to answer healthy, and connects the test client as its
+// own user and a second connection as Dispatch's.
 func startLiveDispatch(t *testing.T, dispatch, image string, grant core.Permissions) liveDispatch {
 	t.Helper()
-	seed, server, uri := startGrantServer(t, image, grant)
+	seed, clientSeed, server, uri := startDispatchServer(t, image, grant)
 	databaseURL := testpg.URL(t)
 	seedDispatchDeliverySettings(t, databaseURL)
 	github := newDispatchGitHub(t)
 	process, port := startDispatch(t, dispatch, databaseURL, uri, seed, github.server.URL)
 	requireHealthy(t, process, port, dispatchHealthWindow, dispatchHealthy)
-	conn, errs := connect(t, uri, seed)
+	conn, errs := connect(t, uri, clientSeed)
 	js, err := conn.JetStream()
 	require.NoError(t, err)
-	return liveDispatch{server: server, github: github, process: process, port: port, conn: conn, errs: errs, js: js}
+	dispatchConn, dispatchErrs := connect(t, uri, seed)
+	return liveDispatch{server: server, github: github, process: process, port: port,
+		conn: conn, errs: errs, js: js, dispatch: dispatchConn, dispatchErrs: dispatchErrs}
+}
+
+// startDispatchServer runs image with two users: Dispatch's, holding grant with its seed, and the
+// test client's, holding testClientPermissions with a seed of its own. It returns both seeds, the
+// server and its client URL.
+func startDispatchServer(t *testing.T, image string, grant core.Permissions) (string, string, natsServer, string) {
+	t.Helper()
+	dispatchSeed, dispatchKey := testnats.User(t)
+	clientSeed, clientKey := testnats.User(t)
+	client := testClientPermissions()
+	config, err := core.Authorization{Users: []core.User{
+		{Name: dispatchMachineID, NKey: dispatchKey, Publish: &grant.Publish, Subscribe: &grant.Subscribe, HasSeed: true},
+		{Name: "example-test-client", NKey: clientKey, Publish: &client.Publish, Subscribe: &client.Subscribe, HasSeed: true},
+	}}.Render(nil)
+	require.NoError(t, err)
+	server, uri := testnats.StartImageConfig(t, image, config, hubServerArgs, false)
+	return dispatchSeed, clientSeed, server, uri
+}
+
+// testClientPermissions is the grant of the live test's own NATS user: SessionPermissions, which
+// lets it play a session (publish its frames, subscribe notifications and its control subject),
+// plus the exact calls its checks make, so it leans on nothing of Dispatch's grant: reply inboxes
+// for its JetStream requests, each Dispatch durable's consumer info, a JetStream publish into the
+// stream, and the redelivery bucket's reads, writes and watch — not the bucket's create, which is
+// Dispatch's to make.
+func testClientPermissions() core.Permissions {
+	session := core.SessionPermissions()
+	redelivery := "KV_" + bus.WebhookRedeliveryBucket
+	publish := append(session.Publish.Allow,
+		bus.NotificationTopicPrefix+">",
+		"$JS.API.CONSUMER.INFO."+bus.Stream+"."+bus.DispatchDeliveryDurable,
+		"$JS.API.CONSUMER.INFO."+bus.Stream+"."+bus.DispatchJobDurable,
+		"$JS.API.STREAM.INFO."+redelivery,
+		"$JS.API.DIRECT.GET."+redelivery+".>",
+		"$JS.API.STREAM.MSG.GET."+redelivery,
+		"$KV."+bus.WebhookRedeliveryBucket+".>",
+		"$JS.API.CONSUMER.CREATE."+redelivery+".>",
+		"$JS.API.CONSUMER.DELETE."+redelivery+".>",
+		"$JS.FC."+redelivery+".>",
+	)
+	return core.Permissions{
+		Publish:   core.Rules{Allow: publish},
+		Subscribe: core.Rules{Allow: append(session.Subscribe.Allow, "_INBOX.>")},
+	}
 }
 
 func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {

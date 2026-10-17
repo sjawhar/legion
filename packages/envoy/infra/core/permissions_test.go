@@ -146,11 +146,11 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 }
 
 func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
-	hostPublish := append([]string{}, listenerPublish...)
-	for index, subject := range hostPublish {
-		hostPublish[index] = strings.ReplaceAll(subject, "example-host-a", "example-dispatch")
+	dispatchPublish := append([]string{}, listenerPublish...)
+	for index, subject := range dispatchPublish {
+		dispatchPublish[index] = strings.ReplaceAll(subject, "example-host-a", "example-dispatch")
 	}
-	dispatchPublish := append(append(hostPublish, "_INBOX.>", "agentstream.*.frames"),
+	dispatchPublish = append(dispatchPublish,
 		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
 		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",
 		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-events",
@@ -173,7 +173,7 @@ func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
 		Publish: core.Rules{Allow: dispatchPublish},
 		Subscribe: core.Rules{Allow: []string{
 			"_INBOX.>", "notifications.role.> envoy-listener-example-dispatch",
-			"notifications.>", "agentstream.*.control", "agentstream.*.frames",
+			"agentstream.*.frames",
 		}},
 	}
 	got := core.DispatchPermissions("example-dispatch")
