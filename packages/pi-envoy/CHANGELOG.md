@@ -35,6 +35,9 @@
 
 ### Added
 
+- The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
+  `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
+  repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
   runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
   registers on `/legion/v1/claims/register` with that boot token in place of a controller
