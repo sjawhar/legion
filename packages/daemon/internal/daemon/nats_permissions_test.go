@@ -16,7 +16,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"github.com/stretchr/testify/require"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/sjawhar/envoy/daemonpermissions"
@@ -26,6 +25,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const (
@@ -45,22 +45,27 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				defer admin.Close()
 				stream := createDaemonNotificationStream(t, js)
 
-				first := connectDaemonGrant(t, uri, daemonSeed, slogBuffer(t))
+				first := connectDaemonGrant(t, uri, daemonSeed, &syncBuffer{})
 				for _, name := range []string{dispatchGrantConsumer, githubGrantConsumer} {
-					_, err := stream.Consumer(t.Context(), name)
-					require.NoError(t, err, "the first daemon creates %s", name)
+					if _, err := stream.Consumer(t.Context(), name); err != nil {
+						t.Fatalf("the first daemon creates %s: %v", name, err)
+					}
 				}
 				first.conn.Close()
 
-				logs := slogBuffer(t)
+				logs := &syncBuffer{}
 				restarted := connectDaemonGrant(t, uri, daemonSeed, logs)
 				defer restarted.conn.Close()
 
 				exception := make(chan []byte, 1)
 				subscription, err := subscribeNoticeExceptions(restarted.conn, func(data []byte) { exception <- append([]byte(nil), data...) })
-				require.NoError(t, err)
+				if err != nil {
+					t.Fatalf("subscribe to role-lane exceptions: %v", err)
+				}
 				defer subscription.Unsubscribe()
-				require.NoError(t, restarted.conn.Flush())
+				if err := restarted.conn.Flush(); err != nil {
+					t.Fatalf("flush the exceptions subscription: %v", err)
+				}
 
 				handler := &failFirstDaemonGrantHandler{}
 				stop := runDaemonGrantConsumers(t, restarted, handler)
@@ -68,20 +73,35 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 
 				publishDaemonGrantFixture(t, js, "../intake/testdata/dispatch/issue-updated.json")
 				publishDaemonGrantFixture(t, js, "../intake/testdata/github/pr-opened.json")
-				require.NoError(t, admin.Publish("notifications.envoy.exceptions.notifications.role.example", []byte("retry this notice")))
-				require.NoError(t, admin.Flush())
-
-				select {
-				case got := <-exception:
-					require.Equal(t, []byte("retry this notice"), got)
-				case <-time.After(10 * time.Second):
-					t.Fatal("the daemon did not receive the role-lane exception")
+				if err := admin.Publish("notifications.envoy.exceptions.notifications.role.example", []byte("retry this notice")); err != nil {
+					t.Fatalf("publish the role-lane exception: %v", err)
 				}
-				require.Eventually(t, func() bool { return handler.calls.Load() >= 3 }, 10*time.Second, 25*time.Millisecond,
-					"the daemon naks one delivery and applies its redelivery with both event types")
+				if err := admin.Flush(); err != nil {
+					t.Fatalf("flush the role-lane exception: %v", err)
+				}
+
+				var got []byte
+				testwait.Eventually(t, "the daemon receiving the role-lane exception", func() bool {
+					select {
+					case got = <-exception:
+						return true
+					default:
+						return false
+					}
+				})
+				if string(got) != "retry this notice" {
+					t.Fatalf("role-lane exception = %q, want %q", got, "retry this notice")
+				}
+				testwait.Eventually(t, "the daemon naking one delivery and applying its redelivery with both event types", func() bool {
+					return handler.calls.Load() >= 3
+				})
 				requireDaemonGrantAcknowledged(t, stream, dispatchGrantConsumer, githubGrantConsumer)
-				require.NotContains(t, logs.String(), "NATS refused the daemon a permission")
-				require.NotContains(t, daemonGrantServerLogs(t, server), "Permissions Violation")
+				if strings.Contains(logs.String(), "NATS refused the daemon a permission") {
+					t.Fatalf("the daemon logged a permission refusal:\n%s", logs.String())
+				}
+				if serverLog := daemonGrantServerLogs(t, server); strings.Contains(serverLog, "Permissions Violation") {
+					t.Fatalf("the server logged a permissions violation:\n%s", serverLog)
+				}
 				t.Log("restarted daemon created both consumers, NAKed then acknowledged both event kinds, and received the role-lane exception without a permission refusal")
 			})
 
@@ -90,32 +110,39 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				grant := daemonpermissions.Grant()
 				held := len(grant.Publish)
 				grant.Publish = slices.DeleteFunc(grant.Publish, func(subject string) bool { return subject == removed })
-				require.Len(t, grant.Publish, held-1, "the daemon grant contains %s", removed)
+				if len(grant.Publish) != held-1 {
+					t.Fatalf("the daemon grant does not contain %s: %v", removed, grant.Publish)
+				}
 
 				daemonSeed, admin, js, server, uri := startDaemonGrantServer(t, image.Ref, grant)
 				defer admin.Close()
 				createDaemonNotificationStream(t, js)
 
-				logs := slogBuffer(t)
+				logs := &syncBuffer{}
 				cfg := daemonGrantConfig(uri)
 				attempt, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
-				w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: logs.logger}
-				err := w.connect(attempt, cfg, natsConnection{seed: daemonSeed})
-				require.Error(t, err)
+				w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
+				if err := w.connect(attempt, cfg, natsConnection{seed: daemonSeed}); err == nil {
+					t.Fatal("the daemon connected without the dispatch consumer-create permission")
+				}
 
 				denied := "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS." + dispatchGrantConsumer
-				require.Eventually(t, func() bool {
-					return strings.Contains(logs.String(), "NATS refused the daemon a permission") && strings.Contains(logs.String(), denied)
-				}, 10*time.Second, 25*time.Millisecond, "the daemon log names the refused JetStream API publish")
-				require.Eventually(t, func() bool {
-					serverLog := daemonGrantServerLogs(t, server)
-					return strings.Contains(serverLog, "Publish Violation") && strings.Contains(serverLog, denied)
-				}, 10*time.Second, 25*time.Millisecond, "the server log names the refused JetStream API publish")
-				daemonLine := matchingLogLine(logs.String(), "NATS refused the daemon a permission", denied)
-				serverLine := matchingLogLine(daemonGrantServerLogs(t, server), "Publish Violation", denied)
-				require.NotEmpty(t, daemonLine)
-				require.NotEmpty(t, serverLine)
+				var daemonLine, serverLine string
+				testwait.Eventually(t, "the daemon log naming the refused JetStream API publish", func() bool {
+					daemonLine = matchingLogLine(logs.String(), "NATS refused the daemon a permission", denied)
+					return daemonLine != ""
+				})
+				var serverLogErr error
+				testwait.Eventually(t, "the server log naming the refused JetStream API publish", func() bool {
+					var serverLog string
+					serverLog, serverLogErr = readDaemonGrantServerLogs(server)
+					serverLine = matchingLogLine(serverLog, "Publish Violation", denied)
+					return serverLine != ""
+				})
+				if serverLogErr != nil {
+					t.Fatalf("read the server log: %v", serverLogErr)
+				}
 				t.Logf("observed daemon refusal: %s", daemonLine)
 				t.Logf("observed server refusal: %s", serverLine)
 			})
@@ -123,19 +150,9 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 	}
 }
 
-type grantLog struct {
-	logger *slog.Logger
-	buffer syncBuffer
+func grantLogger(logs *syncBuffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(logs, nil))
 }
-
-func slogBuffer(t *testing.T) *grantLog {
-	t.Helper()
-	logs := &grantLog{}
-	logs.logger = slog.New(slog.NewTextHandler(&logs.buffer, nil))
-	return logs
-}
-
-func (l *grantLog) String() string { return l.buffer.String() }
 
 func daemonGrantConfig(uri string) config.Config {
 	const project = "CAPTURE"
@@ -145,11 +162,13 @@ func daemonGrantConfig(uri string) config.Config {
 	}
 }
 
-func connectDaemonGrant(t *testing.T, uri, seed string, logs *grantLog) *workflowRuntime {
+func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workflowRuntime {
 	t.Helper()
 	cfg := daemonGrantConfig(uri)
-	w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: logs.logger}
-	require.NoError(t, w.connect(t.Context(), cfg, natsConnection{seed: seed}))
+	w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
+	if err := w.connect(t.Context(), cfg, natsConnection{seed: seed}); err != nil {
+		t.Fatalf("connect the daemon: %v", err)
+	}
 	return w
 }
 
@@ -161,7 +180,9 @@ func runDaemonGrantConsumers(t *testing.T, w *workflowRuntime, handlers ...intak
 	go func() { done <- w.consumers.Run(ctx, pool, handlers...) }()
 	return func() {
 		cancel()
-		require.NoError(t, <-done)
+		if err := <-done; err != nil {
+			t.Fatalf("run the daemon consumers: %v", err)
+		}
 	}
 }
 
@@ -177,18 +198,23 @@ func (h *failFirstDaemonGrantHandler) Apply(context.Context, pgx.Tx, intake.Fact
 func publishDaemonGrantFixture(t *testing.T, js jetstream.JetStream, path string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
 	var envelope struct {
 		Topic string `json:"topic"`
 	}
-	require.NoError(t, json.Unmarshal(data, &envelope))
-	_, err = js.Publish(t.Context(), envelope.Topic, data)
-	require.NoError(t, err)
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode %s: %v", path, err)
+	}
+	if _, err := js.Publish(t.Context(), envelope.Topic, data); err != nil {
+		t.Fatalf("publish %s: %v", path, err)
+	}
 }
 
 func requireDaemonGrantAcknowledged(t *testing.T, stream jetstream.Stream, consumers ...string) {
 	t.Helper()
-	require.Eventually(t, func() bool {
+	testwait.Eventually(t, "the daemon acknowledging both retained event types", func() bool {
 		for _, name := range consumers {
 			consumer, err := stream.Consumer(t.Context(), name)
 			if err != nil {
@@ -200,13 +226,15 @@ func requireDaemonGrantAcknowledged(t *testing.T, stream jetstream.Stream, consu
 			}
 		}
 		return true
-	}, 10*time.Second, 25*time.Millisecond, "the daemon acknowledges both retained event types")
+	})
 }
 
 func createDaemonNotificationStream(t *testing.T, js jetstream.JetStream) jetstream.Stream {
 	t.Helper()
 	stream, err := js.CreateStream(t.Context(), jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("create the notification stream: %v", err)
+	}
 	return stream
 }
 
@@ -218,28 +246,43 @@ func startDaemonGrantServer(t *testing.T, image string, grant daemonpermissions.
 	var permissions strings.Builder
 	encoder := json.NewEncoder(&permissions)
 	encoder.SetEscapeHTML(false)
-	require.NoError(t, encoder.Encode(map[string]map[string][]string{
+	if err := encoder.Encode(map[string]map[string][]string{
 		"publish":   {"allow": grant.Publish},
 		"subscribe": {"allow": grant.Subscribe},
-	}))
+	}); err != nil {
+		t.Fatalf("encode the daemon permissions: %v", err)
+	}
 	server, uri := testnats.StartNkeyAuthorizedUsers(t, image,
 		testnats.NkeyUser{Public: daemonPublic, Permissions: strings.TrimSpace(permissions.String())},
 		testnats.NkeyUser{Public: adminPublic})
 	admin, err := natsauth.Connect([]string{uri}, adminSeed, nats.Timeout(5*time.Second))
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("connect the admin user: %v", err)
+	}
 	js, err := jetstream.New(admin)
-	require.NoError(t, err)
+	if err != nil {
+		t.Fatalf("open JetStream as the admin user: %v", err)
+	}
 	return daemonSeed, admin, js, server, uri
 }
 
 func daemonGrantServerLogs(t *testing.T, server *tcnats.NATSContainer) string {
 	t.Helper()
+	text, err := readDaemonGrantServerLogs(server)
+	if err != nil {
+		t.Fatalf("read the server log: %v", err)
+	}
+	return text
+}
+
+func readDaemonGrantServerLogs(server *tcnats.NATSContainer) (string, error) {
 	logs, err := server.Logs(context.Background())
-	require.NoError(t, err)
+	if err != nil {
+		return "", err
+	}
 	defer logs.Close()
 	text, err := io.ReadAll(logs)
-	require.NoError(t, err)
-	return string(text)
+	return string(text), err
 }
 
 func matchingLogLine(text string, terms ...string) string {

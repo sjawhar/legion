@@ -16,7 +16,10 @@ type Permissions struct {
 // Grant returns the NATS grant for one Legion daemon. Its two durable consumers inspect and create
 // consumers in Envoy's notification stream, fetch their messages, and acknowledge them; the
 // consumer subjects end in `>`, so the grant reaches every consumer of the stream, not only those
-// two. It also receives role-lane delivery exceptions and JetStream API replies.
+// two. It also receives role-lane delivery exceptions and JetStream API replies. Those replies
+// arrive on `_INBOX.>`, so the daemon's seed receives every reply any client on the server gets,
+// key-value reads and watch updates included, such as the listener's envoy_roles and
+// envoy_sessions watchers.
 //
 // Each call owns its lists so a consumer can narrow a grant without changing another caller's.
 func Grant() Permissions {

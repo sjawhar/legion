@@ -113,7 +113,9 @@ and drain any consumer of the stream, every host's listener consumer and another
 consumers included. It can also create a push consumer whose delivery subject is any subject at
 all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,
 other clients' inboxes, `agentstream.*.control`. Treat the daemon's seed as a credential of the
-whole stream and of every subject a push consumer can deliver to.
+whole stream and of every subject a push consumer can deliver to. Its `_INBOX.>` subscription
+also receives every reply any client on the server gets, key-value reads and watch updates
+included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
 
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
 `core.DaemonPermissions()` instead of a host's or an explicit user's grant.

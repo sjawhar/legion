@@ -1273,7 +1273,9 @@ the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
 the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
 lets the seed create a push consumer that delivers stream messages to any subject), and
-subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
+subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
+every reply any client on the server gets, key-value reads and watch updates included, such as
+the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
 subject: role and controller notices go to the Envoy listener over HTTP, and control directives
 over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified
 live: a server granting exactly them logged no refusal across a boot creating both durables, a
