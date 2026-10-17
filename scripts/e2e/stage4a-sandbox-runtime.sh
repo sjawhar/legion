@@ -227,10 +227,15 @@ cleanup() {
   done
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then
     (namespace_clean) || status=1
+    # A `while read` fed by `< <(comm ...)` piping two more process substitutions hung forever
+    # here, live, 2026-10-17 — nested process substitution, not a cluster quirk, confirmed in
+    # isolation the same way (a bare repro of this exact line hung past a 5-minute timeout). comm's
+    # own output goes to a plain file first; the loop reads that file directly, no substitution.
     if [ -f "$evidence/namespace-after.txt" ]; then
+      comm -13 <(sort "$evidence/namespace-before.txt") <(sort "$evidence/namespace-after.txt") >"$evidence/namespace-leftover-pods.txt"
       while IFS= read -r leftover_name; do
         case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
-      done < <(comm -13 <(sort "$evidence/namespace-before.txt") <(sort "$evidence/namespace-after.txt"))
+      done <"$evidence/namespace-leftover-pods.txt"
     fi
   fi
   rm -rf "$work"
