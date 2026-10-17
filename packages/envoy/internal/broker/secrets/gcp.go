@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -59,7 +60,7 @@ func ValidGCPKeyName(name string) error {
 	return nil
 }
 
-// GCP is the Store over Google Cloud Secret Manager.
+// GCP is the Store over Google Cloud Secret Manager. Build it with NewGCP.
 type GCP struct {
 	// Client reads the secrets: Secret Manager's own client, which the tests dial to a fake
 	// Secret Manager over gRPC.
@@ -68,6 +69,47 @@ type GCP struct {
 	// whose current version is encrypted with any other key, Google's default one included, is
 	// not OnKey.
 	KeyName string
+	// held remembers, per source, when Read last found the secret not scheduled for deletion, so
+	// releasing the same secret again within gcpHeldFor costs no metadata read.
+	held *heldCache
+}
+
+// gcpHeldFor is how long Read trusts its last finding that a secret is not scheduled for deletion:
+// a delete made since is refused within that long, and value releases cost metadata reads per
+// distinct secret per 30 s, not per release.
+const gcpHeldFor = 30 * time.Second
+
+// heldCache is when each source was last found not scheduled for deletion.
+type heldCache struct {
+	mu  sync.Mutex
+	at  map[string]time.Time
+	now func() time.Time
+}
+
+// NewGCP is the Store over client, on the agent-secrets key keyName.
+func NewGCP(client *secretmanager.Client, keyName string) GCP {
+	return GCP{Client: client, KeyName: keyName, held: &heldCache{at: map[string]time.Time{}, now: time.Now}}
+}
+
+// fresh reports whether source was found not scheduled for deletion within gcpHeldFor.
+func (h *heldCache) fresh(source string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	at, ok := h.at[source]
+	return ok && h.now().Sub(at) < gcpHeldFor
+}
+
+// record notes that source was just found not scheduled for deletion, dropping expired entries.
+func (h *heldCache) record(source string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	for s, at := range h.at {
+		if now.Sub(at) >= gcpHeldFor {
+			delete(h.at, s)
+		}
+	}
+	h.at[source] = now
 }
 
 // NewGCPClient opens Secret Manager under Application Default Credentials: on GKE the metadata
@@ -200,22 +242,28 @@ func (g GCP) onKey(keyVersion string) bool {
 // GetSecret that refuses one scheduled for deletion: Secret Manager reads a secret until its
 // expire_time, so without that check a grant made before `agent-secrets secret delete` would keep
 // reading it until the policy drops it, where Secrets Manager refuses a secret in its recovery
-// window at once. ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND),
-// when the secret has an expire_time, or when the latest version is disabled or destroyed
+// window at once. That GetSecret counts against the project's shared metadata read quota, so a
+// finding that the secret is not scheduled for deletion is trusted for gcpHeldFor (30 s): a delete
+// is refused within that long, and a busy fleet's releases cost a read per distinct secret per
+// 30 s. ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND), when the
+// secret has an expire_time, or when the latest version is disabled or destroyed
 // (FAILED_PRECONDITION), all the same answer to the caller: the secret is not readable. The value
 // must be non-empty UTF-8, since the broker injects it into an environment; an error names the
 // secret and never the bytes.
 func (g GCP) Read(ctx context.Context, source string) (string, error) {
-	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
-	switch status.Code(err) {
-	case codes.OK:
-		if secret.GetExpireTime() != nil {
+	if !g.held.fresh(source) {
+		secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
+		switch status.Code(err) {
+		case codes.OK:
+			if secret.GetExpireTime() != nil {
+				return "", ErrNotFound
+			}
+		case codes.NotFound:
 			return "", ErrNotFound
+		default:
+			return "", fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
 		}
-	case codes.NotFound:
-		return "", ErrNotFound
-	default:
-		return "", fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
+		g.held.record(source)
 	}
 	latest := source + "/versions/" + gcpLatest
 	out, err := g.Client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})

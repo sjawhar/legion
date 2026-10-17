@@ -1275,3 +1275,20 @@ func TestAServiceGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
 		t.Fatalf("Create after the service's account changed = %+v, %v; want a new request, denied, not request %s reused", again, err, granted.ID)
 	}
 }
+
+// TestAGrantFrozenOnAnotherSourceIsNotLive pins that a grant whose frozen source is not the one the
+// policy now serves the name from - the broker moved between stores, or the secret was replaced -
+// is not live, so its release and its reuse both refuse it and the session asks again, rather than
+// reading a source the policy no longer decides about.
+func TestAGrantFrozenOnAnotherSourceIsNotLive(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("DEEL_API_KEY", policy.OwnerShared, policy.TierAgent, "v"))
+	set := policytest.Current(t, store).Get()
+	live := set.Secrets["DEEL_API_KEY"].Source
+	requester := policy.Requester{Operator: "ada@example.com"}
+	if err := stillAllowed(set, "DEEL_API_KEY", live, policy.Automatic, "", requester); err != nil {
+		t.Fatalf("stillAllowed on the live source = %v, want nil", err)
+	}
+	if err := stillAllowed(set, "DEEL_API_KEY", "projects/000000000000/secrets/agent-secrets-deel-api-key", policy.Automatic, "", requester); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("stillAllowed on a source the policy no longer serves = %v, want ErrGrantNotLive", err)
+	}
+}

@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -121,7 +122,7 @@ func main() {
 		client, err := secrets.NewGCPClient(ctx)
 		fatal(err)
 		defer client.Close()
-		secretStore, credentials = secrets.GCP{Client: client, KeyName: cfg.SecretsKMSKey}, "application-default"
+		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
@@ -198,7 +199,13 @@ func main() {
 	go sweeper.Run(ctx)
 
 	mux := http.NewServeMux()
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken,
+	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so its overall
+	// cap is the GCP one.
+	var rereadOverall *ratelimit.Limit
+	if cfg.SecretsStore == secrets.StoreGCP {
+		rereadOverall = &api.GCPRereadOverallLimit
+	}
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,

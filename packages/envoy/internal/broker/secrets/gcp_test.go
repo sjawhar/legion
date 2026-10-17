@@ -259,7 +259,7 @@ func TestGCPListReadsAnnotationsKeyStateAndExpiry(t *testing.T) {
 		fakeProject + "/secrets/other-agent-secrets-key": {denyVersion: true},
 		fakeProject + "/secrets/AGENT-SECRETS-upper":     {denyVersion: true},
 	}}
-	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	store := NewGCP(startFake(t, f), fakeKey)
 	ctx := context.Background()
 	listings, err := store.List(ctx, fakePrefix)
 	if err != nil {
@@ -311,7 +311,7 @@ func TestGCPDescribeAndRead(t *testing.T) {
 		fakePrefix + "binary":   {annotations: map[string]string{}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, value: []byte{0xff, 0xfe}},
 		fakePrefix + "expiring": {annotations: map[string]string{}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, expires: time.Now().Add(30 * 24 * time.Hour), value: []byte("v")},
 	}}
-	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	store := NewGCP(startFake(t, f), fakeKey)
 	ctx := context.Background()
 
 	ls, err := store.Describe(ctx, fakePrefix+"served")
@@ -350,7 +350,7 @@ func TestGCPDescribeAndRead(t *testing.T) {
 
 func TestGCPListFailureNamesTheCodeNotTheMessage(t *testing.T) {
 	f := &fakeSecretManager{failList: status.Errorf(codes.PermissionDenied, "Permission denied on resource project 000000000000 (secret value: hunter2)")}
-	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	store := NewGCP(startFake(t, f), fakeKey)
 	_, err := store.List(context.Background(), fakePrefix)
 	if err == nil || !strings.Contains(err.Error(), "PermissionDenied") || strings.Contains(err.Error(), "hunter2") {
 		t.Fatalf("List under a denied identity = %v; want the gRPC code and never the status message", err)
@@ -397,7 +397,7 @@ func TestGCPReadQuotaCost(t *testing.T) {
 		fakePrefix + "b": servedSecret("v"),
 		fakePrefix + "c": servedSecret("v"),
 	}}
-	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	store := NewGCP(startFake(t, f), fakeKey)
 	ctx := context.Background()
 	cost := func(op func() error) int {
 		t.Helper()
@@ -425,7 +425,7 @@ func TestGCPRetriesAnUnavailableMetadataCall(t *testing.T) {
 		secrets:     map[string]*fakeSecret{fakePrefix + "a": servedSecret("v")},
 		unavailable: map[string]int{"ListSecrets": 1, "GetSecret": 1, "GetSecretVersion": 2},
 	}
-	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	store := NewGCP(startFake(t, f), fakeKey)
 	ctx := context.Background()
 	if ls, err := store.List(ctx, fakePrefix); err != nil || len(ls) != 1 {
 		t.Fatalf("List through one UNAVAILABLE each = %d secrets, %v; want 1 after retries", len(ls), err)
@@ -435,5 +435,39 @@ func TestGCPRetriesAnUnavailableMetadataCall(t *testing.T) {
 	}
 	if f.calls["ListSecrets"] != 2 || f.calls["GetSecret"] != 2 || f.calls["GetSecretVersion"] != 4 {
 		t.Fatalf("calls = %v; want each failed call made again once", f.calls)
+	}
+}
+
+// TestGCPReadChecksDeletionOncePerWindow pins Read's cache: releasing the same secret again within
+// gcpHeldFor costs no metadata read, the first release after it reads again, and a secret
+// scheduled for deletion since is refused from that read on.
+func TestGCPReadChecksDeletionOncePerWindow(t *testing.T) {
+	f := &fakeSecretManager{secrets: map[string]*fakeSecret{fakePrefix + "a": servedSecret("v")}}
+	store := NewGCP(startFake(t, f), fakeKey)
+	now := time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)
+	store.held.now = func() time.Time { return now }
+	ctx := context.Background()
+	read := func() error { _, err := store.Read(ctx, fakePrefix+"a"); return err }
+	if err := read(); err != nil {
+		t.Fatal(err)
+	}
+	before := f.reads()
+	for range 5 {
+		if err := read(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.reads() - before; got != 0 {
+		t.Fatalf("five releases within the window cost %d metadata reads, want 0", got)
+	}
+	f.mu.Lock()
+	f.secrets[fakePrefix+"a"].expires = now.Add(30 * 24 * time.Hour)
+	f.mu.Unlock()
+	now = now.Add(gcpHeldFor)
+	if err := read(); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read after the window of a secret scheduled for deletion since = %v, want ErrNotFound", err)
+	}
+	if got := f.reads() - before; got != 1 {
+		t.Fatalf("the release after the window cost %d metadata reads, want 1", got)
 	}
 }

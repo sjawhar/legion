@@ -198,7 +198,9 @@ broker does not serve yet, which makes it reread that one name before refusing i
 rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
 `packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
 served on its first request. A reread reads the one secret from
-Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
+the store (on AWS, `DescribeSecret`, which shows a write at once; on Google Secret Manager,
+`GetSecret`, which Google documents as eventually consistent, so a reread made right after a write
+can still find the old state, usually for seconds) and serves it, or stops serving it,
 as it finds it; a read of the whole namespace for as long as the store's listing may lag after (five minutes on
 AWS Secrets Manager, six hours on Google Secret Manager, whose metadata Google documents as
 eventually consistent for up to a few hours) reads that secret again alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
@@ -209,9 +211,11 @@ promise does not cover: a secret created and then deleted before any read served
 nothing, so the next read of the namespace can serve it from a listing that shows the creation and
 not the deletion, for up to that lag after the delete, and a request for it is granted while a
 grant's read of its value is refused `SECRET_NOT_IN_STORE`. A change nothing rereads, such
-as a tag edited in the AWS console, takes effect within about ten minutes: at the next read of the
-namespace, or the one after, since Secrets Manager's listing can lag a change by up to five
-minutes. A read that fails (Secrets Manager or KMS out of reach) is logged, and the policy from the
+as a tag edited in the AWS console, takes effect within about ten minutes on AWS: at the next read
+of the namespace, or the one after, since Secrets Manager's listing can lag a change by up to five
+minutes. On Google Secret Manager it usually takes effect at the next read of the namespace too,
+but Google bounds its listing's lag only at a few hours, so a change made with `gcloud` should be
+followed by a reread. A read that fails (Secrets Manager or KMS out of reach) is logged, and the policy from the
 last good read stays in force. The broker leaves out a secret it cannot serve, and logs it by name
 on every read
 ([Operating the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner`

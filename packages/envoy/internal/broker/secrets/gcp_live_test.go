@@ -50,7 +50,7 @@ func TestGCPLive(t *testing.T) {
 	if err := ValidGCPPrefix(prefix); err != nil {
 		t.Fatal(err)
 	}
-	store := GCP{Client: client, KeyName: key}
+	store := NewGCP(client, key)
 
 	create := func(name string, onKey bool, annotations map[string]string, value string, expires bool) string {
 		t.Helper()
