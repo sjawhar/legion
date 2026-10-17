@@ -43,7 +43,7 @@ retrospective's durable output.
 Retro's commits sit above the reviewer's approved head and the approval stands: commits that
 change only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the
 tree goes from retro to the merger — never back to the tester or reviewer. A conflict-forced
-rewrite after retro takes the approved head off the branch's history, so READY refuses it
+merge after retro brings the base's paths above the approved head, so READY refuses it
 (`READY_UNREVIEWED_CHANGE`) and the reviewer reviews the new head as a new round. Any round after
 retro (a conflict round, a round a red CI sends back, a re-review) writes `.legion/<issue>/`
 again, and every approval moves the issue to retro once more: each retro ends with the removal

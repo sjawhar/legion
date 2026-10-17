@@ -267,9 +267,6 @@ func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, r
 	if handoff.Verdict != "" {
 		text += " Handoff verdict: " + handoff.Verdict + "."
 	}
-	if handoff.HandoffCommit == "" && handoff.Verdict == "" && handoff.Claim != "" {
-		text += " Resume the existing phase work."
-	}
 	if pr != nil && pr.Number != 0 {
 		text += fmt.Sprintf(" Pull request: #%d.", pr.Number)
 	}

@@ -58,7 +58,8 @@ review App. In Dispatch, the issue's header links the pull request.
 ## 6. READY, and your merge
 
 The merger sends `READY`; the daemon checks the head against the approved one and the required
-checks, and posts it on the Dispatch issue. You merge the pull request on GitHub.
+checks, posts it on the Dispatch issue, and submits its merge, which lands under the repository's
+rules.
 
 ![The READY message on the issue: the pull request, its head and the approved commit, then the outcome and the risk.](/legion/media/legion/ready.png)
 

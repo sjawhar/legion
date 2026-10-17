@@ -109,7 +109,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
   The merger's move back to `reviewing` names the refusal's code and paths in its reason. A
   reviewer whose task's `Reason:` names one of them runs a new round, never a fingerprint
-  confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming the refused paths; for
+  confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming what the refusal found; for
   `READY_NOT_APPROVED` it compares its last approved commit with the head on GitHub and requests
   changes when it finds no approval, a head off that commit's history, a 300-file compare or a
   path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`. Either

@@ -76,9 +76,9 @@ Two decisions stay with people:
   approves it, unless that version is the person's own answer to a decision block and the answer is
   the whole change since the version they approved: then Dispatch records their approval at the new
   version and the gate reopens. The gate is on by default; a deployment can turn it off.
-- **The merge.** The merger checks that every check and workflow the base branch requires has
-  passed, posts `READY` on the Dispatch issue, and submits the pull request for merge. The
-  repository's own rules decide when it lands.
+- **The merge.** The merger sends `READY`. The daemon accepts it only when no check or workflow
+  the base branch requires has failed or is missing, posts it on the Dispatch issue, and submits
+  the pull request for merge. The repository's own rules decide when it lands.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.
