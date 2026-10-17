@@ -354,8 +354,8 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 		}
 	}
 	now := time.Now().UnixMilli()
-	roles, interests := bucket(store.RoleBucket, 0), bucket(store.Bucket, 0)
-	sessions, records := bucket(session.SessionBucket, 5*time.Minute), bucket(cistore.Bucket, 0)
+	roles, interests := bucket(bus.RoleClaimBucket, 0), bucket(bus.InterestBucket, 0)
+	sessions, records := bucket(bus.SessionBucket, 5*time.Minute), bucket(bus.CIStateBucket, 0)
 	put(roles, "reviewer", store.RoleClaim{HolderSessionID: "ses_live", ClaimedAt: now})
 	put(interests, "ses_live", store.Interest{SessionID: "ses_live", MachineID: "startup-legacy", Topics: []string{contracts.AgentSubject("ses_live")}, UpdatedAt: now})
 	put(sessions, "ses_live", session.SessionEntry{Port: 1, MachineID: "startup-legacy", UpdatedAt: now})
@@ -395,7 +395,7 @@ var githubWebhookEnv = []string{"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_S
 // it on its next tick. It returns the bucket and the record's key.
 func seedDueCIRecord(t *testing.T, client *bus.Client) (natsgo.KeyValue, string) {
 	t.Helper()
-	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: cistore.Bucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
+	kv, err := client.JS().CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.CIStateBucket, Replicas: 1, Storage: natsgo.FileStorage, TTL: 7 * 24 * time.Hour})
 	if err != nil {
 		t.Fatalf("create the CI bucket: %v", err)
 	}
@@ -444,7 +444,7 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 	// within a few one-second ticks of turning healthy; five seconds covers them.
 	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(250 * time.Millisecond) {
 		consumers := 0
-		for range client.JS().ConsumerNames("KV_" + cistore.Bucket) {
+		for range client.JS().ConsumerNames("KV_" + bus.CIStateBucket) {
 			consumers++
 		}
 		if consumers != 0 {

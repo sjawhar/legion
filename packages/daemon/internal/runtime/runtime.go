@@ -88,11 +88,20 @@ type Runtime interface {
 	ProvisionsWorkspaces() bool
 	// ProvisionBound is how much longer a launch may run before its agent's own process has even
 	// started: zero for a runtime whose process starts the agent at once (tmux), and the Sandbox
-	// runtime's own init-container budget (its fetch's clone bound) for a launch whose pod runs
+	// runtime's own init-container budget (its two clones' bounds together) for a launch whose pod runs
 	// provisioning first, which that runtime's wait for the pod's launcher allows past its boot
 	// timeout. The supervisor also adds it to the registration deadline's base
 	// Boot×RegistrationIntervals bound while a claim is still StateLaunching.
 	ProvisionBound() time.Duration
+	// LaunchBound is the longest one launch try — one Spawn or Resume call — may run on the
+	// runtime's own account before the runtime ends it with an error, so a try that never answers
+	// ends at the bound, is charged to the claim's launch budget, and the next try runs. It is no
+	// shorter than a provisioning pod's rightful wait (BootTimeout, ProvisionBound and the Sandbox
+	// runtime's own calls), and zero for a runtime that states no bound: a tmux pane start is a
+	// local command with no cluster wait, as ProvisionBound zero means no init phase. A try the
+	// caller's own context ends is not the bound's: the supervisor reads its context's error to
+	// tell the daemon's stop from a refusal, and charges that try nothing.
+	LaunchBound() time.Duration
 	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
 	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);
 	// nil once nothing of it remains. A runtime that holds nothing per tree returns nil at once.
@@ -152,7 +161,9 @@ func (k Known) Validate() error {
 //
 // Nothing in it is a place on one runtime's disk. Repository is the issue's repository, the zero
 // Repository for a configuration with none, and each runtime locates the issue's
-// workspace under its own root. Env is the agent's plain variables; Secrets never travel as
+// workspace under its own root. DefaultBranch is that repository's default branch as GitHub names
+// it, a branch name used verbatim (release/v7.1): the base each runtime provisions an issue with no
+// branch at; "" exactly when Repository is zero. Env is the agent's plain variables; Secrets never travel as
 // values — each is written to a 0600 file and reaches the process as a `<NAME>_FILE` pointer — and
 // carries only what is the claim's to carry: a credential every agent of the deployment shares,
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
@@ -176,6 +187,7 @@ type SpawnSpec struct {
 	Secrets                map[string]string
 	Prompt                 PromptParts
 	Repository             ghrepo.Repository
+	DefaultBranch          string
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
 	Plugins                *PluginInstall

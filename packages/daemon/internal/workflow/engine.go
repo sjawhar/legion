@@ -668,7 +668,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// session until its issue closes (leave), and its assignment ends here, not its process. The
 	// workspace passes to the next role at the completion this move records, which the worker reports
 	// once its handoff is committed and pushed, so the next role's start may run while that worker's
-	// turn is still finishing (supervise rows are unordered, record.Postgres's ClaimDue). From then on
+	// turn is still finishing (the issue's lifecycle lane runs its supervise rows one at a time,
+	// oldest due first, and a start waits for no turn to end). From then on
 	// the finished role answers questions read-only: a completion it reports is refused, since it no
 	// longer works the issue's phase (handoff), and a task queued for a phase the issue has left is
 	// dropped rather than sent (supervise.Deps's PhaseHolds). A move between two phases of one role -
@@ -697,7 +698,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		if pr != nil && pr.State == record.PullRequestMerged {
 			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 		}
-		return e.ready(ctx, tx, issue, handoff)
+		return e.ready(ctx, tx, issue, handoff, pr)
 	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")

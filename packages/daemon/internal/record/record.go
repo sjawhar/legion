@@ -115,19 +115,20 @@ type PhaseRow struct {
 	CompletedAt time.Time
 	// MergeNote is the by-hand note the merger's READY was accepted with, empty for any other: the
 	// MANUAL_MERGE_REQUIRED answer READY gives a pull request whose change touches a path the
-	// project's merge.by_hand names. The packet the daemon tells starts with it (ReadyPacket), and the
-	// disarm keeps nothing armed for such a READY.
+	// project's merge.by_hand names. The packet the daemon tells starts with it (ReadyPacket), the
+	// daemon submits no merge for it, and the disarm keeps nothing armed for such a READY.
 	MergeNote string
 }
 
-// byHandMergeLine is the line ReadyPacket puts in place of the merger's request to submit the
-// merge, for a READY a person merges.
+// byHandMergeLine is the line ReadyPacket puts in place of the merger's line saying the daemon
+// submits the merge, for a READY a person merges.
 const byHandMergeLine = "Merge: by hand. A person merges this pull request under the repository's rules; nothing arms it."
 
 // ReadyPacket is the READY packet the daemon tells for summary, the merger's packet, and note, its
 // READY's by-hand note (PhaseRow.MergeNote): summary as it is when there is no note; otherwise the
-// note, a blank line, then summary with each line that begins `Merge:`, the merger's request to
-// submit the merge, replaced by one saying a person merges it, so no reader of the packet arms it.
+// note, a blank line, then summary with each line that begins `Merge:`, the merger's line saying the
+// daemon submits the merge, replaced by one saying a person merges it, so no reader of the packet
+// arms it.
 func ReadyPacket(summary, note string) string {
 	if note == "" {
 		return summary
@@ -390,12 +391,41 @@ type Store interface {
 	// holds an unpublished controller notice of kind, so a wake is never queued behind an
 	// identical one.
 	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
-	// DisarmPending says whether the outbox still holds an unfinished auto_merge_disable row of
-	// issue: a finished row is deleted, so any row of the kind is one still to run or retrying.
+
+	// DisarmPending says whether outbox still holds an unfinished auto_merge_disable row of issue:
+	// a finished row is deleted, so any row of the kind is one still to run or retrying.
 	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
-	ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error)
+	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
+	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
+	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue
+	// of project, kinds nil every kind.
+	DueRows(ctx context.Context, tx pgx.Tx, project, issue string, kinds []OutboxKind, now time.Time) ([]OutboxRow, error)
+	// ClaimRow leases row id for leaseFor from now if a lane may still run it at now, in one
+	// conditional update: false is another holder's lease, a lifecycle row of its issue since
+	// leased, or a row no longer due, in order, or in the outbox. leaseFor must be positive.
+	ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.Time, leaseFor time.Duration) (OutboxRow, bool, error)
+	// RenewOutboxLease moves the lease on row id to until while leaseToken holds it; false is a
+	// lease no longer the caller's.
+	RenewOutboxLease(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, until time.Time) (bool, error)
+	// NextDue is the earliest next_at after now among issue's rows of kinds no live lease holds;
+	// false is none. Kinds nil is every kind.
+	NextDue(ctx context.Context, tx pgx.Tx, issue string, kinds []OutboxKind, now time.Time) (time.Time, bool, error)
+	// UnfinishedLanes is each (issue, lane) with a row of project still in the outbox, by issue
+	// then lane.
+	UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error)
+	// HeldRows is every due, unleased lifecycle row of project held at now behind a lifecycle row
+	// of its issue under a live lease — the oldest such; for a start fenced by its issue_branch
+	// row, that row while it runs — by next_at then id. A start behind a branch row no one is
+	// running is not listed. Issue "" is every issue of project.
+	HeldRows(ctx context.Context, tx pgx.Tx, project, issue string, now time.Time) ([]HeldRow, error)
+	// FinishOutbox deletes row id while leaseToken holds it; a stale lease's finish is a no-op, so
+	// a worker whose lease expired never removes the row its replacement now holds.
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
+	// FinishLeasedOutbox is FinishOutbox for a transaction that writes another effect with the
+	// finish: a stale lease is ErrOutboxLeaseLost, so the caller rolls that effect back rather than
+	// committing it beside the replacement worker's own.
+	FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
 	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
@@ -414,8 +444,9 @@ type Store interface {
 	PutHandedOverRoot(ctx context.Context, tx pgx.Tx, root HandedOverRoot) error
 	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
-	// ExpediteOutbox makes row id due at now if it was due later.
-	ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error
+	// ExpediteOutbox makes row due at now if it was due later. It takes the row, not its id, so a
+	// caller that then wakes the row's lane has its issue and kind.
+	ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error
 	// DropCatchUps deletes every catch-up notice row of issue the outbox still holds, a re-held copy
 	// and a row the runner has leased included. A leased row may be mid-publish: the runner executes
 	// it from memory, and the notice executor publishes it only while OutboxLeased still finds it,

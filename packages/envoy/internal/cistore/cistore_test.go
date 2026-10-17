@@ -491,7 +491,7 @@ func TestRewatchRestartsStoppedWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open replacement JetStream: %v", err)
 	}
-	kv, err := js.KeyValue(Bucket)
+	kv, err := js.KeyValue(bus.CIStateBucket)
 	if err != nil {
 		t.Fatalf("open replacement CI bucket: %v", err)
 	}

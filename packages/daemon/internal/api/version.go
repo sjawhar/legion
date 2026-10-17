@@ -6,8 +6,9 @@ package api
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
-// `mainEnvironment`) — and the environment of a pod's `workspace-init provision` container
-// (`initEnvironment`), which the image's own `legion` reads. The installed plugin declares the
+// `mainEnvironment`) — and the command line and environment of a pod's `workspace-init provision`
+// container (`initContainers` in `internal/runtime/sandbox/podkind.go`, and `initEnvironment`),
+// which the image's own `legion` reads. The installed plugin declares the
 // number it was built against as `legion.daemonApiVersion` in its `package.json`, and the boot
 // gate (`internal/daemon/bootgate.go`) refuses to start unless the two are equal.
 //
@@ -174,4 +175,25 @@ package api
 // gains a third `model-fallback` mark, `unread`, when the probe could not read `retry.modelFallback`.
 // A 24 plugin's strict reader refuses a state whose deployment rows carry `source`, so the boot
 // gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 25
+//
+// 26: reserved for sjawhar/legion#1999 (LEGION-694) by 27 below while that branch was open; no
+// release declares it, since that branch landed at 28 once releases had declared 27 without its
+// field. A gap, left so the history reads as it happened.
+//
+// 27: sjawhar/legion#1986 -- a pod's `workspace-init provision` command names the repository's
+// default branch, `--default-branch <name>`, which it requires: an image whose `legion` was built
+// before 27 exits 2 on the unknown flag in every new issue pod's init container, so the daemon's
+// image probe, which holds the image's pi-legion to this number, refuses such an image at boot
+// instead. (26 was sjawhar/legion#1999's, open when this was taken; a release declaring 26 would
+// carry no `--default-branch`, so this branch took the number above it, as the collision note says.)
+//
+// 28: LEGION-694 (sjawhar/legion#1999) -- api.State gains `heldOutboxRows`, every due lifecycle
+// outbox row held behind its issue's running lifecycle row (record.Store.HeldRows), each with its
+// id, kind, issue, how long it has waited and the row it waits on. Never null, so a plugin built
+// before it refuses the state, and the bump is why the two never meet. (This branch took 25, then
+// 26 when LEGION-636 landed at 25, and 27 above reserved 26 for it; but pi-legion v10.3.5 and
+// v10.3.6 were released from main declaring 27 without `heldOutboxRows`, so a daemon of this branch
+// at 27 would pass the boot gate against a plugin whose strict reader then refuses the state. The
+// release that first declares a number must carry your shapes: it does not, so this branch takes
+// the number above it, as the collision note says.)
+const DaemonAPIVersion = 28

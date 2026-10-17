@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -30,7 +31,60 @@ const (
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
 	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
+	OutboxKindReadyMerge        OutboxKind = "ready_merge"
 )
+
+// OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
+// side. The lifecycle lane runs the rows that start, stop and tidy the issue's roles and their
+// resources, one at a time in the order they were queued: each assumes the state its predecessor
+// leaves (a start after the branch it waits for, a workspace removal after the suspend that
+// stopped the roles). It also carries the issue's pull-request mutations, the disarm
+// (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
+// each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
+// (with outboxLaneFree across daemons) is what keeps them apart. The board lane runs the issue's
+// Dispatch writes and notice publishes beside them, so a status write or a notice never waits
+// behind a start pulling an image, and a slow publish never holds a stop back.
+type OutboxLane string
+
+const (
+	LaneLifecycle OutboxLane = "lifecycle"
+	LaneBoard     OutboxLane = "board"
+)
+
+// laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
+// one lane (TestEveryOutboxKindIsInExactlyOneLane).
+var laneKinds = map[OutboxLane][]OutboxKind{
+	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable, OutboxKindReadyMerge},
+	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+}
+
+// LaneOf is the lane that runs kind.
+func LaneOf(kind OutboxKind) OutboxLane {
+	for lane, kinds := range laneKinds {
+		if slices.Contains(kinds, kind) {
+			return lane
+		}
+	}
+	return ""
+}
+
+// LaneKinds is the kinds lane runs, in a fixed order; nil for a lane that is not one.
+func LaneKinds(lane OutboxLane) []OutboxKind {
+	return slices.Clone(laneKinds[lane])
+}
+
+// LaneKey names one lane of one issue.
+type LaneKey struct {
+	Issue string
+	Lane  OutboxLane
+}
+
+// HeldRow is a due lifecycle row its lane cannot run yet: WaitsOn is the id of the row of its issue
+// under the live lease it waits behind (Store.HeldRows).
+type HeldRow struct {
+	OutboxRow
+	WaitsOn int64
+}
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
 type OutboxPayload interface{ OutboxKind() OutboxKind }
@@ -308,10 +362,10 @@ type MergeQueuePublish struct {
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
 
-// IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at main, where GitHub does
-// not have it yet, before any role of the issue starts: GitHub can refuse the push that creates a
-// branch of a large repository, where it takes a push that moves one. A start of the issue waits
-// while the row is unfinished (Store.ClaimDue).
+// IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at the repository's default
+// branch, where GitHub does not have it yet, before any role of the issue starts: GitHub can refuse
+// the push that creates a branch of a large repository, where it takes a push that moves one. A
+// start of the issue waits while the row is unfinished (outboxInOrder).
 type IssueBranch struct {
 	// Generation is the issue generation the branch is created for. A row of an earlier generation,
 	// or of a tree that lingers, finishes without acting.
@@ -325,13 +379,24 @@ func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
 // issue awaiting its merge, so the workflow queues it on every head move but one landing on that
 // head (a push, or a reopen), on every READY withdrawal, on a child's re-entry and on an issue's
 // leaving the workflow. Its executor decides by the record when it runs, keeping the arm only while
-// the issue awaits its merge at the merger's READY commit, and READY is refused while one is
-// unfinished (Store.DisarmPending).
+// the issue awaits its merge at the merger's READY commit.
 type AutoMergeDisable struct {
 	Number int `json:"number"`
 }
 
 func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisable }
+
+// ReadyMerge submits the merge of pull request Number at Head, the head an accepted READY named.
+// The workflow queues it when an issue reaches awaiting_merge on a READY nobody marked by hand. Its
+// executor decides by GitHub and then the record when it runs, so a READY withdrawn, moved past or
+// left since submits nothing, and it waits while GitHub reports the pull request not yet mergeable
+// in a repository that allows no auto-merge.
+type ReadyMerge struct {
+	Number int    `json:"number"`
+	Head   string `json:"head"`
+}
+
+func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
@@ -437,6 +502,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindReadyMerge:
+		value := ReadyMerge{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -520,6 +591,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Number <= 0 {
 			return fmt.Errorf("auto-merge disable requires its pull request number")
 		}
+	case ReadyMerge:
+		if value.Number <= 0 || value.Head == "" {
+			return fmt.Errorf("READY merge requires its pull request number and head")
+		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)
 	}
@@ -528,7 +603,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

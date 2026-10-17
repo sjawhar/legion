@@ -21,21 +21,27 @@ import (
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
-// runs — the shared clone's own clone, a fetch, a jj operation, or a git configuration edit —
-// each bounded independently. The fetch's clone is the exception, under FetchTimeout instead
-// (below).
+// runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
+// two clones that copy the whole repository are the exceptions, under FetchTimeout and
+// CloneTimeout instead (below).
 const CommandTimeout = 5 * time.Minute
 
 // FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
-// enough for a large repository's slow but steadily progressing transfer to finish. Every other
-// provisioning command keeps CommandTimeout: this widens the one command whose duration follows
-// the repository's size and the network's speed, not a fixed step in provisioning.
+// enough for a large repository's slow but steadily progressing transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
+// CloneTimeout bounds the shared clone's own clone (ensureRepoClone): it copies and imports every
+// object of the repository, from a pod's feed or from GitHub, so its duration follows the
+// repository's size as the fetch's does. A 3.4 GB repository (816k objects, 421 refs) cloned from a
+// local feed in 253 s with four cores and 281 s with two on a 64-core devbox, using no more than
+// about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once a sandbox
+// slows it at all.
+const CloneTimeout = 30 * time.Minute
+
 // Command is one process the provisioner runs, each bounded independently of every other: most
-// hold the runner's own slow-command budget (RunChecked), and each attempt of the fetch's clone
-// holds what remains of FetchTimeout instead (Fetch) — never a budget shared across the whole
-// provisioning sequence.
+// hold the runner's own slow-command budget (RunChecked), each attempt of the fetch's clone holds
+// what remains of FetchTimeout instead (Fetch), and the shared clone's clone holds CloneTimeout
+// (ensureRepoClone) — never a budget shared across the whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string
@@ -66,16 +72,20 @@ type Runner interface {
 }
 
 // Request contains the credential and identity of the repository to provision. Repo is the
-// configured GitHub owner/repository name, for example "sjawhar/legion-smoke".
+// configured GitHub owner/repository name, for example "sjawhar/legion-smoke". DefaultBranch is
+// the repository's default branch as GitHub names it, a branch name used verbatim
+// (release/v7.1): the base an issue with no branch starts at, and the branch a pod's feed brings
+// beside the issue's own.
 type Request struct {
 	StateDir         string
 	Repo             ghrepo.Repository
 	Issue            string
+	DefaultBranch    string
 	CredentialHelper string
 	// Source is how the shared clone reaches the repository: FromFeed or FromGitHub.
 	Source Source
 	// Log takes the one line provisioning logs: the commits it set aside when it started a merged
-	// issue's workspace at main (createWorkspace).
+	// issue's workspace at the default branch (createWorkspace).
 	Log func(line string)
 }
 
@@ -83,12 +93,14 @@ type Request struct {
 // <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the clone the workspace is a jj
 // workspace of, <state>/repos/github.com/<owner>/<repo> — under tmux the one every issue workspace
 // of the repository shares, under Kubernetes the issue pod's own on its own volume. Repo is the
-// repository.
+// repository, and DefaultBranch its default branch, which Provision sets from its request (Location
+// leaves it empty: no path depends on it).
 type Workspace struct {
-	Dir      string
-	Bookmark string
-	Clone    string
-	Repo     ghrepo.Repository
+	Dir           string
+	Bookmark      string
+	Clone         string
+	Repo          ghrepo.Repository
+	DefaultBranch string
 }
 
 // In a pod, the one process that holds the provisioning token, Fetch, runs in a container that
@@ -456,6 +468,14 @@ func tomlString(value string) string {
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }
 
+// jjString is name as a jj string literal, the form every jj argument here takes a bookmark name
+// in: jj parses a bookmark argument, a `--branch` and a bookmark list's name pattern (`exact:`
+// selects how a pattern matches, not that its text is literal) and a revset symbol as expressions,
+// so a bare `release#stable` fails to parse and a bare `release|stable` matches `release` or
+// `stable`. Quoted, every name git accepts is the one name it is. jj's string literal escapes `\`
+// and `"` as a TOML basic string does.
+func jjString(name string) string { return tomlString(name) }
+
 // runCommand runs argv with the runner's own slow-command budget: run is nil-checked before
 // run.Timeout() is ever read, so a nil Runner always returns the error below rather than a panic.
 func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
@@ -467,7 +487,7 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 
 // runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
 // budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of
-// FetchTimeout for each attempt of its clone, that path's one caller.
+// FetchTimeout for each attempt of its clone, and ensureRepoClone with CloneTimeout.
 func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -506,7 +526,7 @@ func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) 
 	return checkedResult(argv, result, err)
 }
 
-// checkedResult is RunChecked's and Fetch's shared answer: a process that could not
+// checkedResult is the checked runners' shared answer: a process that could not
 // start, exited non-zero, or outlived its budget is an error naming the command. A clean exit
 // whose I/O draining outlived WaitDelay (exec.ErrWaitDelay) is not this: execRunner.Run already
 // reads that as the process's own true ExitCode, so it passes through the same as any other
@@ -565,7 +585,7 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	// and on the tmux runtime this fetch holds the one-shot credential.
 	fetch := []string{"git", "fetch"}
 	for _, branch := range source.branches {
-		fetch = append(fetch, "--branch", "exact:"+branch)
+		fetch = append(fetch, "--branch", exactName(branch))
 	}
 	argv, err := onClone(cloneDir, fetch...)
 	if err != nil {

@@ -40,13 +40,19 @@ type CodeFlow struct {
 	// revocationURL is the revocation_endpoint the issuer's discovery document names; empty when it
 	// names none.
 	revocationURL string
-	http          *http.Client
+	// hostedDomain is the Google Workspace domain a domain-mode flow signs people in for; empty in
+	// group mode, a Cognito sign-in pool's.
+	hostedDomain string
+	http         *http.Client
 }
 
 // NewCodeFlow reads the issuer's discovery document now and returns the code flow for the client.
 // An issuer whose discovery names no authorization_endpoint or token_endpoint offers no sign-in,
 // and is refused. One that names no revocation_endpoint is accepted, and Revoke fails against it.
-func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret string) (*CodeFlow, error) {
+// hostedDomain is the Google Workspace domain of a domain-mode flow (Google's issuer), which asks
+// for offline access and reads the Workspace claims; empty, the flow is a Cognito sign-in pool's
+// and does neither.
+func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDomain string) (*CodeFlow, error) {
 	provider, err := gooidc.NewProvider(ctx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("oidc: discovering issuer %s: %w", issuer, err)
@@ -70,6 +76,7 @@ func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret string) (*C
 			Scopes:       signInScopes,
 		},
 		revocationURL: revocation.Endpoint,
+		hostedDomain:  hostedDomain,
 		// A redirect is answered as it stands: following a 307 or 308 would re-send the form, and
 		// with it a code or a refresh token, to wherever the redirect points.
 		http: &http.Client{Timeout: tokenTimeout, CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -80,18 +87,25 @@ func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret string) (*C
 
 // DiscoverCodeFlow is NewCodeFlow under a deadline on the discovery read, as Discover is for the
 // pod-token verifier.
-func DiscoverCodeFlow(ctx context.Context, issuer, clientID, clientSecret string, timeout time.Duration) (*CodeFlow, error) {
+func DiscoverCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDomain string, timeout time.Duration) (*CodeFlow, error) {
 	discovery, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return NewCodeFlow(discovery, issuer, clientID, clientSecret)
+	return NewCodeFlow(discovery, issuer, clientID, clientSecret, hostedDomain)
 }
 
 // AuthURL is where a browser starts the sign-in: the issuer's authorization endpoint asking for a
-// code to be sent to redirectURL with state, and an ID token carrying nonce.
+// code to be sent to redirectURL with state, and an ID token carrying nonce. A domain-mode flow
+// also asks Google for offline access with consent, since Google returns a refresh token only for
+// access_type=offline and, after the first exchange, only with prompt=consent; and it names the
+// domain as hd, a hint for Google's account chooser that the callback does not rely on.
 func (f *CodeFlow) AuthURL(redirectURL, state, nonce string) string {
 	config := f.config
 	config.RedirectURL = redirectURL
-	return config.AuthCodeURL(state, gooidc.Nonce(nonce))
+	options := []oauth2.AuthCodeOption{gooidc.Nonce(nonce)}
+	if f.hostedDomain != "" {
+		options = append(options, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"), oauth2.SetAuthURLParam("hd", f.hostedDomain))
+	}
+	return config.AuthCodeURL(state, options...)
 }
 
 // Exchange trades the code the issuer redirected to redirectURL for the signed-in person's ID
@@ -163,6 +177,9 @@ func (f *CodeFlow) Revoke(ctx context.Context, refreshToken string) error {
 	return fmt.Errorf("oidc: revoke: the issuer answered HTTP %d %s", response.StatusCode, body.Error)
 }
 
+// session verifies the ID token of a token-endpoint answer and returns its claims with the refresh
+// token. A domain-mode flow also reads the Workspace claims from the verified token (Claims.Email,
+// EmailVerified, HostedDomain); Verify, which every other token kind goes through, never does.
 func (f *CodeFlow) session(ctx context.Context, token *oauth2.Token) (Session, error) {
 	raw, ok := token.Extra("id_token").(string)
 	if !ok || raw == "" {
@@ -172,7 +189,48 @@ func (f *CodeFlow) session(ctx context.Context, token *oauth2.Token) (Session, e
 	if err != nil {
 		return Session{}, fmt.Errorf("oidc: ID token rejected (%s): %w", Reason(err), err)
 	}
+	if f.hostedDomain != "" {
+		if err := readWorkspaceClaims(raw, &claims); err != nil {
+			return Session{}, fmt.Errorf("oidc: ID token rejected (malformed): %w", err)
+		}
+	}
 	return Session{Claims: claims, RefreshToken: token.RefreshToken}, nil
+}
+
+// workspaceClaims are the claims of a Google ID token a domain-mode session reads, each kept as the
+// JSON it was written in, so a value of a shape Google does not document reads as absent or false
+// rather than failing the sign-in.
+type workspaceClaims struct {
+	Email         json.RawMessage `json:"email"`
+	EmailVerified json.RawMessage `json:"email_verified"`
+	HostedDomain  json.RawMessage `json:"hd"`
+}
+
+// readWorkspaceClaims reads raw's email, email_verified and hd into claims: email and hd when each
+// is a JSON string, and email_verified as true only for the JSON true or the string "true", Google
+// documenting both. raw is a token Verify accepted, so its payload is a JSON object.
+func readWorkspaceClaims(raw string, claims *Claims) error {
+	payload, err := tokenPayload(raw)
+	if err != nil {
+		return err
+	}
+	var workspace workspaceClaims
+	if err := json.Unmarshal(payload, &workspace); err != nil {
+		return fmt.Errorf("payload is not a claim set: %w", err)
+	}
+	claims.Email = jsonString(workspace.Email)
+	claims.HostedDomain = jsonString(workspace.HostedDomain)
+	claims.EmailVerified = string(workspace.EmailVerified) == "true" || jsonString(workspace.EmailVerified) == "true"
+	return nil
+}
+
+// jsonString is value when it is a JSON string, and empty for any other value or none.
+func jsonString(value json.RawMessage) string {
+	var text string
+	if json.Unmarshal(value, &text) != nil {
+		return ""
+	}
+	return text
 }
 
 // tokenContext hands oauth2 the bounded client its token-endpoint calls use; its default client has

@@ -4,6 +4,68 @@
 
 ### Added
 
+- The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
+  Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
+  unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is
+  `projects/<project number>/secrets/<id prefix>-`, `BROKER_SECRETS_KMS_KEY_NAME` names the
+  agent-secrets Cloud KMS key in place of `BROKER_SECRETS_KMS_KEY_ARN`, and a secret's owner and
+  tier are its annotations. The broker signs in under Application Default Credentials (on GKE,
+  Workload Identity for its ServiceAccount; no key file) and needs only `roles/secretmanager.viewer`
+  on the project and `roles/secretmanager.secretAccessor` on the namespace's secrets. `GET
+  /v1/settings` names the store (`store`) and answers each store's own fields (`kms_key_name` and
+  `gcp_project` for GCP), the other store's omitted. `secrets.Store` is the one interface the
+  policy and the value release read through, with `secrets.AWS` and `secrets.GCP` behind it;
+  `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
+  `agent-secrets secret` manages both stores: against a GCP broker it reads and writes Secret
+  Manager itself under the person's own Application Default Credentials, refusing a service
+  account's.
+- `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
+  `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
+  dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the
+  MCP bridge. The proxy is handed each server's host name as the URL spells it, unresolved, so a
+  proxy that resolves names this process cannot (a userspace Tailscale container's SOCKS5 server
+  and MagicDNS) reaches them. A value that is not `host:port` (whitespace around it, a scheme, an
+  IPv6 address with a zone, a host that is neither an IP address nor a DNS name, a port outside
+  1-65535, or empty) is refused before anything dials, and so is one that holds an nkey seed as
+  `bus.HoldsSeed` finds one (the value, its host, a label or part of one, or split across labels by
+  `.`, `-` or `_`, in either case), which is a valid DNS label but never a proxy address. A set
+  proxy is remote reach, refused without `ENVOY_ALLOW_REMOTE_NATS=1`, since
+  the proxy chooses the server. No refusal prints the value. A connect through the proxy that
+  fails, its attempts spent or its deadline reached, names the setting and the proxy's address,
+  with the proxy's own dial error where nats.go alone would report only `nats: no servers
+  available for connection`, and a proxied dial ends at a connect's deadline as a direct one does.
+  Unset, the bus dials NATS directly, as before.
+- Dispatch signs people in with Google directly for one Google Workspace domain, with no Cognito
+  sign-in pool and no AWS account: `DISPATCH_SIGNIN_DOMAIN` takes the place of
+  `DISPATCH_SIGNIN_GROUP` beside the issuer, client ID and client secret, under the issuer
+  `https://accounts.google.com` and a Google web client. A person signs in when their Google ID
+  token's `hd` is the domain and Google has verified their `email`, and is named by that email;
+  anyone else reaches the refusal page with the reason (not in the domain, email not verified, no
+  email). The authorization request asks Google for offline access with `prompt=consent` and the
+  domain as `hd`, and the hourly confirmation applies the same rule to the refreshed token. The code
+  flow reads `email`, `email_verified` and `hd` from the verified token in domain mode alone; the
+  shared verifier, which Cognito tokens, pods' tokens and the listener go through, is unchanged.
+  Migration `0112` adds the nullable `people.sub`: in domain mode a sign-in records the Google
+  account's `sub`, and a sign-in under another account for the same address (a Workspace admin
+  gave a deleted account's address to a new one) ends every session of the address in the
+  transaction that updates the locked person row, as does a confirmation whose refreshed token
+  names another account.
+  Exactly one of the group and the domain is set: both, a domain under another issuer, a group
+  under Google's, and a domain that is not a lowercase DNS name refuse the boot, and header identity
+  and dev sign-in refuse the domain. A deployment with the four Cognito settings boots, signs in and
+  confirms as before; its refusal texts for partial settings now name the domain beside the group.
+  The compose deployment passes `DISPATCH_SIGNIN_DOMAIN` through.
+- Every live session now carries `host` beside `machine_id`: where the session process actually
+  runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
+  listener happened to register it. Sessions on separate machines registering through one shared
+  listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
+  keeps its routing meaning unchanged (the listener that owns the session's delivery,
+  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
+  session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
+  /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
+  whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
+  own defensive fallback to `machine_id` for a listener that predates the field too.
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
@@ -322,6 +384,22 @@
   tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
+
+- The secrets broker's policy keeps a single-name reread against a lagging listing only when the
+  reread changed the live answer; a reread that confirms what the policy serves costs the next
+  reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret
+  from (a secret deleted and recreated under its name on AWS, or a move between stores) answers
+  `403 GRANT_NOT_LIVE` and is not reused, where it answered `404 SECRET_NOT_IN_STORE`; the session
+  asks again.
+
+- **Breaking:** every listener `/v1` request with a body must set `Content-Type: application/json`;
+  parameters such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is
+  answered 415 with a JSON error before authentication or the handler runs, whether the body's
+  length is known or not (a chunked body is checked too). A cross-site browser request can no longer
+  publish a `text/plain` body through an unauthenticated loopback listener. A request with no body,
+  such as a `GET` or `DELETE`, is unaffected, and webhook routes keep their own signature and
+  content handling. Every Legion client already sends the header; an operator's own script that
+  posts to `/v1` without it now gets the 415 and must set the header.
 
 - **Breaking:** `GET` and `PUT /api/v1/settings/delivery` replace
   `production_job_name` with `production_job_names` (a string array) and
@@ -754,6 +832,10 @@
 
 ### Fixed
 
+- A closed issue can give up an external link (a write whose links are a subset of what it already
+  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
+  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
+
 - A bus client whose NATS connection closes while a publish is in flight now replaces it once,
   and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close
   starts and the publish each dialled a replacement, and both were installed in turn, so the
@@ -788,6 +870,29 @@
   however long the worker took between that read and the arm, and a test that moved its clock
   forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
   timer armed for a moment the clock has already passed fires at once.
+
+- The delivery live hub no longer re-sends a run in which nothing changed (LEGION-690). Each item it
+  sends is revised by a hash of its JSON, and several store reads answered rows tied on their order
+  in whatever order Postgres's plan read them: a run's jobs (no order at all), the pull requests a
+  run shipped and the waiting list (merged in one second), and runs started in one instant. The
+  plan alternates between a sequential scan (the table's row order, where a reconcile pass's
+  unchanged rewrite moves a row last) and an index scan, so a recompute answered a run's
+  `failed_jobs`, `root_failing_job`, `production` or `prs` in another order and the hub sent the
+  run again, whole: in production deltas of 54 to 61 runs, about 110 KB each, whose one change was
+  the order of their `prs`. A run's jobs now come back by when each started, a job that never
+  started last, then by name (`ListRunJobs`, `ListRunJobsForRuns`, sorted in Go per run: an
+  `order by` sorts the whole 28-day read on disk, 82-93 ms against 43-52 ms for the unordered read
+  and 3 ms for the sort), the order `GET /api/v1/delivery/runs/{id}` already listed them in. Pull
+  requests merged together come back by id (`owner/repo#N` in byte order, the page's own order) and
+  runs started together by run id. A run's root failing job and its production job, among jobs
+  finishing together, are the first by name, and a run whose production jobs all failed falls back
+  to the first by start rather than the first listed. The Pipeline page's failing jobs name, as a
+  job's last failing run among runs that completed together, the one with the higher run id rather
+  than whichever was listed last.
+
+- Two production deploys whose jobs complete in the same second are ordered by run id, and the
+  lower run id ships a pull request both could, so the live Delivery hub's sliding window no longer
+  swaps a pull request's `deploy_run` and a run's `prs` with no stored row changed (LEGION-690).
 
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since

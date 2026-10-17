@@ -45,6 +45,38 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
+  accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
+  merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
+  allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
+  reports it mergeable. An arm or queue entry is not the end: the daemon watches it until GitHub
+  reports the merge at READY's head, and submits again if it disappears while the issue still
+  awaits that READY. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  once the gate opens, and ordinary READY no longer waits for a required check still running or an
+  unfinished disarm. A by-hand READY still waits for its pull request's unfinished disarm, so a
+  stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new
+  `merge-refused` row says what to do when GitHub refuses that submission in a way a retry would
+  meet again: the daemon stops submitting it, and a person fixes the repository setting or App
+  permission and merges the pull request. Its new `merge-stalled` row covers a submission that
+  ended because GitHub showed the pull request closed, or at another head, while the record still
+  awaited READY's head, and GitHub's last change to it was more than 10 minutes old.
+- Daemon API contract 28 (LEGION-694): `legion state` carries `heldOutboxRows`, every due lifecycle
+  outbox row the daemon holds behind its issue's running lifecycle row — its id, kind, issue, how
+  long it has waited since it came due and the row it waits on — never null, and the plain
+  `legion state` names the held rows on one line beside the pending Dispatch status writes. (This
+  branch took 25, then 26 when LEGION-636 landed at 25, and contract 27 reserved 26 for it; but
+  pi-legion v10.3.5 and v10.3.6 were released declaring 27 without the field, so a daemon at 27
+  would pass their boot gate and they would refuse its state. 26 stays a gap no release declares,
+  and this branch takes 28, the number above the released one.) Install this release with a
+  `legion` built from the same commit.
+- Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
+  names the repository's default branch (`--default-branch <name>`), which every branch and
+  workspace now starts at, whatever its name (`develop`, `release/v7.1`, `release#stable`); an
+  image built before it is refused by the daemon's image probe. Install this release with a
+  `legion` built from the same commit. The `legion-worker` skill's attribution check reads
+  GitHub's `default_branch`, and its conflict merge and fingerprint use the pull request's base
+  branch, instead of assuming `main@origin`; the recreated-workspace notice says a workspace holds
+  the repository's default branch when nothing was pushed.
 - Daemon API contract 25 (LEGION-636): a deployment row of `legion state`'s `capabilities` carries
   `source`, `configuration` (what legion.yaml alone decides) or `boot` (what boot measured);
   `installed` leaves the status set (nothing has emitted it since LEGION-629); the probe's OK line
@@ -76,12 +108,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
   `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
   The merger's move back to `reviewing` names the refusal's code and paths in its reason. A
-  reviewer whose task's `Reason:` names `READY_UNREVIEWED_CHANGE` or `READY_NOT_APPROVED` runs a
-  new round, never a fingerprint confirmation: it compares its last approved commit with the
-  head on GitHub, and when it finds no approval, a head off that commit's history, a 300-file
-  compare or a path outside `docs/solutions/` and `.legion/<issue>/`, it requests changes so the
-  implementer completes and the tester runs the head before it approves. The merge-gate reference
-  and the architect and retro skills say the same.
+  reviewer whose task's `Reason:` names one of them runs a new round, never a fingerprint
+  confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming the refused paths; for
+  `READY_NOT_APPROVED` it compares its last approved commit with the head on GitHub and requests
+  changes when it finds no approval, a head off that commit's history, a 300-file compare or a
+  path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`. Either
+  request asks only that the implementer complete so the tester runs the head, and the implementer's
+  prompt says how. The merge-gate reference and the architect and retro skills say the same, and
+  the architect's `review_round_cap` judgment does not count those rounds as going in circles.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
@@ -167,13 +201,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   under a controller grant minted with its registration secret), in place of running
   `legion state` and `legion status` from bash. The client's strict parse needs this release beside
   a daemon at 19; the daemon's boot gate and `legion probe-image` refuse any earlier contract (the
-  8.9.0 release declares 18 and the 8.6.0 release 17, each still minting a grant before every command; 8.4.1 declares 16). The
-  merger submits the merge itself the moment READY is accepted, with
-  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a merge queue
-  enqueues the pull request, a repository without one arms auto-merge, and the repository's
-  required reviews and checks decide when it lands); the implementer disarms it with
-  `gh pr merge <n> -R <owner>/<repo> --disable-auto` at the start of a round that follows a
-  withdrawn READY; and no skill or prompt says Legion never merges. The tester's prompt and the
+  8.9.0 release declares 18 and the 8.6.0 release 17, each still minting a grant before every command; 8.4.1 declares 16). No
+  role runs `gh pr merge`: the daemon submits an accepted READY's merge and disarms a withdrawn
+  one (this section's first entry), and no skill or prompt says Legion never merges. The tester's
+  prompt and the
   `legion-worker` skill now say the tester runs the changed surface for real, tries to break it,
   judges whether the implementer's tests would catch what it broke and reads CI for everything
   static; the sentences that had it rerun the lint, type or unit lanes before a push are gone.

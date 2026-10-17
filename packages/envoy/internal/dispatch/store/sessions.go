@@ -64,16 +64,22 @@ func (s *PgSessionStore) CurrentSessionGeneration(ctx context.Context, login str
 	return generation, true, nil
 }
 
+// revokeSessionsSQL advances $1's session generation, creating its row at generation 1. The
+// domain-mode people writes run it inside their own transaction, under the people row's lock: a
+// sign-in under another subject (PgPeopleStore.SignInSubject) and a confirmation's end
+// (PgPeopleStore.EndSubject).
+const revokeSessionsSQL = `
+	insert into user_sessions (login, generation) values ($1, 1)
+	on conflict (login) do update set generation = user_sessions.generation + 1
+`
+
 // RevokeSessions advances the user's generation, invalidating every previously
 // issued signed browser cookie for that login.
 func (s *PgSessionStore) RevokeSessions(ctx context.Context, login string) error {
 	if s == nil || s.pool == nil {
 		return errors.New("revoke sessions: Postgres pool required")
 	}
-	if _, err := s.pool.Exec(ctx, `
-		insert into user_sessions (login, generation) values ($1, 1)
-		on conflict (login) do update set generation = user_sessions.generation + 1
-	`, login); err != nil {
+	if _, err := s.pool.Exec(ctx, revokeSessionsSQL, login); err != nil {
 		return fmt.Errorf("revoke sessions for %q: %w", login, err)
 	}
 	return nil

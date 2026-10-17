@@ -6,6 +6,7 @@ import (
 	"github.com/pulumi/pulumi-go-provider/infer"
 
 	"github.com/sjawhar/envoy/infra/aws"
+	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/host"
 )
 
@@ -27,6 +28,7 @@ func New() (p.Provider, error) {
 			infer.ComponentF(host.NewListener),
 			infer.ComponentF(aws.NewNatsService),
 			infer.ComponentF(aws.NewWebhookListener),
+			infer.ComponentF(gcp.NewNatsHub),
 		).
 		Build()
 }

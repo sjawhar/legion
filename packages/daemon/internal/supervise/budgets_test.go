@@ -1,9 +1,12 @@
 package supervise
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -224,6 +227,59 @@ func TestASpawnTheRuntimeRefusesIsALaunchFailure(t *testing.T) {
 	}
 }
 
+// A Spawn the runtime refuses while the launch's own context is alive is the runtime's failure
+// (TestASpawnTheRuntimeRefusesIsALaunchFailure): a Sandbox try that runs out of its LaunchBound
+// returns one such error. A Spawn that ends with the launch's context — the daemon's stop — is
+// not: the machine reads its context's error, charges the claim nothing, tries again nothing, and
+// leaves the claim launching at the same generation with no process recorded, for the next boot
+// to launch again, saying so in the log.
+func TestASpawnCutShortByItsContextIsChargedNothing(t *testing.T) {
+	h := newBareHarness(t)
+	gated := &gatedSpawn{Runtime: h.rt, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	h.deps.Runtime = gated
+	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+		t.Fatal(err)
+	}
+	h.start(queuedClaim())
+	ctx, cancel := context.WithCancel(h.ctx)
+	launched := make(chan error, 1)
+	go func() { launched <- h.m.Handle(ctx, RequestSpawn{Claim: testToken}) }()
+	select {
+	case <-gated.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch never reached the runtime")
+	}
+	cancel()
+
+	select {
+	case err := <-launched:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the cut-short launch returned %v, want its context's cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch did not end with its context")
+	}
+	h.m.Wait()
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{})
+	// The gate answered the one try itself, so the fake behind it recorded no Spawn; a retry would
+	// have entered the gate again before Handle returned.
+	select {
+	case <-gated.entered:
+		t.Fatal("the machine tried the launch again after its context ended")
+	default:
+	}
+	if h.generation() != 1 || h.claim().Locator != nil {
+		t.Errorf("claim %+v, want generation 1 with no process recorded", h.claim())
+	}
+	if lines := h.logs.lines("launch cut short; its context ended"); len(lines) != 1 {
+		t.Errorf("logged %v, want the launch cut short by its context once", lines)
+	}
+	if lines := h.logs.lines("launch failed"); len(lines) != 0 {
+		t.Errorf("logged %v, want no launch failure", lines)
+	}
+}
+
 func TestSpawnsTheRuntimeKeepsRefusingEndInFailed(t *testing.T) {
 	h := newHarness(t)
 	h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom})
@@ -237,6 +293,79 @@ func TestSpawnsTheRuntimeKeepsRefusingEndInFailed(t *testing.T) {
 	h.wantBudgets(Budgets{LaunchFailures: 3})
 	h.wantCalls("Spawn", 3)
 	h.wantCalls("Suspend", 0)
+}
+
+// testLaunchBackoff is the first wait before a launch tried again after a charged launch failure
+// in every machine the harness builds (Timeouts.LaunchBackoff). The harness's clock records each
+// wait rather than waiting it, so it costs the suite nothing.
+const testLaunchBackoff = 2 * time.Second
+
+// Each try that follows a charged launch failure waits first, doubling, so a fault that lasts a
+// moment cannot spend a claim's whole launch budget in that moment: the second try waits between
+// half the first step of the backoff and the whole of it, the third between the whole of it and
+// twice it. That holds for a launch the runtime refuses, which the launch tries again itself, and
+// for a process that dies before its agent is ready, which relaunches after its charge.
+func TestChargedLaunchFailuresAreSpacedByTheBackoff(t *testing.T) {
+	for name, fail := range map[string]func(*harness){
+		"a launch the runtime refuses": func(h *harness) {
+			h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom})
+			if err := h.handle(RequestSpawn{Claim: testToken}); !errors.Is(err, errBoom) {
+				t.Fatalf("spawn returned %v, want the runtime's last refusal", err)
+			}
+		},
+		"a process that dies before its agent is ready": func(h *harness) {
+			h.launch()
+			h.observe(runtime.Gone)
+			h.observe(runtime.Gone)
+			h.observe(runtime.Gone)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+
+			fail(h)
+
+			h.wantState(StateFailed)
+			h.wantBudgets(Budgets{LaunchFailures: 3})
+			h.clock.mu.Lock()
+			slept := slices.Clone(h.clock.slept)
+			h.clock.mu.Unlock()
+			if len(slept) != 2 {
+				t.Fatalf("the machine waited %v before its tries, want two waits, before the second try and the third", slept)
+			}
+			for i, step := range []time.Duration{testLaunchBackoff, 2 * testLaunchBackoff} {
+				if slept[i] < step/2 || slept[i] > step {
+					t.Errorf("wait %d before try %d was %s, want between %s and %s", i+1, i+2, slept[i], step/2, step)
+				}
+			}
+		})
+	}
+}
+
+// A charged launch failure is written before the backoff waits, so the daemon's stop during the
+// wait forgives nothing: the claim is stored launching, with the charge, for the next boot to
+// launch again.
+func TestAChargeOutlivesADaemonStopDuringTheBackoff(t *testing.T) {
+	h := newHarness(t)
+	h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom})
+	stopping, stop := context.WithCancel(h.ctx)
+	defer stop()
+	// The daemon stops once the charged try is written, so its backoff is cut short.
+	h.store.onPut = func(c Claim) {
+		if c.Budgets.LaunchFailures == 1 {
+			stop()
+		}
+	}
+
+	if err := h.m.Handle(stopping, RequestSpawn{Claim: testToken}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("spawn whose backoff the stop cut short = %v, want the stop's context error", err)
+	}
+
+	h.wantCalls("Spawn", 1)
+	if stored := h.store.load(testToken); stored.State != StateLaunching || stored.Budgets.LaunchFailures != 1 || stored.Locator != nil {
+		t.Fatalf("stored claim after a stop in the backoff = %s with budgets %+v and locator %v, want launching with the charge and no process",
+			stored.State, stored.Budgets, stored.Locator)
+	}
 }
 
 func TestALaunchWhoseSpecCannotBeBuiltIsALaunchFailure(t *testing.T) {
@@ -369,7 +498,7 @@ func TestAStartedTurnResetsBothPromptBudgets(t *testing.T) {
 func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 	h := newBareHarness(t)
 	h.deps.Limits = Limits{LaunchFailures: 1, PromptFailures: 1, PromptRetires: 1}
-	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop}
+	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, Stop: testStop, LaunchBackoff: testLaunchBackoff}
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}
@@ -396,6 +525,7 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 		"RPC":                   func(d *Deps) { d.Timeouts.RPC = 0 },
 		"Probe":                 func(d *Deps) { d.Timeouts.Probe = 0 },
 		"Stop":                  func(d *Deps) { d.Timeouts.Stop = 0 },
+		"LaunchBackoff":         func(d *Deps) { d.Timeouts.LaunchBackoff = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newBareHarness(t)

@@ -176,8 +176,8 @@ config is one file shared by every issue workspace of the clone. Legion has two 
 one per role: your role's App is the **implement** App if you are the implementer or the merger,
 and the **review** App if you are the planner, tester, reviewer, or an architect; your pane's
 `JJ_USER` and `JJ_EMAIL` name your role's App's bot account. A planner's commits authored
-by the review App are right. Before a push, check
-`jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
+by the review App are right. Before a push, check, with GitHub's default branch read as a jj string literal in the same command (never a name pasted between quotes),
+`default=$(gh api repos/<owner>/<repo> --jq '.default_branch | @json') && jj -R "$LEGION_WORKSPACE" log -r "${default}@origin..@" -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App. Their *committer* is
 a different matter, and no longer noise to accept. Resolving a conflict rewrites nothing — it is a
@@ -307,12 +307,11 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
   → retro → the merger's READY → the merge → the implementer's production check. On READY's
-  acceptance the merger submits the pull request with
-  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, unless the
-  answer's note begins `MANUAL_MERGE_REQUIRED:`, where a person merges it; the repository's
-  required reviews and checks decide when it lands
+  acceptance the daemon submits the merge of the head READY named, unless the answer's note begins
+  `MANUAL_MERGE_REQUIRED:`, where a person merges it; no role runs `gh pr merge`, and the
+  repository's required reviews and checks decide when it lands
   (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
-  the merger's READY and its submission, and the production check follow the same reference.
+  the merger's READY, the daemon's submission, and the production check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 

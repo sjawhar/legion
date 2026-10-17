@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,10 +63,15 @@ func (s *memorySessionStore) RevokeSessions(_ context.Context, login string) err
 	return nil
 }
 
-// memoryPeopleStore is auth.PeopleStore in memory.
+// memoryPeopleStore is auth.PeopleStore in memory. A sign-in under another subject than the one it
+// holds for the address ends the address's sessions in sessions, as store.PgPeopleStore does; a
+// store with no sessions refuses such a sign-in.
 type memoryPeopleStore struct {
-	mu     sync.Mutex
-	people map[string]auth.PersonMembership
+	mu       sync.Mutex
+	people   map[string]auth.PersonMembership
+	sessions *memorySessionStore
+	// afterSignIn, when set, runs once after the next SignIn or SignInSubject returns.
+	afterSignIn func()
 }
 
 func newMemoryPeople() *memoryPeopleStore {
@@ -81,10 +87,41 @@ func (s *memoryPeopleStore) Record(_ context.Context, email string) error {
 	return nil
 }
 
+func (s *memoryPeopleStore) runAfterSignIn() {
+	// afterSignIn runs once, after a sign-in (SignIn or SignInSubject) has committed and released
+	// the store: a test's window between a sign-in's commit and its cookie.
+	if hook := s.afterSignIn; hook != nil {
+		s.afterSignIn = nil
+		hook()
+	}
+}
+
 func (s *memoryPeopleStore) SignIn(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+	defer s.runAfterSignIn()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.people[email] = auth.PersonMembership{RefreshToken: refreshToken, ConfirmedAt: confirmedAt}
+	membership := s.people[email]
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
+}
+
+func (s *memoryPeopleStore) SignInSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	defer s.runAfterSignIn()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership, existed := s.people[email]
+	if existed && membership.Subject != subject {
+		if s.sessions == nil {
+			return errors.New("memoryPeopleStore: a sign-in under another subject has no sessions to end")
+		}
+		if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+			return err
+		}
+	}
+	membership.Subject = subject
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
 	return nil
 }
 
@@ -96,14 +133,31 @@ func (s *memoryPeopleStore) Membership(_ context.Context, email string) (auth.Pe
 }
 
 func (s *memoryPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
-	return s.SignIn(context.Background(), email, refreshToken, confirmedAt)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership := s.people[email]
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
+}
+
+func (s *memoryPeopleStore) ConfirmSubject(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership := s.people[email]
+	if membership.Subject != subject {
+		return nil
+	}
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
+	return nil
 }
 
 func (s *memoryPeopleStore) End(_ context.Context, email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, found := s.people[email]; found {
-		s.people[email] = auth.PersonMembership{}
+	if membership, found := s.people[email]; found {
+		s.people[email] = auth.PersonMembership{Subject: membership.Subject}
 	}
 	return nil
 }
@@ -119,9 +173,10 @@ const (
 	rigClientID = "dispatch-client"
 	rigGroup    = "dispatch-members"
 	rigEmail    = "a.b+c@d.example"
+	rigDomain   = "example.com"
 )
 
-// signInRig is a Dispatch router signing people in through a fake sign-in pool, with the
+// signInRig is a Dispatch router signing people in through a fake sign-in issuer, with the
 // cookie identity production runs and a clock the membership refresh reads.
 type signInRig struct {
 	handler  http.Handler
@@ -133,24 +188,38 @@ type signInRig struct {
 	now      time.Time
 }
 
+// newSignInRig is a router signing the members of rigGroup in through a fake Cognito sign-in pool.
 func newSignInRig(t *testing.T, serverURL string) *signInRig {
+	t.Helper()
+	return newSignInRigFor(t, serverURL, identity.GroupRule{Group: rigGroup}, "")
+}
+
+// newDomainSignInRig is a router signing the people of the Workspace domain rigDomain in through a
+// fake issuer that mints Google's claims.
+func newDomainSignInRig(t *testing.T) *signInRig {
+	t.Helper()
+	return newSignInRigFor(t, "", identity.DomainRule{Domain: rigDomain}, rigDomain)
+}
+
+func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, hostedDomain string) *signInRig {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), rigClientID, "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret", hostedDomain)
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}
 	rig := &signInRig{issuer: issuer, people: newMemoryPeople(), sessions: &memorySessionStore{generations: map[string]int64{}}, now: time.Now()}
-	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Group: rigGroup, Now: rig.clock}
+	rig.people.sessions = rig.sessions
+	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: rule, Now: rig.clock}
 	rig.ctx, err = BuildAppContext(AppContextOptions{
-		SigningKey:  "signing-key",
-		People:      rig.people,
-		Sessions:    rig.sessions,
-		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
-		SignIn:      flow,
-		SignInGroup: rigGroup,
-		ServerURL:   serverURL,
+		SigningKey: "signing-key",
+		People:     rig.people,
+		Sessions:   rig.sessions,
+		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
+		SignIn:     flow,
+		SignInRule: rule,
+		ServerURL:  serverURL,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)
@@ -340,6 +409,216 @@ func TestSessionEndsWhenThePersonLeavesTheGroup(t *testing.T) {
 	}
 }
 
+// rigGoogleEmail is the person googleClaims names, as Dispatch names them: lowercased.
+const rigGoogleEmail = "a.person@example.com"
+
+// googleClaims is a Google ID token's claims for a verified account of the Workspace domain
+// rigDomain under subject.
+func googleClaims(subject string) map[string]any {
+	return map[string]any{
+		"sub":            subject,
+		"email":          "A.Person@example.com",
+		"email_verified": true,
+		"hd":             rigDomain,
+	}
+}
+
+// captureRouterLogs sends slog's default logger to a buffer until t ends.
+func captureRouterLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &logs
+}
+
+// A verified account of the domain signs in: it gets a session, lands on the page it asked for, and
+// is named by its lowercased email, with the account's subject recorded beside the refresh token.
+func TestDomainSignInAdmitsAVerifiedAccountOfTheDomain(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	response := rig.signIn(t, googleClaims("google-subject-1"))
+	if response.Code != http.StatusFound || response.Header().Get("Location") != "/issues/CORE-1" {
+		t.Fatalf("callback: status %d Location %q body=%s, want 302 to /issues/CORE-1", response.Code, response.Header().Get("Location"), response.Body.String())
+	}
+	cookie := sessionCookie(response)
+	if cookie == nil {
+		t.Fatal("a member of the domain did not receive a session cookie")
+	}
+	if whoami := rig.whoami(cookie); whoami.Code != http.StatusOK || !strings.Contains(whoami.Body.String(), `"login":"`+rigGoogleEmail+`"`) {
+		t.Fatalf("whoami: status %d body %s, want %s", whoami.Code, whoami.Body.String(), rigGoogleEmail)
+	}
+	if membership, found := rig.people.get(rigGoogleEmail); !found || membership.RefreshToken == "" || membership.Subject != "google-subject-1" {
+		t.Fatalf("the sign-in recorded %#v found=%t, want the refresh token and google-subject-1", membership, found)
+	}
+}
+
+// An account outside the domain, one whose email Google has not verified, and one with no email
+// each reach Dispatch's refusal page with their reason; none gets a session or a recorded sign-in,
+// and each refusal is logged with the email and hd.
+func TestDomainSignInRefusesWithItsReasonOnThePageAndInTheLog(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(claims map[string]any)
+		page   string
+		logged []string
+	}{
+		{"an account of another domain", func(claims map[string]any) { claims["hd"] = "other.example" },
+			rigGoogleEmail + " is not in the domain that may use Dispatch", []string{"email=A.Person@example.com", "hd=other.example"}},
+		{"an account outside any Workspace", func(claims map[string]any) { delete(claims, "hd") },
+			rigGoogleEmail + " is not in the domain that may use Dispatch", []string{"email=A.Person@example.com", `hd=""`}},
+		{"an email Google has not verified", func(claims map[string]any) { claims["email_verified"] = false },
+			rigGoogleEmail + ": email not verified", []string{"email=A.Person@example.com", "hd=" + rigDomain}},
+		{"no email", func(claims map[string]any) { delete(claims, "email") },
+			"No email: this sign-in carries no email address", []string{`email=""`, "hd=" + rigDomain}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			logs := captureRouterLogs(t)
+			rig := newDomainSignInRig(t)
+			claims := googleClaims("google-subject-1")
+			tc.change(claims)
+			response := rig.signIn(t, claims)
+			if response.Code != http.StatusForbidden || !strings.HasPrefix(response.Header().Get("Content-Type"), "text/html") {
+				t.Fatalf("callback: status %d Content-Type %q, want 403 text/html", response.Code, response.Header().Get("Content-Type"))
+			}
+			if body := response.Body.String(); !strings.Contains(body, tc.page) || !strings.Contains(body, `href="/auth/start"`) {
+				t.Errorf("refusal page does not say %q and offer another sign-in: %s", tc.page, body)
+			}
+			if sessionCookie(response) != nil {
+				t.Error("a refused sign-in received a session cookie")
+			}
+			if len(rig.people.people) != 0 {
+				t.Errorf("a refused sign-in was recorded: %#v", rig.people.people)
+			}
+			logged := logs.String()
+			if !strings.Contains(logged, "sign-in refused") {
+				t.Errorf("the refusal was not logged: %q", logged)
+			}
+			for _, want := range tc.logged {
+				if !strings.Contains(logged, want) {
+					t.Errorf("the refusal's log line does not carry %s: %q", want, logged)
+				}
+			}
+		})
+	}
+}
+
+// The hourly confirmation runs the domain rule on the refreshed token: a member's session renews,
+// and an account that left the domain, changed its email, became another account, or whose refresh
+// Google refused, loses every session.
+func TestDomainSessionRenewsHourlyAndEndsWhenTheAccountNoLongerQualifies(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	cookie := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+	rig.advance(61 * time.Minute)
+	if response := rig.whoami(cookie); response.Code != http.StatusOK || rig.issuer.Refreshes() != 1 {
+		t.Fatalf("after the hour: status %d refreshes %d, want 200 and one refresh", response.Code, rig.issuer.Refreshes())
+	}
+	for name, end := range map[string]func(issuer *oidctest.Issuer){
+		"another domain": func(issuer *oidctest.Issuer) {
+			issuer.UpdateGrants(func(c map[string]any) { c["hd"] = "other.example" })
+		},
+		"another email": func(issuer *oidctest.Issuer) {
+			issuer.UpdateGrants(func(c map[string]any) { c["email"] = "b.person@example.com" })
+		},
+		"another Google account": func(issuer *oidctest.Issuer) {
+			issuer.UpdateGrants(func(c map[string]any) { c["sub"] = "google-subject-2" })
+		},
+		"a refused refresh": func(issuer *oidctest.Issuer) { issuer.RevokeGrants() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newDomainSignInRig(t)
+			cookie := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+			end(rig.issuer)
+			rig.advance(2 * time.Hour)
+			if response := rig.whoami(cookie); response.Code != http.StatusUnauthorized {
+				t.Fatalf("whoami: status %d body %s, want 401", response.Code, response.Body.String())
+			}
+			if generation, _, _ := rig.sessions.CurrentSessionGeneration(context.Background(), rigGoogleEmail); generation != 1 {
+				t.Fatalf("session generation = %d, want 1: every cookie of the person revoked", generation)
+			}
+		})
+	}
+}
+
+// An address a Workspace admin gave to a new account: once the new account signs in, the old
+// account's cookies answer 401 while the new one's work, even though the confirmation would pass
+// on the new account's refresh token.
+func TestDomainSignInUnderAnotherSubjectEndsTheAddressSessions(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	first := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+	second := sessionCookie(rig.signIn(t, googleClaims("google-subject-2")))
+	if first == nil || second == nil {
+		t.Fatalf("sign-in cookies %v and %v, want both", first, second)
+	}
+	if response := rig.whoami(first); response.Code != http.StatusUnauthorized {
+		t.Errorf("the old account's cookie: whoami %d %s, want 401", response.Code, response.Body.String())
+	}
+	if response := rig.whoami(second); response.Code != http.StatusOK {
+		t.Errorf("the new account's cookie: whoami %d %s, want 200", response.Code, response.Body.String())
+	}
+	if membership, _ := rig.people.get(rigGoogleEmail); membership.Subject != "google-subject-2" {
+		t.Errorf("recorded subject %q, want google-subject-2", membership.Subject)
+	}
+}
+
+// A cookie from before the switch to domain mode — a row recording no subject at all, a
+// Cognito-era, header- or dev-recorded row, with a session already live — stops working the
+// first time the address signs in through the domain, even though no other Google account has
+// taken it yet.
+func TestDomainSignInEndsACookieFromBeforeTheSwitchToDomainMode(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "old-refresh-token", rig.clock()); err != nil {
+		t.Fatalf("sign in the pre-switch row: %v", err)
+	}
+	generation, err := rig.sessions.EnsureSession(context.Background(), rigGoogleEmail)
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	before, err := http.ParseSetCookie(auth.IssueSessionCookie(rigGoogleEmail, generation, "signing-key", true))
+	if err != nil {
+		t.Fatalf("parse session cookie: %v", err)
+	}
+	if response := rig.whoami(before); response.Code != http.StatusOK {
+		t.Fatalf("the pre-switch cookie before signing in: whoami %d %s, want 200", response.Code, response.Body.String())
+	}
+	after := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+	if after == nil {
+		t.Fatal("a member of the domain did not receive a session cookie")
+	}
+	if response := rig.whoami(before); response.Code != http.StatusUnauthorized {
+		t.Errorf("the pre-switch cookie: whoami %d %s, want 401", response.Code, response.Body.String())
+	}
+	if response := rig.whoami(after); response.Code != http.StatusOK {
+		t.Errorf("the domain sign-in's own cookie: whoami %d %s, want 200", response.Code, response.Body.String())
+	}
+	if membership, _ := rig.people.get(rigGoogleEmail); membership.Subject != "google-subject-1" {
+		t.Errorf("recorded subject %q, want google-subject-1", membership.Subject)
+	}
+}
+
+// The same account signing in again, from another browser, keeps its other sessions.
+func TestDomainSignInUnderTheSameSubjectKeepsItsOtherSessions(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	first := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+	second := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+	for name, cookie := range map[string]*http.Cookie{"first": first, "second": second} {
+		if response := rig.whoami(cookie); response.Code != http.StatusOK {
+			t.Errorf("the %s cookie: whoami %d %s, want 200", name, response.Code, response.Body.String())
+		}
+	}
+}
+
+// A sign-in through a Cognito pool records no subject, though the pool's token carries one.
+func TestGroupSignInRecordsNoSubject(t *testing.T) {
+	rig := newSignInRig(t, "")
+	if response := rig.signIn(t, personClaims(rigGroup)); response.Code != http.StatusFound {
+		t.Fatalf("callback: status %d body %s, want 302", response.Code, response.Body.String())
+	}
+	if membership, found := rig.people.get(rigEmail); !found || membership.Subject != "" {
+		t.Fatalf("the group sign-in recorded %#v, want no subject", membership)
+	}
+}
+
 func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -371,13 +650,42 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 	}
 }
 
+// Another Google account's sign-in to the same address that commits after a sign-in has recorded
+// its own account and before that sign-in's cookie is issued: the earlier sign-in gets no working
+// session, since its cookie would carry the generation the later one advanced to.
+func TestDomainSignInGetsNoSessionWhenAnotherAccountTakesTheAddressBeforeItsCookie(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	rig.people.afterSignIn = func() {
+		if err := rig.people.SignInSubject(context.Background(), rigGoogleEmail, "google-subject-2", "refresh-2", time.Now()); err != nil {
+			t.Errorf("the other account's sign-in: %v", err)
+		}
+	}
+	response := rig.signIn(t, googleClaims("google-subject-1"))
+	if cookie := sessionCookie(response); cookie != nil {
+		if whoami := rig.whoami(cookie); whoami.Code != http.StatusUnauthorized {
+			t.Fatalf("the earlier account's cookie: whoami %d %s, want 401", whoami.Code, whoami.Body.String())
+		}
+	}
+	if response.Code == http.StatusFound {
+		t.Errorf("the callback answered 302 to %q, want a refusal: the address belongs to another account now", response.Header().Get("Location"))
+	}
+	if generation, _, _ := rig.sessions.CurrentSessionGeneration(context.Background(), rigGoogleEmail); generation != 1 {
+		t.Errorf("session generation %d, want 1: the other account's sign-in ended the address's sessions", generation)
+	}
+}
+
 func TestAuthStartWithoutSignInIsUnavailable(t *testing.T) {
+	const want = "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)"
 	handler, _ := newTestRouter(t)
 	for _, target := range []string{"/auth/start", "/auth/callback?code=c&state=s"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test"+target, nil))
-		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"SIGNIN_UNCONFIGURED"`) {
-			t.Errorf("%s with no sign-in: status %d body %s, want 503 SIGNIN_UNCONFIGURED", target, response.Code, response.Body.String())
+		var body struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusServiceUnavailable || body.Code != "SIGNIN_UNCONFIGURED" || body.Error != want {
+			t.Errorf("%s with no sign-in: status %d body %s (%v), want 503 SIGNIN_UNCONFIGURED with %q", target, response.Code, response.Body.String(), err, want)
 		}
 	}
 }
@@ -975,6 +1283,30 @@ func TestAuthStartUsesConfiguredCanonicalOriginForCallback(t *testing.T) {
 	}
 }
 
+// A domain-mode server sends the browser to Google asking for offline access with consent, so the
+// exchange carries a refresh token every time, and with the domain as a hint; a group-mode server's
+// redirect carries none of the three.
+func TestAuthStartAsksGoogleForOfflineAccessInTheDomain(t *testing.T) {
+	// rig.start reads the redirect's Location.
+	query := func(rig *signInRig) url.Values {
+		t.Helper()
+		location, _ := rig.start(t, "http://dispatch.test/auth/start")
+		return location.Query()
+	}
+	domain := query(newDomainSignInRig(t))
+	for name, want := range map[string]string{"access_type": "offline", "prompt": "consent", "hd": rigDomain, "client_id": rigClientID} {
+		if got := domain.Get(name); got != want {
+			t.Errorf("domain mode: GET /auth/start redirected with %s=%q, want %q", name, got, want)
+		}
+	}
+	group := query(newSignInRig(t, ""))
+	for _, name := range []string{"access_type", "prompt", "hd"} {
+		if group.Has(name) {
+			t.Errorf("group mode: GET /auth/start redirected with %s=%q, want none", name, group.Get(name))
+		}
+	}
+}
+
 // cookieRouter is a router on a cookie identity with no membership to confirm, and a session
 // cookie of sami@d.example's current generation.
 func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *memoryPeopleStore) {
@@ -1062,4 +1394,21 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 			t.Fatalf("bearer request without origin was rejected as CSRF: body=%s", response.Body.String())
 		}
 	})
+}
+
+func (s *memoryPeopleStore) EndSubject(ctx context.Context, email, subject string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership, found := s.people[email]
+	if !found || membership.Subject != subject {
+		return false, nil
+	}
+	if s.sessions == nil {
+		return false, errors.New("memoryPeopleStore: EndSubject has no sessions to end")
+	}
+	if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+		return false, err
+	}
+	s.people[email] = auth.PersonMembership{Subject: membership.Subject}
+	return true, nil
 }

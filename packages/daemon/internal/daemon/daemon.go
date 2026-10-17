@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -90,6 +91,13 @@ const (
 	// periodic retry owns it until tmux can say the old pane was reaped or absent.
 	bootOrphanReconcileAttempts   = 3
 	bootOrphanReconcileRetryDelay = 100 * time.Millisecond
+	// launchBackoffFirst is the machines' first wait before a launch is tried again after a
+	// charged launch failure (supervise.Timeouts.LaunchBackoff), doubled for each one after it: a
+	// three-failure budget's tries span three seconds at least, never a moment one fault lasts.
+	launchBackoffFirst = 2 * time.Second
+	// busyBackoffFirst is the Sandbox runtime's first wait before a launch's request the API server
+	// answered overloaded is sent again (sandbox.Options.BusyBackoff), doubled up to 8 s.
+	busyBackoffFirst = 250 * time.Millisecond
 )
 
 // overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
@@ -240,6 +248,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
 		plan.identity = workflow.identity
+		plan.defaultBranch = workflow.defaultBranches.Of
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -484,6 +493,9 @@ func closeStore(st *store.Store, log *slog.Logger) {
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// defaultBranch is a repository's default branch as GitHub names it, read with the workflow's
+	// token source (defaultBranches.Of); nil without one.
+	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
@@ -891,7 +903,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
-			identity: p.identity, designGate: cfg.Gates.Design,
+			identity: p.identity, defaultBranch: p.defaultBranch, designGate: cfg.Gates.Design,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     p.identity,
@@ -912,6 +924,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
+			LaunchBackoff:         launchBackoffFirst,
 		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,
@@ -1410,9 +1423,18 @@ type source struct {
 // filtered here: a slot's index is unique across every project's slots, so admission chooses the
 // next one over all of them and counts only its own against its cap (admit.ownSlots). The outbox's
 // claim is scoped in its SQL instead, because the lease it takes is itself the damage.
+//
+// It is also where the outbox learns of its rows: every write that makes a row due — Enqueue, and
+// ExpediteOutbox — wakes the row's lane (outbox.wake) once the transaction has committed, through
+// the transaction's commit hooks (intake.OnCommit), so no lane runs a row it cannot yet read, and
+// no lane polls for one. wake is nil where there is no workflow to wake: the API-only daemon, the
+// state route's reads and the stranded report.
 type projectRecords struct {
 	record.Store
 	project string
+	wake    func(issue string, kind record.OutboxKind)
+	// log says when a row was written outside a commit scope; nil is the default logger.
+	log *slog.Logger
 }
 
 func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, error) {
@@ -1427,6 +1449,46 @@ func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, 
 		}
 	}
 	return issues, nil
+}
+
+func (s projectRecords) Enqueue(ctx context.Context, tx pgx.Tx, row record.OutboxRow) error {
+	if err := s.Store.Enqueue(ctx, tx, row); err != nil {
+		return err
+	}
+	s.wakeOnCommit(ctx, row)
+	return nil
+}
+
+func (s projectRecords) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row record.OutboxRow, now time.Time) error {
+	if err := s.Store.ExpediteOutbox(ctx, tx, row, now); err != nil {
+		return err
+	}
+	s.wakeOnCommit(ctx, row)
+	return nil
+}
+
+// wakeOnCommit wakes the row's lane once the transaction that wrote it commits. A write made
+// outside a commit scope (intake.WithCommitHooks) has no commit to wait for: its lane is woken at
+// once, and the write is logged with its caller, since a lane woken before the row is visible
+// finds nothing and the row then waits for the sweep — every transaction that writes a row is
+// meant to be scoped, and one that is not is a bug to fix where the log names.
+func (s projectRecords) wakeOnCommit(ctx context.Context, row record.OutboxRow) {
+	if s.wake == nil {
+		return
+	}
+	if intake.CommitScoped(ctx) {
+		intake.OnCommit(ctx, func() { s.wake(row.Issue, row.Kind) })
+		return
+	}
+	log := s.log
+	if log == nil {
+		log = slog.Default()
+	}
+	// Caller 2 is the caller of Enqueue or ExpediteOutbox, past this helper and the method.
+	_, file, line, _ := goruntime.Caller(2)
+	log.Error("outbox row written outside a commit scope; its lane is woken at once",
+		"kind", row.Kind, "issue", row.Issue, "file", file, "line", line)
+	s.wake(row.Issue, row.Kind)
 }
 
 func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
@@ -1444,7 +1506,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
-	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports())
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports(), time.Now().UTC())
 	if err != nil {
 		return api.State{}, err
 	}

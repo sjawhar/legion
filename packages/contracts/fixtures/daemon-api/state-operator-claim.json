@@ -35,6 +35,7 @@
     }
   },
   "pendingStatusWrites": [],
+  "heldOutboxRows": [],
   "strandedClaims": [],
   "capabilities": []
 }

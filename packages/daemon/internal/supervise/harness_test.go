@@ -42,6 +42,17 @@ type fakeClock struct {
 	now    time.Time
 	timers []*fakeTimer
 	armed  int
+	// slept is every wait a machine asked to Sleep, in order.
+	slept []time.Duration
+}
+
+// Sleep records d and returns at once, with ctx's error when it has ended: a machine's wait costs
+// the test nothing, and the test reads what it waited.
+func (c *fakeClock) Sleep(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	c.slept = append(c.slept, d)
+	c.mu.Unlock()
+	return ctx.Err()
 }
 
 type fakeTimer struct {
@@ -338,6 +349,7 @@ func testTimeouts() Timeouts {
 		RPC:                   testRPC,
 		Probe:                 testProbe,
 		Stop:                  testStop,
+		LaunchBackoff:         testLaunchBackoff,
 	}
 }
 
@@ -647,6 +659,25 @@ func (g *gatedResume) Resume(ctx context.Context, prev *runtime.Locator, spec ru
 	g.entered <- struct{}{}
 	<-g.release
 	return g.Runtime.Resume(ctx, prev, spec)
+}
+
+// gatedSpawn holds Spawn until the test lets it through or its context ends, as a Sandbox launch
+// waits on the cluster for its pod; a context that ends first is answered with its error, as the
+// runtime's waits answer.
+type gatedSpawn struct {
+	*fake.Runtime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gatedSpawn) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	g.entered <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return runtime.Locator{}, ctx.Err()
+	}
+	return g.Runtime.Spawn(ctx, spec)
 }
 
 func waitFor(t *testing.T, what string, ch <-chan string) string {

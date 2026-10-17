@@ -61,6 +61,7 @@
     }
   },
   "pendingStatusWrites": [],
+  "heldOutboxRows": [],
   "strandedClaims": [],
   "controllerLocator": {
     "runtime": "kubernetes",

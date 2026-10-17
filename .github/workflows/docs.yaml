@@ -111,8 +111,9 @@ jobs:
           bun run docs:build
           ls -l docs/site/dist/THIRD_PARTY_NOTICES.txt
       # The built site, generated reference pages and copied media captions include no private
-      # deployment repository, company, or internal host; pr-and-main.yaml checks the sources.
-      - name: Check the built site has no private name or internal host
+      # deployment repository, company, internal host, or Tailscale MagicDNS host;
+      # pr-and-main.yaml checks the sources.
+      - name: Check the built site has no private name, internal host, or tailnet host
         run: .github/scripts/check-private-names.sh docs/site/dist
       - if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0

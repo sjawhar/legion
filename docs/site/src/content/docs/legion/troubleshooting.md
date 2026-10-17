@@ -171,20 +171,23 @@ Check, in order:
 
    `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
 5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
-   branch, `legion/<KEY>`, on GitHub at `main` as the implement App, and again before each tree
-   member's planner starts, so no agent's push is the one that creates it (GitHub can refuse that
-   push on a large repository). A branch GitHub already has is kept as it is. While GitHub refuses
-   the create, the architect or planner waiting for it does not start. The daemon retries the
-   create, backing off to about a minute, and logs each refusal as an error whose `msg` is
-   `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the ref,
-   GitHub's status and its body:
+   branch, `legion/<KEY>`, on GitHub at the repository's default branch, as GitHub names it
+   (`default_branch`, read again at most every ten minutes), as the implement App, and again before
+   each tree member's planner starts, so no agent's push is the one that creates it (GitHub can
+   refuse that push on a large repository). A branch GitHub already has is kept as it is. While
+   GitHub refuses the read or the create, the architect or planner waiting for it does not start.
+   The daemon retries, backing off to about a minute, and logs each refusal as an error whose `msg`
+   is `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the
+   ref, GitHub's status and its body:
 
    ```text
-   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
+   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <default branch's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
    ```
 
-   Fix what GitHub names, such as the implement App's permissions or a ruleset on `legion/*`
-   branches. The next attempt then creates the branch, and the tree starts.
+   A read GitHub refuses names it instead (`read the default branch of acme/widgets: GitHub
+   answered GET /repos/acme/widgets with 404: …`). Fix what GitHub names, such as the implement
+   App's permissions or a ruleset on `legion/*` branches. The next attempt then creates the branch,
+   and the tree starts.
 6. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
@@ -213,8 +216,14 @@ says which budget ran out (`launch failures ran out`, `deaths with work outstand
 {"level":"ERROR","msg":"supervise: claim failed","why":"launch failures ran out","launchFailures":3,"deaths":0,…}
 ```
 
-Before it come `supervise: launch failed` or `supervise: process died` warnings, one per attempt.
-The state shows it too:
+Before it come `supervise: launch failed` or `supervise: process died` warnings, one per attempt,
+each but the last followed by `supervise: waiting before the next launch`: the tries are spaced by
+a backoff (1–2 s, then 2–4 s), so a fault that lasts a moment cannot spend the whole budget. Under
+the Kubernetes runtime, a launch whose requests the API server answers overloaded (a 429, or a 5xx
+such as `etcdserver: throttle: too many requests`) waits the server out and is charged nothing;
+its `sandbox runtime: the API server answered a launch's request overloaded` warning comes first,
+and the launch fails only when the server is still overloaded at the launch's own deadline. The
+state shows it too:
 
 ```sh
 legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, holdReason, architect, workers}'
@@ -492,6 +501,25 @@ pending Dispatch status writes: 2; the oldest, for WIDGETS-12, has failed 4 atte
 ```
 
 The writes are retried in order; the error at the end of the line is Dispatch's answer.
+
+## An issue's stop or start waits behind its own launch
+
+An issue's lifecycle rows — its starts, stops and suspensions, its branch, its workspace removal —
+run one at a time, oldest due first, so a stop, suspension or later start of an issue waits while
+the row it names runs. Most often that row is a start whose pod is still launching
+([A pod does not come up](/legion/legion/troubleshooting/#a-pod-does-not-come-up)). Other issues
+are not held, and the issue's own status writes, messages and notices run meanwhile.
+`legion state` says so on its fourth line, naming the row that has waited longest:
+
+```text
+held lifecycle rows: 1; the longest waiting, supervise row 802 of WIDGETS-12, has waited 2m30s behind row 801
+```
+
+`legion state --json` lists each under `heldOutboxRows`, with its `id`, `kind` and `issue`,
+`waitedSeconds` counted from when the row came due, and `waitsOn`, the id of the running row. Once
+such a wait passes two minutes the daemon logs a warning, `outbox row held behind its issue's
+running lifecycle row`, with `row`, `kind`, `issue`, `waitsOn` and `waited`: search the log for
+it, then look at what the row `waitsOn` names is doing.
 
 ## GitHub, NATS and the Secrets Broker
 

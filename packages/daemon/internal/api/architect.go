@@ -357,8 +357,11 @@ func (s *server) scheduleChildReleaseRetry(w http.ResponseWriter, r *http.Reques
 	now := time.Now().UTC()
 	var retry record.ReleaseRetry
 	var exhausted, backoff bool
-	if err := pgx.BeginFunc(r.Context(), s.pool, func(tx pgx.Tx) error {
-		current, err := s.records.ReleaseRetry(r.Context(), tx, child.Key)
+	// The retry is its own transaction, so it owns the commit hook the stalled notice's write
+	// registers (the daemon's projectRecords, intake.OnCommit), as ApplyFact does for a fact's rows.
+	scoped, committed := intake.WithCommitHooks(r.Context())
+	if err := pgx.BeginFunc(scoped, s.pool, func(tx pgx.Tx) error {
+		current, err := s.records.ReleaseRetry(scoped, tx, child.Key)
 		if err != nil {
 			return err
 		}
@@ -383,16 +386,17 @@ func (s *server) scheduleChildReleaseRetry(w http.ResponseWriter, r *http.Reques
 			if err != nil {
 				return err
 			}
-			if err := s.records.Enqueue(r.Context(), tx, row); err != nil {
+			if err := s.records.Enqueue(scoped, tx, row); err != nil {
 				return err
 			}
 			exhausted = true
 		}
-		return s.records.PutReleaseRetry(r.Context(), tx, retry)
+		return s.records.PutReleaseRetry(scoped, tx, retry)
 	}); err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RETRY_UNAVAILABLE", fmt.Sprintf("could not record the release retry of %s", child.Key))
 		return false
 	}
+	committed()
 	if exhausted {
 		writeFailure(w, http.StatusConflict, "CHILD_RELEASE_STALLED", fmt.Sprintf("%s is todo but its parent %s has not reached the daemon after %d attempts; the tree architect was notified", child.Key, parent, retry.Attempts))
 		return false

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -210,6 +211,91 @@ func TestAPIAuth(t *testing.T) {
 				t.Fatalf("the 401 body names the failure class: %q", recorder.Body.String())
 			}
 			assertRejectionLog(t, logged.String(), tc.wantReason, tc.authorize)
+		})
+	}
+}
+
+func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	cases := []struct {
+		name          string
+		path          string
+		contentType   string
+		unknownLength bool
+		wantStatus    int
+	}{
+		{
+			name:        "allows JSON parameters",
+			path:        "/v1/messages/publish",
+			contentType: "application/json; charset=utf-8",
+			wantStatus:  http.StatusNoContent,
+		},
+		{
+			name:       "refuses missing content type",
+			path:       "/v1/messages/publish",
+			wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "refuses non JSON content type",
+			path:        "/v1/messages/publish",
+			contentType: "text/plain",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			// A chunked body reaches the handler with ContentLength -1, so the gate must not
+			// read an unknown length as an empty body.
+			name:          "refuses non JSON body of unknown length",
+			path:          "/v1/messages/publish",
+			contentType:   "text/plain",
+			unknownLength: true,
+			wantStatus:    http.StatusUnsupportedMediaType,
+		},
+		{
+			// ParseMediaType still returns "application/json" beside its error here, so the
+			// gate must refuse on the error rather than on the type alone.
+			name:        "refuses malformed JSON content type",
+			path:        "/v1/messages/publish",
+			contentType: "application/json; charset",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
+			name:        "leaves webhooks to their signature handler",
+			path:        "/webhook/github",
+			contentType: "text/plain",
+			wantStatus:  http.StatusNoContent,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requestBody io.Reader = strings.NewReader(`{}`)
+			if tc.unknownLength {
+				requestBody = io.NopCloser(requestBody)
+			}
+			request := httptest.NewRequest(http.MethodPost, tc.path, requestBody)
+			if tc.unknownLength && request.ContentLength != -1 {
+				t.Fatalf("ContentLength = %d, want -1 for a body of unknown length", request.ContentLength)
+			}
+			if tc.contentType != "" {
+				request.Header.Set("Content-Type", tc.contentType)
+			}
+			recorder := httptest.NewRecorder()
+
+			apiAuth("", nil, logging.NewWithWriter("test-machine", io.Discard), next).ServeHTTP(recorder, request)
+
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tc.wantStatus, recorder.Body.String())
+			}
+			if tc.wantStatus == http.StatusUnsupportedMediaType {
+				if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("Content-Type = %q, want application/json", got)
+				}
+				if body := recorder.Body.String(); body != "{\"error\":\"Content-Type must be application/json\"}\n" {
+					t.Fatalf("body = %q, want JSON Content-Type refusal", body)
+				}
+			}
 		})
 	}
 }

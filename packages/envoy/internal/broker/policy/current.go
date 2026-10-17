@@ -8,15 +8,12 @@ import (
 	"time"
 )
 
-// listLag is how stale ListSecrets may be: AWS documents "might not reflect changes from the last
-// five minutes" (ListSecrets API reference). Refresh re-describes each name it holds an anchor for
-// (recent), so a lagging listing neither undoes what a single-name read settled nor undoes a
-// change that reload's own re-describe caught.
-const listLag = 5 * time.Minute
-
 // Current is the live policy. The first load must succeed; a later load that fails logs
 // LoadFailedMessage and keeps the previous set, so a Secrets Manager outage never turns into
-// deny-everything. A secret refused for its own tags leaves only that secret out.
+// deny-everything. A secret refused for its own tags leaves only that secret out. Refresh
+// re-describes each name it holds an anchor for (recent) for as long as the store's metadata may
+// lag a write (Store.ListLag), so a lagging listing neither undoes what a single-name read settled
+// nor undoes a change that reload's own re-describe caught.
 type Current struct {
 	loader Loader
 	set    atomic.Pointer[Set]
@@ -25,11 +22,11 @@ type Current struct {
 	// guards recent. It is a one-slot channel so a writer waiting for it gives up when its context
 	// ends (lock).
 	mu chan struct{}
-	// recent is, for each name a reread or a reload's own re-describe last settled something for,
-	// when it did: RefreshOne's reread of a name whose answer it kept (not an absent answer for a
-	// name the live set did not serve, which it records nothing for, so a repeated absent reread
-	// leaves the first such anchor in place), and Refresh's own re-describe of such a name when the
-	// answer differed from what the live set held. Each anchor lives until listLag has passed.
+	// recent is, for each name a reread or a reload's own re-describe last changed the live answer
+	// for, when it did: RefreshOne's reread and Refresh's own re-describe each record one only when
+	// the answer differed from what the live set held, so a reread that confirms the live answer
+	// leaves any earlier anchor in place and adds none. Each anchor lives until the store's ListLag
+	// has passed.
 	recent map[string]time.Time
 	now    func() time.Time
 }
@@ -81,7 +78,7 @@ func (c *Current) lock(ctx context.Context) error {
 func (c *Current) unlock() { <-c.mu }
 
 // Refresh loads the policy now and, when the load succeeds, makes it the live one. A name recent
-// anchors within listLag of the moment this reload began - before its listing was fetched - is
+// anchors within the store's ListLag of the moment this reload began - before its listing was fetched - is
 // read again alone and kept as that read finds it, since the full listing may not show the change
 // yet. recent anchors a name a reread settled, and one an earlier reload's own re-describe caught
 // a change to. Any failed read fails the refresh.
@@ -93,6 +90,7 @@ func (c *Current) Refresh(ctx context.Context) error {
 	// The window is measured from before the listing is fetched: a listing read inside it may lag
 	// a reread however long Load takes to return.
 	now := c.now()
+	lag := c.loader.Store.ListLag()
 	set, err := c.loader.Load(ctx)
 	if err != nil {
 		return err
@@ -103,7 +101,7 @@ func (c *Current) Refresh(ctx context.Context) error {
 	}
 	live := c.set.Load().Secrets
 	for name, at := range c.recent {
-		if now.Sub(at) > listLag {
+		if now.Sub(at) > lag {
 			delete(c.recent, name)
 			continue
 		}
@@ -113,8 +111,8 @@ func (c *Current) Refresh(ctx context.Context) error {
 		}
 		merge(set.Secrets, name, lk)
 		// A change this read catches that no reread did - a console delete, a tag that now refuses
-		// the secret - is as new to the listing as a reread's answer, so it is kept for listLag from
-		// now; the live set, not this listing, is what it changed.
+		// the secret - is as new to the listing as a reread's answer, so it is kept for the store's
+		// ListLag from now; the live set, not this listing, is what it changed.
 		if was, served := live[name]; served != lk.Served || was != lk.Secret {
 			c.recent[name] = c.now()
 		}
@@ -126,12 +124,14 @@ func (c *Current) Refresh(ctx context.Context) error {
 // RefreshOne rereads name alone (Loader.LoadOne) and merges the answer into the live policy: a
 // served secret replaces or adds name, and a refused or absent one takes name out. Every other
 // name stays as the live policy had it. A failed read leaves the live policy as it was, and a name
-// no secret can carry is ErrNameInvalid before the writer lock (CheckName). Refresh keeps every
-// reread for listLag, except an absent answer for a name the live policy did not serve: that
-// changed nothing, and anyone may ask for a reread, so keeping it would let invented names each
-// cost every reload in the next listLag a DescribeSecret under the writer lock. A served name
-// found absent is kept, so a lagging listing cannot bring back a deleted secret; a secret created
-// and deleted before any read served it can still show from a lagging listing until listLag has
+// no secret can carry is ErrNameInvalid before the writer lock (CheckName). Refresh keeps a reread
+// for the store's ListLag only when it changed the live answer, as Refresh does for its own
+// re-describes: a reread that confirms what the live policy already held settled nothing a lagging
+// listing could undo, and anyone may ask for a reread, so anchoring it would let each one cost
+// every reload in the next ListLag a describe under the writer lock (on Secret Manager, two
+// metadata reads from a quota the whole project shares). A served name found absent is a change
+// and is kept, so a lagging listing cannot bring back a deleted secret; a secret created and
+// deleted before any read served it can still show from a lagging listing until ListLag has
 // passed.
 func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 	if err := c.CheckName(name); err != nil {
@@ -146,7 +146,7 @@ func (c *Current) RefreshOne(ctx context.Context, name string) (Lookup, error) {
 		return Lookup{}, err
 	}
 	live := c.set.Load().Secrets
-	if _, served := live[name]; !served && lk.Reason == ReasonAbsent {
+	if was, served := live[name]; served == lk.Served && was == lk.Secret {
 		return lk, nil
 	}
 	secrets := maps.Clone(live)

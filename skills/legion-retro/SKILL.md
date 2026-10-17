@@ -30,7 +30,7 @@ retrospective's durable output.
    READY, and sends the READY packet with its completion, which refuses a head with anything above
    the approved head but those commits, or still carrying `.legion/<issue>/`; the daemon
    posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
-   configured. On READY's acceptance the merger submits the merge, and it lands under the
+   configured. On READY's acceptance the daemon submits the merge, and it lands under the
    repository's rules: its required reviews and checks, and its merge queue when it enables one.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
    and records it on the PR and the issue: the agent that developed it is responsible for testing
@@ -135,8 +135,8 @@ merger.
    they derive nothing, skip steps 2 to 4 and go on to the push.
 2. Compute it the way they say, for the paths the pull request changes at your head, the files
    GitHub lists on it:
-   `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from 'fork_point(<base>@origin | <head>)' --to <head> --name-only`
-   lists them, `<base>` the pull request's base branch and `<head>` your removal commit. Where a
+   `base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head>)" --to <head> --name-only`
+   lists them, `base` the pull request's base branch as a jj string literal (never a name pasted between quotes) and `<head>` your removal commit. Where a
    line affirms work, such as a checklist completed for a class of path, do that work for the
    paths your commits add before you write the line: the line is a claim. That work may change
    files under `docs/solutions/` only, folded into your docs commit before the push, since

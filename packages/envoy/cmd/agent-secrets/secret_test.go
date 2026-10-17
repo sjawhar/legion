@@ -77,7 +77,7 @@ func TestSecretDerivedOwnerMustBeAnEmailBeforeWriting(t *testing.T) {
 				if code == 0 || !strings.Contains(errOut, "email") {
 					t.Fatalf("exit=%d stderr=%q; want invalid email refusal", code, errOut)
 				}
-				if tagMap(describe(t, local, "HELD_KEY").Tags)[policy.TagOwner] != "ada@example.com" {
+				if secrets.TagMap(describe(t, local, "HELD_KEY").Tags)[policy.TagOwner] != "ada@example.com" {
 					t.Fatal("retag wrote a malformed owner")
 				}
 				if _, err := local.DescribeSecret(context.Background(), &secretsmanager.DescribeSecretInput{SecretId: aws.String(policytest.ID("NEW_KEY"))}); err == nil {
@@ -147,15 +147,16 @@ const testAccount = "111122223333"
 // adaSignIn is ada@example.com's Identity Center sign-in in testAccount.
 const adaSignIn = "arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_User_abc123/ada@example.com"
 
-// secretBroker is a fake broker for the secret forms: GET /v1/settings answers policytest's
-// namespace in testAccount, and each reread is answered by answer and recorded, in order, or
-// refused with the status fail names when it is set.
+// secretBroker is a fake broker for the secret forms: GET /v1/settings answers settings, and each
+// reread is answered by answer and recorded, in order, or refused with the status fail names when
+// it is set.
 type secretBroker struct {
-	mu      sync.Mutex
-	rereads []string
-	answers []Reread
-	answer  func(name string) Reread
-	fail    int
+	mu       sync.Mutex
+	rereads  []string
+	answers  []Reread
+	answer   func(name string) Reread
+	fail     int
+	settings Settings
 }
 
 // failRereads makes the broker refuse every reread from now on with status.
@@ -165,14 +166,22 @@ func (b *secretBroker) failRereads(status int) {
 	b.fail = status
 }
 
-// startSecretBroker serves a secretBroker on AGENT_SECRETS_URL for the rest of t.
+// startSecretBroker serves a secretBroker on AGENT_SECRETS_URL for the rest of t, answering
+// GET /v1/settings with policytest's namespace in testAccount.
 func startSecretBroker(t *testing.T, answer func(name string) Reread) *secretBroker {
 	t.Helper()
-	b := &secretBroker{answer: answer}
+	return startSecretBrokerWith(t, Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: testAccount, AWSRegion: "us-east-1"}, answer)
+}
+
+// startSecretBrokerWith is startSecretBroker with settings of the caller's choosing, so a test for
+// another store (e.g. GCP) can reuse the same fake broker.
+func startSecretBrokerWith(t *testing.T, settings Settings, answer func(name string) Reread) *secretBroker {
+	t.Helper()
+	b := &secretBroker{answer: answer, settings: settings}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/settings":
-			writeJSON(w, Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: testAccount, AWSRegion: "us-east-1"})
+			writeJSON(w, b.settings)
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/secrets/") && strings.HasSuffix(r.URL.Path, "/reread"):
 			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/secrets/"), "/reread")
 			b.mu.Lock()
@@ -214,7 +223,7 @@ func servedBy(sm secretsAPI) func(name string) Reread {
 		switch {
 		case err != nil || out.DeletedDate != nil:
 			return Reread{Name: name, Reason: policy.ReasonAbsent}
-		case !policy.HasCurrentVersion(out.VersionIdsToStages):
+		case !secrets.HasCurrentVersion(out.VersionIdsToStages):
 			return Reread{Name: name, Reason: policy.ReasonNoCurrentValue}
 		}
 		return Reread{Name: name, Served: true}
@@ -312,7 +321,7 @@ func TestSecretRefusesSettingsInconsistentWithKeyARN(t *testing.T) {
 		return nil, nil, fmt.Errorf("awsClients must not run")
 	}
 	t.Cleanup(func() { awsClients = restore })
-	region, account := policy.KeyARNParts(policytest.KeyARN)
+	region, account := secrets.AWSKeyARNParts(policytest.KeyARN)
 	for _, tc := range []struct {
 		name     string
 		settings Settings
@@ -392,7 +401,7 @@ func TestSecretCreateResolvesOwnerMeFromTheSessionName(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
 	}
 	got := describe(t, local, "NEW_KEY")
-	if tags := tagMap(got.Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent {
+	if tags := secrets.TagMap(got.Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierAgent {
 		t.Fatalf("tags = %v, want owner ada@example.com and tier agent", tags)
 	}
 	if aws.ToString(got.KmsKeyId) != policytest.KeyARN {
@@ -481,13 +490,13 @@ func TestSecretRetagSendsBothTags(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr %q; want 0", code, stderr)
 	}
-	if tags := tagMap(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierHuman {
+	if tags := secrets.TagMap(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" || tags[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("tags = %v, want owner ada@example.com unchanged and tier human", tags)
 	}
 	if len(sent.requests) != 1 {
 		t.Fatalf("TagResource requests = %d, want 1", len(sent.requests))
 	}
-	if got := tagMap(sent.requests[0].Tags); len(got) != 2 || got[policy.TagOwner] != "ada@example.com" || got[policy.TagTier] != policy.TierHuman {
+	if got := secrets.TagMap(sent.requests[0].Tags); len(got) != 2 || got[policy.TagOwner] != "ada@example.com" || got[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("TagResource sent %v, want both tags: owner ada@example.com and tier human", got)
 	}
 	if rereads, _ := broker.recorded(); len(rereads) != 1 || rereads[0] != "OWNED_KEY" {
@@ -542,10 +551,10 @@ func TestSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T) {
 			}
 		}
 	}
-	if tags := tagMap(describe(t, local, "SHARED_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
+	if tags := secrets.TagMap(describe(t, local, "SHARED_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("tags = %v, want shared and human unchanged", tags)
 	}
-	if tags := tagMap(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" {
+	if tags := secrets.TagMap(describe(t, local, "OWNED_KEY").Tags); tags[policy.TagOwner] != "ada@example.com" {
 		t.Fatalf("tags = %v, want OWNED_KEY's owner unchanged", tags)
 	}
 	_, stderr, code := runSecret("retag", "OWNED_KEY", "--tier", "agent")
@@ -1134,7 +1143,7 @@ func TestSecretWriteExitsOneWhenTheBrokerCannotBeAsked(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "v2")
 	_, stderr, code := runSecret("set", "SET_KEY")
-	if code != 1 || !strings.Contains(stderr, "the write to Secrets Manager stands") || !strings.Contains(stderr, "RATE_LIMITED") {
+	if code != 1 || !strings.Contains(stderr, "the write to the secret store stands") || !strings.Contains(stderr, "RATE_LIMITED") {
 		t.Fatalf("exit %d, stderr %q; want 1 saying the write stands and naming the refusal", code, stderr)
 	}
 	if v := valueOf(t, local, "SET_KEY"); v != "v2" {
@@ -1160,7 +1169,7 @@ func TestSecretWritesRefuseAMachinesOwnRoleBeforeWriting(t *testing.T) {
 				t.Fatalf("exit %d, stderr %q; want 1 naming the role", code, stderr)
 			}
 			got := describe(t, local, "HELD_KEY")
-			if got.DeletedDate != nil || tagMap(got.Tags)[policy.TagTier] != policy.TierAgent || valueOf(t, local, "HELD_KEY") != "v1" {
+			if got.DeletedDate != nil || secrets.TagMap(got.Tags)[policy.TagTier] != policy.TierAgent || valueOf(t, local, "HELD_KEY") != "v1" {
 				t.Fatalf("HELD_KEY changed under a machine's role: %+v", got)
 			}
 			if rereads, _ := broker.recorded(); len(rereads) != 0 {
@@ -1188,7 +1197,7 @@ func TestSecretSetOrCreateWithASharedOwner(t *testing.T) {
 	if _, stderr, code := runSecret("create", "TEAM_KEY", "--owner", "shared", "--tier", "human"); code != 0 {
 		t.Fatalf("create: exit %d, stderr %q", code, stderr)
 	}
-	if tags := tagMap(describe(t, local, "TEAM_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
+	if tags := secrets.TagMap(describe(t, local, "TEAM_KEY").Tags); tags[policy.TagOwner] != policy.OwnerShared || tags[policy.TagTier] != policy.TierHuman {
 		t.Fatalf("tags = %v, want shared and human", tags)
 	}
 	useStdin(t, "second\n")

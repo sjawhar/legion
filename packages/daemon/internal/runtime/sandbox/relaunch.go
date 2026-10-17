@@ -72,7 +72,15 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // issue pod has its workspace's provisioning token minted, the controller's pod needs nothing. A
 // workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so
 // the tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox
-// this creates.
+// this creates. Every Kubernetes request of the launch is sent again while the API server answers
+// it overloaded, up to the launch's own deadline for it (launching, resend), so a server under load
+// slows the launch rather than failing it.
+// The try is bounded on the runtime's own account from the moment it holds the pod's launch turn
+// (launchBound, LaunchBound): a try that never answers ends at the bound with an error naming it,
+// which the supervisor charges as a launch failure and tries again; one the caller's own context
+// ends is not the bound's, and the supervisor charges it nothing. The cleanups of a failed try
+// (suspendFailedLaunch, stopIssuedChild) run on the caller's context with bounds of their own,
+// since the try's bound may be what ended it.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
 // not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
@@ -82,20 +90,23 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // already right; carrying the install onto a fresh pod would be installing over a pair already
 // current. l.spec.Plugins is cleared in that case before launcherCommand builds its argv.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+	ctx = launching(ctx)
 	l, err := r.prepare(spec)
 	if err != nil {
 		return runtime.Locator{}, err
 	}
-	fail := func(step string, err error) (runtime.Locator, error) {
-		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, err)
-	}
 	r.forget(spec.Claim)
 	release, err := r.lockPod(ctx, l.name)
 	if err != nil {
-		return fail("take its pod's launch turn", err)
+		return runtime.Locator{}, fmt.Errorf("launch %s: take its pod's launch turn: %w", spec.Claim, err)
 	}
 	defer release()
-	s, err := r.ensureSandbox(ctx, l)
+	bounded, cancel := context.WithTimeout(ctx, r.launchBound)
+	defer cancel()
+	fail := func(step string, err error) (runtime.Locator, error) {
+		return runtime.Locator{}, fmt.Errorf("launch %s: %s: %w", spec.Claim, step, boundRanOut(ctx, bounded, r.launchBound, err))
+	}
+	s, err := r.ensureSandbox(bounded, l)
 	if err != nil {
 		return fail("ensure its sandbox", err)
 	}
@@ -107,7 +118,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	replace := !live || (drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
-		bound, err := r.launcherBound(ctx, s, pod, l.roles)
+		bound, err := r.launcherBound(bounded, s, pod, l.roles)
 		if err != nil {
 			return fail("read its pod's launcher bindings", err)
 		}
@@ -121,26 +132,26 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		switch {
 		case live:
-			if err := r.suspendDisplacing(ctx, s, pod.UID); err != nil {
+			if err := r.suspendDisplacing(bounded, s, pod.UID); err != nil {
 				return fail("suspend its sandbox", err)
 			}
 		case s.mode() != modeSuspended:
-			if err := r.setMode(ctx, s, modeSuspended); err != nil {
+			if err := r.setMode(bounded, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
 			}
 		}
-		old, err := r.awaitPodGone(ctx, s)
+		old, err := r.awaitPodGone(bounded, s)
 		if err != nil {
 			return fail("wait out its previous pod", err)
 		}
-		if err := l.kind.provision(ctx, r, &l, s); err != nil {
-			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, err)
+		if err := l.kind.provision(bounded, r, &l, s); err != nil {
+			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, boundRanOut(ctx, bounded, r.launchBound, err))
 		}
-		if err := r.writeLauncherSecrets(ctx, s, l); err != nil {
+		if err := r.writeLauncherSecrets(bounded, s, l); err != nil {
 			return fail("write its launcher secrets", err)
 		}
 		template := r.podTemplate(l)
-		running, err := r.patch(ctx, s,
+		running, err := r.patch(bounded, s,
 			jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 			jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
 		)
@@ -148,22 +159,22 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			r.suspendFailedLaunch(ctx, spec.Claim, s)
 			return fail("set its sandbox running", err)
 		}
-		pod, err = r.awaitNewPod(ctx, running, old)
+		pod, err = r.awaitNewPod(bounded, running, old)
 		if err != nil {
 			r.suspendFailedLaunch(ctx, spec.Claim, s)
 			return fail("wait for its new pod", err)
 		}
 		s = running
-		if err := r.bindLauncherSecrets(ctx, s, l, string(pod.UID)); err != nil {
+		if err := r.bindLauncherSecrets(bounded, s, l, string(pod.UID)); err != nil {
 			return fail("bind its role launchers to the new pod", err)
 		}
 	}
 	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
-	ended, deadline, err := r.awaitRoleLauncher(ctx, loc)
+	ended, deadline, err := r.awaitRoleLauncher(bounded, loc)
 	if err != nil {
 		return fail("wait for its role launcher", err)
 	}
-	starting, cancel := context.WithDeadline(ctx, deadline.Add(r.terminationGrace))
+	starting, cancel := context.WithDeadline(bounded, deadline.Add(r.terminationGrace))
 	defer cancel()
 	if ended {
 		// A real failed init proves no role could start. Return its recorded pod so supervision
@@ -209,28 +220,85 @@ func (r *Runtime) stopIssuedChild(ctx context.Context, token claim.Token, podUID
 	return nil
 }
 
+// boundRanOut is err with a note that the launch try's bound ran out, when it did: the bounded
+// context has ended while the caller's own, parent, is alive, and err is a deadline exceeded. Any
+// other err is returned as it is — a step's own deadline (apiTimeout's call, the start frame's
+// grace), or the caller's context ending, which the supervisor tells apart by that context's own
+// error and charges nothing.
+func boundRanOut(parent, bounded context.Context, bound time.Duration, err error) error {
+	if bounded.Err() != nil && parent.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w (the launch try's bound of %s ran out)", err, bound)
+	}
+	return err
+}
+
+// relaunchCalls is the most bounded calls one replacing launch try makes between its waits —
+// client requests, each bounded by apiTimeout once the limiter lets it go (requestConfig), the
+// mints bounded by call, and the store reads and launcher frames bounded by their context alone,
+// the try's — counted generously, every retry and rare branch included, since the bound they size
+// (launchBound) must never be shorter than a legitimate try. Per try (relaunchPodCalls):
+// ensureSandbox's Get, its Create or relabel patch and that relabel's store read, and for a Sandbox
+// being deleted the wait's last Get, past its deadline, and the Get and Create after it (6); the
+// suspension patch (1); awaitPodGone's confirming Get, which may begin just before its deadline
+// (1); provision's retained-sessions store read, its token mint and its Secret upsert's Get,
+// Delete and Create (5); the Running patch (1); the stop of an earlier generation (1); the address
+// record patch (1); the Start frame (1). Per launcher role of the pod (relaunchRoleCalls, claim.Roles
+// for an issue pod, the most any pod has): launcherBound's Secret Get (1); writeLauncherSecrets'
+// credential mint and its upsert's Get, Delete and Create (4); bindLauncherSecrets' Get and Update,
+// and both again on a conflict (4).
+var relaunchCalls = relaunchPodCalls + relaunchRoleCalls*len(claim.Roles)
+
+const (
+	relaunchPodCalls  = 17
+	relaunchRoleCalls = 9
+)
+
+// launchBound is the longest one launch try may run once it holds its pod's launch turn, from the
+// runtime's boot timeout, ProvisionBound and termination grace (LaunchBound): the sum of a
+// replacing try's waits — ensureSandbox's wait for a Sandbox being deleted, awaitPodGone and
+// awaitNewPod, the boot timeout each; awaitRoleLauncher's backstop; the termination grace the
+// start frame has past the launcher deadline — and of its relaunchCalls calls at apiTimeout each.
+func launchBound(bootTimeout, provisionBound, terminationGrace time.Duration) time.Duration {
+	waits := 3*bootTimeout + launcherBackstop(bootTimeout, provisionBound) + terminationGrace
+	return waits + time.Duration(relaunchCalls)*apiTimeout
+}
+
+// launcherBackstop is await's own budget for a role launcher's wait (awaitRoleLauncher), given the
+// boot timeout and ProvisionBound: no launcher deadline lies past twice the boot timeout plus
+// ProvisionBound from the wait's start (launcherDeadline), and two recheck intervals more let the
+// wait's own check end it first.
+func launcherBackstop(boot, bound time.Duration) time.Duration {
+	return 2*boot + bound + 2*recheckInterval
+}
+
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
 // launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone and its retries may take up to ProvisionBound from the fetch's own start. So until the
-// wait first sees the pod provisioning (an init container running, provisioning) it gives the pod
-// the boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw
-// the pod provisioning, never past the boot timeout plus ProvisionBound from the first
-// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
+// clone with its retries, then workspace-init's clone of the feed, may take up to ProvisionBound
+// from the fetch's own start. So until the wait first sees the pod provisioning (an init container
+// running, provisioning) it gives the pod the boot timeout, the image pull's; from then on, the boot
+// timeout from the last moment it saw the pod provisioning, never past the boot timeout plus
+// ProvisionBound from the first (launcherDeadline). A pod that never provisions past the boot
+// timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
 	deadline := start.Add(r.bootTimeout)
 	var first time.Time
 	ended := false
-	// await's own budget is only a backstop. The check below runs at every informer event and at
-	// least every recheckInterval, and it ends the wait before it extends the deadline, so the pod
-	// is first seen provisioning within the boot timeout of the start or never, and no deadline lies
-	// past twice the boot timeout plus ProvisionBound from the start. Two recheck intervals more let
-	// that check end the wait first.
-	backstop := 2*r.bootTimeout + r.ProvisionBound() + 2*recheckInterval
-	err := r.await(ctx, backstop, what, func() (bool, error) {
+	// await's own budget is only a backstop (launcherBackstop). The check below runs at every
+	// informer event and at least every recheckInterval, and it ends the wait before it extends the
+	// deadline, so the pod is first seen provisioning within the boot timeout of the start or never,
+	// and no deadline lies past twice the boot timeout plus ProvisionBound from the start.
+	backstop := launcherBackstop(r.bootTimeout, r.ProvisionBound())
+	err := r.await(ctx, backstop, what, func(context.Context) (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
+		if serverBusy(err) && time.Now().Before(deadline) {
+			// A store whose list or watch the API server answers overloaded is waited out within the
+			// wait's deadline, as the launch's own requests are (resend): the informer lists and
+			// watches again by itself.
+			return false, nil
+		}
 		if err != nil {
 			return false, err
 		}
@@ -281,10 +349,15 @@ func provisioning(pod *corev1.Pod) bool {
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
 // Suspended again. The patch may have been applied even when its answer was an error, and a pod the
-// controller made later would run a valid token for a claim the supervisor counts as failed. Best
-// effort, and not cancelled with the caller: the next relaunch suspends the Sandbox in any case.
+// controller made later would run a valid token for a claim the supervisor counts as failed. It is
+// not cancelled with the caller, and it is bounded by apiTimeout: it is part of the launch, so it
+// waits out an API server answering it overloaded (resend), but no longer than that, so a daemon
+// stop never waits a boot timeout on it. A suspension that still fails is logged; the next
+// relaunch suspends the Sandbox in any case.
 func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s *sandbox) {
-	if err := r.setMode(context.WithoutCancel(ctx), s, modeSuspended); err != nil {
+	suspending, cancel := call(context.WithoutCancel(ctx))
+	defer cancel()
+	if err := r.setMode(suspending, s, modeSuspended); err != nil {
 		r.log.Error("sandbox runtime: could not suspend the sandbox of a failed launch", "claim", token, "err", err)
 	}
 }
@@ -310,6 +383,11 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // before any launch (treeVolumeLayout).
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
+	// refused is the relabel the API server refused as invalid, and refusedAt the resourceVersion its
+	// fence tested: a Sandbox read again still at that resourceVersion has not changed since, so the
+	// refusal was the patch's own, and it is the answer.
+	var refused error
+	var refusedAt string
 	tree := r.labels(l)[labelTree]
 	for {
 		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
@@ -341,8 +419,12 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
-			// Fenced to the resourceVersion read, beside the uid patch tests: a delete, a relabel or a
-			// mode change since that read conflicts, and the next launch reads the Sandbox again.
+			if refused != nil && s.ResourceVersion == refusedAt {
+				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, refused)
+			}
+			// Fenced to the resourceVersion read, beside the uid patch tests: a relabel, a mode change,
+			// or a delete begun since that read fails the test (422), and this launch reads the Sandbox
+			// again within its deadline; a delete already completed answers 404 and fails the try.
 			ops := []jsonPatchOp{
 				{Op: "test", Path: "/metadata/resourceVersion", Value: s.ResourceVersion},
 				{Op: "add", Path: labelPatchPath(labelTree), Value: tree},
@@ -361,13 +443,21 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping its volume",
 				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree, "operatingMode", s.mode())
 			relabelled, err := r.patch(ctx, s, ops...)
+			if apierrors.IsInvalid(err) && time.Now().Before(deadline) {
+				// The fence's test failed: the Sandbox changed since the read, or this patch, sent
+				// again after an overloaded answer (resend), was already applied. Read it again and
+				// decide from what it holds now; one still at the tested resourceVersion refused the
+				// patch itself.
+				refused, refusedAt = err, s.ResourceVersion
+				continue
+			}
 			if err != nil {
 				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
 			}
 			return relabelled, nil
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
-		gone := func() (bool, error) {
+		gone := func(ctx context.Context) (bool, error) {
 			current, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return true, nil
@@ -386,7 +476,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 // the incarnation the relaunch will return.
 func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]bool, error) {
 	old := map[types.UID]bool{}
-	gone := func() (bool, error) {
+	gone := func(ctx context.Context) (bool, error) {
 		if pod := r.storedPod(s.Name); ownedBy(pod, s.UID) {
 			old[pod.UID] = true
 			return false, nil
@@ -418,7 +508,7 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID]bool) (*corev1.Pod, error) {
 	var found *corev1.Pod
 	what := fmt.Sprintf("a new pod of sandbox %s and its Running patch in the Sandbox store", s.Name)
-	err := r.await(ctx, r.bootTimeout, what, func() (bool, error) {
+	err := r.await(ctx, r.bootTimeout, what, func(context.Context) (bool, error) {
 		pod := r.storedPod(s.Name)
 		if !ownedBy(pod, s.UID) || old[pod.UID] || pod.DeletionTimestamp != nil {
 			return false, nil
@@ -506,7 +596,20 @@ func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMet
 	}
 }
 
+// upsertSecret writes want, creating it, updating the Sandbox's own Secret by its name, or
+// replacing one that is not the Sandbox's (writeSecret). A create refused as already done, or an
+// update refused as a conflict, is read and written once more: a launch's write the server applied
+// and answered overloaded is sent again (resend) and refused that way, so what it left is read
+// before the launch goes on from it, as bindLauncherSecrets reads again after a conflict.
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
+	err := r.writeSecret(ctx, want)
+	if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) {
+		err = r.writeSecret(ctx, want)
+	}
+	return err
+}
+
+func (r *Runtime) writeSecret(ctx context.Context, want corev1.Secret) error {
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
 	switch {

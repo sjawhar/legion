@@ -162,7 +162,7 @@ func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
 // handed as a one-shot credential on the container's own filesystem (its TMPDIR) and which is gone
 // once it returns; the feed never holds it.
 func TestWorkspaceInitFetchFillsTheFeed(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 
@@ -259,7 +259,7 @@ func useInstantClock(t *testing.T) *instantClock {
 // clone fails; this git leaves a partial clone there anyway, so the test holds the fetch to removing
 // whatever a failed attempt left before it clones again.
 func TestWorkspaceInitFetchRetriesATransientCloneFailure(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	attempts := v.failClones(t, curl92Failure, http408Failure)
 	clock := useInstantClock(t)
 	v.setenv(t)
@@ -299,7 +299,7 @@ func TestWorkspaceInitFetchRetriesATransientCloneFailure(t *testing.T) {
 // A clone that keeps failing transiently is retried four times, one per backoff wait, and the
 // fifth failure fails the fetch: the four retries on stdout, the failure and the limit on stderr.
 func TestWorkspaceInitFetchGivesUpAfterItsLastRetry(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	attempts := v.failClones(t, http408Failure, http408Failure, http408Failure, http408Failure, http408Failure, http408Failure)
 	clock := useInstantClock(t)
 	v.setenv(t)
@@ -324,7 +324,7 @@ func TestWorkspaceInitFetchGivesUpAfterItsLastRetry(t *testing.T) {
 // git's own message on stderr and logging nothing on stdout. Which failures are permanent is
 // workspace.Fetch's to tell; this is what the command does with one.
 func TestWorkspaceInitFetchFailsAPermanentCloneFailureAtOnce(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	notFound := "remote: Repository not found.\nfatal: repository 'https://github.com/acme/widgets/' not found\n"
 	attempts := v.failClones(t, notFound, notFound)
 	clock := useInstantClock(t)
@@ -349,7 +349,7 @@ func TestWorkspaceInitFetchFailsAPermanentCloneFailureAtOnce(t *testing.T) {
 // Neither a retried attempt's log line nor the final failure carries the provisioning token, even
 // where git echoes it: each says *** in its place.
 func TestWorkspaceInitFetchLogsNoToken(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.failClones(t,
 		"fatal: unable to access 'https://x-access-token:@TOKEN@@github.com/acme/widgets/': Failed to connect to github.com port 443 after 127010 ms: Couldn't connect to server\n",
 		"remote: Invalid username or token @TOKEN@.\nfatal: Authentication failed for 'https://x-access-token:@TOKEN@@github.com/acme/widgets/'\n",

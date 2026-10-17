@@ -658,8 +658,8 @@ func nextUTCMidnight(t time.Time) time.Time {
 }
 
 // getDeliveryRun answers GET /api/v1/delivery/runs/{id}: one run of the deploy repository with
-// every job it ran, by when each started (a job that never started last, then by name), for the
-// drill-down's job lists.
+// every job it ran, in ListRunJobs' order (by when each started, a job that never started last,
+// then by name), for the drill-down's job lists.
 func (s *server) getDeliveryRun(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -689,17 +689,6 @@ func (s *server) getDeliveryRun(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	slices.SortFunc(jobs, func(a, b delivery.DeliveryRunJob) int {
-		switch {
-		case a.StartedAt == nil && b.StartedAt != nil:
-			return 1
-		case a.StartedAt != nil && b.StartedAt == nil:
-			return -1
-		case a.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt):
-			return a.StartedAt.Compare(*b.StartedAt)
-		}
-		return strings.Compare(a.Name, b.Name)
-	})
 	views := make([]delivery.DeliveryRunJobDetailView, len(jobs))
 	for i, job := range jobs {
 		views[i] = delivery.DeliveryRunJobDetailView{Name: job.Name, StartedAt: job.StartedAt, CompletedAt: job.CompletedAt, Conclusion: job.Conclusion}

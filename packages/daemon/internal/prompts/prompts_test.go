@@ -48,11 +48,10 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 			"read CI for everything static", "try to break it"}},
 		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, []string{"reviewer.md", "worker-common.md"}, []string{`op: "handoff_complete"`,
 			"Retro's last commit removes that directory above your approved head", "`pullRequest.head` is the commit you pushed"}},
-		// The packet limit the merger is told is the one the handoff route enforces. The merger submits
-		// the merge itself once READY is accepted, and its packet says so.
+		// The packet limit the merger is told is the one the handoff route enforces.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base", "`READY_CHECKS_NOT_GREEN`: a check the base branch requires",
-			"`READY_HEAD_CARRIES_HANDOFFS`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
-			"`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`", "`READY_DISARM_PENDING`", "`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
+			"`READY_HEAD_CARRIES_HANDOFFS`", "`READY_DISARM_PENDING`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
+			"`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
 			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -87,8 +87,15 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 23 for contract 23's `strandedClaims` list on `GET /legion/v1/state` (LEGION-670: every
-claim nothing will wake, by issue, role and state), after contract 22's token login (LEGION-618: the
+number is 28 for contract 28's `heldOutboxRows` list on `GET /legion/v1/state` (LEGION-694: every
+due lifecycle outbox row held behind its issue's running lifecycle row, with its id, kind, issue,
+how long it has waited and the row it waits on; 26, reserved for it, is a gap no release declares),
+after contract 27's `--default-branch` on a pod's `workspace-init provision` command
+(sjawhar/legion#1986), after contract 25's `source` on the deployment
+rows of `capabilities` (LEGION-636), after contract 24's `pluginContract` on the claim views and the
+controller locator (LEGION-164), after contract 23's `strandedClaims` list on `GET /legion/v1/state`
+(LEGION-670: every claim nothing will wake, by issue, role and state), after contract 22's token
+login (LEGION-618: the
 daemon logs in to the secrets broker with its own ServiceAccount token, so `agentSecretsLogin` on
 `GET /legion/v1/state` loses `code` and its `state` is `none`, `issued` or `failed`), after contract
 21's capability report (LEGION-663:

@@ -7,6 +7,7 @@ export function runningAgent(overrides: Partial<Agent> = {}): Agent {
   return {
     capabilities: [],
     dir: "/home/alice/legion",
+    host: "devbox-alice",
     last_activity: null,
     last_seen: 1,
     machine_id: "devbox-alice",
