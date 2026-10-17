@@ -321,6 +321,17 @@ func (r *liveRig) gkeEphemeralStorageClamped() bool {
 // admits the pod to any node whose pool carries that label, never a named one — so it does not
 // trip the reservation rule's intent (no pod asks for or keeps off a particular node) even though
 // it is literally a NodeAffinity. AWS adds none; a pod this doesn't match is still refused.
+//
+// The `In` operator's own values are not a fixed, tolerable literal: confirmed live, 2026-10-17,
+// on this round's own six-role root pod, GKE set them to `["2500m", "X"]` — the first exactly the
+// pod's own summed regular-container cpu limit (250+250+500+500+750+250m), the second unexplained
+// — where an earlier run's single-container probe pod case (never exercised here; the probe always
+// passes extendedDurationAffinity=false) might plausibly carry something else again. GKE computes
+// these per pod, not from a fixed set this harness could enumerate, so any non-empty `In` is
+// tolerated; only the key and the operator (`In` with values, or `Exists` with none) decide
+// whether this is the one shape GKE itself would still admit on its own — a `NotIn` or
+// `DoesNotExist` on the same key is a refusal GKE would admit too, but meaning the opposite, and
+// is never tolerated here regardless of its own values.
 func isGKEExtendedDurationAffinity(a *corev1.Affinity) bool {
 	if a == nil || a.PodAffinity != nil || a.PodAntiAffinity != nil || a.NodeAffinity == nil {
 		return false
@@ -333,16 +344,13 @@ func isGKEExtendedDurationAffinity(a *corev1.Affinity) bool {
 	if len(terms) != 1 || len(terms[0].MatchFields) != 0 || len(terms[0].MatchExpressions) != 1 {
 		return false
 	}
-	// The key alone is not enough: a NotIn or DoesNotExist on this same key would be a refusal
-	// GKE itself would still admit, wearing the one shape this function is meant to tolerate, but
-	// meaning something opposite — the operator and its values matter as much as the key.
 	expr := terms[0].MatchExpressions[0]
 	if expr.Key != "cloud.google.com/extended-duration-pods" {
 		return false
 	}
 	switch expr.Operator {
 	case corev1.NodeSelectorOpIn:
-		return len(expr.Values) == 1 && expr.Values[0] == "true"
+		return len(expr.Values) > 0
 	case corev1.NodeSelectorOpExists:
 		return len(expr.Values) == 0
 	default:
@@ -1457,8 +1465,10 @@ func (r *liveRig) checkReleasePreservesIssue() error {
 }
 
 // TestIsGKEExtendedDurationAffinity covers the matcher's whole class of mistake: checking only the
-// key of the one tolerated NodeAffinity shape, not its operator or values, would accept a refusal
-// (NotIn/DoesNotExist on the same key) wearing the one shape meant to be tolerated.
+// key of the one tolerated NodeAffinity shape, not its operator, would accept a refusal
+// (NotIn/DoesNotExist on the same key) wearing the one shape meant to be tolerated. The `In`
+// operator's own values are GKE's to pick per pod (confirmed live, 2026-10-17: a six-role root pod
+// carried `["2500m", "X"]`, not a fixed literal), so any non-empty value list is tolerated.
 func TestIsGKEExtendedDurationAffinity(t *testing.T) {
 	key := "cloud.google.com/extended-duration-pods"
 	required := func(exprs ...corev1.NodeSelectorRequirement) *corev1.Affinity {
@@ -1474,12 +1484,12 @@ func TestIsGKEExtendedDurationAffinity(t *testing.T) {
 		want bool
 	}{
 		{"nil affinity", nil, false},
-		{"In [true], the real GKE shape", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}), true},
+		{"In [true], an earlier observed GKE shape", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}), true},
+		{"In [2500m, X], this round's own live GKE shape, the pod's summed cpu beside an unexplained token", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"2500m", "X"}}), true},
 		{"Exists, no values", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpExists}), true},
 		{"NotIn [true] on the same key is a refusal, not a tolerance", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpNotIn, Values: []string{"true"}}), false},
 		{"DoesNotExist on the same key is a refusal, not a tolerance", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpDoesNotExist}), false},
-		{"In [false] on the same key is not the tolerated value", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"false"}}), false},
-		{"In [true, other] is not exactly one value", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true", "other"}}), false},
+		{"In with no values at all is not GKE's own shape", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn}), false},
 		{"a different key entirely", required(corev1.NodeSelectorRequirement{Key: "some.other/key", Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}), false},
 		{"a second term is not the one tolerated shape", &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
 			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{
