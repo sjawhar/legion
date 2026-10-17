@@ -323,8 +323,11 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    the merger submits nothing on a refusal, so once that spec version is approved and the daemon
    posts the packet, tell the merger to submit it. If the merger reports a failed verification,
    treat it like `pr-blocked`: the merger holds the phase, so tell it to move the issue back with
-   `request_backward_move`, naming what failed; never bypass. A READY refused because the head
-   still carries `.legion/<issue>/` goes back to `retro`, so the implementer's retro removes it.
+   `request_backward_move`, naming what failed; never bypass. A READY refused
+   `READY_UNREVIEWED_CHANGE`, or a merger task with no approved head (`READY_NOT_APPROVED`), goes
+   back to `reviewing`, the move's reason naming the code and any paths, so the reviewer runs a
+   new round. A READY refused because the head still carries `.legion/<issue>/` goes back to
+   `retro`, so the implementer's retro removes it.
 5. the merge lands under the repository's rules; the daemon then starts the **implementer** once
    more, on the production check.
    It drives the changed path in production through the user's own access path and records

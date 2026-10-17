@@ -87,9 +87,10 @@ reviewing until you finish.
   (`skill://legion-retro` gives the steps), leave the approval standing, and the tree goes to the
   merger — never back to the tester or reviewer. Anything else above the approved head does void
   it: READY is refused `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the
-  architect, who has it send the head back to review instead of completing. A conflict-forced
-  rewrite after retro takes the approved head off the branch's history, so READY refuses it the
-  same way and the reviewer confirms or reviews the new head. Every approval moves the issue to
+  architect, who has it send the head back to review instead of completing, the move's reason
+  naming the refusal's code and paths. A conflict-forced rewrite after retro takes the approved
+  head off the branch's history, so READY refuses it the same way. Either return reaches the
+  reviewer as a new round, never a fingerprint confirmation. Every approval moves the issue to
   retro again, so each retro ends with the removal again.
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for

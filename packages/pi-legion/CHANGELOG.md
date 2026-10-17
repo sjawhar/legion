@@ -75,10 +75,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or shows the approved head is not the head's ancestor, and `READY_NOT_APPROVED` when the round
   recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
   `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
-  The merger's move back to `reviewing` names the refusal's code and paths in its reason, and the
-  reviewer's prompt makes that return a new round, never a fingerprint confirmation, with
-  `REQUEST_CHANGES` when the refusal names a path outside `docs/solutions/` and `.legion/<issue>/`,
-  so the change goes through the implementer and the tester.
+  The merger's move back to `reviewing` names the refusal's code and paths in its reason. A
+  reviewer whose task's `Reason:` names `READY_UNREVIEWED_CHANGE` or `READY_NOT_APPROVED` runs a
+  new round, never a fingerprint confirmation: it compares its last approved commit with the
+  head on GitHub, and when it finds no approval, a head off that commit's history, a 300-file
+  compare or a path outside `docs/solutions/` and `.legion/<issue>/`, it requests changes so the
+  implementer completes and the tester runs the head before it approves. The merge-gate reference
+  and the architect and retro skills say the same.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
