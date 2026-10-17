@@ -2221,7 +2221,7 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   /var/run/legion/feed`: a `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
   reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the issue's volume nor the config home. Provisioning's commands are bounded by
+  It mounts neither the issue's volume nor the config home. Provisioning's other commands are bounded by
   `workspace.CommandTimeout` (5 minutes, fixed), but this clone's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: it runs under
   `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A clone that

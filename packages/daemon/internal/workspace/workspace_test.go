@@ -463,7 +463,7 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 
 // assertCredentialedEnvironmentBounded is assertCredentialedEnvironment, but for a command bounded
 // by timeout instead of the runner's slow-command budget (the fetch's clone, bounded by
-// FetchTimeout).
+// FetchTimeout, and the shared clone's clone, bounded by CloneTimeout).
 func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout time.Duration) {
 	t.Helper()
 	if commandEnv(command, "LEGION_PROVISIONING_TOKEN_FILE") == "" {
