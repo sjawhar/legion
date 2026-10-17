@@ -133,12 +133,18 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. How long a node takes to pull that is not
+tree with the two npm language servers is 66 MiB. On EKS, how long a node takes to pull that is not
 recorded here: the stage 4a launch below is where it is measured. The pull must fit the launch's
 wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
-"Liveness rules" below); a launch whose launcher has not connected by then fails and is counted.
+"Liveness rules" below); a launch whose launcher has not connected by then fails and is counted. On
+GKE Autopilot (measured 2026-10-16), an issue or controller pod usually waits for a node of its own
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) and pulls the image cold there: 2m23s and
+3m33s from creation to the first init container in the two launches measured (1m19s and 2m25s of
+that waiting for the node, 56s and 58s pulling), and one cold pull of a new digest on an existing
+node took 2m14s by itself — so a GKE deployment needs a larger `worker_boot_timeout_seconds` (for
+example 300) to keep that provisioning-plus-pull time from being counted as a launch failure.
 The image probe's own wait is derived from the same key: each attempt's budget is
 `slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
 60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
@@ -1541,8 +1547,12 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    clone is the one full download of the repository ([The repository cache](#the-repository-cache)).
    A relaunch, whose volume already holds the feed, fetches the delta into it alone (`the feed
    holds <owner>/<repo> already: …`), after removing every git lock file a fetch killed mid-update
-   left in the feed, each logged with its age. Each transfer from GitHub is tried again up to four
-   times after a transient failure, within its 30-minute bound.
+   left in the feed, each logged with its age. Once the fetch may start — at once, or once the
+   cache is ready — the cache's stream, its verification and the delta from GitHub share one
+   30-minute bound (`workspace.FetchTimeout`), each given what remains of it, so the whole fetch
+   ends within 70 minutes (`workspace.FetchBudget`) however long it waited; a step with nothing
+   left fails the fetch, naming the bound. Each transfer from GitHub is tried again up to four
+   times after a transient failure, within that bound.
    It is the only process that holds the provisioning token
    ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the issue's clone and its jj workspace on the issue's own volume from
@@ -1631,8 +1641,8 @@ Every container carries a reservation, cpu and memory with request equal to limi
 ephemeral-storage limit over a smaller request: each role container its role's
 (`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init containers the
 reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). So
-the pod is `Guaranteed`, each container is bounded on the node's disk, and it carries no affinity
-([Issue sizing](#issue-sizing-one-reservation-per-pod)).
+the pod is `Guaranteed`, each container is bounded on the node's disk, and Legion sets no affinity
+on it (GKE Autopilot adds its own, below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root,
 `GH_CONFIG_DIR=/var/run/legion/gh/<owner>`, the issue's repository's owner's directory, and
@@ -1710,12 +1720,30 @@ Every pod runs:
   when it names none) and `automountServiceAccountToken: false`;
 - under Pod Security "restricted": non-root user 1000 on the pod, and on each container no
   privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
-- on the Legion pool, with its node selector and toleration, and nothing else of its placement: no
-  affinity;
+- on the Legion pool, with its node selector and toleration, and nothing else of its placement that
+  Legion itself sets: no affinity (GKE Autopilot adds its own to an annotated pod, below);
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated `karpenter.sh/do-not-disrupt: "true"`.
+- annotated against autoscaler eviction:
+  - `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own, which GKE's cluster-autoscaler ignores;
+  - the issue pod and the project controller's additionally carry
+    `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, the upstream Cluster Autoscaler's own
+    annotation, which GKE Autopilot honours as a request for up to seven days of extended-duration
+    protection from its own scale-down and node-upgrade eviction — not indefinitely, and not from
+    node pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or an
+    operator-initiated drain;
+  - on GKE Autopilot this second annotation also adds a required node affinity
+    (`cloud.google.com/extended-duration-pods`) and gives the pod a node of its own whenever
+    possible, which usually costs each pod it creates (an issue's first launch, or a relaunch that
+    replaces the pod) a fresh node and a cold image pull ([Image size and pull
+    time](#image-size-and-pull-time));
+  - a pod carrying it is refused outright under the `cloud.google.com/gke-spot` node selector or
+    toleration (GKE offers no extended duration to a Spot Pod requested any other way, such as the
+    `autopilot-spot` compute class); the boot probe (below) carries only Karpenter's, so it does
+    not catch a `gke-spot` scheduling config before every issue and controller launch is refused;
+  - the image probe pod (below) carries only the first: a dedicated node per boot would cost more
+    than the eviction window buys a probe that is already short-lived and retried on failure.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -1747,7 +1775,7 @@ owns one volume, `cache-<sandbox>`, of `runtime.kubernetes.repository_cache.volu
 default), holding a bare clone of the repository at `/legion/cache/<owner>/<repo>.git`, and a
 headless Service of its own name, whose DNS name resolves to the pod only while it is Ready. Its
 Secret, `<sandbox>-token`, holds the implement App's installation token for the repository's
-owner, read again before every fetch and brought to the current lease on the gh refresher's
+owner, read again as every transfer from GitHub starts and brought to the current lease on the gh refresher's
 minute, and the cache's own bearer token, 32 random bytes made with the Secret and kept while it
 stands; the issue pods of that repository are given the same bearer token in their provisioning
 Secret, and no other pod has it.
@@ -1762,37 +1790,64 @@ before it fetches again. It serves, on port 8418:
   readiness probe, which carries no token.
 - `GET /healthz`: `503 {"ready":false,…}` until the first clone is whole, then `200 {"ready":true,
   "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`; it
-  waits on no fetch.
+  waits on no fetch, and answers any request, since it holds nothing secret and nothing of the
+  repository's content.
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/` and
   `objects/pack/pack-<id>.pack`, no pack index, loose object or configuration — which waits for a
   fetch under way to finish, so it never streams a half-written ref or pack.
 
-`/healthz` and `/tar` answer only a request whose `Authorization: Bearer` is the cache's own
-token; any other is 401 and names nothing. Each answer they give names its repository in a
-`Legion-Repository` header. A fetch that fails is logged and tried at the next tick, and the cache
+`/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
+401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
+on every answer. A fetch that fails is logged and tried at the next tick, and the cache
 stays ready on what it last fetched; a restarted cache whose volume holds its clone fetches into
 it, and serves it as it is when GitHub cannot be reached; a first clone that fails ends the
 process, and the kubelet restarts it.
 
 An issue pod's `workspace-fetch` fills a fresh feed from its repository's cache alone
-([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). It presents the cache's token and takes
-nothing from an answer that refuses it or names another repository, so a cache pod replaced and its
-address reused by another repository's cache can put nothing into the feed. It indexes each pack
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). It asks the cache's health with no
+credential, takes nothing from a cache whose answer names another repository, so a cache pod
+replaced and its address reused by another repository's cache can put nothing into the feed, and
+presents the cache's token with its request for the tar alone. It indexes each pack
 it received afresh (`git index-pack`, which checks the pack's checksum and every object in it) and
 checks every object the refs reach is there (`git fsck --connectivity-only`) before the feed is
 used, and a damaged or incomplete history fails the fetch. A cache that is not ready is waited
 for, and one that never becomes ready fails the fetch, naming its last answer; the issue pod's
 failure then names the cache's state (`the repository cache of <owner>/<repo>, which a fresh feed
-comes from alone, is failing: container cache CrashLoopBackOff: …`). The issue pods reach the cache
-pods on port 8418 inside the namespace, and so does the daemon, which reads each Ready cache's
-`/healthz` every minute: a NetworkPolicy that isolates the namespace's pods must admit both, or
-every fresh feed waits on a cache it cannot reach and `legion state` shows the read's failure.
+comes from alone, is failing: container cache CrashLoopBackOff: …`).
+
+The issue pods reach the cache on port 8418 at its Service's name, `<cache>.<namespace>.svc`,
+the headless Service the Agent Sandbox controller makes for the cache's Sandbox. Since the fetch
+presents the cache's token to whatever that name reaches, the daemon hands an issue pod the
+cache's address and token only once the Service of that name is the cache's own: controlled by
+the cache's Sandbox, by uid, selecting exactly the pods the controller stamps with the hash of the
+Sandbox's name (`agents.x-k8s.io/sandbox-name-hash`), and headless (`clusterIP: None`) with no
+`externalName`, the shape the controller makes. Anyone who may create a Service in the namespace
+could make one of the cache's name first, or write a controller reference into one itself, which
+the API server accepts. The controller refuses to adopt one without its tracking label, or one
+with a cluster IP, and leaves it standing; one with the label and no cluster IP, an `ExternalName`
+Service among them, it adopts, writing its own controller reference and the exact selector but
+keeping the planted `type` and `externalName`, so it would send the token to its maker's host.
+Either
+way the launch waits, logging `the repository cache's Service is not the cache's` with the Service
+and why, and fails at the boot timeout naming them, with no pod made and no token written, and
+`legion state` shows the cache `refused` with the same reason. The controller never resets a
+Service's type: delete such a Service, and the controller makes the cache's own. While the
+daemon's Services list or watch is failing, its store may hold a Service that has since changed,
+so it trusts none: launches wait the same way, and the cache shows `refused` with `its Service …
+cannot be checked: the Service store may be stale: …`. The daemon reads each Ready cache's
+`/healthz` every minute at its pod's address, as the store
+holds it, with no credential, so a daemon outside the cluster that reaches pod addresses but
+resolves no cluster name reads it too; an answer from a pod that took the address once the cache's
+pod was gone names another repository, and is that read's failure. A NetworkPolicy that isolates
+the namespace's pods must admit both, or every fresh feed waits on a cache it cannot reach and
+`legion state` shows the read's failure.
 
 `legion state --json | jq .repositories` shows them: each `mapped[]` repository carries `cache`
-(`repo`, `sandbox`, `state` — `starting`, `cloning`, `ready`, or `failing` with the kubelet's
-`reason` — `ready`, `address` while Ready, and from the last health read `head`, `lastFetchAt` and
-`bytes`, or `healthError`) once the cache exists, and `caches` lists the caches of repositories the
-mapping no longer names, each with `retainedUntil`.
+(`repo`, `sandbox`, `state` — `starting`, `cloning`, `ready`, `failing` with the kubelet's
+`reason`, or `refused` with the Service's — `ready`, `address`, the cache's Service, while Ready
+behind its own Service, and from the last health read of the pod it runs now `head`,
+`lastFetchAt` and `bytes`, or `healthError`) once the cache exists, and `caches` lists the caches
+of repositories the mapping no longer names, each with `retainedUntil`.
 
 An issue pod's launch makes its repository's cache when there is none yet, and the daemon makes
 the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:
@@ -2040,15 +2095,19 @@ implementer's and tester's 6Gi holds its agent, one lane and a browser with room
 the reviewer's 4Gi holds its agent, a browser and its review pair, and the pod's 19 GiB holds six
 agents beside them.
 
-No pod carries an affinity: each owns its volume and shares nothing with another pod, so the
-scheduler bin-packs it wherever the `legion` pool has room for its reservation, and Karpenter adds a
+Legion sets no affinity itself (GKE Autopilot adds its own to an annotated pod, [Anatomy of a
+Sandbox pod](#anatomy-of-a-sandbox-pod)): each pod owns its volume and shares nothing with another
+pod, so the scheduler bin-packs it wherever the `legion` pool has room for its reservation, and
+Karpenter adds a
 node under the pool's limits when none has, of the smallest type the pool's requirements allow. In
 production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
 floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 19 GiB
 issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 19 would place three), cpu the binding
-dimension. A pod relaunched onto another node waits for its `ReadWriteOnce` volume to detach from
-the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach` events until the old
-pod is gone; then it runs on.
+dimension. On GKE Autopilot each issue and controller pod tends to get a node of its own instead
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so node count there tracks pod count rather
+than this two-per-node packing. A pod relaunched onto another node waits for its `ReadWriteOnce`
+volume to detach from the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach`
+events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
@@ -2200,34 +2259,54 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   `Failed` pod the last 20 log lines of the failing container (the init container when it exited
   non-zero, else the main one) are quoted in the daemon log;
 - `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
-  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s clone and
-  its retries of a transient failure, all within one `workspace.FetchTimeout` rather than
-  `workspace.CommandTimeout` ([Trust model](#trust-model-the-provisioning-token)), then
-  `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; it waits on no other pod
+  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s wait for
+  the repository cache, then its stream, verification and delta under one
+  `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, all within
+  `workspace.FetchBudget` ([Trust model](#trust-model-the-provisioning-token)), then
+  `workspace-init`'s shared clone of the feed, whose steps that follow the repository's size share
+  one `workspace.CloneTimeout`, and its other commands, each up to `workspace.CommandTimeout`;
+  it waits on no other pod
   and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
   and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
   The launch that created the pod waits for the role's launcher, which starts only once both init
   containers have finished. Until it first sees an init container running it waits
   `worker_boot_timeout_seconds`, the image pull's bound; from then on, `worker_boot_timeout_seconds`
   counted from the last moment it saw one running, and never longer than that plus
-  `workspace.FetchTimeout` (30 min; `sandbox.Runtime.ProvisionBound`) from the first
-  (`awaitRoleLauncher`, `internal/runtime/sandbox/relaunch.go`). The fetch started no later than
-  that first sighting, so it ends inside the bound, and `workspace-init` then has at least the boot
-  timeout. A pod that provisions for twenty minutes is one launch, not a launch failure per boot
-  timeout, and a launcher that has not connected the boot timeout after provisioning ended still
-  fails the launch. The wait runs inside whatever asked for the launch, and a start row asks from
-  the outbox, which runs one row at a time: the project's later rows wait behind it. During a
-  GitHub outage that is the fetch's five attempts and four waits, about 2 minutes when GitHub
-  refuses at once and about 12½ minutes when every connect times out (127 s each), after which the
-  fetch fails and the launch ends; each relaunch of the claim then holds its machine as long again,
-  and an outbox row that reads that claim waits on it. A transfer that keeps making progress can
-  hold the launch for the whole 30 minutes. Once the launch returns, the boot watchdog
-  re-arms on the claim, bounded by its registration deadline
+  `workspace.FetchBudget` and `workspace.CloneTimeout` together (100 min;
+  `sandbox.Runtime.ProvisionBound`) from the first (`awaitRoleLauncher`,
+  `internal/runtime/sandbox/relaunch.go`): each term is the real bound of a distinct phase, run one
+  after the other, `workspace-fetch`'s whole fetch and then `workspace-init`'s shared clone of the
+  feed. The fetch started no later than that first sighting and the shared clone after the fetch
+  ended, so both end inside the bound, each failing on its own, naming why, when it runs out of
+  its own — the fetch's failure naming the repository cache's state — and `workspace-init`'s other
+  commands then have at least the boot timeout. A launch that gives up while `workspace-fetch`
+  still runs says so, with the cache's state. A pod that provisions for twenty minutes is one
+  launch, not a launch failure per boot timeout, and a launcher that has not connected the boot
+  timeout after provisioning ended still fails the launch. The wait runs inside whatever asked for
+  the launch, and a start row asks from the outbox, on the issue's own lifecycle lane: only that
+  issue's later lifecycle rows — its stops, suspensions and later starts — wait behind it, while
+  other issues' rows and the issue's own board writes and notices run meanwhile. During a GitHub
+  outage that is the fetch's five attempts and four waits, about 2 minutes when GitHub refuses at
+  once and about 12½ minutes when every connect times out (127 s each), after which the fetch fails
+  and the launch ends; each relaunch of the claim then holds the issue's lifecycle lane as long
+  again, and the issue's later lifecycle rows wait on it. A repository cache that is slow to become
+  ready and a transfer that keeps making progress can hold the launch for the fetch's whole 70
+  minutes, and `workspace-init`'s shared clone of the feed, for a large repository, up to 30 more.
+  Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`,
+  `internal/runtime/sandbox/relaunch.go`) at the sum of the try's waits and bounded calls — three
+  boot timeouts; the repository cache's waits, five more boot timeouts and the calls of one other
+  ensure of the cache that may hold its turn ahead of the try; the launcher wait's backstop of
+  twice the boot timeout plus `sandbox.Runtime.ProvisionBound`; the termination grace; and the
+  try's client calls at their 30 s timeout — about 2 h 50 min at the defaults; a try that reaches
+  it is charged a launch failure and the next try runs, while a try the daemon's own stop ends is
+  still charged nothing.
+  Once the launch returns, the boot watchdog re-arms on the claim, bounded by its registration
+  deadline
   (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
-  6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchTimeout` until
-  the shim's first hello, and from there the daemon re-arms the base deadline alone, the same one a
-  tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
-  plus the base deadline plus the bound, armed as one (36 min at the defaults); one that says hello
+  6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
+  until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same
+  one a tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
+  plus the base deadline plus the bound, armed as one (106 min at the defaults); one that says hello
   and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
   one whose agent registers and never says it is ready is retired at its registration plus the base
   deadline alone (6 min from the registration, again from a daemon restart that finds it
@@ -2325,9 +2404,12 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   place once whole, with git's automatic garbage collection off and every fetch's objects kept as
   a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's volume and no
   config home. Every other provisioning command is
-  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer from GitHub's duration
-  follows the repository's size and the network's speed, not a fixed step in provisioning: it runs
-  under `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A transfer
+  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
+  repository's size and the network's speed, not a fixed step in provisioning: once the fetch may
+  start — at once, or once the repository cache is ready, after a wait of at most 40 minutes — the
+  cache's stream, its verification and every attempt of the transfer from GitHub run under one
+  `workspace.FetchTimeout` (30 minutes) instead, each given what remains of it, so the fetch ends
+  within `workspace.FetchBudget` (70 minutes). A transfer
   that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
   5xx, or a connection that could not be made or broke (connect, DNS, reset, timeout, empty reply,
@@ -2335,18 +2417,22 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   pack stream that ended early. Each retry logs the attempt's error on stdout as one line, the
   token replaced by `***`, removes whatever a failed clone left beside the feed, and waits 5 s,
   15 s, 30 s, then a minute: four retries at most, so a transfer still failing after the fourth
-  fails the fetch. Each attempt is bounded by what remains of the 30 minutes from the first one's
-  start, and no retry starts past them. Any other failure — a token refused, a repository not found or not
+  fails the fetch. No retry starts past the bound. Any other failure — a token refused, a repository not found or not
   granted, a certificate that does not verify, a curl error the list does not name — fails the
   fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`). The launch waits for the
-  pod's launchers while either init container runs, up to the same 30 minutes plus its boot timeout
-  from when it first sees one running (above, "Liveness rules"), so the fetch, retries included,
-  spends no launch failure, and `workspace-init` has at least the boot timeout after a fetch that
-  ran its whole 30 minutes. The fetch reads the token once, and the daemon hands a pod the
-  implement App's cached lease while more than 20 minutes of it remain
-  (`internal/appauth/appauth.go`), so a retry late in a long fetch can outlast the token: an
-  attempt that starts after it expired fails with `Authentication failed`, which the fetch reads as
-  permanent, and the launch's next pod is handed a token afresh.
+  pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` (100
+  minutes) plus its boot timeout from when it first sees one running (above, "Liveness rules"), so
+  the fetch, its wait and retries included, spends no launch failure, and `workspace-init` has its
+  shared clone's 30 minutes and at least the boot timeout after a fetch that ran its whole budget.
+  The fetch reads the token from its file anew as every transfer
+  attempt from GitHub starts, taking the file as it stands then, and while the pod's
+  `workspace-fetch` has yet to finish, the gh refresher's minute brings its provisioning Secret to
+  the implement App's current lease (`refreshProvisioningToken`,
+  `internal/runtime/sandbox/ghcredential.go`), the cache's token beside it kept, logging `sandbox
+  runtime: provisioning token refreshed`; the daemon re-mints a lease once less than 20 minutes of
+  it remain (`internal/appauth/appauth.go`) and the kubelet rewrites the projected file within its
+  sync period, so a delta after a long wait on the repository cache, or a retry late in a long
+  fetch, presents a token that is still good. A pod past its fetch keeps its Secret as it is.
 - **`workspace-init`** mounts the issue's volume, the feed read-only over it, and the config home —
   never the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
   --default-branch <name> --root /legion --credential-helper '!legion git-credential' --feed
@@ -2354,7 +2440,11 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   `https://github.com/<owner>/<repo>`, and its fetch reaches that remote at the feed over git's
   file transport, bringing the default branch and the issue's branch alone, each by its exact
   name, then the workspace add, `update-stale`, and the configuration writes, once it has removed
-  the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
+  the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). The shared
+  clone copies no object, but its checkout of the working tree and jj's import of every commit
+  follow the repository's size, so the two share one bound of their own, `workspace.CloneTimeout`
+  (30 minutes), the import given what the checkout left, rather than `workspace.CommandTimeout`;
+  every other command here keeps the 5 minutes.
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
   volume, and no other provision shares the repository. What an agent of the issue planted can run
   there, with nothing to take that the agent does not already hold.
@@ -2475,6 +2565,10 @@ group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
+- `services`: get, list, watch, which the Service informer reads, so a launch hands an issue pod
+  its repository cache's address only once the Service of that name is the cache's own
+  ([The repository cache](#the-repository-cache)); without them the daemon refuses at boot,
+  naming the refused list;
 - `events`: list;
 - a cluster-scoped get on `customresourcedefinitions` named `sandboxes.agents.x-k8s.io`, and a get
   on the `agent-sandbox-controller` Deployment in `agent-sandbox-system`, for the boot refusal when
@@ -2517,7 +2611,7 @@ exits 0; a refusal is boot's own, on stderr, and exits 1.
 - **Identity.** It acts as whoever `runtime.kubernetes` resolves to in its own process: the daemon's
   identity only with the daemon's kubeconfig and context, or in a pod under the daemon's
   ServiceAccount. It uses a subset of the daemon's grants above: `sandboxes` create, get, list,
-  watch and delete; `pods` list and watch; `pods/log` get; `events` list; the get on the CRD and on
+  watch and delete; `pods` list and watch; `services` list and watch; `pods/log` get; `events` list; the get on the CRD and on
   the controller's Deployment. It reads no `secrets` and patches no Sandbox. The probe pod itself is
   created by the agent-sandbox controller with the operator's ServiceAccount, so its result is the
   daemon's boot's own when it runs as the daemon's identity; under another, an RBAC or admission
@@ -3197,10 +3291,15 @@ exits 3, which the daemon reads as a lost volume and answers with a fresh contro
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
-agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
-so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
-"true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
-is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
+agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it, so under
+Karpenter it lands wherever the pool has room for it (on GKE Autopilot it usually gets a node of its own,
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and it is annotated `karpenter.sh/do-not-disrupt:
+"true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
+or replaces for drift the node it runs on, though issue pods can still be scheduled onto that node;
+GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) has what it does not stop), after which
+Autopilot may evict it like any other pod, and it is relaunched and resumes the same session like
+any claim's pod that dies ("The claim", above). Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
 pointers, and the six gh variables exactly as an issue pod's role container is told them

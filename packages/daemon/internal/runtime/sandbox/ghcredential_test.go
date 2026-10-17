@@ -259,3 +259,67 @@ func TestTheRefresherLeavesAPodThatIsNotLiveAlone(t *testing.T) {
 		})
 	}
 }
+
+// leaseTokens is a provisioning token source whose lease the test re-mints: each token is the
+// lease's name and the owner's.
+type leaseTokens struct{ lease atomic.Pointer[string] }
+
+func (l *leaseTokens) Token(_ context.Context, owner string) (string, error) {
+	return "ghs_" + *l.lease.Load() + "_" + owner, nil
+}
+
+// A re-minted lease reaches the provisioning Secret of every issue pod whose workspace-fetch has yet
+// to finish, on the same tick as the role Secrets: the fetch reads the token's file anew before
+// every transfer from GitHub, so one that waits long on its repository's cache presents the
+// current lease. Only the token is rewritten; the cache's bearer token beside it stays. A pod whose
+// fetch has finished keeps its Secret as it is: nothing in it reads the token again.
+func TestTheRefresherKeepsAFetchingPodsProvisioningTokenFresh(t *testing.T) {
+	tokens := &leaseTokens{}
+	first, second := "first", "second"
+	tokens.lease.Store(&first)
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = tokens }))
+	other, err := claim.NewToken(testProject, "LEGION-210", claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.spawn(rootSpec(t))
+	g.spawn(testSpec(t, other, claim.RoleArchitect, "LEGION-210"))
+	inFetch, pastFetch := SandboxName(rootToken), SandboxName(other)
+	owner := rootSpec(t).Repository.Owner()
+	for _, name := range []string{inFetch, pastFetch} {
+		if got := string(g.secret(secretName(name)).Data[provisionTokenKey]); got != "ghs_first_"+owner {
+			t.Fatalf("%s's provisioning Secret holds %q at launch, want the first lease's", name, got)
+		}
+	}
+	bearer := string(g.secret(secretName(inFetch)).Data[cacheTokenKey])
+	g.update(g.pod(inFetch), fetching)
+	g.update(g.pod(pastFetch), func(p *corev1.Pod) {
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{
+			{Name: fetchContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}}},
+			{Name: initContainer, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		}}
+	})
+	g.eventually("the store to hold both pods Pending", func() bool {
+		for _, name := range []string{inFetch, pastFetch} {
+			if pod := g.r.storedPod(name); pod == nil || pod.Status.Phase != corev1.PodPending {
+				return false
+			}
+		}
+		return true
+	})
+	tokens.lease.Store(&second)
+	g.clearActions()
+
+	g.r.refreshGitHubCredentials(g.ctx)
+
+	if updated := secretUpdates(g.writes()); !slices.Equal(updated, []string{secretName(inFetch)}) {
+		t.Fatalf("the refresher updated %v, want %s alone", updated, secretName(inFetch))
+	}
+	refreshed := g.secret(secretName(inFetch))
+	if got := string(refreshed.Data[provisionTokenKey]); got != "ghs_second_"+owner || string(refreshed.Data[cacheTokenKey]) != bearer || len(refreshed.Data) != 2 {
+		t.Errorf("the fetching pod's provisioning Secret holds %q and the cache token %t, want the second lease's and the cache's token kept", got, string(refreshed.Data[cacheTokenKey]) == bearer)
+	}
+	if got := string(g.secret(secretName(pastFetch)).Data[provisionTokenKey]); got != "ghs_first_"+owner {
+		t.Errorf("the pod past its fetch holds %q, want its Secret left as it was", got)
+	}
+}

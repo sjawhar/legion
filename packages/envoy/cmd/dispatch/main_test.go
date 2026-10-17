@@ -71,16 +71,100 @@ func TestResolveBootConfigReadsTheFourSignInSettings(t *testing.T) {
 	}
 }
 
+// googleSignInEnvironment is a cookie-identity boot environment that signs people in with Google
+// for the Workspace domain example.com: Google's issuer, the client, and the domain in place of a
+// group.
+func googleSignInEnvironment(overrides map[string]string) map[string]string {
+	values := signInEnvironment(map[string]string{
+		"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com",
+		"DISPATCH_SIGNIN_GROUP":  "",
+		"DISPATCH_SIGNIN_DOMAIN": "example.com",
+	})
+	for name, value := range overrides {
+		values[name] = value
+	}
+	return values
+}
+
+func TestResolveBootConfigReadsTheDomainSignIn(t *testing.T) {
+	boot, err := resolveBootConfig(envGetter(googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": " example.com "})))
+	if err != nil {
+		t.Fatalf("resolve boot config: %v", err)
+	}
+	if boot.SignInIssuer != "https://accounts.google.com" || boot.SignInClientID != "dispatch-client" ||
+		boot.SignInClientSecret != "client-secret" || boot.SignInDomain != "example.com" || boot.SignInGroup != "" {
+		t.Fatalf("boot = %#v, want Google's issuer, the client and the domain example.com with no group", boot)
+	}
+}
+
 // Cookie identity is Google sign-in: without the sign-in settings, or with only some of them, the
 // server refuses to boot and names what is missing.
 func TestResolveBootConfigRefusesCookieIdentityWithoutTheWholeSignIn(t *testing.T) {
-	if _, err := resolveBootConfig(envGetter(map[string]string{"DATABASE_URL": "postgres://dispatch", "DISPATCH_AGENT_TOKEN": "agent-token"})); err == nil ||
-		!strings.Contains(err.Error(), "DISPATCH_SIGNIN_ISSUER") {
-		t.Fatalf("cookie identity without sign-in: err = %v, want a refusal naming the settings", err)
+	_, err := resolveBootConfig(envGetter(map[string]string{"DATABASE_URL": "postgres://dispatch", "DISPATCH_AGENT_TOKEN": "agent-token"}))
+	if want := "cookie identity signs people in: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required"; err == nil || err.Error() != want {
+		t.Fatalf("cookie identity without sign-in: err = %v, want %q", err, want)
 	}
-	_, err := resolveBootConfig(envGetter(signInEnvironment(map[string]string{"DISPATCH_SIGNIN_GROUP": ""})))
-	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNIN_GROUP missing") {
-		t.Fatalf("sign-in without its group: err = %v, want a refusal naming DISPATCH_SIGNIN_GROUP", err)
+	_, err = resolveBootConfig(envGetter(signInEnvironment(map[string]string{"DISPATCH_SIGNIN_GROUP": ""})))
+	if want := "Google sign-in needs DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET set, DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN missing"; err == nil || err.Error() != want {
+		t.Fatalf("sign-in with neither a group nor a domain: err = %v, want %q", err, want)
+	}
+}
+
+// Each sign-in setting the server cannot use refuses the boot with its own text, and an input that
+// trips two checks gets the first: both set, a partial set, a domain under another issuer, a
+// malformed domain, a group under Google's issuer.
+func TestResolveBootConfigRefusesSignInSettingsItCannotUse(t *testing.T) {
+	const lead = "Google sign-in needs DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN: "
+	const both = "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set; set one: a Cognito pool's group, or a Google Workspace domain"
+	noSignIn := map[string]string{"DATABASE_URL": "postgres://dispatch", "DISPATCH_AGENT_TOKEN": "agent-token"}
+	with := func(base, overrides map[string]string) map[string]string {
+		values := map[string]string{}
+		for name, value := range base {
+			values[name] = value
+		}
+		for name, value := range overrides {
+			values[name] = value
+		}
+		return values
+	}
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"both a group and a domain", signInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}), both},
+		{"both, with the secret missing too", signInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com", "DISPATCH_SIGNIN_CLIENT_SECRET": ""}), both},
+		{"a domain alone", with(noSignIn, map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}),
+			lead + "DISPATCH_SIGNIN_DOMAIN set, DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET missing"},
+		{"a domain without its secret", googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_CLIENT_SECRET": ""}),
+			lead + "DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_DOMAIN set, DISPATCH_SIGNIN_CLIENT_SECRET missing"},
+		{"an issuer and a client with no secret, group or domain", with(noSignIn, map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com", "DISPATCH_SIGNIN_CLIENT_ID": "dispatch-client"}),
+			lead + "DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID set, DISPATCH_SIGNIN_CLIENT_SECRET, DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN missing"},
+		{"a domain under a Cognito pool", googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://issuer.example/pool"}),
+			"DISPATCH_SIGNIN_DOMAIN needs DISPATCH_SIGNIN_ISSUER https://accounts.google.com, since only Google's tokens carry hd; DISPATCH_SIGNIN_ISSUER is https://issuer.example/pool"},
+		{"a domain under Google's schemeless issuer", googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_ISSUER": "accounts.google.com"}),
+			"DISPATCH_SIGNIN_DOMAIN needs DISPATCH_SIGNIN_ISSUER https://accounts.google.com, since only Google's tokens carry hd; DISPATCH_SIGNIN_ISSUER is accounts.google.com"},
+		{"a malformed domain under another issuer", googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://issuer.example/pool", "DISPATCH_SIGNIN_DOMAIN": "Example.com"}),
+			"DISPATCH_SIGNIN_DOMAIN needs DISPATCH_SIGNIN_ISSUER https://accounts.google.com, since only Google's tokens carry hd; DISPATCH_SIGNIN_ISSUER is https://issuer.example/pool"},
+		{"a group under Google's issuer", signInEnvironment(map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com"}),
+			"DISPATCH_SIGNIN_GROUP is a Cognito pool's group, and a token from https://accounts.google.com carries none; set DISPATCH_SIGNIN_DOMAIN instead"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := resolveBootConfig(envGetter(tc.env)); err == nil || err.Error() != tc.want {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+	for _, domain := range []string{"Example.com", "example", "exa_mple.com", "https://example.com", "alice@example.com", "-example.com", "example-.com", "example..com", ".example.com", "example.com.", "ex ample.com", strings.Repeat("a", 64) + ".com", strings.Repeat(strings.Repeat("a", 63)+".", 4) + "com"} {
+		_, err := resolveBootConfig(envGetter(googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": domain})))
+		if want := "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got a value of " + strconv.Itoa(len(domain)) + " characters"; err == nil || err.Error() != want {
+			t.Errorf("DISPATCH_SIGNIN_DOMAIN=%q: err = %v, want %q", domain, err, want)
+		}
+	}
+	for _, domain := range []string{"example.com", "d.example", "eng.example.co.uk", "x-1.example", strings.Repeat("a", 63) + ".com"} {
+		if _, err := resolveBootConfig(envGetter(googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": domain}))); err != nil {
+			t.Errorf("DISPATCH_SIGNIN_DOMAIN=%q: %v, want accepted", domain, err)
+		}
 	}
 }
 
@@ -110,6 +194,7 @@ func TestResolveBootConfigFencesHeaderIdentityToTrustedLocalHarnesses(t *testing
 		"DISPATCH_SIGNIN_CLIENT_ID":     "dispatch-client",
 		"DISPATCH_SIGNIN_CLIENT_SECRET": "client-secret",
 		"DISPATCH_SIGNIN_GROUP":         "dispatch-members",
+		"DISPATCH_SIGNIN_DOMAIN":        "example.com",
 	} {
 		if _, err := resolveBootConfig(envGetter(headerIdentityEnvironment(map[string]string{name: value}))); err == nil ||
 			!strings.Contains(err.Error(), name) ||
@@ -126,6 +211,19 @@ func TestDevSignInRefusesTheSignInSettings(t *testing.T) {
 	}))
 	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNIN_* must be unset") {
 		t.Fatalf("dev sign-in with the sign-in settings: err = %v, want a refusal", err)
+	}
+	// A complete domain set passes every sign-in check, and the fence refuses it.
+	_, err = resolveBootConfig(devSignInEnvironment(map[string]string{
+		"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com", "DISPATCH_SIGNIN_CLIENT_ID": "c",
+		"DISPATCH_SIGNIN_CLIENT_SECRET": "s", "DISPATCH_SIGNIN_DOMAIN": "example.com",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNIN_* must be unset") {
+		t.Fatalf("dev sign-in with the domain sign-in settings: err = %v, want the fence's refusal", err)
+	}
+	// A domain on its own is a partial set, refused before the fence.
+	_, err = resolveBootConfig(devSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_SIGNIN_DOMAIN set") {
+		t.Fatalf("dev sign-in with DISPATCH_SIGNIN_DOMAIN: err = %v, want a refusal naming it", err)
 	}
 }
 

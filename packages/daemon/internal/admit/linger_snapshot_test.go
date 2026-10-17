@@ -25,7 +25,7 @@ func TestReleaseAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineNotOnlyTheR
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-PARK", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "park", Tree: "LEGION-PARK", Phase: phase.Implementing,
+		Key: "LEGION-PARK", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "park", Tree: "LEGION-PARK", Phase: phase.Implementing,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 	})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -75,7 +75,7 @@ func TestReconcileAppliesASnapshotThatLeavesTheWorkflowThroughTheEngineWhenTheCo
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-PARK2", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "park2", Tree: "LEGION-PARK2", Phase: phase.Implementing,
+		Key: "LEGION-PARK2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "park2", Tree: "LEGION-PARK2", Phase: phase.Implementing,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 	})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -122,7 +122,7 @@ func TestReconcileReentersAParkedChildSetBackToTodoInABootSummary(t *testing.T) 
 	seedSlotted(t, pool, "LEGION-ROOT", "A")
 	parent := "LEGION-ROOT"
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-CHILD", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-ROOT", Project: testProject, Title: "child", Parent: &parent,
+		Key: "LEGION-CHILD", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-ROOT", Project: testProject, Title: "child", Parent: &parent,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", LastDispatchSeq: 1,
 	})
 
@@ -148,7 +148,7 @@ func TestReconcileLeavesSlotStateUnchangedWhenALevelSnapshotEchoesAnAgentsOutOfW
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	putIssue(t, pool, record.Issue{
-		Key: "LEGION-AGENT", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "agent", Tree: "LEGION-AGENT", Phase: phase.Implementing,
+		Key: "LEGION-AGENT", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "agent", Tree: "LEGION-AGENT", Phase: phase.Implementing,
 		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 5,
 	})
 	inTx(t, pool, func(tx pgx.Tx) {
@@ -191,7 +191,7 @@ func TestABootListingOfASetBackBacklogLeavesTheTreeRunning(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			putIssue(t, pool, record.Issue{
-				Key: "LEGION-RUN", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "run", Tree: "LEGION-RUN", Phase: phase.Implementing,
+				Key: "LEGION-RUN", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "run", Tree: "LEGION-RUN", Phase: phase.Implementing,
 				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 5,
 			})
 			inTx(t, pool, func(tx pgx.Tx) {

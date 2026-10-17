@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -368,7 +369,7 @@ func TestEnsureRepoCloneDoesNotDisarmTheCallersWorkingDirectory(t *testing.T) {
 	}
 	clone := filepath.Join(t.TempDir(), "clone")
 
-	if err := ensureRepoClone(context.Background(), run, clone, run.remote, "main", remote{}); err != nil {
+	if err := ensureRepoClone(context.Background(), run, WallClock{}, clone, run.remote, "main", remote{}); err != nil {
 		t.Fatalf("ensureRepoClone: %v", err)
 	}
 	if _, err := os.Stat(config); err != nil {
@@ -471,7 +472,7 @@ func assertCredentialedEnvironment(t *testing.T, command Command) {
 
 // assertCredentialedEnvironmentBounded is assertCredentialedEnvironment, but for a command bounded
 // by timeout instead of the runner's slow-command budget (the fetch's clone, bounded by
-// FetchTimeout).
+// FetchTimeout, and the shared clone's clone, bounded by CloneTimeout).
 func assertCredentialedEnvironmentBounded(t *testing.T, command Command, timeout time.Duration) {
 	t.Helper()
 	if commandEnv(command, "LEGION_PROVISIONING_TOKEN_FILE") == "" {
@@ -558,7 +559,10 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 	if !strings.HasPrefix(clone.Argv[4], filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")+".clone-") {
 		t.Errorf("clone target = %q, want temporary sibling", clone.Argv[4])
 	}
-	assertCredentialedEnvironment(t, clone)
+	assertCredentialedEnvironmentBounded(t, clone, clone.Timeout)
+	if clone.Timeout > CloneTimeout || clone.Timeout < CloneTimeout-time.Minute {
+		t.Errorf("the clone was given %s, want what remained of one %s CloneTimeout from its start", clone.Timeout, CloneTimeout)
+	}
 	fetch := findCall(t, run.Calls(), "jj", "git", "fetch")
 	assertCredentialedEnvironment(t, fetch)
 
@@ -589,9 +593,17 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 func fetchRequest(t *testing.T) FetchRequest {
 	t.Helper()
 	return FetchRequest{
-		Repo: ghrepo.MustParse("acme/widgets"), Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Repo: ghrepo.MustParse("acme/widgets"), Token: staticToken(testInstallationToken), CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 		Log: func(line string) { t.Logf("fetch logged: %s", line) }, Clock: WallClock{},
 	}
+}
+
+// testInstallationToken is the provisioning token a test's fetch reads.
+const testInstallationToken = "test-installation-token"
+
+// staticToken is a FetchRequest.Token that always answers token.
+func staticToken(token string) func() (string, error) {
+	return func() (string, error) { return token, nil }
 }
 
 // readOnly takes every write permission away from dir's tree, as a read-only mount does, until
@@ -638,6 +650,8 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	t.Setenv("GIT_CONFIG_SYSTEM", config)
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'init.templatedir'='"+template+"'")
 	req := fetchRequest(t)
+	// The clock stands still, so the clone is given the whole bound it shares with the reads before.
+	req.Clock = newTestClock()
 
 	report, err := Fetch(context.Background(), run, req)
 	if err != nil {
@@ -734,6 +748,130 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	if fetched := strings.TrimSpace(runSetup(t, cloneDir, "jj", "log", "-r", "main@origin", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", cloneDir)); fetched != head {
 		t.Errorf("after the next pod's fetch the shared clone's main@origin is %s, want the remote's %s", fetched, head)
 	}
+}
+
+// The shared clone's clone from a pod's feed runs each step whose duration follows the
+// repository's size under what remains of one shared CloneTimeout — the `git clone --shared`,
+// which checks out the working tree, then jj's import of every commit, with less — and every
+// other provisioning command keeps the runner's slow-command budget.
+func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
+	run := newLocalRunner(t)
+	req := feedRequest(t, run, provisionRequest(t))
+	before := len(run.Calls())
+	if _, err := Provision(context.Background(), run, req); err != nil {
+		t.Fatalf("provision from the feed: %v", err)
+	}
+	var steps []string
+	var given []time.Duration
+	for _, call := range run.Calls()[before:] {
+		if commandWith(call.Argv, "git", "clone", "--shared") || commandWith(call.Argv, "jj", "git", "init", "--colocate") {
+			steps = append(steps, strings.Join(call.Argv[:3], " "))
+			given = append(given, call.Timeout)
+			if call.Timeout > CloneTimeout || call.Timeout < CloneTimeout-time.Minute {
+				t.Errorf("%q ran under %s, want what remained of one %s CloneTimeout", call.Argv, call.Timeout, CloneTimeout)
+			}
+			continue
+		}
+		if call.Timeout != testTimeout {
+			t.Errorf("%q ran under %s, want %s", call.Argv, call.Timeout, testTimeout)
+		}
+	}
+	if len(given) == 2 && given[1] >= given[0] {
+		t.Errorf("jj's import was given %s, no less than the shared clone's %s: want what remained after it", given[1], given[0])
+	}
+	if !slices.Equal(steps, []string{"git clone --shared", "jj git init"}) {
+		t.Errorf("provisioning ran the shared clone's steps %q, want the shared clone and jj's import once each", steps)
+	}
+}
+
+// The shared clone's two size-following steps share one CloneTimeout, counted from the first's
+// start, as ProvisionBound budgets one: the `git clone --shared` gets the whole bound and jj's
+// import what remains of it. Two steps that fit together clone; a clone that leaves the import too
+// little fails at the shared deadline, the import killed there, and no clone is left in place.
+func TestTheSharedClonesStepsShareOneCloneTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		took     map[string]time.Duration
+		timeouts map[string][]time.Duration
+		fails    bool
+	}{
+		{
+			name:     "two steps that fit together",
+			took:     map[string]time.Duration{"git clone": 10 * time.Minute, "jj git": 10 * time.Minute},
+			timeouts: map[string][]time.Duration{"git clone": {CloneTimeout}, "jj git": {CloneTimeout - 10*time.Minute}},
+		},
+		{
+			name:     "a clone that leaves the import too little",
+			took:     map[string]time.Duration{"git clone": 25 * time.Minute, "jj git": 25 * time.Minute},
+			timeouts: map[string][]time.Duration{"git clone": {CloneTimeout}, "jj git": {CloneTimeout - 25*time.Minute}},
+			fails:    true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			local := newLocalRunner(t)
+			req := feedRequest(t, local, provisionRequest(t))
+			source, err := req.Source.open(req.Repo, "legion/LEGION-1", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = source.remove() }()
+			clock := newTestClock()
+			start := clock.Now()
+			run := &slowSteps{recordingRunner: local, clock: clock, step: sharedCloneStep, took: tc.took, timeouts: map[string][]time.Duration{}}
+			cloneDir := filepath.Join(t.TempDir(), "acme", "widgets")
+
+			err = ensureRepoClone(context.Background(), run, clock, cloneDir, GitHubURL(req.Repo), "main", source)
+			if !maps.EqualFunc(run.timeouts, tc.timeouts, slices.Equal[[]time.Duration]) {
+				t.Errorf("the shared clone's steps were given %v, want %v: what remained of one CloneTimeout", run.timeouts, tc.timeouts)
+			}
+			if elapsed := clock.Now().Sub(start); elapsed > CloneTimeout {
+				t.Errorf("the shared clone ran %s, past its one %s bound", elapsed, CloneTimeout)
+			}
+			_, statErr := os.Stat(filepath.Join(cloneDir, ".jj"))
+			if tc.fails && (err == nil || !strings.Contains(err.Error(), "command timed out: jj git init") || statErr == nil) {
+				t.Fatalf("ensureRepoClone = %v with the clone in place %t, want the import timed out at the shared deadline and no clone", err, statErr == nil)
+			}
+			if !tc.fails && (err != nil || statErr != nil) {
+				t.Fatalf("ensureRepoClone = %v (clone: %v), want the clone", err, statErr)
+			}
+		})
+	}
+}
+
+// slowSteps is the local runner with the clock time each step a test names takes: step names the
+// command's step, "" for one that takes no clock time; each named step records the timeout it was
+// given, then takes took of the clock's time — or, given less than that, runs to its timeout and is
+// killed there — before it runs.
+type slowSteps struct {
+	*recordingRunner
+	clock    *testClock
+	step     func(argv []string) string
+	took     map[string]time.Duration
+	timeouts map[string][]time.Duration
+}
+
+func (r *slowSteps) Run(ctx context.Context, command Command) (Result, error) {
+	step := r.step(command.Argv)
+	if step == "" {
+		return r.recordingRunner.Run(ctx, command)
+	}
+	r.timeouts[step] = append(r.timeouts[step], command.Timeout)
+	took := r.took[step]
+	if command.Timeout < took {
+		r.clock.advance(command.Timeout)
+		return Result{ExitCode: -1, TimedOut: true}, nil
+	}
+	r.clock.advance(took)
+	return r.recordingRunner.Run(ctx, command)
+}
+
+// sharedCloneStep names the shared clone's size-following steps, `git clone --shared` and then
+// `jj git init`.
+func sharedCloneStep(argv []string) string {
+	if commandWith(argv, "git", "clone", "--shared") || commandWith(argv, "jj", "git", "init") {
+		return strings.Join(argv[:2], " ")
+	}
+	return ""
 }
 
 // The feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent can push to

@@ -34,13 +34,17 @@ func TestTreeName(t *testing.T) {
 	}
 }
 
-// ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision first.
-// Nothing else exercises this method directly (the supervisor's own tests script a fake.Runtime's
-// independent ProvisionGrace field instead), so a changed return value here would otherwise pass
+// ProvisionBound and LaunchBound are zero: a pane starts the agent at once, with no init phase to
+// provision first, by a local command with no cluster wait, so no bound is stated. Nothing else
+// exercises these methods directly (the supervisor's own tests script a fake.Runtime's independent
+// ProvisionGrace and TryBound fields instead), so a changed return value here would otherwise pass
 // unnoticed.
 func TestProvisionBoundIsZero(t *testing.T) {
 	if got := (&Runtime{}).ProvisionBound(); got != 0 {
 		t.Errorf("ProvisionBound() = %s, want 0", got)
+	}
+	if got := (&Runtime{}).LaunchBound(); got != 0 {
+		t.Errorf("LaunchBound() = %s, want 0", got)
 	}
 }
 

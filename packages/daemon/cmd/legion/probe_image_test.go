@@ -256,8 +256,8 @@ func TestProbeImageRefusesAnImageWithoutTheGhWrapper(t *testing.T) {
 }
 
 // lastContractWithoutRepositoryCache is the last daemon API contract whose image's `legion` has no
-// `workspace-init cache`, which every repository cache pod runs: 29, the issue repository's.
-const lastContractWithoutRepositoryCache = 29
+// `workspace-init cache`, which every repository cache pod runs: 30, the issue repository's.
+const lastContractWithoutRepositoryCache = 30
 
 // An image built before the repository cache carries a pi-legion declaring that older contract, so
 // the daemon's probe Sandbox, asking for this binary's own, refuses it by both numbers before any

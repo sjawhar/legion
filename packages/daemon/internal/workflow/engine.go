@@ -311,7 +311,7 @@ func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	if resolution.Refusal != "" {
 		return e.refuseChild(ctx, tx, root, fact.Key, fact.ResolvedRepo, resolution)
 	}
-	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution.Repo, resolution.DefaultBranch)
+	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution)
 }
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
@@ -353,20 +353,20 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next, child.Repo, child.DefaultBranch); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
 }
 
-// enterChild records a todo child under root's live tree, admitted at generation on repo at its
-// default branch, and starts its planning when the tree's gate is open. A re-entered child keeps
-// the repository it was first recorded with.
-func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, repo, defaultBranch string) error {
+// enterChild records a todo child under root's live tree, admitted at generation on the repository
+// at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
+// tree's gate is open. A re-entered child keeps the repository it was first recorded with.
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
-		Repo: repo, DefaultBranch: defaultBranch}
+		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
@@ -698,7 +698,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// session until its issue closes (leave), and its assignment ends here, not its process. The
 	// workspace passes to the next role at the completion this move records, which the worker reports
 	// once its handoff is committed and pushed, so the next role's start may run while that worker's
-	// turn is still finishing (supervise rows are unordered, record.Postgres's ClaimDue). From then on
+	// turn is still finishing (the issue's lifecycle lane runs its supervise rows one at a time,
+	// oldest due first, and a start waits for no turn to end). From then on
 	// the finished role answers questions read-only: a completion it reports is refused, since it no
 	// longer works the issue's phase (handoff), and a task queued for a phase the issue has left is
 	// dropped rather than sent (supervise.Deps's PhaseHolds). A move between two phases of one role -
@@ -727,7 +728,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		if pr != nil && pr.State == record.PullRequestMerged {
 			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 		}
-		return e.ready(ctx, tx, issue, handoff)
+		return e.ready(ctx, tx, issue, handoff, pr)
 	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")
@@ -834,14 +835,15 @@ func (e *Engine) phaseRow(ctx context.Context, tx pgx.Tx, issue string, role cla
 	return record.PhaseRow{Issue: issue, Role: role}, nil
 }
 
-// issueForBranch is the issue whose branch legion/<KEY> is, when it is recorded on repo: a pull
-// request on legion/<KEY> in another repository is never <KEY>'s.
+// issueForBranch is the issue whose branch legion/<KEY> is, when it is recorded on repo, as its
+// record keeps GitHub's spelling (record.Issue.GitHubRepo), compared case-insensitively as GitHub
+// compares names: a pull request on legion/<KEY> in another repository is never <KEY>'s.
 func (e *Engine) issueForBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*record.Issue, error) {
 	if !strings.HasPrefix(branch, "legion/") {
 		return nil, nil
 	}
 	issue, err := e.store.Issue(ctx, tx, strings.TrimPrefix(branch, "legion/"))
-	if err != nil || issue == nil || !strings.EqualFold(issue.Repo, repo) {
+	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
 		return nil, err
 	}
 	return issue, nil
@@ -866,11 +868,12 @@ func (e *Engine) pullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branc
 	return e.ownPullRequest(ctx, tx, pr, repo)
 }
 
-// ownPullRequest is pr when the issue it is recorded for is recorded on repo, and nil otherwise: a
-// GitHub fact applies to an issue only when it names the issue's repository.
+// ownPullRequest is pr when the issue it is recorded for is recorded on repo, as its record keeps
+// GitHub's spelling, and nil otherwise: a GitHub fact applies to an issue only when it names the
+// issue's repository.
 func (e *Engine) ownPullRequest(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, repo string) (*record.PullRequest, error) {
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || !strings.EqualFold(issue.Repo, repo) {
+	if err != nil || issue == nil || !strings.EqualFold(issue.GitHubRepo, repo) {
 		return nil, err
 	}
 	return pr, nil

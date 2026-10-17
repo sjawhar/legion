@@ -88,7 +88,7 @@ var issueSummaryTail = `
 	  and ((cardinality($7::smallint[]) = 0 and not $8::boolean)
 	       or i.priority = any($7::smallint[])
 	       or ($8::boolean and i.priority is null))
-	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `, repo.resolved
+	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `, repo.resolved, repo.looped
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc, i.key asc
 `
 
@@ -294,7 +294,9 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 		if err := rows.Scan(append(targets, repo.targets()...)...); err != nil {
 			return nil, err
 		}
-		issue.Repo, issue.ResolvedRepo = repo.own, repo.resolved
+		if issue.Repo, issue.ResolvedRepo, err = repo.resolve(issue.Key); err != nil {
+			return nil, err
+		}
 		resolved, err := claim.resolve(issue.Key)
 		if err != nil {
 			return nil, err
@@ -428,7 +430,11 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	`, key).Scan(append(targets, repo.targets()...)...); err != nil {
 		return model.Issue{}, model.IssueProgress{}, err
 	}
-	issue.Repo, issue.ResolvedRepo = repo.own, repo.resolved
+	own, resolvedRepo, err := repo.resolve(issue.Key)
+	if err != nil {
+		return model.Issue{}, model.IssueProgress{}, err
+	}
+	issue.Repo, issue.ResolvedRepo = own, resolvedRepo
 	issue.Components = components.resolve(issue.Key)
 	resolved, err := claim.resolve(issue.Key)
 	if err != nil {

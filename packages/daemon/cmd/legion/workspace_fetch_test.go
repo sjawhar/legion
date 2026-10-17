@@ -531,16 +531,17 @@ func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	}
 	body := stream.Bytes()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+cmdCacheToken {
-			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
-			return
-		}
 		w.Header().Set(workspace.CacheRepositoryHeader, "acme/widgets")
 		switch r.URL.Path {
 		case "/healthz":
 			_, _ = w.Write([]byte(`{"ready":true,"repo":"acme/widgets","bytes":1}`))
 			return
 		case "/tar":
+			if r.Header.Get("Authorization") != "Bearer "+cmdCacheToken {
+				w.Header().Del(workspace.CacheRepositoryHeader)
+				http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+				return
+			}
 		default:
 			http.NotFound(w, r)
 			return
@@ -603,10 +604,6 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 func TestWorkspaceInitFetchFailsWhenTheCacheIsNeverReady(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t, "main")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+cmdCacheToken {
-			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
-			return
-		}
 		w.Header().Set(workspace.CacheRepositoryHeader, "acme/widgets")
 		http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
 	}))

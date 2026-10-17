@@ -148,7 +148,7 @@ const legionPhaseView = z.strictObject({
  * testing, and an approval through retro and every phase after it; absent until a review in a
  * round decides. */
 const legionPullRequestView = z.strictObject({
-  /** The repository (`owner/name`) the pull request is in, its issue's (contract 29). */
+  /** The repository (`owner/name`) the pull request is in, its issue's (contract 30). */
   repo: nonEmptyString,
   number: z.number().int().positive(),
   head: nonEmptyString,
@@ -196,6 +196,20 @@ const legionStrandedClaim = z.strictObject({
   state: z.enum(["suspended", "failed"]),
 });
 
+/** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
+ * because another lifecycle row of the issue is running (`record.Store.HeldRows`, contract 28):
+ * the lane runs an issue's lifecycle rows one at a time, in the order they were queued. `waitedSeconds`
+ * counts from the moment the row became due, so a retried row's earlier backoffs are not counted as
+ * waiting on its sibling; `waitsOn` is the id of the running row — or, for a role's start fenced
+ * behind its issue's branch row, that branch row while it runs. */
+const legionHeldOutboxRow = z.strictObject({
+  id: z.number().int().positive(),
+  kind: nonEmptyString,
+  issue: nonEmptyString,
+  waitedSeconds: z.number().int().nonnegative(),
+  waitsOn: z.number().int().positive(),
+});
+
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
  * (Zod's plain `record` over an enum demands every key). */
 const legionIssue = z.strictObject({
@@ -205,7 +219,7 @@ const legionIssue = z.strictObject({
   status: nonEmptyString,
   /** The repository (`owner/name`) the issue targets and that repository's default branch, taken
    * when the daemon first recorded the issue and never changed after; absent on an issue the
-   * workflow does not record (phase `unrecorded`, an operator's claim) (contract 29). */
+   * workflow does not record (phase `unrecorded`, an operator's claim) (contract 30). */
   repo: nonEmptyString.optional(),
   defaultBranch: nonEmptyString.optional(),
   /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
@@ -279,14 +293,14 @@ const legionCapabilityState = z.strictObject({
 });
 
 /** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
- * Sandbox, its `state` (`failing` with the kubelet's `reason`), whether its pod is Ready and its
- * address then, from its last health read the default branch's `head`, `lastFetchAt` and the
- * `bytes` it serves or the read's `healthError`, and, for a repository the mapping no longer names,
- * `retainedUntil` (contract 30). */
+ * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
+ * whether its pod is Ready behind its own Service and its address then, from its last health read
+ * the default branch's `head`, `lastFetchAt` and the `bytes` it serves or the read's
+ * `healthError`, and, for a repository the mapping no longer names, `retainedUntil` (contract 31). */
 const legionCacheView = z.strictObject({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
-  state: z.enum(["starting", "cloning", "ready", "failing"]),
+  state: z.enum(["starting", "cloning", "ready", "failing", "refused"]),
   reason: nonEmptyString.optional(),
   ready: z.boolean(),
   address: nonEmptyString.optional(),
@@ -301,8 +315,8 @@ const legionCacheView = z.strictObject({
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
  * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
  * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
- * of repositories the mapping no longer names. Every list sorted and never null (contracts 29,
- * 30). */
+ * of repositories the mapping no longer names. Every list sorted and never null (contracts 30,
+ * 31). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
   mapped: z.array(
@@ -321,13 +335,16 @@ const legionRepositories = z.strictObject({
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
- * claim nothing will wake, by issue and then role, never null (contract 23); `repositories` is the
- * project's repository mapping as the daemon serves it (contract 29). */
+ * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
+ * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
+ * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
+ * serves it (contract 30). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
   issues: z.record(z.string(), legionIssue),
   pendingStatusWrites: z.array(legionPendingStatusWrite),
+  heldOutboxRows: z.array(legionHeldOutboxRow),
   strandedClaims: z.array(legionStrandedClaim),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),

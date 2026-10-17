@@ -783,7 +783,7 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 	moved := advance(t, remote, "moved")
 	var logged []string
 	report, err := workspace.Fetch(context.Background(), run, workspace.FetchRequest{
-		Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Repo: ghrepo.MustParse("acme/widgets"), Token: func() (string, error) { return "ghs_pod", nil }, CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 		Log: func(line string) { logged = append(logged, line) }, Clock: workspace.WallClock{}, CacheURL: c.url, CacheToken: testCacheToken,
 	})
 	if err != nil {
@@ -806,11 +806,12 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 	}
 }
 
-// /healthz and /tar answer only a request carrying the cache's own token: none, or another, is
-// 401, and says nothing of the repository. An answered one names the repository in
-// workspace.CacheRepositoryHeader. /readyz, the kubelet's readiness probe, which carries no
-// token, answers 503 then 200 with nothing but its status.
-func TestEveryAnswerButReadinessNeedsTheCachesToken(t *testing.T) {
+// /tar answers only a request carrying the cache's own token: none, or another, is 401, and says
+// nothing of the repository. /healthz, its health, which carries no secret and nothing of the
+// repository's content, answers any request, a token or none, the same way: 200 and the health,
+// naming the repository in workspace.CacheRepositoryHeader. /readyz, the kubelet's readiness
+// probe, answers 503 then 200 with nothing but its status.
+func TestOnlyTheTarNeedsTheCachesToken(t *testing.T) {
 	remote := newRemote(t)
 	run := newTestRunner(t, remote)
 	started, release := run.hold()
@@ -822,19 +823,26 @@ func TestEveryAnswerButReadinessNeedsTheCachesToken(t *testing.T) {
 	}
 	release()
 	c.ready(t)
-	for _, path := range []string{"/healthz", "/tar"} {
-		for _, bearer := range []string{"", "cache-token-of-acme-gadgets"} {
-			response := c.get(t, path, bearer)
-			body, _ := io.ReadAll(response.Body)
-			response.Body.Close()
-			if response.StatusCode != http.StatusUnauthorized || response.Header.Get(workspace.CacheRepositoryHeader) != "" || strings.Contains(string(body), "acme/widgets") {
-				t.Errorf("%s with bearer %q answers %d %q naming %q, want 401 naming nothing", path, bearer, response.StatusCode, body, response.Header.Get(workspace.CacheRepositoryHeader))
-			}
-		}
-		response := c.get(t, path, testCacheToken)
+	for _, bearer := range []string{"", "cache-token-of-acme-gadgets"} {
+		response := c.get(t, "/tar", bearer)
+		body, _ := io.ReadAll(response.Body)
 		response.Body.Close()
-		if response.StatusCode != http.StatusOK || response.Header.Get(workspace.CacheRepositoryHeader) != "acme/widgets" {
-			t.Errorf("%s with its token answers %d naming %q, want 200 naming acme/widgets", path, response.StatusCode, response.Header.Get(workspace.CacheRepositoryHeader))
+		if response.StatusCode != http.StatusUnauthorized || response.Header.Get(workspace.CacheRepositoryHeader) != "" || strings.Contains(string(body), "acme/widgets") {
+			t.Errorf("/tar with bearer %q answers %d %q naming %q, want 401 naming nothing", bearer, response.StatusCode, body, response.Header.Get(workspace.CacheRepositoryHeader))
+		}
+	}
+	if response := c.get(t, "/tar", testCacheToken); response.StatusCode != http.StatusOK || response.Header.Get(workspace.CacheRepositoryHeader) != "acme/widgets" {
+		t.Errorf("/tar with its token answers %d naming %q, want 200 naming acme/widgets", response.StatusCode, response.Header.Get(workspace.CacheRepositoryHeader))
+	} else {
+		response.Body.Close()
+	}
+	for _, bearer := range []string{"", "cache-token-of-acme-gadgets", testCacheToken} {
+		response := c.get(t, "/healthz", bearer)
+		var health Health
+		err := json.NewDecoder(response.Body).Decode(&health)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || response.Header.Get(workspace.CacheRepositoryHeader) != "acme/widgets" || err != nil || !health.Ready || health.Repo != "acme/widgets" {
+			t.Errorf("/healthz with bearer %q answers %d naming %q: %+v (%v), want 200 and the health naming acme/widgets", bearer, response.StatusCode, response.Header.Get(workspace.CacheRepositoryHeader), health, err)
 		}
 	}
 	response := c.get(t, "/readyz", "")
@@ -847,8 +855,9 @@ func TestEveryAnswerButReadinessNeedsTheCachesToken(t *testing.T) {
 
 // Two caches of two repositories, each with its own token: an issue pod of acme/widgets that is
 // handed acme/gadgets's cache — a cache pod replaced and its address reused — takes nothing from
-// it. Its own token is refused there, and even with acme/gadgets's token the answer names another
-// repository: no ref, tag or object of acme/gadgets reaches its feed. Its own cache fills the feed.
+// it, whichever token it holds. The cache's health already names another repository, so the fetch
+// is refused before it asks for the tar or presents a token: no ref, tag or object of acme/gadgets
+// reaches its feed. Its own cache fills the feed.
 func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	widgets, gadgets := newRemote(t), newRemote(t)
 	tagged := advance(t, gadgets, "gadgets-only")
@@ -861,7 +870,7 @@ func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	otherCache.ready(t)
 	fetch := func(cache *running, bearer string) (workspace.FetchReport, string, error) {
 		request := workspace.FetchRequest{
-			Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+			Repo: ghrepo.MustParse("acme/widgets"), Token: func() (string, error) { return "ghs_pod", nil }, CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 			Log: func(string) {}, Clock: workspace.WallClock{}, CacheURL: cache.url, CacheToken: bearer,
 		}
 		report, err := workspace.Fetch(context.Background(), run, request)
@@ -870,7 +879,7 @@ func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	for _, tc := range []struct {
 		bearer, says string
 	}{
-		{testCacheToken, "/healthz answered 401 Unauthorized"},
+		{testCacheToken, "is the repository cache of acme/gadgets, not of acme/widgets"},
 		{"cache-token-of-acme-gadgets", "is the repository cache of acme/gadgets, not of acme/widgets"},
 	} {
 		_, feed, err := fetch(otherCache, tc.bearer)

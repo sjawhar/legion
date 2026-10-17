@@ -161,6 +161,9 @@ export interface DispatchToolResult {
   readonly details: Record<string, unknown>;
   /** Pictures the model is shown after the text, in the order the text names them. */
   readonly images?: readonly ToolImage[];
+  /** What the caller should hear beside the result rather than in it: the dispatch CLI writes
+   *  each line to stderr. The text already says what the reader needs. */
+  readonly warnings?: readonly string[];
 }
 
 interface ResolvedArtifact {
@@ -1331,14 +1334,48 @@ function progressText(progress: IssueProgress | undefined, sep: string): string 
 }
 
 /** Which repository the issue targets and where it came from: its own, or resolved through its
- *  parent chain and the project's default mapping. */
+ *  parent chain and the project's default mapping. A Dispatch server from before the repository
+ *  fields sends neither field, and its answer is unknown, never none: none means the server
+ *  resolved no repository. */
 function repositoryLine(issue: {
-  readonly repo: string | null;
-  readonly resolved_repo: string | null;
+  readonly repo?: string | null;
+  readonly resolved_repo?: string | null;
 }): string {
+  if (issue.resolved_repo === undefined) return `Repository: ${REPOSITORY_UNKNOWN}`;
   if (issue.resolved_repo === null) return "Repository: none";
-  if (issue.repo !== null) return `Repository: ${issue.repo} (own)`;
+  if (issue.repo !== null && issue.repo !== undefined) return `Repository: ${issue.repo} (own)`;
   return `Repository: ${issue.resolved_repo} (inherited or project default)`;
+}
+
+const REPOSITORY_UNKNOWN = "unknown (this Dispatch server predates repository fields; upgrade it)";
+
+/** The warning a read from a Dispatch server without the repository fields carries: it names the
+ *  refusal this client does not make, so a session's clients can update before its server does. */
+function repositoryFieldsWarnings(issue: {
+  readonly key: string;
+  readonly resolved_repo?: string | null;
+}): { readonly warnings?: readonly string[] } {
+  if (issue.resolved_repo !== undefined) return {};
+  return {
+    warnings: [
+      `dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so ${issue.key}'s repository is unknown; upgrade the server`,
+    ],
+  };
+}
+
+/** A Dispatch server from before the repository fields that takes a write naming `repo` answers
+ *  without the field: it did not save the repository, and that must not pass as a success. The
+ *  error says what the server did do, so the agent does not repeat the rest of the write. */
+function refuseUnsavedRepository(
+  verb: "created" | "updated",
+  issue: { readonly key: string; readonly repo?: string | null },
+  repo: string | undefined
+): void {
+  if (repo === undefined || issue.repo !== undefined) return;
+  const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
+  throw new Error(
+    `Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`
+  );
 }
 
 function issueSummary(
@@ -1355,7 +1392,6 @@ function issueSummary(
   if (issue.assignee === undefined) throw new Error("Dispatch issue is missing assignee");
   if (issue.components === undefined) throw new Error("Dispatch issue is missing components");
   if (issue.claim === undefined) throw new Error("Dispatch issue is missing claim");
-  if (issue.resolved_repo === undefined) throw new Error("Dispatch issue is missing resolved_repo");
   if (issue.external_links === undefined) {
     throw new Error("Dispatch issue is missing external_links");
   }
@@ -2304,6 +2340,7 @@ export async function executeDispatchTool(
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
+        refuseUnsavedRepository("created", created, repo);
         const componentGuidance = await architectureGuidance(
           client,
           created.project,
@@ -2385,10 +2422,19 @@ export async function executeDispatchTool(
           throw withAccount(error, told);
         }
       }
-      // The server replaces the whole link set; the common call is "link the pull request
-      // I just opened", so merge by URL and keep every existing link (and its kind).
+      // The server replaces the whole link set. The common call is "link the pull request I just
+      // opened", so a non-empty list merges by URL and keeps every existing link (and its kind).
+      // An explicit empty list (only `--clear-external-links` sends one) is a genuine clear: it
+      // replaces the set with nothing rather than merging in zero new links, which would just
+      // re-send the issue's current links unchanged.
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
+      const sentLinks =
+        requestedLinks === undefined
+          ? undefined
+          : requestedLinks.length === 0
+            ? []
+            : [...before.external_links, ...newLinks.map((url) => ({ url }))];
       let after: Advised<Issue>;
       try {
         after = await client.updateIssue(issueKey, {
@@ -2401,9 +2447,7 @@ export async function executeDispatchTool(
           ...(blockedBy === undefined ? {} : { blocked_by: blockedBy }),
           ...(components === undefined ? {} : { components }),
           ...(repo === undefined ? {} : { repo: repo === "" ? null : repo }),
-          ...(requestedLinks === undefined
-            ? {}
-            : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
+          ...(sentLinks === undefined ? {} : { external_links: sentLinks }),
           actor,
         });
       } catch (error) {
@@ -2429,6 +2473,7 @@ export async function executeDispatchTool(
         if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken, landed);
         throw withAccount(error, landed);
       }
+      refuseUnsavedRepository("updated", after, repo);
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
         ...(closingNote === undefined
@@ -2445,9 +2490,11 @@ export async function executeDispatchTool(
         ...(requestedLinks === undefined
           ? []
           : [
-              newLinks.length === 0
-                ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
-                : `linked ${newLinks.join(", ")} ${linkCount}`,
+              requestedLinks.length === 0
+                ? "external links cleared"
+                : newLinks.length === 0
+                  ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
+                  : `linked ${newLinks.join(", ")} ${linkCount}`,
             ]),
         ...(route === undefined
           ? []
@@ -3432,6 +3479,7 @@ export async function executeDispatchTool(
         ),
         details: { issue: read.issue.key },
         ...showImages(pictures),
+        ...repositoryFieldsWarnings(read.issue),
       };
     }
     default:

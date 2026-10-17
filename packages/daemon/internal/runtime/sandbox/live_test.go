@@ -150,6 +150,16 @@ func (r *liveRig) mappedRepositories() []ghrepo.Repository {
 	return slices.Clone(r.mapped)
 }
 
+// mapRepository adds repo to the run's mapping, as Dispatch's mapping names a repository before
+// any issue of it launches.
+func (r *liveRig) mapRepository(repo ghrepo.Repository) {
+	r.mappedMu.Lock()
+	defer r.mappedMu.Unlock()
+	if !slices.Contains(r.mapped, repo) {
+		r.mapped = append(r.mapped, repo)
+	}
+}
+
 // liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
 // `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
 // and memory, the tester's ephemeral-storage limit beside them, the reviewer's memory alone (its
@@ -634,8 +644,9 @@ type liveRig struct {
 	// trees is the durable state every runtime of the run reads (Options.Store): every tree live
 	// until a check records its cleanup confirmed.
 	trees *fakeStore
-	// mapped is the repositories the run maps (Options.Mapped): none until repository-cache maps
-	// LEGION_E2E_REPO, so no sweep before it makes a cache the run did not ask for.
+	// mapped is the repositories the run maps (Options.Mapped): each added just before its first
+	// issue pod launches (root-ready, second-owner), so no sweep makes a cache the run's first
+	// launch of that repository is to make.
 	mappedMu sync.Mutex
 	mapped   []ghrepo.Repository
 
@@ -793,10 +804,8 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// replaces while the displaced role still runs in it (displaced).
 		{"displaced", "S4A-6", "S4A-6", claim.RoleArchitect},
 		{"displacer", "S4A-6", "S4A-6", claim.RoleImplementer},
-		// cache-a and cache-b are two more issue pods on the run's repository: cache-a launched
-		// before the repository has a cache (repository-cache), cache-b while its cache is Ready
+		// cache-b is one more issue pod on the run's repository, launched while its cache is Ready
 		// (cache-second-pod) and again after its volume is lost (cache-lost-volume).
-		{"cache-a", "S4A-8", "S4A-8", claim.RoleArchitect},
 		{"cache-b", "S4A-9", "S4A-9", claim.RoleArchitect},
 		// second-owner is an issue pod on the repository of the run's other owner (second-owner).
 		{"second-owner", "S4A-7", "S4A-7", claim.RoleImplementer},
@@ -1052,12 +1061,12 @@ func (r *liveRig) poll(limit time.Duration, what string, cond func() (bool, erro
 
 // ---- launching, as the machine does -----------------------------------------------------------
 
-// spec is the claim's launch: on LEGION_E2E_REPO at its default branch, or, for a claim on another
-// repository (liveClaim.repo), on LEGION_E2E_REPO_SECOND_OWNER at its own.
+// spec is the claim's launch: on its repository (claimRepository) at that repository's default
+// branch.
 func (r *liveRig) spec(c *liveClaim, resume string) runtime.SpawnSpec {
-	repo, branch := r.env.repo, r.defaultBranch
+	repo, branch := r.claimRepository(c), r.defaultBranch
 	if !c.repo.IsZero() {
-		repo, branch = c.repo, r.secondDefaultBranch
+		branch = r.secondDefaultBranch
 	}
 	return runtime.SpawnSpec{
 		Claim: c.token, Project: r.env.claimProject, Tree: c.tree, Issue: c.issue, Role: c.role,
@@ -1065,6 +1074,15 @@ func (r *liveRig) spec(c *liveClaim, resume string) runtime.SpawnSpec {
 		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: repo, DefaultBranch: branch,
 		ResumeSessionFile: resume,
 	}
+}
+
+// claimRepository is c's repository: LEGION_E2E_REPO, or, for a claim on another repository
+// (liveClaim.repo), LEGION_E2E_REPO_SECOND_OWNER.
+func (r *liveRig) claimRepository(c *liveClaim) ghrepo.Repository {
+	if !c.repo.IsZero() {
+		return c.repo
+	}
+	return r.env.repo
 }
 
 // spawn is a Spawn of the claim's next generation; armed false mints a token no hello registers.

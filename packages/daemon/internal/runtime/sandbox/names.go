@@ -198,7 +198,7 @@ func CacheSandboxName(project string, repo ghrepo.Repository) string {
 }
 
 // cacheSecretName is a cache's Secret, which its Sandbox owns: the implement App's token for the
-// repository's owner.
+// repository's owner, and the cache's bearer token its clients present.
 func cacheSecretName(sandbox string) string { return sandbox + "-token" }
 
 // cacheClaimName is a cache's volume claim, as the controller names the claim it makes from the

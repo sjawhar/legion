@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -66,7 +67,7 @@ func newProvisioningCredential(parent, token string) (remote, error) {
 		}
 		return remote{}, cause
 	}
-	tokenFile := filepath.Join(directory, "token")
+	tokenFile := filepath.Join(directory, provisioningTokenName)
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		return cleanup(fmt.Errorf("write provisioning token: %w", err))
 	}
@@ -90,6 +91,21 @@ func newProvisioningCredential(parent, token string) (remote, error) {
 			"GIT_CONFIG_VALUE_1=!" + shellprefix.Literal(helper),
 		},
 	}, nil
+}
+
+// provisioningTokenName is the one-shot credential's token file, in its directory.
+const provisioningTokenName = "token"
+
+// setToken writes token over the one-shot credential's, which git's helper reads at each request
+// for it: Fetch's, before each transfer from GitHub, with the token as it stands then.
+func (r remote) setToken(token string) error {
+	if token == "" {
+		return errors.New("workspace provisioning token is required")
+	}
+	if err := os.WriteFile(filepath.Join(r.dir, provisioningTokenName), []byte(token), 0o600); err != nil {
+		return fmt.Errorf("write provisioning token: %w", err)
+	}
+	return nil
 }
 
 func (r remote) remove() error {
@@ -221,8 +237,11 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
 // contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
 // clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.shared) it is a git
-// clone shared with the feed (sharedClone), which copies none of the history.
-func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultBranch string, source remote) error {
+// clone shared with the feed (sharedClone), which copies none of the history. The steps whose
+// duration follows the repository's size (the clone, or a shared clone's checkout and then jj's
+// import of every commit) share one CloneTimeout, counted on clock from the first's start, each
+// given what remains of it (cloneSteps), not the runner's slow-command budget.
+func ensureRepoClone(ctx context.Context, run Runner, clock Clock, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
 		return err
@@ -248,11 +267,12 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultB
 		_ = os.RemoveAll(temporary)
 	}()
 
+	steps := cloneSteps{clock: clock, deadline: clock.Now().Add(CloneTimeout)}
 	if source.shared != "" {
-		if err := sharedClone(ctx, run, temporary, remote, defaultBranch, source); err != nil {
+		if err := sharedClone(ctx, run, steps, temporary, remote, defaultBranch, source); err != nil {
 			return err
 		}
-	} else if _, err := RunChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, source.env, ""); err != nil {
+	} else if err := steps.run(ctx, run, []string{"jj", "git", "clone", remote, temporary}, source.env); err != nil {
 		return err
 	}
 	complete, err := pathExists(filepath.Join(temporary, ".jj"))
@@ -283,15 +303,15 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultB
 // working tree jj's first snapshot would record every file deleted in the clone's own workspace. A
 // default branch the feed lacks is left untracked, for the base's own refusal to name
 // (baseCommit).
-func sharedClone(ctx context.Context, run Runner, temporary, remote, defaultBranch string, source remote) error {
-	if _, err := RunChecked(ctx, run, []string{"git", "clone", "--shared", "--quiet", source.shared, temporary}, source.env, ""); err != nil {
+func sharedClone(ctx context.Context, run Runner, steps cloneSteps, temporary, remote, defaultBranch string, source remote) error {
+	if err := steps.run(ctx, run, []string{"git", "clone", "--shared", "--quiet", source.shared, temporary}, source.env); err != nil {
 		return err
 	}
 	gitDir := filepath.Join(temporary, ".git")
 	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, ""); err != nil {
 		return err
 	}
-	if _, err := RunChecked(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil, ""); err != nil {
+	if err := steps.run(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil); err != nil {
 		return err
 	}
 	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, "")
@@ -302,6 +322,26 @@ func sharedClone(ctx context.Context, run Runner, temporary, remote, defaultBran
 		return nil
 	}
 	_, err = runCheckedOnClone(ctx, run, temporary, "bookmark", "track", originRow(defaultBranch))
+	return err
+}
+
+// cloneSteps is the one CloneTimeout the shared clone's size-following steps share, ending at
+// deadline by clock: ProvisionBound budgets one CloneTimeout for workspace-init's clone.
+type cloneSteps struct {
+	clock    Clock
+	deadline time.Time
+}
+
+// run runs one size-following step of the shared clone's clone under what remains of the shared
+// CloneTimeout, checked as RunChecked checks its commands; a step with nothing left fails, naming
+// the bound, without running.
+func (s cloneSteps) run(ctx context.Context, run Runner, argv, env []string) error {
+	left := s.deadline.Sub(s.clock.Now())
+	if left <= 0 {
+		return fmt.Errorf("the shared clone's %s bound ran out before %s", CloneTimeout, strings.Join(argv, " "))
+	}
+	result, err := runCommandTimeout(ctx, run, argv, env, "", left)
+	_, err = checkedResult(argv, result, err)
 	return err
 }
 

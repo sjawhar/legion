@@ -485,7 +485,7 @@ func TestARateLimitOnTheReviewsReadEndsThePass(t *testing.T) {
 	seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Repo: "acme/widgets", DefaultBranch: "main", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
 			Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "V"}); err != nil {
 			return err
 		}

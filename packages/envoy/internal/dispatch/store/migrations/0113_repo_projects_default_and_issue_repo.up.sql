@@ -1,4 +1,4 @@
--- 0112_repo_projects_default_and_issue_repo.up.sql — a project's default repository and an issue's own.
+-- 0113_repo_projects_default_and_issue_repo.up.sql — a project's default repository and an issue's own.
 --
 -- A project maps many repositories (0005) and names at most one of them its default, which an issue
 -- with no repository of its own and none on its parent chain resolves to. An issue's own repository

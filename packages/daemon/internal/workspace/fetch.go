@@ -26,14 +26,17 @@ import (
 // inherits (config.go).
 var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
 
-// FetchRequest is a pod's first init container's: the repository, the provisioning token, the
-// directory its one-shot credential goes under, the feed directory, the log each retried transfer
-// and each wait on the cache are told to, the clock the retries and that wait read and wait on, and
-// the repository cache's address and the bearer token it takes (an issue pod's, under the
-// Kubernetes runtime), both empty for the cache's own process, which fills its clone from GitHub.
+// FetchRequest is a pod's first init container's: the repository, how to read the provisioning
+// token (Token), the directory its one-shot credential goes under, the feed directory, the log each
+// retried transfer and each wait on the cache are told to, the clock the retries and that wait read
+// and wait on, and the repository cache's address and the bearer token it takes (an issue pod's,
+// under the Kubernetes runtime), both empty for the cache's own process, which fills its clone from
+// GitHub.
 type FetchRequest struct {
-	Repo          ghrepo.Repository
-	Token         string
+	Repo ghrepo.Repository
+	// Token answers the provisioning token as it stands when called, never a copy kept from an
+	// earlier call: the file a pod mounts it at, which the daemon keeps fresh while the fetch runs.
+	Token         func() (string, error)
 	CredentialDir string
 	Feed          string
 	Log           func(line string)
@@ -80,19 +83,31 @@ type FetchReport struct {
 // download of the repository. With none, the feed is cloned bare from GitHub: what the cache's own
 // process does. Provision then clones the shared clone from the feed with no credential.
 //
-// A transfer from GitHub that fails transiently (transientCloneFailure) is run again after the
-// next of fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left
-// removed first, all within FetchTimeout from the first attempt's start: each attempt is bounded by
-// what remains of it, and no retry starts past it. A transfer still failing after the last wait,
-// and every other failure, is the answer at once. Each attempt's stderr has the token replaced by
-// *** as soon as the attempt returns, so nothing Fetch logs or returns carries it, wherever git
-// echoed it.
+// What the fetch does once it may start — at once, or once the cache is ready — shares one
+// FetchTimeout: the cache's stream, its verification and the delta from GitHub, or a clone or fetch
+// from GitHub, each bounded by what remains of it, and none started past it. So a fetch ends within
+// FetchBudget, however long it waited on the cache. Every attempt of a transfer from GitHub reads
+// the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
+// presents the token as its file stands then, not as it stood when the fetch began. A transfer
+// from GitHub that fails transiently (transientCloneFailure) is run again after the next of
+// fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left removed
+// first, and no retry starts past the bound. A transfer still failing after the last wait, and
+// every other failure, is the answer at once. Each attempt's stderr has every token the fetch has
+// read replaced by *** as soon as the attempt returns, so nothing Fetch logs or returns carries
+// one, wherever git echoed it.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, error) {
 	feed, err := FeedRepository(request.Feed, request.Repo)
 	if err != nil {
 		return FetchReport{}, err
 	}
-	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
+	if request.Token == nil {
+		return FetchReport{}, errors.New("workspace fetch token is required")
+	}
+	token, err := request.Token()
+	if err != nil {
+		return FetchReport{}, err
+	}
+	github := gitHubSource{token: token, credentialDir: request.CredentialDir}
 	if err := github.check(request.Repo); err != nil {
 		return FetchReport{}, err
 	}
@@ -119,13 +134,14 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if err != nil {
 		return FetchReport{}, err
 	}
-	env := merge(credential.env, isolatedGitConfig)
+	held := &fetchCredential{remote: credential, env: merge(credential.env, isolatedGitConfig), read: request.Token, held: []string{token}}
 	report := FetchReport{Feed: feed}
 	if present {
 		if err := RemoveStaleFeedLocks(feed, request.Clock.Now(), request.Log); err != nil {
 			return FetchReport{}, err
 		}
-		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, env); err != nil {
+		deadline := request.Clock.Now().Add(FetchTimeout)
+		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, held, deadline); err != nil {
 			return FetchReport{}, err
 		}
 		return report, credential.remove()
@@ -143,11 +159,14 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		if err := waitForCache(ctx, request); err != nil {
 			return FetchReport{}, err
 		}
+	}
+	deadline := request.Clock.Now().Add(FetchTimeout)
+	if request.CacheURL != "" {
 		started := request.Clock.Now()
-		streamed, err := unpackCache(ctx, run, request, staging)
+		streamed, err := unpackCache(ctx, run, request, staging, deadline)
 		verifying := request.Clock.Now()
 		if err == nil {
-			err = verifyCache(ctx, run, staging)
+			err = verifyCache(ctx, run, request, staging, deadline)
 		}
 		if err != nil {
 			return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
@@ -156,7 +175,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		transfer = fetchInto(staging, request.Repo)
 	}
 	report.Cloned = transfer.verb == "clone"
-	if err := report.fromGitHub(ctx, run, request, transfer, staging, env); err != nil {
+	if err := report.fromGitHub(ctx, run, request, transfer, staging, held, deadline); err != nil {
 		return FetchReport{}, err
 	}
 	if err := feedConfiguration(ctx, run, staging); err != nil {
@@ -168,10 +187,11 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	return report, credential.remove()
 }
 
-// fromGitHub runs transfer into the bare repository gitDir under env, with Fetch's retries, and
-// records how much the repository's objects grew across it and how many refs it made, moved or
-// deleted. A clone's gitDir holds no repository before it runs: nothing, and no ref.
-func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, env []string) error {
+// fromGitHub runs transfer into the bare repository gitDir under the one-shot credential held,
+// with Fetch's retries, all before deadline, and records how much the repository's objects grew
+// across it and how many refs it made, moved or deleted. A clone's gitDir holds no repository
+// before it runs: nothing, and no ref.
+func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, held *fetchCredential, deadline time.Time) error {
 	refsBefore, err := feedRefs(ctx, run, gitDir, transfer.verb == "fetch")
 	if err != nil {
 		return err
@@ -180,7 +200,7 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 	if err != nil {
 		return err
 	}
-	if err := transferWithRetries(ctx, run, request, transfer, env); err != nil {
+	if err := transferWithRetries(ctx, run, request, transfer, held, deadline); err != nil {
 		return err
 	}
 	refsAfter, err := feedRefs(ctx, run, gitDir, true)
@@ -245,8 +265,9 @@ func objectsSize(gitDir string) (int64, error) {
 	return size, err
 }
 
-// cacheClient reaches the repository cache directly, at the pod address it is given: no proxy the
-// container's environment names stands between an issue pod and a pod of its own namespace.
+// cacheClient reaches the repository cache directly, at the address it is given, the cache's
+// Service: no proxy the container's environment names stands between an issue pod and a pod of its
+// own namespace.
 var cacheClient = &http.Client{Transport: &http.Transport{Proxy: nil, ForceAttemptHTTP2: false}}
 
 // CachePoll is how long Fetch waits between two asks of a repository cache that is not ready.
@@ -256,16 +277,25 @@ const CachePoll = 10 * time.Second
 // first clone is bounded by FetchTimeout, and the rest is its pod's scheduling and volume.
 const CacheWaitTimeout = FetchTimeout + 10*time.Minute
 
+// FetchBudget is the whole of a fetch, end to end: at most CacheWaitTimeout waiting for the
+// repository cache, then FetchTimeout for the cache's stream, its verification and the delta from
+// GitHub together. The Sandbox runtime allows a launching pod's provisioning this much
+// (sandbox.Runtime.ProvisionBound), so a fetch that runs out of it fails, naming why, before the
+// launch would give up on it.
+const FetchBudget = CacheWaitTimeout + FetchTimeout
+
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
 // 200 ready, logging what it answered whenever that changes and at least once a minute, and fails
-// with the last answer once a further ask would start past CacheWaitTimeout. An answer that refuses
-// the token, or names another repository (askCache), fails it at once: no wait makes either right.
+// with the last answer once a further ask would start past CacheWaitTimeout. Each ask is bounded
+// by cacheAsk, and by what remains of the wait, so the wait ends within it. An answer that names
+// another repository (askCache) fails it at once: no wait makes that right. The asks carry no
+// credential (cacheNotReady).
 func waitForCache(ctx context.Context, request FetchRequest) error {
 	deadline := request.Clock.Now().Add(CacheWaitTimeout)
 	var logged string
 	var loggedAt time.Time
 	for {
-		why, err := cacheNotReady(ctx, request)
+		why, err := cacheNotReady(ctx, request, min(cacheAsk, deadline.Sub(request.Clock.Now())))
 		if err != nil {
 			return err
 		}
@@ -286,12 +316,17 @@ func waitForCache(ctx context.Context, request FetchRequest) error {
 	}
 }
 
+// cacheAsk bounds one ask of a repository cache's /healthz.
+const cacheAsk = 30 * time.Second
+
 // cacheNotReady is why the repository cache is not ready to stream, or "" when its /healthz
-// answers 200 with ready set; an answer askCache refuses is the error.
-func cacheNotReady(ctx context.Context, request FetchRequest) (string, error) {
-	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+// answers 200 with ready set, within timeout; an answer askCache refuses is the error. The ask
+// carries no credential: the cache answers its health to anyone, and its token goes with the tar
+// alone (unpackCache).
+func cacheNotReady(ctx context.Context, request FetchRequest, timeout time.Duration) (string, error) {
+	bounded, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	response, err := askCache(bounded, request, "/healthz")
+	response, err := askCache(bounded, request, "/healthz", false)
 	if response == nil {
 		return err.Error(), nil
 	}
@@ -315,22 +350,25 @@ func cacheNotReady(ctx context.Context, request FetchRequest) (string, error) {
 	return "", nil
 }
 
-// askCache is GET <cache><path> with the cache's bearer token. It answers (nil, the transport's
-// failure) when the cache could not be reached, which is worth another ask. An answer that refuses
-// the token (401), or whose CacheRepositoryHeader is not the request's repository, comes back with
-// the refusal as its error: the caller closes the body and takes nothing it carries.
-func askCache(ctx context.Context, request FetchRequest, path string) (*http.Response, error) {
+// askCache is GET <cache><path>, with the cache's bearer token when withToken is set. It answers
+// (nil, the transport's failure) when the cache could not be reached, which is worth another ask.
+// An answer that refuses the token (401) to a request that carried it, or whose
+// CacheRepositoryHeader is not the request's repository, comes back with the refusal as its error:
+// the caller closes the body and takes nothing it carries.
+func askCache(ctx context.Context, request FetchRequest, path string, withToken bool) (*http.Response, error) {
 	cache := strings.TrimSuffix(request.CacheURL, "/")
 	ask, err := http.NewRequestWithContext(ctx, http.MethodGet, cache+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	ask.Header.Set("Authorization", "Bearer "+request.CacheToken)
+	if withToken {
+		ask.Header.Set("Authorization", "Bearer "+request.CacheToken)
+	}
 	response, err := cacheClient.Do(ask)
 	if err != nil {
 		return nil, err
 	}
-	if response.StatusCode == http.StatusUnauthorized {
+	if withToken && response.StatusCode == http.StatusUnauthorized {
 		return response, fmt.Errorf("ask the repository cache %s: GET %s%s answered %s: it is not the cache whose token this pod holds", request.CacheURL, cache, path, response.Status)
 	}
 	if named := strings.TrimSpace(response.Header.Get(CacheRepositoryHeader)); !strings.EqualFold(named, request.Repo.String()) {
@@ -344,20 +382,24 @@ func askCache(ctx context.Context, request FetchRequest, path string) (*http.Res
 }
 
 // unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
-// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
-// returns the tar's length; Fetch then verifies what it wrote (verifyCache). The answer must be
-// the request's repository's (askCache) before any of it is read. Every entry must be a regular
-// file or a directory whose cleaned name stays inside staging and is one of a repository's refs or
-// packs (FeedEntry); the first that is not ends the stream, refused by name, and the caller removes
-// what was written. The stream is read to its end, so a transfer the cache broke off is a failure,
-// not a short repository.
-func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string) (int64, error) {
+// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), before
+// deadline, and returns the tar's length; Fetch then verifies what it wrote (verifyCache). The
+// answer must be the request's repository's (askCache) before any of it is read. Every entry must
+// be a regular file or a directory whose cleaned name stays inside staging and is one of a
+// repository's refs or packs (FeedEntry); the first that is not ends the stream, refused by name,
+// and the caller removes what was written. The stream is read to its end, so a transfer the cache
+// broke off is a failure, not a short repository.
+func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) (int64, error) {
 	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
 		return 0, err
 	}
-	bounded, cancel := context.WithTimeout(ctx, FetchTimeout)
+	left, err := remaining(request, deadline, "the stream from the repository cache")
+	if err != nil {
+		return 0, err
+	}
+	bounded, cancel := context.WithTimeout(ctx, left)
 	defer cancel()
-	response, err := askCache(bounded, request, "/tar")
+	response, err := askCache(bounded, request, "/tar", true)
 	if response != nil {
 		defer response.Body.Close()
 	}
@@ -392,26 +434,45 @@ func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging 
 // hashes every object in it, writing the index git then reads, so no index of the cache's is
 // trusted), and every object the refs reach must then be present (`git fsck --connectivity-only`).
 // A pack that does not index and a history that is not whole are refused, naming git's answer.
-// Each runs within FetchTimeout, as a transfer does, since both follow the repository's size.
-func verifyCache(ctx context.Context, run Runner, staging string) error {
+// Each runs within what remains before deadline, the bound the stream and the delta share, since
+// both follow the repository's size; one with nothing left fails the fetch, naming the bound.
+func verifyCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) error {
 	packs, err := filepath.Glob(filepath.Join(staging, "objects", "pack", "pack-*.pack"))
 	if err != nil {
 		return err
 	}
-	verify := func(argv []string) error {
-		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", FetchTimeout)
+	verify := func(argv []string, left time.Duration) error {
+		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", left)
 		_, err = checkedResult(argv, result, err)
 		return err
 	}
 	for _, pack := range packs {
-		if err := verify([]string{"git", "--git-dir=" + staging, "index-pack", pack}); err != nil {
+		left, err := remaining(request, deadline, "indexing the repository cache's pack "+filepath.Base(pack))
+		if err != nil {
+			return err
+		}
+		if err := verify([]string{"git", "--git-dir=" + staging, "index-pack", pack}, left); err != nil {
 			return fmt.Errorf("the repository cache's pack %s, which does not verify: %w", filepath.Base(pack), err)
 		}
 	}
-	if err := verify([]string{"git", "--git-dir=" + staging, "fsck", "--connectivity-only", "--no-dangling", "--no-progress"}); err != nil {
+	left, err := remaining(request, deadline, "checking the repository cache's history is whole")
+	if err != nil {
+		return err
+	}
+	if err := verify([]string{"git", "--git-dir=" + staging, "fsck", "--connectivity-only", "--no-dangling", "--no-progress"}, left); err != nil {
 		return fmt.Errorf("the repository cache's history is not whole: %w", err)
 	}
 	return nil
+}
+
+// remaining is what is left before deadline, by request's clock, for what runs next, or the
+// fetch's failure naming it and the bound once nothing is.
+func remaining(request FetchRequest, deadline time.Time, what string) (time.Duration, error) {
+	left := deadline.Sub(request.Clock.Now())
+	if left <= 0 {
+		return 0, fmt.Errorf("the fetch's %s bound ran out before %s", FetchTimeout, what)
+	}
+	return left, nil
 }
 
 // unpackEntry writes one entry of the repository cache's tar into staging, refusing one a feed does
@@ -522,15 +583,20 @@ func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Re
 	return RunChecked(ctx, run, append([]string{"git", "--git-dir=" + gitDir}, args...), isolatedGitConfig, "")
 }
 
-// transferWithRetries runs transfer under env until it succeeds, retrying a transient failure as
-// Fetch says.
-func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, env []string) error {
-	scrub := strings.NewReplacer(request.Token, "***")
+// transferWithRetries runs transfer under the one-shot credential held until it succeeds, retrying
+// a transient failure as Fetch says, each attempt bounded by what remains before deadline and run
+// on the provisioning token as it stands when the attempt starts (renew).
+func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, held *fetchCredential, deadline time.Time) error {
 	now := request.Clock.Now()
-	deadline := now.Add(FetchTimeout)
+	if _, err := remaining(request, deadline, "the "+transfer.verb+" from GitHub"); err != nil {
+		return err
+	}
 	for attempt := 1; ; attempt++ {
-		result, runErr := runCommandTimeout(ctx, run, transfer.argv, env, "", deadline.Sub(now))
-		result.Stderr = scrub.Replace(result.Stderr)
+		if err := held.renew(); err != nil {
+			return fmt.Errorf("%s attempt %d: %w", transfer.verb, attempt, err)
+		}
+		result, runErr := runCommandTimeout(ctx, run, transfer.argv, held.env, "", deadline.Sub(now))
+		result.Stderr = held.scrub(result.Stderr)
 		_, failed := checkedResult(transfer.argv, result, runErr)
 		if failed == nil {
 			return nil
@@ -559,6 +625,43 @@ func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, 
 			return fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
 		}
 	}
+}
+
+// fetchCredential is the one-shot credential a fetch's transfers from GitHub run under (remote,
+// with env the environment that names it), the way to read the provisioning token
+// (FetchRequest.Token), and every token it has held, none of which anything Fetch logs or returns
+// carries.
+type fetchCredential struct {
+	remote remote
+	env    []string
+	read   func() (string, error)
+	held   []string
+}
+
+// renew reads the provisioning token as it stands now and writes it over the credential's, so the
+// transfer about to start presents it: a token file the daemon refreshed during a long wait on the
+// repository cache, or a retry's backoff, is the one git is given, never the token the fetch began
+// with.
+func (c *fetchCredential) renew() error {
+	token, err := c.read()
+	if err != nil {
+		return fmt.Errorf("read the provisioning token: %w", err)
+	}
+	if err := c.remote.setToken(token); err != nil {
+		return err
+	}
+	if !slices.Contains(c.held, token) {
+		c.held = append(c.held, token)
+	}
+	return nil
+}
+
+// scrub is text with every token the credential has held replaced by ***.
+func (c *fetchCredential) scrub(text string) string {
+	for _, token := range c.held {
+		text = strings.ReplaceAll(text, token, "***")
+	}
+	return text
 }
 
 // Clock is the time Fetch's retries read and wait on: WallClock, or a test's own.

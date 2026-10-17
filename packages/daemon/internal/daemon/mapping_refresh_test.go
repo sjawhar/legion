@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -174,7 +173,7 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 	w, client, _, stream := mappingRig(t, map[string]bool{})
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		if err := w.records.PutIssue(ctx, tx, record.Issue{Key: "LEGION-300", Tree: "LEGION-300", Project: "LEGION", Title: "root", Phase: phase.Planning,
-			Generation: 1, Status: "in_progress", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main"}); err != nil {
+			Generation: 1, Status: "in_progress", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}); err != nil {
 			return err
 		}
 		return w.records.PutSlot(ctx, tx, record.Slot{Issue: "LEGION-300", Index: 0, AdmittedAt: time.Now()})
@@ -223,21 +222,17 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 }
 
 // GitHub intake hears a repository as GitHub spells it, which Envoy's subjects carry, whatever
-// spelling an issue's record keeps: a record the backfill filled with a clone's spelling is heard
-// once, under the served repository's GitHub spelling, and a live record on a repository the
-// mapping no longer serves is heard under the spelling GitHub last named for it.
+// spelling an issue's record keeps for its workspace: a record the backfill filled with a clone's
+// spelling is heard once, under the served repository's GitHub spelling, and a live record on a
+// repository the mapping no longer serves is heard under the GitHub spelling its record keeps, with
+// no read of GitHub.
 func TestGitHubIntakeHearsEachRepositoryAsGitHubSpellsIt(t *testing.T) {
 	ctx := context.Background()
 	w, _, _, _ := mappingRig(t, map[string]bool{})
-	github := newNamedGitHub(t, map[string]string{"orbit/gadgets": "Orbit/Gadgets@main"})
-	w.defaultBranches = newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
-	if _, err := w.defaultBranches.Named(ctx, ghrepo.MustParse("orbit/gadgets")); err != nil {
-		t.Fatal(err)
-	}
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		for index, issue := range []record.Issue{
-			{Key: "LEGION-300", Repo: "ACME/widgets", DefaultBranch: "main"},
-			{Key: "LEGION-301", Repo: "orbit/gadgets", DefaultBranch: "main"},
+			{Key: "LEGION-300", Repo: "ACME/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"},
+			{Key: "LEGION-301", Repo: "orbit/gadgets", DefaultBranch: "main", GitHubRepo: "Orbit/Gadgets"},
 		} {
 			issue.Tree, issue.Project, issue.Title, issue.Phase, issue.Generation, issue.Status, issue.Rank = issue.Key, "LEGION", issue.Key, phase.Planning, 1, "in_progress", "A"
 			if err := w.records.PutIssue(ctx, tx, issue); err != nil {

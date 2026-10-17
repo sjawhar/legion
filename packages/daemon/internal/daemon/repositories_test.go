@@ -101,8 +101,8 @@ func TestTheMappingServesOnlyRepositoriesBothAppsAreInstalledOn(t *testing.T) {
 		resolved string
 		want     workflow.Resolution
 	}{
-		{"acme/widgets", workflow.Resolution{Repo: "Acme/Widgets", DefaultBranch: "release/v7.1"}},
-		{"Acme/Widgets", workflow.Resolution{Repo: "Acme/Widgets", DefaultBranch: "release/v7.1"}},
+		{"acme/widgets", workflow.Resolution{Repo: "Acme/Widgets", DefaultBranch: "release/v7.1", GitHubRepo: "Acme/Widgets"}},
+		{"Acme/Widgets", workflow.Resolution{Repo: "Acme/Widgets", DefaultBranch: "release/v7.1", GitHubRepo: "Acme/Widgets"}},
 		{"acme/gadgets", workflow.Resolution{Refusal: "the review App is not installed on acme/gadgets", LeftOut: true}},
 		{"other/thing", workflow.Resolution{Refusal: "other/thing is not mapped to project LEGION in Dispatch"}},
 	} {
@@ -200,14 +200,14 @@ func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
 	view := repos.view([]sandbox.CacheStatus{
 		{Repo: ghrepo.MustParse("acme/legacy"), Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "failing",
 			Reason: "container cache ImagePullBackOff: pull access denied (restarted 0 times)", RetainedUntil: retained},
-		{Repo: ghrepo.MustParse("acme/widgets"), Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://10.8.1.4:8418",
+		{Repo: ghrepo.MustParse("acme/widgets"), Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
 			Health: &repocache.Health{Ready: true, Repo: "acme/widgets", Head: "34a7ac80", LastFetchAt: fetched, Bytes: 6612345678}},
 	})
 	want := api.RepositoriesView{
 		Owners: []string{"acme", "zeta"},
 		Mapped: []api.MappedRepositoryView{
 			{Repo: "Acme/Widgets", Default: true, Cache: &api.CacheView{
-				Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://10.8.1.4:8418",
+				Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
 				Head: "34a7ac80", LastFetchAt: fetched, Bytes: 6612345678,
 			}},
 			{Repo: "zeta/tools"},

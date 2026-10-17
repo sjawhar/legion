@@ -71,7 +71,7 @@ func TestReconcileLeavesAnIssueTheStreamHoldsNewerEventsFor(t *testing.T) {
 func TestReconcileHoldsARootUntilTheDispatchConsumerReachesTheStreamPosition(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-EDGE", ResolvedRepo: "acme/widgets", Title: "LEGION-EDGE", Status: "todo", Rank: "A", HandedOver: handed, LastSeq: 2},
@@ -100,7 +100,7 @@ func TestReconcileLogsTheHoldItStartsWithItsTargetAndAckFloor(t *testing.T) {
 	pool := migratedPool(t)
 	var logs bytes.Buffer
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(&logs, nil)))
-	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-EDGE", ResolvedRepo: "acme/widgets", Title: "LEGION-EDGE", Status: "todo", Rank: "A", HandedOver: handed, LastSeq: 2},
@@ -117,7 +117,7 @@ func TestReconcileLogsTheHoldItStartsWithItsTargetAndAckFloor(t *testing.T) {
 func TestReleaseLogsThePositionItReachedAndHowManyRootsItAdmitted(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-EDGE", ResolvedRepo: "acme/widgets", Title: "LEGION-EDGE", Status: "todo", Rank: "A", HandedOver: handed, LastSeq: 2},
 	}, 5, 2, false)
@@ -163,7 +163,7 @@ func TestPromotionHoldsADeferredRootAcrossUnrelatedFactsUntilTheStreamPositionCa
 			pool := migratedPool(t)
 			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			seedSlotted(t, pool, "LEGION-OTHER", "Z")
-			putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+			putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
 			reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 				{Key: "LEGION-EDGE", ResolvedRepo: "acme/widgets", Title: "LEGION-EDGE", Status: "todo", Rank: "A", HandedOver: handed, LastSeq: 2},
@@ -235,7 +235,7 @@ func TestReconcileReleasesImmediatelyWhenTheDispatchConsumerIsIdle(t *testing.T)
 func TestReleaseAppliesTheHeldSummaryBeforePromotingSoAnUnlabeledRootIsNeverAdmitted(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
 	// The listing itself already shows the label gone; LastSeq is ahead of the record, so
 	// Reconcile holds it on this summary rather than deciding now.
@@ -334,7 +334,7 @@ func TestReleaseLeavesTheHoldIntactWhenItsOwnTransactionFails(t *testing.T) {
 	engine := workflow.New(real, workflow.Config{Project: testProject, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, nil)
 	admission := New(failing, engine, 1, testProject, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admission.now = func() time.Time { return fixedNow }
-	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-EDGE", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-EDGE", Tree: "LEGION-EDGE", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-EDGE", ResolvedRepo: "acme/widgets", Title: "LEGION-EDGE", Status: "todo", Rank: "A", HandedOver: handed, LastSeq: 2},

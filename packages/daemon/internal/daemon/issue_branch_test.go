@@ -278,12 +278,12 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
 		githubAPI: github.url}
 	until := time.Now().Add(time.Hour)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
 		Generation: 2, Status: "in_progress", Rank: "U"})
 	parent := "LEGION-210"
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-210", Title: "Closed", Phase: phase.Done,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-210", Title: "Closed", Phase: phase.Done,
 		Generation: 1, Status: "backlog", Rank: "V", LingerUntil: &until})
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-210", Parent: &parent, Title: "Child",
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-210", Parent: &parent, Title: "Child",
 		Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
 
 	for _, row := range []record.OutboxRow{
@@ -310,13 +310,13 @@ func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string) (
 	return appauth.Lease{}, errors.New("GitHub is down")
 }
 
-// Branch creation and the disarm mint the implement App's token for the owner of the repository
-// the issue's record names, and a mint that fails names that owner, so the outbox's failure line
-// says whose installation refused.
-func TestBranchCreationAndTheDisarmNameTheOwnerTheyMintFor(t *testing.T) {
+// Branch creation, the disarm and the READY merge mint the implement App's token for the owner of
+// the repository the issue's record names, and a mint that fails names that owner, so the outbox's
+// failure line says whose installation refused.
+func TestBranchCreationTheDisarmAndTheREADYMergeNameTheOwnerTheyMintFor(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow",
+	issue := record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow",
 		Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
 	putOutboxIssue(t, pool, records, issue)
 	runner := &outbox{log: quietLogger(), pool: pool, records: records, tokens: refusingOwnerTokens{}}
@@ -327,5 +327,9 @@ func TestBranchCreationAndTheDisarmNameTheOwnerTheyMintFor(t *testing.T) {
 	row := mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 7}, time.Now())
 	if err := runner.autoMergeDisable(context.Background(), row, record.AutoMergeDisable{Number: 7}); err == nil || err.Error() != want {
 		t.Errorf("autoMergeDisable with a refused mint = %v, want %q", err, want)
+	}
+	merge := record.ReadyMerge{Number: 7, Head: "ready-head"}
+	if err := runner.readyMerge(context.Background(), mustOutboxRow(t, "LEGION-208", merge, time.Now()), merge); err == nil || err.Error() != want {
+		t.Errorf("readyMerge with a refused mint = %v, want %q", err, want)
 	}
 }

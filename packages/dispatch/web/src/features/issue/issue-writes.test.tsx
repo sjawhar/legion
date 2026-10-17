@@ -89,6 +89,9 @@ function stubIssueApi() {
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({
     "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
   });
+  // The header reads the project's repository mappings at once for an issue that resolves to
+  // none, as this one does; a project that maps none shows no repository item.
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([]);
   // The server answers a PATCH with the narrow `Issue`, not `IssueDetails`: no artifacts,
   // children, or open asks. The stub mirrors that so the page is exercised against the
   // real response shape.
@@ -106,6 +109,7 @@ function stubIssueApi() {
       getInbox.mockRestore();
       getIssueSubscribers.mockRestore();
       getMyState.mockRestore();
+      listRepoProjects.mockRestore();
       patchIssue.mockRestore();
     },
   };

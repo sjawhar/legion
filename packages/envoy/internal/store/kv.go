@@ -19,9 +19,6 @@ import (
 	"github.com/sjawhar/envoy/internal/routing"
 )
 
-const Bucket = "envoy_interests"
-const RoleBucket = "envoy_roles"
-
 // RoleClaim is the durable ownership record for a role lane. Role claims are
 // independent of interest records: a listener restart can temporarily age an
 // interest out before its still-running holder re-registers.
@@ -106,11 +103,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: Bucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: RoleBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
+	roleKV, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: opts.replicas, Storage: nats.FileStorage})
 	if err != nil {
 		return nil, err
 	}

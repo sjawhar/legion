@@ -37,6 +37,7 @@
       "lastError": "Dispatch unavailable"
     }
   ],
+  "heldOutboxRows": [],
   "strandedClaims": [],
   "capabilities": [],
   "repositories": {

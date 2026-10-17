@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,13 +44,13 @@ func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
 		}
 	}
 	gh := env["LEGION_GH_PATH"]
-	owner, named, err := ghTargetOf(args, env, func(path []string) (string, error) { return readGhHelp(gh, path) })
+	owner, err := ghTargetOf(args, env, func(path []string) (string, error) { return readGhHelp(gh, path) })
 	if err != nil {
 		fmt.Fprintf(stderr, "legion gh: %v\n", err)
 		return 2
 	}
 	dir := env["GH_CONFIG_DIR"]
-	if named {
+	if owner != "" {
 		if dir, err = ownerGHConfigDir(env["LEGION_GH_OWNERS_DIR"], owner); err != nil {
 			fmt.Fprintf(stderr, "legion gh: %v\n", err)
 			return 2
@@ -67,52 +69,76 @@ func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
 }
 
 // ghTargetOf is the owner, lowercased, of the repository the gh command argv (gh's arguments,
-// without `gh`) acts on, and whether the command names one at all. It fails closed: whenever it
-// cannot be certain which owner the command targets it is an error, which names the argument it
-// could not place, and nothing is sent. Only a command that names no repository at all is not
-// named, and gh then acts on its working directory's repository, the issue's.
+// without `gh`) acts on, empty when the command names none. It fails closed: whenever it cannot be
+// certain which owner the command targets it is an error, which names the argument it could not
+// place, and nothing is sent. Only a command that names no repository at all names no owner, and
+// gh then acts on its working directory's repository, the issue's; a command whose last --help is
+// true names none either, since gh only prints its help.
 //
 // It reads the command as gh does, from gh's own help of each command on the way (help): the
 // path of subcommands down to the leaf the arguments run, every option's arity, and the arguments
-// the leaf's USAGE line names. Before the leaf only the inherited -R/--repo and --help may come;
-// anything else there, a subcommand gh does not know, help that lists an option incompletely or
-// not at all, and an option the leaf's help does not list are errors. The leaf's options are read
-// with pflag's rules, and after `--` the rest are its arguments, unless its USAGE passes them on
-// (`gh repo clone <repository> [<directory>] [-- <gitflags>...]`).
+// the leaf's USAGE line names. A word its parent's help lists as a gh alias, whose expansion may
+// name a repository of its own, or as an extension, which reads gh's token itself, is an error
+// before its help is read, since reading it would run them; so is such a word as the target of
+// `gh help`, which for an extension gh runs (ghHelpTarget), and `gh copilot`, which runs another
+// program on gh's token, and a word whose help is another command's that lists no such alias of
+// its own. Before the leaf only the inherited -R/--repo and --help/-h may come, read with
+// the leaf's own options; anything else there, a subcommand gh does not know, help that lists an
+// option incompletely or not at all, an option the leaf's help does not list, and an argument its
+// USAGE has no place for or names in a way this does not know (ghSlotKinds) are errors. The leaf's
+// options are read with pflag's rules, and after `--` the rest are its arguments, unless its
+// USAGE passes them on (`gh repo clone <repository> [<directory>] [-- <gitflags>...]`).
 //
 // Every selector the leaf's help names counts: a `<repository>` (or another repository) argument,
 // an `<owner>`, a URL argument that is a github.com URL, a search `<query>`'s repo:/owner:/user:/
-// org: qualifiers, `gh api`'s endpoint (repos/<owner>/, orgs/<owner>/, users/<owner>/) and a
-// GraphQL query's owner variable (`-F owner=<login>`), and the options naming a repository or an
-// owner (-R/--repo, --repos, --owner, --org …). They must all name one owner; two are an error.
-// Only when none names one does GH_REPO name the owner, for a leaf that reads it: one with the
-// inherited -R, and gh api when its arguments hold a {owner} or {repo} placeholder gh fills from
-// it. A GraphQL query naming its repository otherwise, by a node id or in the query text, names
-// none gh could resolve, and runs as the issue owner's.
-func ghTargetOf(argv []string, env map[string]string, help func(path []string) (string, error)) (owner string, named bool, err error) {
-	var path, rest []string
+// org: qualifiers, `gh api`'s endpoint (repos/<owner>/, orgs/<owner>/, users/<owner>/, a search
+// endpoint's q) and a GraphQL query's owner variable (`-F owner=<login>`), and the options naming
+// a repository or an owner (-R/--repo, --repos, a name in --repos under --org, --owner, --org …).
+// They must all name one owner; two are an error. Only when none names one does GH_REPO name the
+// owner, for a leaf that reads it: one with the inherited -R, and gh api when its arguments hold a
+// {owner} or {repo} placeholder gh fills from it. A GraphQL query naming its repository otherwise,
+// by a node id or in the query text, names none gh could resolve, and runs as the issue owner's.
+// GH_HOST naming another host than github.com, where gh would send no token of the bundle's, and
+// a GH_TOKEN or GITHUB_TOKEN, which gh sends in place of any directory's token, are errors.
+func ghTargetOf(argv []string, env map[string]string, help func(path []string) (string, error)) (string, error) {
+	if host := env["GH_HOST"]; host != "" && !strings.EqualFold(host, "github.com") {
+		return "", fmt.Errorf("GH_HOST is %q, another host than github.com, so it sends no token; unset GH_HOST", host)
+	}
+	for _, name := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
+		if env[name] != "" {
+			return "", fmt.Errorf("%s is set, and gh sends it in place of the token of the owner the command targets, so it sends no token; unset %s", name, name)
+		}
+	}
+	walk := ghWalk{help: help}
+	var rest []string
 	var cmd *ghCommand
 	for i := 0; i < len(argv) && cmd == nil; i++ {
 		arg := argv[i]
 		switch {
-		case arg == "--help" || arg == "-h" || (len(path) == 0 && (arg == "--version" || arg == "help")):
-			return "", false, nil
+		case len(walk.path) == 0 && arg == "--version":
+			return "", nil
+		case len(walk.path) == 0 && arg == "help":
+			return "", ghHelpTarget(argv[i+1:], help)
 		case arg == "-R" || arg == "--repo":
 			if i+1 == len(argv) {
-				return "", false, cannotPlace(arg, "has no value", false)
+				return "", cannotPlace(arg, "has no value", false)
 			}
 			rest = append(rest, arg, argv[i+1])
 			i++
-		case strings.HasPrefix(arg, "--repo=") || (strings.HasPrefix(arg, "-R") && len(arg) > 2):
+		case strings.HasPrefix(arg, "--repo=") || (strings.HasPrefix(arg, "-R") && len(arg) > 2) ||
+			arg == "--help" || strings.HasPrefix(arg, "--help=") || arg == "-h":
+			// The leaf reads these as its own, in order with the rest of its arguments.
 			rest = append(rest, arg)
 		case strings.HasPrefix(arg, "-"):
-			return "", false, cannotPlace(arg, "comes before the command's name, and only -R/--repo may", false)
+			return "", cannotPlace(arg, "comes before the command's name, and only -R/--repo and --help may", false)
 		default:
-			read, err := readGhCommand(append(slices.Clone(path), arg), help)
-			if err != nil {
-				return "", false, err
+			if err := walk.check(arg); err != nil {
+				return "", err
 			}
-			path = read.path
+			read, err := walk.read(arg)
+			if err != nil {
+				return "", err
+			}
 			if !read.group {
 				cmd = &read
 				rest = append(rest, argv[i+1:]...)
@@ -121,41 +147,43 @@ func ghTargetOf(argv []string, env map[string]string, help func(path []string) (
 	}
 	if cmd == nil {
 		// No leaf: `gh`, or a group alone, which prints its help.
-		return "", false, nil
+		return "", nil
 	}
-	api := slices.Equal(cmd.path, []string{"api"})
+	if slices.Equal(cmd.path, []string{"copilot"}) {
+		return "", errors.New("cannot tell which repository the command targets: `gh copilot` runs another program, which reads gh's token itself, so it sends no token; run gh's own commands, with -R <owner>/<repo>")
+	}
 	parsed, err := cmd.parse(rest)
 	if err != nil || parsed.help {
-		return "", false, err
+		return "", err
 	}
-	sel := selectors{api: api}
+	sel := selectors{api: cmd.isAPI(), owners: map[string]string{}}
 	if err := sel.fromCommand(cmd, parsed); err != nil {
-		return "", false, err
+		return "", err
 	}
 	switch len(sel.owners) {
 	case 1:
 		for owner := range sel.owners {
-			return owner, true, nil
+			return owner, nil
 		}
 	case 0:
 		// GH_REPO names the repository of a leaf with the inherited -R, and of gh api only through
 		// the {owner} and {repo} placeholders gh fills from it.
 		readsGHRepo := cmd.readsGHRepo()
-		if api {
-			readsGHRepo = strings.Contains(strings.Join(rest, " "), "{owner}") || strings.Contains(strings.Join(rest, " "), "{repo}")
+		if sel.api {
+			args := strings.Join(rest, " ")
+			readsGHRepo = strings.Contains(args, "{owner}") || strings.Contains(args, "{repo}")
 		}
 		if !readsGHRepo || env["GH_REPO"] == "" {
-			return "", false, nil
+			return "", nil
 		}
-		owner, err := repositoryOwner(env["GH_REPO"], "GH_REPO", api)
-		return owner, err == nil, err
+		return repositoryOwner(env["GH_REPO"], "GH_REPO", sel.api)
 	}
 	var listed []string
 	for owner, what := range sel.owners {
 		listed = append(listed, fmt.Sprintf("%s (%s)", owner, what))
 	}
 	slices.Sort(listed)
-	return "", false, fmt.Errorf("the command names more than one owner, %s, so it sends no token; name one repository", strings.Join(listed, " and "))
+	return "", fmt.Errorf("the command names more than one owner, %s, so it sends no token; name one repository", strings.Join(listed, " and "))
 }
 
 // cannotPlace is ghTargetOf's refusal of an argument it cannot place: what it is and why, and how
@@ -170,7 +198,7 @@ func cannotPlace(arg, why string, api bool) error {
 
 // ghFlag is one option of a gh command as its help lists it: whether it takes a value, whether
 // only after `=` (pflag's NoOptDefVal, `--commit string[="last"]`), whether its help cannot say
-// (a placeholder that is itself an option), and the placeholder naming its value.
+// (a placeholder that is itself an option, or a count), and the placeholder naming its value.
 type ghFlag struct {
 	value, optional, uncertain bool
 	placeholder                string
@@ -183,16 +211,19 @@ type ghSlot struct {
 	variadic bool
 }
 
-// ghCommand is what gh's help of one command says: its canonical path (an alias resolved), whether
-// it is a group of subcommands, and, for a leaf, its options, its arguments and whether its USAGE
-// passes on the arguments after `--`.
+// ghCommand is what gh's help of one command says: its canonical path (an alias resolved) and the
+// cobra aliases it lists for itself; for a group of subcommands, the gh aliases and extensions it
+// lists among them; and, for a leaf, its options, its arguments and whether its USAGE passes on
+// the arguments after `--`.
 type ghCommand struct {
-	path        []string
-	group       bool
-	flags       map[string]ghFlag
-	shorts      map[rune]string
-	slots       []ghSlot
-	passthrough bool
+	path                  []string
+	aliases               map[string]bool
+	group                 bool
+	ghAliases, extensions map[string]bool
+	flags                 map[string]ghFlag
+	shorts                map[byte]string
+	slots                 []ghSlot
+	passthrough           bool
 }
 
 var (
@@ -203,36 +234,61 @@ var (
 	ghCommandWord = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 	// ghSlotName is a named argument of a USAGE line, `<name>`.
 	ghSlotName = regexp.MustCompile(`<([^>]+)>`)
+	// ghListedCommand is one entry of a help's COMMANDS section, `  <name>:  <description>`.
+	ghListedCommand = regexp.MustCompile(`^\s+(\S+):(?:\s|$)`)
 )
 
 // readGhCommand reads gh's help of path and parses it (parseGhHelp).
 func readGhCommand(path []string, help func(path []string) (string, error)) (ghCommand, error) {
 	text, err := help(path)
 	if err != nil {
-		return ghCommand{}, fmt.Errorf("cannot read `gh %s`: %w; run gh's own command, and pass -R <owner>/<repo> to name its repository", strings.Join(path, " "), err)
+		return ghCommand{}, fmt.Errorf("cannot read `%s`: %w; run gh's own command, and pass -R <owner>/<repo> to name its repository", strings.Join(append([]string{"gh"}, path...), " "), err)
 	}
 	return parseGhHelp(path, text)
 }
 
-// parseGhHelp reads gh's help of the command requested. Its USAGE line names the command's
-// canonical path, which is requested itself or, for an alias, the command it stands for; a path
-// that is a strict prefix of requested is gh's help of a parent, which gh prints for a subcommand
-// it does not know, and an error. A help with a `… COMMANDS` section, or a USAGE naming
-// `<command>`, is a group's. A leaf's help must list its options, --help among them, every one in
-// a form this reads; anything else is an error, since an option's arity decides which argument
-// is a repository.
+// parseGhHelp reads gh's help of the command requested, gh's own for none. Its USAGE line names
+// the command's canonical path, which is requested itself or a cobra alias of it the help's
+// ALIASES section lists; a path that is a strict prefix of requested is gh's help of a parent,
+// which gh prints for a subcommand it does not know, and any other path is the help of the command
+// a gh alias stands for, whose expansion may carry arguments of its own: both are errors. A help
+// with a `… COMMANDS` section, or a USAGE naming `<command>`, is a group's, and its ALIAS COMMANDS
+// and EXTENSION COMMANDS sections list the gh aliases and extensions among its subcommands. A
+// leaf's help must list its options, --help among them, every one in a form this reads; anything
+// else is an error, since an option's arity decides which argument is a repository.
 func parseGhHelp(requested []string, text string) (ghCommand, error) {
-	what := "`gh " + strings.Join(requested, " ") + "`"
+	spelled := strings.Join(append([]string{"gh"}, requested...), " ")
+	what := "`" + spelled + "`"
 	lines := strings.Split(text, "\n")
 	var usage, section string
-	cmd := ghCommand{flags: map[string]ghFlag{}, shorts: map[rune]string{}}
+	cmd := ghCommand{
+		aliases: map[string]bool{}, ghAliases: map[string]bool{}, extensions: map[string]bool{},
+		flags: map[string]ghFlag{}, shorts: map[byte]string{},
+	}
 	for i, line := range lines {
 		if line == "" || line[0] == ' ' || line[0] == '\t' {
-			if section == "FLAGS" || section == "INHERITED FLAGS" {
-				if strings.HasPrefix(strings.TrimSpace(line), "-") {
+			entry := strings.TrimSpace(line)
+			switch {
+			case entry == "":
+			case section == "FLAGS" || section == "INHERITED FLAGS":
+				if strings.HasPrefix(entry, "-") {
 					if err := cmd.addFlag(line); err != nil {
 						return ghCommand{}, fmt.Errorf("cannot read the options of %s: %w; pass -R <owner>/<repo>", what, err)
 					}
+				}
+			case section == "ALIASES":
+				for _, alias := range strings.Split(entry, ",") {
+					cmd.aliases[strings.TrimSpace(alias)] = true
+				}
+			case section == "ALIAS COMMANDS" || section == "EXTENSION COMMANDS":
+				listed := ghListedCommand.FindStringSubmatch(line)
+				if listed == nil {
+					return ghCommand{}, fmt.Errorf("cannot read %s's %s: %q; run gh's own commands, with -R <owner>/<repo>", what, section, entry)
+				}
+				if section == "ALIAS COMMANDS" {
+					cmd.ghAliases[listed[1]] = true
+				} else {
+					cmd.extensions[listed[1]] = true
 				}
 			}
 			continue
@@ -259,14 +315,14 @@ func parseGhHelp(requested []string, text string) (ghCommand, error) {
 		n++
 	}
 	cmd.path = words[1:n]
-	if len(cmd.path) < len(requested) && slices.Equal(cmd.path, requested[:len(cmd.path)]) {
+	switch {
+	case len(cmd.path) < len(requested) && slices.Equal(cmd.path, requested[:len(cmd.path)]):
 		return ghCommand{}, fmt.Errorf("gh has no command %s, so it sends no token; pass -R <owner>/<repo>", what)
-	}
-	if len(cmd.path) == 0 {
-		return ghCommand{}, fmt.Errorf("cannot read %s: its usage %q names no command", what, usage)
+	case !slices.Equal(cmd.path, requested) && !cmd.aliases[spelled]:
+		return ghCommand{}, fmt.Errorf("cannot tell which repository the command targets: %s prints the help of `gh %s`, which lists no such alias, so it is a gh alias, whose expansion may name a repository of its own, and it sends no token; run the gh command it stands for, with -R <owner>/<repo>", what, strings.Join(cmd.path, " "))
 	}
 	args := strings.Join(words[n:], " ")
-	if strings.HasPrefix(args, "<command>") || strings.HasPrefix(args, "[subcommand]") || strings.HasPrefix(args, "<subcommand>") {
+	if ghUsageNamesSubcommands(args) {
 		cmd.group = true
 	}
 	if cmd.group {
@@ -275,11 +331,90 @@ func parseGhHelp(requested []string, text string) (ghCommand, error) {
 	if _, ok := cmd.flags["help"]; !ok {
 		return ghCommand{}, fmt.Errorf("cannot read the options of %s: its help lists no --help, so it is no command's whole help; pass -R <owner>/<repo>", what)
 	}
-	if _, taken := cmd.shorts['h']; !taken {
-		cmd.shorts['h'] = "help"
-	}
 	cmd.slots, cmd.passthrough = ghSlots(args)
 	return cmd, nil
+}
+
+// ghUsageNamesSubcommands says whether the arguments of a USAGE line, after the command's path,
+// are a group's: its subcommand first.
+func ghUsageNamesSubcommands(args string) bool {
+	return strings.HasPrefix(args, "<command>") || strings.HasPrefix(args, "[subcommand]") || strings.HasPrefix(args, "<subcommand>")
+}
+
+// ghHelpTarget reads the words of `gh help <words>` as the path of the command whose help it asks
+// for, refusing a gh alias or an extension among them as ghTargetOf refuses one run directly: gh
+// runs `gh help <extension>` as `gh <extension> --help`, which runs the extension on gh's token.
+// gh's own help, a command's and a help topic's, sends nothing, and is not named. A word past a
+// leaf is that leaf's argument, which gh's help ignores; an option, which `gh help` takes none of,
+// is an error.
+func ghHelpTarget(words []string, help func(path []string) (string, error)) error {
+	walk := ghWalk{help: help}
+	for i, word := range words {
+		if err := walk.check(word); err != nil {
+			return err
+		}
+		if strings.HasPrefix(word, "-") {
+			return cannotPlace(word, "is an option of `gh help`, which takes only the names of commands", false)
+		}
+		if i == len(words)-1 {
+			return nil
+		}
+		read, err := walk.read(word)
+		if err != nil || !read.group {
+			return err
+		}
+	}
+	return nil
+}
+
+// ghWalk walks a command path down gh's own help (help), gh's for the first word: each word is
+// checked against its parent's help before its own is read (check), since reading the help of a
+// gh alias or an extension the parent lists runs it, then read as the command after the path so
+// far (read), a group the parent of the next word.
+type ghWalk struct {
+	help   func(path []string) (string, error)
+	parent *ghCommand
+	path   []string
+}
+
+// check refuses word when its parent's help lists it as a gh alias or an extension (mayRead),
+// reading gh's own help for the first word.
+func (w *ghWalk) check(word string) error {
+	if w.parent == nil {
+		gh, err := readGhCommand(nil, w.help)
+		if err != nil {
+			return err
+		}
+		w.parent = &gh
+	}
+	return w.parent.mayRead(word)
+}
+
+// read reads word's help as the command after the walk's path, which becomes the command's
+// canonical one, and a group the parent of the next word.
+func (w *ghWalk) read(word string) (ghCommand, error) {
+	cmd, err := readGhCommand(append(slices.Clone(w.path), word), w.help)
+	if err != nil {
+		return ghCommand{}, err
+	}
+	w.path = cmd.path
+	if cmd.group {
+		w.parent = &cmd
+	}
+	return cmd, nil
+}
+
+// mayRead refuses word as a subcommand of the group c when c's help lists it as a gh alias, whose
+// expansion may name a repository of its own, or an extension, which reads gh's token itself:
+// reading the help of either runs it, a shell alias or an extension with whatever it holds.
+func (c *ghCommand) mayRead(word string) error {
+	switch {
+	case c.ghAliases[word]:
+		return fmt.Errorf("cannot tell which repository the command targets: %q is a gh alias, whose expansion may name a repository of its own, so it sends no token; run the gh command it stands for, with -R <owner>/<repo>", word)
+	case c.extensions[word]:
+		return fmt.Errorf("cannot tell which repository the command targets: %q is a gh extension, which reads gh's token itself, so it sends no token; run gh's own commands, with -R <owner>/<repo>", word)
+	}
+	return nil
 }
 
 // addFlag records one option line of a FLAGS section, refusing one this cannot read.
@@ -294,13 +429,14 @@ func (c *ghCommand) addFlag(line string) error {
 		if before, _, found := strings.Cut(flag.placeholder, "[="); found && before != "" {
 			flag.optional, flag.placeholder = true, before
 		}
-		if strings.HasPrefix(flag.placeholder, "-") {
+		// pflag names a count's type, which takes no value, as it names a value's.
+		if strings.HasPrefix(flag.placeholder, "-") || flag.placeholder == "count" {
 			flag.uncertain = true
 		}
 	}
 	c.flags[match[2]] = flag
 	if match[1] != "" {
-		c.shorts[[]rune(match[1])[0]] = match[2]
+		c.shorts[match[1][0]] = match[2]
 	}
 	return nil
 }
@@ -359,13 +495,114 @@ func ghSlots(args string) (slots []ghSlot, passthrough bool) {
 	return slots, passthrough
 }
 
+// ghArgKind is what one argument name of gh's usages selects — a repository, another repository a
+// command acts on beside its own, an owner, a URL that may name a repository, a search query, a
+// repository's name (`gh repo create [<name>]`, OWNER/NAME or a name alone), or nothing ("") — and
+// whether it stands for one or more arguments, as a plural name does with no `...` (`gh issue edit
+// {<numbers> | <urls>}` edits one or more issues).
+type ghArgKind struct {
+	kind string
+	many bool
+}
+
+// ghSlotKinds is the ghArgKind of each argument name gh's usages spell, gh 2.98.0's and 2.65.0's,
+// every command of their references. A name it does not hold is one this cannot read: an argument
+// filling it is refused, never read as naming nothing.
+var ghSlotKinds = map[string]ghArgKind{
+	"repository":             {kind: "repository"},
+	"destination-repo":       {kind: "second-repository"},
+	"destination-repository": {kind: "second-repository"},
+	"source-repository":      {kind: "second-repository"},
+	"owner":                  {kind: "owner"},
+	"url":                    {kind: "url"},
+	"urls":                   {kind: "url", many: true},
+	"pr-url":                 {kind: "url"},
+	"discussion-url":         {kind: "url"},
+	"comment-url":            {kind: "url"},
+	"query":                  {kind: "query", many: true},
+	"name":                   {kind: "name"},
+	// Arguments naming no repository, several of them in one slot.
+	"files": {many: true}, "numbers": {many: true}, "sources": {many: true},
+	// Arguments naming no repository, one to a slot.
+	"alias": {}, "asset-name": {}, "branch": {}, "cache-id": {}, "cache-key": {}, "comment-id": {},
+	"commit-sha": {}, "commit-SHA": {}, "dest": {}, "directory": {}, "expansion": {}, "file-path": {},
+	"filename": {}, "flag": {}, "gist": {}, "id": {}, "image-uri": {}, "key": {}, "key-file": {},
+	"key-id": {}, "keyPrefix": {}, "license-key": {}, "local-port": {}, "new-filename": {},
+	"newFilename": {}, "new-name": {}, "number": {}, "old-filename": {}, "oldFilename": {},
+	"path": {}, "pattern": {}, "pr-branch": {}, "pr-number": {}, "prompt": {}, "remote-port": {},
+	"ruleset-id": {}, "run-id": {}, "secret-name": {}, "session-id": {}, "shell": {}, "skill": {},
+	"skill[@version]": {}, "spdx-id": {}, "SPDX-ID": {}, "tag": {}, "task description": {},
+	"template": {}, "type": {}, "urlTemplate": {}, "value": {}, "variable-name": {},
+	"workflow-id": {}, "workflow-name": {},
+}
+
+// ghKindRank orders the kinds of a slot's names: the slot is of its most specific name's kind
+// (`[<number> | <url> | <branch>]` is a URL's when the argument is one).
+var ghKindRank = map[string]int{"": 0, "name": 1, "url": 2, "query": 3, "owner": 4, "second-repository": 5, "repository": 6}
+
+// kind is what a slot's argument selects, its most specific name's ghSlotKinds kind, or the first
+// of its names ghSlotKinds does not hold, which makes it a slot this cannot read.
+func (s ghSlot) kind() (kind, unknown string) {
+	if len(s.names) == 0 {
+		return "", "an argument with no name"
+	}
+	for _, name := range s.names {
+		arg, known := ghSlotKinds[name]
+		if !known {
+			return "", name
+		}
+		if ghKindRank[arg.kind] > ghKindRank[kind] {
+			kind = arg.kind
+		}
+	}
+	return kind, ""
+}
+
+// takesMany says whether the slot takes one or more arguments: spelled with `...`, or naming one
+// ghSlotKinds takes as several (a plural name, a search query's words).
+func (s ghSlot) takesMany() bool {
+	return s.variadic || slices.ContainsFunc(s.names, func(name string) bool { return ghSlotKinds[name].many })
+}
+
+// slotsFor is the slot each of n positional arguments fills, in order, as gh's usage places them:
+// the first slot taking more than one takes every argument the slots after it leave (`gh codespace
+// cp <sources>... <dest>`), and a usage with none takes no more arguments than it has slots.
+func (c *ghCommand) slotsFor(n int) ([]ghSlot, bool) {
+	many := slices.IndexFunc(c.slots, ghSlot.takesMany)
+	if many < 0 {
+		if n > len(c.slots) {
+			return nil, false
+		}
+		return c.slots[:n], true
+	}
+	after := len(c.slots) - many - 1
+	placed := make([]ghSlot, n)
+	for i := range placed {
+		switch {
+		case i < many:
+			placed[i] = c.slots[i]
+		case i >= max(n-after, many+1):
+			placed[i] = c.slots[len(c.slots)-(n-i)]
+		default:
+			placed[i] = c.slots[many]
+		}
+	}
+	return placed, true
+}
+
 // readsGHRepo says whether the leaf takes the inherited -R, whose default GH_REPO is.
 func (c *ghCommand) readsGHRepo() bool {
 	return c.flags["repo"].placeholder == "[HOST/]OWNER/REPO"
 }
 
+// isAPI says whether the leaf is gh api, whose argument is an endpoint and which has no -R.
+func (c *ghCommand) isAPI() bool { return slices.Equal(c.path, []string{"api"}) }
+
+// quoted is the leaf as a refusal names it, `gh <path>`.
+func (c *ghCommand) quoted() string { return "`gh " + strings.Join(c.path, " ") + "`" }
+
 // ghArgs is a leaf's arguments as pflag reads them: its positional arguments in order, every
-// value of each option by long name, and whether --help is among them.
+// value given each option, by long name, and whether gh only prints the leaf's help.
 type ghArgs struct {
 	positionals []string
 	values      map[string][]string
@@ -373,9 +610,11 @@ type ghArgs struct {
 }
 
 // parse reads args, the arguments of the leaf with its path taken out, as pflag does, refusing an
-// option the leaf's help does not list or does not say the arity of.
+// option the leaf's help does not list or does not say the arity of. --help is a boolean whose
+// last value decides; a -h no option of the leaf takes is pflag's request for help, which ends
+// the reading there.
 func (c *ghCommand) parse(args []string) (ghArgs, error) {
-	api := slices.Equal(c.path, []string{"api"})
+	api, leaf := c.isAPI(), c.quoted()
 	parsed := ghArgs{values: map[string][]string{}}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -389,59 +628,91 @@ func (c *ghCommand) parse(args []string) (ghArgs, error) {
 			name, value, hasValue := strings.Cut(arg[2:], "=")
 			flag, ok := c.flags[name]
 			if !ok {
-				return ghArgs{}, cannotPlace(arg, "is no option `gh "+strings.Join(c.path, " ")+"`'s help lists", api)
-			}
-			if name == "help" {
-				parsed.help = true
-				return parsed, nil
+				return ghArgs{}, cannotPlace(arg, "is no option "+leaf+"'s help lists", api)
 			}
 			if flag.uncertain {
 				return ghArgs{}, cannotPlace(arg, "is an option whose help does not say whether it takes a value", api)
 			}
-			if flag.value && !flag.optional && !hasValue {
-				if i+1 == len(args) {
+			if !hasValue {
+				switch {
+				case !flag.value:
+					value, hasValue = "true", true
+				case flag.optional:
+					// Its default, which names nothing.
+				case i+1 == len(args):
 					return ghArgs{}, cannotPlace(arg, "has no value", api)
+				default:
+					i++
+					value, hasValue = args[i], true
 				}
-				i++
-				value, hasValue = args[i], true
 			}
-			if flag.value && hasValue {
-				parsed.values[name] = append(parsed.values[name], value)
+			if hasValue {
+				if err := parsed.set(name, flag, value, arg, api); err != nil {
+					return ghArgs{}, err
+				}
 			}
 		case strings.HasPrefix(arg, "-") && arg != "-":
-			shorts := []rune(arg[1:])
-			for j, short := range shorts {
+			// pflag's shorthands, each in turn: `-f=value` gives any its value; a boolean or an
+			// optional value takes its default and leaves the rest of the word to the next
+			// shorthand; any other takes the rest of the word, or the next argument.
+			for shorts := arg[1:]; shorts != ""; {
+				short, rest := shorts[0], shorts[1:]
 				name, ok := c.shorts[short]
 				if !ok {
-					return ghArgs{}, cannotPlace(arg, fmt.Sprintf("names -%c, which `gh %s`'s help does not list", short, strings.Join(c.path, " ")), api)
-				}
-				if name == "help" {
-					parsed.help = true
-					return parsed, nil
+					if short == 'h' {
+						parsed.help = true
+						return parsed, nil
+					}
+					return ghArgs{}, cannotPlace(arg, fmt.Sprintf("names -%c, which %s's help does not list", short, leaf), api)
 				}
 				flag := c.flags[name]
-				if flag.uncertain || flag.optional {
-					return ghArgs{}, cannotPlace(arg, "is an option whose help does not say how its shorthand takes a value", api)
+				if flag.uncertain {
+					return ghArgs{}, cannotPlace(arg, "is an option whose help does not say whether it takes a value", api)
 				}
-				if !flag.value {
-					continue
-				}
-				value := strings.TrimPrefix(string(shorts[j+1:]), "=")
-				if value == "" {
-					if i+1 == len(args) {
-						return ghArgs{}, cannotPlace(arg, "has no value", api)
-					}
+				value, hasValue := "", true
+				switch {
+				case len(rest) > 1 && rest[0] == '=':
+					value, rest = rest[1:], ""
+				case !flag.value:
+					value = "true"
+				case flag.optional:
+					hasValue = false
+				case rest != "":
+					value, rest = rest, ""
+				case i+1 < len(args):
 					i++
 					value = args[i]
+				default:
+					return ghArgs{}, cannotPlace(arg, "has no value", api)
 				}
-				parsed.values[name] = append(parsed.values[name], value)
-				break
+				if hasValue {
+					if err := parsed.set(name, flag, value, arg, api); err != nil {
+						return ghArgs{}, err
+					}
+				}
+				shorts = rest
 			}
 		default:
 			parsed.positionals = append(parsed.positionals, arg)
 		}
 	}
 	return parsed, nil
+}
+
+// set records value given the option name: --help's as a boolean, any other's taking a value in
+// the order given.
+func (p *ghArgs) set(name string, flag ghFlag, value, arg string, api bool) error {
+	switch {
+	case name == "help":
+		help, err := strconv.ParseBool(value)
+		if err != nil {
+			return cannotPlace(arg, "gives --help a value that is no boolean", api)
+		}
+		p.help = help
+	case flag.value:
+		p.values[name] = append(p.values[name], value)
+	}
+	return nil
 }
 
 // selectors is every owner a command names, each with the argument that names it.
@@ -451,9 +722,6 @@ type selectors struct {
 }
 
 func (s *selectors) add(owner, what string) {
-	if s.owners == nil {
-		s.owners = map[string]string{}
-	}
 	if _, ok := s.owners[owner]; !ok {
 		s.owners[owner] = what
 	}
@@ -477,71 +745,91 @@ func (s *selectors) owner(value, what string) error {
 
 // fromCommand collects the owners the leaf's arguments and options name.
 func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
+	leaf := cmd.quoted()
 	targeted, second := len(parsed.values["repo"]) > 0 && cmd.readsGHRepo(), ""
 	if s.api {
-		if len(parsed.positionals) > 0 {
-			if err := s.endpoint(parsed.positionals[0]); err != nil {
+		if len(parsed.positionals) > 1 {
+			return cannotPlace(parsed.positionals[1], "is an argument "+leaf+"'s usage has no place for", true)
+		}
+		search := false
+		if len(parsed.positionals) == 1 {
+			var err error
+			if search, err = s.endpoint(parsed.positionals[0]); err != nil {
 				return err
 			}
 		}
 		// A GraphQL query's variables named for an owner (`-F owner=<login>`) name the owner it
 		// reads; `{owner}` is GH_REPO's, which gh fills. Any other query names no repository gh
-		// could resolve, and runs as the issue owner's.
-		if len(parsed.positionals) > 0 && parsed.positionals[0] == "graphql" {
-			for _, field := range append(slices.Clone(parsed.values["field"]), parsed.values["raw-field"]...) {
+		// could resolve, and runs as the issue owner's. A search endpoint's q field is its query.
+		graphql := len(parsed.positionals) == 1 && parsed.positionals[0] == "graphql"
+		for _, option := range []string{"field", "raw-field"} {
+			for _, field := range parsed.values[option] {
 				key, value, _ := strings.Cut(field, "=")
-				if (key == "owner" || key == "org" || key == "organization" || key == "login") && value != "{owner}" {
+				switch {
+				case graphql && (key == "owner" || key == "org" || key == "organization" || key == "login") && value != "{owner}":
 					if err := s.owner(value, "the field "+field); err != nil {
+						return err
+					}
+				case search && key == "q":
+					if option == "field" && strings.HasPrefix(value, "@") {
+						return cannotPlace(field, "reads the search query from a file", true)
+					}
+					if err := s.query(strings.Fields(value)); err != nil {
 						return err
 					}
 				}
 			}
 		}
 	} else {
+		placed, ok := cmd.slotsFor(len(parsed.positionals))
+		if !ok {
+			return cannotPlace(parsed.positionals[len(cmd.slots)], "is an argument "+leaf+"'s usage has no place for", false)
+		}
+		var query []string
 		for i, arg := range parsed.positionals {
-			if len(cmd.slots) == 0 {
-				break
+			kind, unknown := placed[i].kind()
+			if unknown != "" {
+				return cannotPlace(arg, fmt.Sprintf("fills <%s> of %s's usage, an argument this does not know", unknown, leaf), false)
 			}
-			slot := cmd.slots[min(i, len(cmd.slots)-1)]
-			if i >= len(cmd.slots) && !slot.variadic && slot.kind() != "query" {
-				continue
-			}
-			switch kind := slot.kind(); {
-			case kind == "repository":
+			switch kind {
+			case "repository", "name":
+				if kind == "name" && (!slices.Equal(cmd.path, []string{"repo", "create"}) || !strings.Contains(arg, "/")) {
+					continue
+				}
 				if err := s.repository(arg, "the repository "+arg); err != nil {
 					return err
 				}
 				targeted = true
-			case kind == "second-repository":
+			case "second-repository":
 				if err := s.repository(arg, "the repository "+arg); err != nil {
 					return err
 				}
 				second = arg
-			case kind == "owner":
+			case "owner":
 				if err := s.owner(arg, "the owner "+arg); err != nil {
 					return err
 				}
 				targeted = true
-			case kind == "url" && (strings.HasPrefix(arg, "https://") || strings.HasPrefix(arg, "http://")):
+			case "url":
+				if !isWebURL(arg) {
+					continue
+				}
 				if err := s.repository(arg, "the URL "+arg); err != nil {
 					return err
 				}
 				targeted = true
-			case kind == "query":
-				if err := s.query(arg); err != nil {
-					return err
-				}
-			case kind == "name" && slices.Equal(cmd.path, []string{"repo", "create"}) && strings.Contains(arg, "/"):
-				if err := s.repository(arg, "the repository "+arg); err != nil {
-					return err
-				}
-				targeted = true
+			case "query":
+				query = append(query, arg)
 			}
 		}
+		if err := s.query(query); err != nil {
+			return err
+		}
 	}
-	for name, values := range parsed.values {
+	orgs := parsed.values["org"]
+	for _, name := range slices.Sorted(maps.Keys(parsed.values)) {
 		flag := cmd.flags[name]
-		for _, value := range values {
+		for _, value := range parsed.values[name] {
 			for _, item := range strings.Split(value, ",") {
 				what := "--" + name + " " + item
 				switch {
@@ -549,16 +837,21 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 					if !strings.EqualFold(item, "github.com") {
 						return cannotPlace(what, "names another host than github.com", s.api)
 					}
-				case name == "owner" || name == "org" || name == "repo-owner" || name == "target-owner":
+				case name == "owner" || name == "org" || name == "repo-owner" || name == "target-owner" || name == "source-owner":
 					if err := s.owner(item, what); err != nil {
 						return err
+					}
+				case name == "repos" && !strings.Contains(item, "/"):
+					// gh reads a name alone as a repository of the --org, whose owner that is.
+					if len(orgs) == 0 {
+						return cannotPlace(what, "names a repository by its name alone, and no --org says whose", s.api)
 					}
 				case name == "repo" || name == "repos" || name == "branch-repo" ||
 					flag.placeholder == "repository" || flag.placeholder == "repositories":
 					if err := s.repository(item, what); err != nil {
 						return err
 					}
-				case name == "url" && (strings.HasPrefix(item, "https://") || strings.HasPrefix(item, "http://")):
+				case name == "url" && isWebURL(item):
 					if err := s.repository(item, what); err != nil {
 						return err
 					}
@@ -572,79 +865,99 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 	return nil
 }
 
-// kind is what a slot's argument selects: a repository (`<repository>`), another repository a
-// command acts on beside its own (`<destination-repo>`, `<source-repository>`), an owner, a URL, a
-// search query, a repository's name (`gh repo create [<name>]`), or nothing.
-func (s ghSlot) kind() string {
-	kind := ""
-	for _, name := range s.names {
-		switch {
-		case name == "repository":
-			return "repository"
-		case strings.Contains(name, "repo"):
-			kind = "second-repository"
-		case name == "owner":
-			return "owner"
-		case name == "query":
-			return "query"
-		case name == "url" || name == "urls" || strings.HasSuffix(name, "-url") || strings.HasSuffix(name, "-urls"):
-			if kind == "" {
-				kind = "url"
-			}
-		case name == "name" && kind == "":
-			kind = "name"
-		}
-	}
-	return kind
-}
+// ghQualifier is a search query's argument that gh passes on, and GitHub reads, as one qualifier:
+// a name, a colon and a value holding no space, quote, parenthesis or backslash, negated by a
+// leading "-".
+var ghQualifier = regexp.MustCompile(`^(-?)([A-Za-z][A-Za-z-]*):([^\s"'()\\]+)$`)
 
-// query collects the owners a search query's qualifiers name: repo:<owner>/<repo>, and owner:,
-// user: and org: <owner>, each also negated.
-func (s *selectors) query(query string) error {
-	for _, word := range strings.Fields(query) {
-		qualifier, value, ok := strings.Cut(strings.TrimPrefix(word, "-"), ":")
-		if !ok {
+// query collects the owners a search query names in its repo:<owner>/<repo>, owner:, user: and
+// org: qualifiers, each word of words one argument gh joins into the query. A word holding a colon
+// that is no plain qualifier is refused, since gh quotes a word holding a space and GitHub reads a
+// quoted or grouped qualifier otherwise. So is a query naming an owner whose scope is not that
+// owner's: one excluding an owner (`-repo:`), or joining its words with OR, NOT or parentheses.
+func (s *selectors) query(words []string) error {
+	var named, joined string
+	for _, word := range words {
+		if !strings.Contains(word, ":") {
+			if joined == "" && (strings.EqualFold(word, "OR") || strings.EqualFold(word, "NOT") || strings.ContainsAny(word, "()")) {
+				joined = word
+			}
 			continue
 		}
-		value = strings.Trim(value, `"'`)
-		switch qualifier {
-		case "repo":
-			if err := s.repository(value, "the qualifier "+word); err != nil {
+		qualifier := ghQualifier.FindStringSubmatch(word)
+		if qualifier == nil {
+			return cannotPlace(word, "is a search qualifier this cannot read for certain, since gh and GitHub read a quoted, spaced or grouped one otherwise", s.api)
+		}
+		switch strings.ToLower(qualifier[2]) {
+		case "repo", "owner", "user", "org":
+			if qualifier[1] == "-" {
+				return cannotPlace(word, "excludes an owner, so the search's scope is no one owner's", s.api)
+			}
+			if strings.EqualFold(qualifier[2], "repo") {
+				if err := s.repository(qualifier[3], "the qualifier "+word); err != nil {
+					return err
+				}
+			} else if err := s.owner(qualifier[3], "the qualifier "+word); err != nil {
 				return err
 			}
-		case "owner", "user", "org":
-			if err := s.owner(value, "the qualifier "+word); err != nil {
-				return err
+			if named == "" {
+				named = word
 			}
 		}
+	}
+	if named != "" && joined != "" {
+		return cannotPlace(joined, "joins the query's repo:/owner: qualifiers with others, so the search's scope is no one owner's ("+named+" and more)", s.api)
 	}
 	return nil
 }
 
 // endpoint collects the owner a gh api endpoint names: repos/<owner>/, orgs/<owner>/ or
-// users/<owner>/, with or without the API's host before it. Its {owner} placeholder names none,
-// since GH_REPO fills it; a repository named by id (repositories/<id>) and another host are errors.
-func (s *selectors) endpoint(endpoint string) error {
+// users/<owner>/, with or without the API's host before it, and a search endpoint's q, reporting
+// whether it is a search endpoint, whose q field is its query too. Its {owner} placeholder names
+// none, since GH_REPO fills it; a repository named by id (repositories/<id>) and another host are
+// errors. gh reads an endpoint holding "://" as a whole URL.
+func (s *selectors) endpoint(endpoint string) (search bool, err error) {
 	path := endpoint
-	if strings.HasPrefix(endpoint, "https://") || strings.HasPrefix(endpoint, "http://") {
+	if strings.Contains(endpoint, "://") {
 		parsed, err := url.Parse(endpoint)
 		if err != nil || !strings.EqualFold(parsed.Host, "api.github.com") {
-			return cannotPlace(endpoint, "names another host than api.github.com", true)
+			return false, cannotPlace(endpoint, "names another host than api.github.com", true)
 		}
 		path = parsed.Path
-	}
-	path, _, _ = strings.Cut(strings.TrimPrefix(path, "/"), "?")
-	segments := strings.Split(path, "/")
-	switch {
-	case segments[0] == "repositories":
-		return cannotPlace(endpoint, "names a repository by its id", true)
-	case (segments[0] == "repos" || segments[0] == "orgs" || segments[0] == "users") && len(segments) > 1:
-		if segments[1] == "{owner}" {
-			return nil
+		if parsed.RawQuery != "" {
+			path += "?" + parsed.RawQuery
 		}
-		return s.owner(segments[1], "the endpoint "+endpoint)
 	}
-	return nil
+	path, rawQuery, _ := strings.Cut(strings.TrimPrefix(path, "/"), "?")
+	segments := strings.Split(path, "/")
+	switch first := strings.ToLower(segments[0]); {
+	case first == "repositories":
+		return false, cannotPlace(endpoint, "names a repository by its id", true)
+	case (first == "repos" || first == "orgs" || first == "users") && len(segments) > 1:
+		if segments[1] == "{owner}" {
+			return false, nil
+		}
+		return false, s.owner(segments[1], "the endpoint "+endpoint)
+	case first == "search":
+		query, err := url.ParseQuery(rawQuery)
+		if err != nil {
+			return true, cannotPlace(endpoint, "has a query string this cannot read", true)
+		}
+		for _, q := range query["q"] {
+			if err := s.query(strings.Fields(q)); err != nil {
+				return true, err
+			}
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
+// isWebURL says whether s is an http or https URL, as gh reads a URL argument: its scheme in any
+// case.
+func isWebURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https")
 }
 
 // repositoryOwner is the owner, lowercased, of a repository named as gh names one — OWNER/REPO,
@@ -676,8 +989,8 @@ func checkedOwner(owner, what string, api bool) (string, error) {
 	return lower, nil
 }
 
-// readGhHelp is the real gh's help of the command path, `gh <path> --help`, refused when gh
-// answers it with an error.
+// readGhHelp is the real gh's help of the command path, `gh <path> --help` (`gh --help` for
+// gh's own), refused when gh answers it with an error.
 func readGhHelp(gh string, path []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

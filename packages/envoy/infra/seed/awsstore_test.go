@@ -537,7 +537,7 @@ func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 	serve(t, f)
 	var out, errs bytes.Buffer
 	code := Command(context.Background(), []string{"check", "--store", AWSSecretsManager, "--name", awsSecret},
-		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+		&out, &errs, Stores{AWSSecretsManager: AWS})
 	require.Equal(t, 2, code)
 	require.Equal(t, "refused: "+awsSecret+": no AWS region: pass --region, or name one in AWS_REGION or the profile\n", errs.String())
 	require.Empty(t, f.recorded())
@@ -876,7 +876,7 @@ func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
 					row.setup(c, run.value)
 					var out, errs bytes.Buffer
 					args := append([]string{"check", "--store", AWSSecretsManager, "--name", awsSecret}, row.args...)
-					code := Command(context.Background(), args, &out, &errs, Stores{AWSSecretsManager: OpenAWS})
+					code := Command(context.Background(), args, &out, &errs, Stores{AWSSecretsManager: AWS})
 					_, statErr := os.Stat(filepath.Join(c.dir, "process-ran"))
 					ran := statErr == nil
 					if run.name == "clean" {
@@ -916,7 +916,7 @@ func TestAWSErrorsAreRenderedByCodeOrClassNeverByTheirText(t *testing.T) {
 		{&smithy.OperationError{Err: fmt.Errorf("get identity: %w", errors.New(canary))}, "errorString"},
 	}
 	for _, row := range rows {
-		got := awsFailed("put-secret-value", awsSecret, row.err).Error()
+		got := failed("put-secret-value", awsSecret, row.err).Error()
 		require.Equal(t, "put-secret-value "+awsSecret+" failed: "+row.want, got)
 		require.NotContains(t, got, canary)
 	}

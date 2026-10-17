@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -57,7 +56,7 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
@@ -98,7 +97,7 @@ func TestPollHoldReleaseRetriesAFailedPositionRead(t *testing.T) {
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
@@ -146,7 +145,7 @@ func TestPollHoldReleaseRetriesAFailedApplyOfAnUnchangedPosition(t *testing.T) {
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
@@ -423,13 +422,13 @@ func (f *failingPositionReader) DispatchPosition(context.Context) (intake.Dispat
 // the current ack floor, and the stream sequence stuck behind it.
 func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 	pool := isolatedOutboxPool(t)
-	var logBuf bytes.Buffer
+	var logBuf syncBuffer
 	log := slog.New(slog.NewTextHandler(&logBuf, nil))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {

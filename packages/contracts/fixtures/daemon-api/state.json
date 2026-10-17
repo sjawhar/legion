@@ -134,6 +134,15 @@
     }
   },
   "pendingStatusWrites": [],
+  "heldOutboxRows": [
+    {
+      "id": 802,
+      "kind": "supervise",
+      "issue": "LEGION-208",
+      "waitedSeconds": 150,
+      "waitsOn": 801
+    }
+  ],
   "strandedClaims": [
     {
       "issue": "LEGION-210",
@@ -273,7 +282,7 @@
           "sandbox": "legion-legion-cache-acme-widgets-d782c874",
           "state": "ready",
           "ready": true,
-          "address": "http://10.8.1.4:8418",
+          "address": "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
           "head": "34a7ac80e9c3389ffbc1bbeece371ccacc043992",
           "lastFetchAt": "2026-10-16T19:20:30Z",
           "bytes": 6612345678

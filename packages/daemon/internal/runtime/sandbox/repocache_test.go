@@ -2,13 +2,17 @@ package sandbox
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -436,9 +440,10 @@ func TestRefreshCacheTokensRewritesALostOrForeignSecret(t *testing.T) {
 	}
 }
 
-// A cache is ready, at http://<pod ip>:8418, when the pod its Sandbox owns has passed its readiness
-// probe, and not before; a long repository is found by the name it derives, with its whole name;
-// and a cache name another repository's cache holds answers not found, logged once.
+// A cache is ready, at its Service's http://<sandbox>.<namespace>.svc:8418, when the pod its Sandbox
+// owns has passed its readiness probe, and not before, whatever address the pod holds; a long
+// repository is found by the name it derives, with its whole name; and a cache name another
+// repository's cache holds answers not found, logged once.
 func TestRepositoryCacheReadsReadiness(t *testing.T) {
 	logs := &logBuffer{}
 	g := newRig(t, []k8sruntime.Object{cacheObject(t, ghrepo.MustParse("acme/gadgets"), "uid-gadgets", modeRunning, "acme/sprockets")}, withLog(logs))
@@ -458,8 +463,9 @@ func TestRepositoryCacheReadsReadiness(t *testing.T) {
 		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	})
 	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(cacheRepo); return status.Ready })
-	if status, _ := g.r.RepositoryCache(cacheRepo); status.Address != "http://10.0.0.5:8418" || !status.RetainedUntil.IsZero() {
-		t.Errorf("RepositoryCache once ready = %+v, want http://10.0.0.5:8418 and no retention", status)
+	want := "http://" + name + "." + testNamespace + ".svc:8418"
+	if status, _ := g.r.RepositoryCache(cacheRepo); status.Address != want || !status.RetainedUntil.IsZero() {
+		t.Errorf("RepositoryCache once ready = %+v, want %s and no retention", status, want)
 	}
 	if status, found := g.r.RepositoryCache(longRepo); !found || status.Repo != longRepo {
 		t.Errorf("RepositoryCache(%s) = %+v, %t; want found with the whole repository", longRepo, status, found)
@@ -484,11 +490,12 @@ func crashLooping(pod *corev1.Pod) *corev1.Pod {
 }
 
 // A cache's state, as legion state shows it and a failed fetch names it: starting while its pod
-// is absent or not yet running, cloning while its container runs and it is not ready, ready once
-// its readiness probe passes, and failing, with the kubelet's reason, while its container waits to
-// restart or its image cannot be pulled.
+// is absent or not yet running, cloning while its container runs and it is not ready, failing, with
+// the kubelet's reason, while its container waits to restart or its image cannot be pulled, still
+// starting while its readiness probe passes before the controller has made its Service, and ready,
+// at that Service, once both are true.
 func TestRepositoryCacheReadsItsState(t *testing.T) {
-	g := newRig(t, []k8sruntime.Object{cacheObject(t, cacheRepo, "uid-cache", modeRunning, "")})
+	g := newRig(t, []k8sruntime.Object{cacheObject(t, cacheRepo, "uid-cache", modeRunning, "")}, withoutController())
 	name := CacheSandboxName(testProject, cacheRepo)
 	state := func() (string, string) {
 		status, _ := g.r.RepositoryCache(cacheRepo)
@@ -522,14 +529,22 @@ func TestRepositoryCacheReadsItsState(t *testing.T) {
 			p.Status.PodIP = "10.0.0.5"
 			p.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: cacheContainer, Ready: true, State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}
 			p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
-		}, cacheReady, ""},
+		}, cacheStarting, ""},
 	} {
 		g.update(g.pod(name), tc.edit)
-		g.eventually("the cache "+tc.state, func() bool { got, _ := state(); return got == tc.state })
-		if _, reason := state(); reason != tc.reason {
-			t.Errorf("the cache %s says %q, want %q", tc.state, reason, tc.reason)
-		}
+		// Two steps in a row are failing: the step is the store's once its reason is the step's too.
+		g.eventually(fmt.Sprintf("the cache %s, saying %q", tc.state, tc.reason), func() bool {
+			got, reason := state()
+			return got == tc.state && reason == tc.reason
+		})
 	}
+	if err := g.kube.Tracker().Add(cacheService(name, "uid-cache")); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("the cache ready behind its Service", func() bool {
+		status, _ := g.r.RepositoryCache(cacheRepo)
+		return status.State == cacheReady && status.Ready && status.Address == g.r.cacheURL(name)
+	})
 }
 
 // The boot census keeps a cache Sandbox the runtime builds and refuses, by name, a Sandbox marked
@@ -709,8 +724,8 @@ func TestReconcileOrphansKeepsAMappedCacheAndRetiresAnUnmappedOne(t *testing.T) 
 
 // A mapped repository whose cache cannot be made — its owner's token cannot be minted — is logged
 // as the sweep's warning naming the cache and tried at the next sweep; ReconcileOrphans answers
-// nil, since its error holds the claims' launches back at boot and an issue pod without a cache
-// clones from GitHub.
+// nil, since its error holds the claims' launches back at boot and each launch ensures its own
+// repository's cache.
 func TestACacheThatCannotBeMadeNeverFailsTheReconciliation(t *testing.T) {
 	logs := &logBuffer{}
 	g := newRig(t, nil, withLog(logs), withOptions(func(o *Options) {
@@ -900,10 +915,7 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: "acme/widgets", Head: "0123abcd", LastFetchAt: fetched, Bytes: 6612345678})
 	}))
 	t.Cleanup(served.Close)
-	port, err := strconv.Atoi(served.URL[strings.LastIndex(served.URL, ":")+1:])
-	if err != nil {
-		t.Fatal(err)
-	}
+	network := &podNetwork{routes: map[string]string{"10.0.0.5:8418": served.Listener.Addr().String()}}
 	gadgets := ghrepo.MustParse("acme/gadgets")
 	var mapped atomic.Bool
 	mapped.Store(true)
@@ -915,7 +927,7 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 			return []ghrepo.Repository{cacheRepo}
 		}
 	}))
-	g.r.cachePort = port
+	g.r.cacheDial = network.dial
 	for _, repo := range []ghrepo.Repository{cacheRepo, gadgets} {
 		if err := g.r.EnsureRepositoryCache(g.ctx, repo); err != nil {
 			t.Fatal(err)
@@ -924,7 +936,7 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 		g.eventually("the cache pod of "+repo.String(), func() bool { return g.r.storedPod(name) != nil })
 	}
 	g.update(g.pod(CacheSandboxName(testProject, cacheRepo)), func(p *corev1.Pod) {
-		p.Status.PodIP = "127.0.0.1"
+		p.Status.PodIP = "10.0.0.5"
 		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
 	})
 	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(cacheRepo); return status.Ready })
@@ -942,8 +954,8 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 		t.Fatalf("RepositoryCaches before a health read = %+v, want two caches and nothing read", before)
 	}
 	g.r.readCacheHealth(g.ctx)
-	if want := "Bearer " + string(g.secret(cacheSecretName(CacheSandboxName(testProject, cacheRepo))).Data[cacheTokenKey]); presented.Load() != want {
-		t.Errorf("the health read presented %q, want the cache's own %q", presented.Load(), want)
+	if presented.Load() != "" {
+		t.Errorf("the health read presented %q, want no credential", presented.Load())
 	}
 	caches := g.r.RepositoryCaches()
 	if len(caches) != 2 || caches[0].Repo != gadgets || caches[1].Repo != cacheRepo {
@@ -961,5 +973,247 @@ func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
 	g.r.readCacheHealth(g.ctx)
 	if widgets := g.r.RepositoryCaches()[1]; widgets.Health != nil || !strings.Contains(widgets.HealthError, "connection refused") {
 		t.Errorf("a cache whose /healthz cannot be read is %+v, want the read's failure and no health", widgets)
+	}
+}
+
+// podNetwork is a cacheDial for a daemon outside the cluster: it reaches pod addresses, each
+// served by the listener routes names, and resolves no name at all, as a host with no cluster DNS
+// does. It records every address dialed.
+type podNetwork struct {
+	routes map[string]string
+	mu     sync.Mutex
+	dialed []string
+}
+
+func (n *podNetwork) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	n.mu.Lock()
+	n.dialed = append(n.dialed, address)
+	n.mu.Unlock()
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	if net.ParseIP(host) == nil {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	to, routed := n.routes[address]
+	if !routed {
+		return nil, fmt.Errorf("dial %s: no route to host", address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, network, to)
+}
+
+func (n *podNetwork) addresses() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return slices.Clone(n.dialed)
+}
+
+// healthServer is a cache's /healthz at an httptest listener, naming repo and recording the
+// Authorization header of every request it answers.
+func healthServer(t *testing.T, repo string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var credentials []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		credentials = append(credentials, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set(workspace.CacheRepositoryHeader, repo)
+		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: repo, Head: "0123abcd"})
+	}))
+	t.Cleanup(server.Close)
+	return server, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(credentials)
+	}
+}
+
+// readyCache makes cacheRepo's cache and marks its pod Ready at podIP, returning the Sandbox's name.
+func readyCache(t *testing.T, g *rig, podIP string) string {
+	t.Helper()
+	if err := g.r.EnsureRepositoryCache(g.ctx, cacheRepo); err != nil {
+		t.Fatal(err)
+	}
+	name := CacheSandboxName(testProject, cacheRepo)
+	g.eventually("the cache pod", func() bool { return g.r.storedPod(name) != nil })
+	g.update(g.pod(name), func(p *corev1.Pod) {
+		p.Status.PodIP = podIP
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	})
+	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(cacheRepo); return status.Ready })
+	return name
+}
+
+// A health read asks the cache pod at its address, as the store holds it, and carries no
+// credential: /healthz holds nothing secret, so a daemon outside the cluster, which reaches pod
+// addresses but resolves no cluster name, reads every cache's health. On the wire the request has
+// no Authorization header. A read is the pod's it was made of: once that pod is replaced, its
+// successor shows none until it is read.
+func TestTheHealthReadAsksThePodAddressWithNoCredential(t *testing.T) {
+	served, credentials := healthServer(t, cacheRepo.String())
+	g := newRig(t, nil)
+	network := &podNetwork{routes: map[string]string{"10.0.0.5:8418": served.Listener.Addr().String()}}
+	g.r.cacheDial = network.dial
+	name := readyCache(t, g, "10.0.0.5")
+
+	g.r.readCacheHealth(g.ctx)
+
+	if dialed := network.addresses(); !slices.Equal(dialed, []string{"10.0.0.5:8418"}) {
+		t.Errorf("the health read dialed %q, want the pod's address alone", dialed)
+	}
+	if got := credentials(); !slices.Equal(got, []string{""}) {
+		t.Errorf("the cache's /healthz was asked with Authorization %q, want one request carrying none", got)
+	}
+	caches := g.r.RepositoryCaches()
+	if len(caches) != 1 || caches[0].Health == nil || caches[0].Health.Head != "0123abcd" || caches[0].HealthError != "" {
+		t.Fatalf("RepositoryCaches = %+v, want the cache's own health", caches)
+	}
+	g.update(g.pod(name), func(p *corev1.Pod) { p.UID = "uid-cache-pod-successor" })
+	g.eventually("the successor pod", func() bool { pod := g.r.storedPod(name); return pod != nil && pod.UID == "uid-cache-pod-successor" })
+	if caches := g.r.RepositoryCaches(); len(caches) != 1 || caches[0].Health != nil || caches[0].HealthError != "" {
+		t.Errorf("RepositoryCaches after the pod was replaced = %+v, want no read shown for the successor", caches)
+	}
+}
+
+// A stranger holding the cache pod's address, as a pod that took it once the cache's pod was gone
+// would, is asked the health with no credential, so it learns nothing: the cache's token goes to
+// no health read. Its answer names another repository, which the read refuses: the cache shows that
+// read's failure, and no health, until the next.
+func TestAStrangerAtTheCachePodsAddressGetsNoCredential(t *testing.T) {
+	stranger, credentials := healthServer(t, "acme/gadgets")
+	g := newRig(t, nil)
+	g.r.cacheDial = (&podNetwork{routes: map[string]string{"10.0.0.5:8418": stranger.Listener.Addr().String()}}).dial
+	readyCache(t, g, "10.0.0.5")
+
+	g.r.readCacheHealth(g.ctx)
+
+	if got := credentials(); len(got) != 1 || got[0] != "" {
+		t.Errorf("the stranger was asked with Authorization %q, want one request carrying none", got)
+	}
+	caches := g.r.RepositoryCaches()
+	if len(caches) != 1 || caches[0].Health != nil || !strings.Contains(caches[0].HealthError, `naming the repository "acme/gadgets", not acme/widgets`) {
+		t.Fatalf("RepositoryCaches = %+v, want the read refused for naming acme/gadgets and no health", caches)
+	}
+}
+
+// cacheService is the headless Service the Agent Sandbox controller makes for the cache Sandbox
+// name with uid: controlled by it, and selecting its pod by the controller's hash of its name.
+func cacheService(name string, uid types.UID) *corev1.Service {
+	return &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: testNamespace, Labels: map[string]string{sandboxNameHashLabel: sandboxNameHash(name)},
+			OwnerReferences: []metav1.OwnerReference{{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox", Name: name, UID: uid, Controller: new(true)}},
+		},
+		Spec: corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone, Selector: map[string]string{sandboxNameHashLabel: sandboxNameHash(name)}},
+	}
+}
+
+// sandboxNameHash is the Agent Sandbox controller's NameHash (v1.0.3): the values below are what
+// the controller's own function returns for these names, so the selector the daemon requires of a
+// cache's Service is the one the controller writes.
+func TestSandboxNameHashIsTheControllersNameHash(t *testing.T) {
+	for name, want := range map[string]string{
+		"":  "811c9dc5",
+		"a": "e40c292c",
+		"legion-legion-cache-acme-widgets-d782c874": "7e13b444",
+	} {
+		if got := sandboxNameHash(name); got != want {
+			t.Errorf("sandboxNameHash(%q) = %s, want the controller's %s", name, got, want)
+		}
+	}
+}
+
+// The issue pods' fetch reaches the cache at its Service with the cache's token, so the daemon
+// hands an issue pod the cache's address only once that Service is the cache Sandbox's: controlled
+// by it, by uid, selecting exactly its pod by the controller's hash of its name, and headless with
+// no external name. A Service of the cache's name that is not is refused: one no Sandbox controls
+// and without the controller's tracking label, which anyone who may create a Service could have
+// made first and which the controller refuses to adopt; one another Sandbox controls; one selecting
+// other pods; and an ExternalName Service planted with the tracking label, as the controller
+// leaves it once it has adopted it — its own controller reference and the exact selector written,
+// its type and external name kept. The launch waits on it, logging why, and fails at the boot
+// timeout naming the Service, with no issue pod made and no token written for one; and legion
+// state shows the cache refused, naming the Service and why.
+func TestAnIssuePodGetsNoCacheAddressFromAServiceThatIsNotTheCaches(t *testing.T) {
+	for name, tc := range map[string]struct {
+		edit func(*corev1.Service)
+		says string
+	}{
+		"a Service selecting other pods": {func(s *corev1.Service) { s.Spec.Selector = map[string]string{"app": "elsewhere"} }, "selects map[app:elsewhere]"},
+		"a Service no Sandbox controls": {func(s *corev1.Service) {
+			s.OwnerReferences, s.Labels = nil, map[string]string{"app": "elsewhere"}
+		}, "has no controller"},
+		"a Service another Sandbox controls": {func(s *corev1.Service) { s.OwnerReferences[0].UID = "uid-other" }, "(uid-other), not the cache's Sandbox (uid-cache)"},
+		"an ExternalName Service the controller adopted": {func(s *corev1.Service) {
+			s.Spec.Type, s.Spec.ClusterIP, s.Spec.ExternalName = corev1.ServiceTypeExternalName, "", "collector.attacker.example"
+		}, "is a ExternalName Service"},
+		"a ClusterIP Service whose maker wrote the controller reference": {func(s *corev1.Service) {
+			s.Spec.Type, s.Spec.ClusterIP = corev1.ServiceTypeClusterIP, "10.0.0.196"
+		}, "is a ClusterIP Service"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec := rootSpec(t)
+			cache := CacheSandboxName(testProject, spec.Repository)
+			service := cacheService(cache, "uid-cache")
+			tc.edit(service)
+			logs := &logBuffer{}
+			g := newRig(t, []k8sruntime.Object{cacheObject(t, spec.Repository, "uid-cache", modeRunning, ""), service}, withLog(logs))
+
+			_, err := g.r.Spawn(g.ctx, spec)
+			if err == nil || !strings.Contains(err.Error(), "the repository cache's Service "+cache) || !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("Spawn = %v, want the launch refused naming the Service %s and %q", err, cache, tc.says)
+			}
+			issue := SandboxName(spec.Claim)
+			if pod := g.pod(issue); pod != nil {
+				t.Errorf("the refused launch made the issue pod %s", pod.Name)
+			}
+			if secret := g.secret(secretName(issue)); secret != nil {
+				t.Errorf("the refused launch wrote the provisioning Secret %s: %v", secret.Name, slices.Sorted(maps.Keys(secret.Data)))
+			}
+			if !strings.Contains(logs.String(), "service="+cache) || !strings.Contains(logs.String(), tc.says) {
+				t.Errorf("the launch logged %q, want its wait on the Service %s and why", logs.String(), cache)
+			}
+			status, found := g.r.RepositoryCache(spec.Repository)
+			if !found || status.State != cacheRefused || status.Ready || status.Address != "" || !strings.Contains(status.Reason, "Service "+cache) || !strings.Contains(status.Reason, tc.says) {
+				t.Errorf("RepositoryCache = %+v, %t; want it refused, naming the Service %s and %q", status, found, cache, tc.says)
+			}
+		})
+	}
+}
+
+// While the Services list or watch is failing, the Service store may hold a Service that has since
+// changed, so even the cache's own Service is not trusted: a launch waits, logging why, and fails
+// at the boot timeout naming the Service and the stale store, with nothing written, and legion
+// state shows the cache refused, saying its Service cannot be checked. Once a request succeeds the
+// store is trusted again. The failure recorded here is what the Service informer's list or watch
+// records when the API server refuses it.
+func TestNoServiceIsTrustedWhileTheServiceWatchFails(t *testing.T) {
+	spec := rootSpec(t)
+	cache := CacheSandboxName(testProject, spec.Repository)
+	logs := &logBuffer{}
+	g := newRig(t, []k8sruntime.Object{cacheObject(t, spec.Repository, "uid-cache", modeRunning, ""), cacheService(cache, "uid-cache")}, withLog(logs))
+	g.r.serviceFeed.record(errors.New(`services is forbidden: User "legion-daemon" cannot watch resource "services"`), time.Now())
+	says := "cannot be checked: the Service store may be stale"
+
+	_, err := g.r.Spawn(g.ctx, spec)
+	if err == nil || !strings.Contains(err.Error(), "the repository cache's Service "+cache+" "+says) {
+		t.Fatalf("Spawn = %v, want the launch refused naming the Service %s and %q", err, cache, says)
+	}
+	issue := SandboxName(spec.Claim)
+	if pod, secret := g.pod(issue), g.secret(secretName(issue)); pod != nil || secret != nil {
+		t.Errorf("the refused launch made pod %v and Secret %v, want neither", pod != nil, secret != nil)
+	}
+	if !strings.Contains(logs.String(), "service="+cache) || !strings.Contains(logs.String(), says) {
+		t.Errorf("the launch logged %q, want its wait on the Service %s and why", logs.String(), cache)
+	}
+	if status, _ := g.r.RepositoryCache(spec.Repository); status.State != cacheRefused || status.Address != "" || !strings.Contains(status.Reason, "its Service "+cache+" "+says) {
+		t.Errorf("RepositoryCache = %+v, want it refused, its Service unchecked", status)
+	}
+
+	g.r.serviceFeed.record(nil, time.Now())
+	if refusal, made := g.r.cacheServiceRefusal(cache, "uid-cache"); refusal != "" || !made {
+		t.Errorf("cacheServiceRefusal once the watch is fed again = %q, %t; want the cache's own Service", refusal, made)
 	}
 }

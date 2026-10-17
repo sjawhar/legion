@@ -16,6 +16,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -336,6 +337,7 @@ type gitHubStandIn struct {
 	remote string
 
 	mu        sync.Mutex
+	tokens    []string
 	failures  []packFailure
 	attempts  int
 	passwords []string
@@ -348,7 +350,7 @@ func newGitHubStandIn(t *testing.T, http2 bool, token string, failures ...packFa
 		t.Fatalf("the stand-in runs a real git http-backend: %v", err)
 	}
 	root := t.TempDir()
-	s := &gitHubStandIn{remote: localBareRemote(t), failures: failures}
+	s := &gitHubStandIn{remote: localBareRemote(t), tokens: []string{token}, failures: failures}
 	if err := os.Mkdir(filepath.Join(root, "acme"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -365,8 +367,9 @@ func newGitHubStandIn(t *testing.T, http2 bool, token string, failures ...packFa
 				s.attempts++
 			}
 		}
+		accepted := slices.Contains(s.tokens, password)
 		s.mu.Unlock()
-		if !ok || user != "x-access-token" || password != token {
+		if !ok || user != "x-access-token" || !accepted {
 			w.Header().Set("WWW-Authenticate", `Basic realm="GitHub"`)
 			http.Error(w, "Invalid username or token.", http.StatusUnauthorized)
 			return
@@ -526,6 +529,20 @@ func (s *gitHubStandIn) attemptCount() int {
 	return s.attempts
 }
 
+// accept has the stand-in take token as well as the one it was made with.
+func (s *gitHubStandIn) accept(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens = append(s.tokens, token)
+}
+
+// presented is every password git presented, in order.
+func (s *gitHubStandIn) presented() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.passwords)
+}
+
 // tokensPresented fails the test unless git presented the one-shot credential's token on every
 // authenticated request, and on at least one per attempt.
 func (s *gitHubStandIn) tokensPresented(t *testing.T, token string) {
@@ -562,7 +579,7 @@ func TestFetchRetriesWhatARealGitPrintsForATransientFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := fetchRequest(t)
-			github := newGitHubStandIn(t, tc.http2, req.Token, tc.failures...)
+			github := newGitHubStandIn(t, tc.http2, testInstallationToken, tc.failures...)
 			clock := newTestClock()
 			req.Clock = clock
 			var logged []string
@@ -592,7 +609,7 @@ func TestFetchRetriesWhatARealGitPrintsForATransientFailure(t *testing.T) {
 			if attempts := github.attemptCount(); attempts != len(tc.logged)+1 {
 				t.Fatalf("git made %d attempts, want %d", attempts, len(tc.logged)+1)
 			}
-			github.tokensPresented(t, req.Token)
+			github.tokensPresented(t, testInstallationToken)
 			if main := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")); main != strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+github.remote, "rev-parse", "main")) {
 				t.Errorf("the feed's main is %s, not the remote's", main)
 			}
@@ -613,7 +630,7 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := fetchRequest(t)
-			accepts := req.Token
+			accepts := testInstallationToken
 			if tc.accepts != "" {
 				accepts = tc.accepts
 			}
@@ -633,9 +650,94 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 			if attempts := github.attemptCount(); attempts != 1 || len(clock.waits) != 0 || len(logged) != 0 {
 				t.Fatalf("git made %d attempts, Fetch waited %v and logged %q; want one attempt, no wait, nothing logged", attempts, clock.waits, logged)
 			}
-			github.tokensPresented(t, req.Token)
+			github.tokensPresented(t, testInstallationToken)
 		})
 	}
+}
+
+// The provisioning token is read as its file stands before every transfer from GitHub, never kept
+// from the fetch's start: the daemon keeps a provisioning pod's Secret fresh while its fetch runs,
+// and the kubelet rewrites the file projected from it in place. Against a real git reaching the
+// stand-in as github.com: a token file rewritten while the fetch waits on the repository cache is
+// the one the delta presents, the stand-in taking that token alone; and one rewritten during a
+// retry's backoff is the one the retry presents.
+func TestFetchReadsTheProvisioningTokenAsItsFileStandsBeforeEveryTransfer(t *testing.T) {
+	t.Run("rewritten during the wait on the repository cache", func(t *testing.T) {
+		github := newGitHubStandIn(t, false, "ghs_fresh")
+		served := &fakeCache{body: cacheTar(t, cacheOf(t, github.remote)), notReady: 2}
+		pushRemoteBranch(t, github.remote, "release/v7.1", "newer.txt")
+		req := fetchRequest(t)
+		file := tokenFile(t, "ghs_stale")
+		req.Token = tokenFrom(file)
+		req.CacheURL, req.CacheToken = served.serve(t), testCacheToken
+		req.Clock = &rewritingClock{testClock: newTestClock(), file: file, token: "ghs_fresh"}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+
+		report, err := Fetch(ctx, NewRunner(testTimeout, testTools(t)), req)
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if report.Cloned || report.CacheBytes == 0 || served.healthAsked != 3 {
+			t.Fatalf("Fetch reported %+v after %d health polls, want the cache streamed after the wait", report, served.healthAsked)
+		}
+		github.tokensPresented(t, "ghs_fresh")
+	})
+	t.Run("rewritten during a retry's backoff", func(t *testing.T) {
+		github := newGitHubStandIn(t, false, "ghs_stale", http.StatusRequestTimeout)
+		github.accept("ghs_fresh")
+		req := fetchRequest(t)
+		file := tokenFile(t, "ghs_stale")
+		req.Token = tokenFrom(file)
+		req.Clock = &rewritingClock{testClock: newTestClock(), file: file, token: "ghs_fresh"}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+
+		if _, err := Fetch(ctx, NewRunner(testTimeout, testTools(t)), req); err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		presented := github.presented()
+		fresh := slices.Index(presented, "ghs_fresh")
+		if github.attemptCount() != 2 || fresh <= 0 || slices.Contains(presented[:fresh], "ghs_fresh") || slices.Contains(presented[fresh:], "ghs_stale") {
+			t.Fatalf("git presented %q over %d attempts, want the first attempt's token, then the rewritten one alone", presented, github.attemptCount())
+		}
+	})
+}
+
+// tokenFile is a provisioning token file holding token, as a pod mounts one.
+func tokenFile(t *testing.T, token string) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "LEGION_PROVISION_TOKEN")
+	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// tokenFrom is a FetchRequest.Token that reads file each time it is called.
+func tokenFrom(file string) func() (string, error) {
+	return func() (string, error) {
+		contents, err := os.ReadFile(file)
+		return strings.TrimSpace(string(contents)), err
+	}
+}
+
+// rewritingClock is the test clock that, at its first wait, rewrites file to hold token: what the
+// daemon's refresh and the kubelet do to a pod's token file while the fetch waits.
+type rewritingClock struct {
+	*testClock
+	file, token string
+	rewritten   bool
+}
+
+func (c *rewritingClock) Sleep(ctx context.Context, d time.Duration) error {
+	if !c.rewritten {
+		c.rewritten = true
+		if err := os.WriteFile(c.file, []byte(c.token), 0o600); err != nil {
+			return err
+		}
+	}
+	return c.testClock.Sleep(ctx, d)
 }
 
 // A fetch killed mid-update leaves git's lock files in the feed, which outlives it on the issue's
@@ -691,6 +793,8 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 func TestFetchIntoAFeedThatHoldsTheRepositoryFetchesEveryBranch(t *testing.T) {
 	run := newLocalRunner(t)
 	req := fetchRequest(t)
+	// The clock stands still, so the fetch is given the whole bound it shares with the reads before.
+	req.Clock = newTestClock()
 	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "doomed", "main")
 	first, err := Fetch(context.Background(), run, req)
 	if err != nil {
@@ -1036,32 +1140,33 @@ func tarOf(t *testing.T, entries ...[2]string) []byte {
 // testCacheToken is the bearer the fake cache takes and fetchRequest's cache requests present.
 const testCacheToken = "cache-token-of-acme-widgets"
 
-// fakeCache stands in for the repository cache's server: every request must carry the bearer
-// testCacheToken, or it is answered 401; an answered one names the cache's repository, acme/widgets
-// unless repo or tarRepo says otherwise, in CacheRepositoryHeader. GET /healthz answers 503 for its
-// first notReady polls and then 200 ready, and GET /tar streams body. It counts each.
+// fakeCache stands in for the repository cache's server: GET /tar must carry the bearer
+// testCacheToken, or it is answered 401; GET /healthz answers any request, 503 for its first
+// notReady polls and then 200 ready, recording the Authorization each carried. An answered request
+// names the cache's repository, acme/widgets unless repo or tarRepo says otherwise, in
+// CacheRepositoryHeader. It counts each.
 type fakeCache struct {
 	body     []byte
 	notReady int
 	repo     string
 	tarRepo  string
 
-	mu          sync.Mutex
-	healthAsked int
-	tarAsked    int
+	mu                sync.Mutex
+	healthAsked       int
+	healthCredentials []string
+	tarAsked          int
 }
 
 func (c *fakeCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if r.Header.Get("Authorization") != "Bearer "+testCacheToken {
-		http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
-		return
-	}
 	repo := cmp.Or(c.repo, "acme/widgets")
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 		c.healthAsked++
+		if credential := r.Header.Get("Authorization"); credential != "" {
+			c.healthCredentials = append(c.healthCredentials, credential)
+		}
 		w.Header().Set(CacheRepositoryHeader, repo)
 		if c.healthAsked <= c.notReady {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -1071,6 +1176,10 @@ func (c *fakeCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ready":true,"repo":"` + repo + `","bytes":1}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/tar":
 		c.tarAsked++
+		if r.Header.Get("Authorization") != "Bearer "+testCacheToken {
+			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set(CacheRepositoryHeader, cmp.Or(c.tarRepo, repo))
 		w.Header().Set("Content-Type", "application/x-tar")
 		_, _ = w.Write(c.body)
@@ -1137,7 +1246,10 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	if fetch.Argv == nil {
 		t.Fatalf("Fetch fetched no delta from GitHub into the unpacked cache: %q", run.Calls())
 	}
-	assertCredentialedEnvironmentBounded(t, fetch, FetchTimeout)
+	assertCredentialedEnvironmentBounded(t, fetch, fetch.Timeout)
+	if left := FetchTimeout - report.CacheDuration - report.VerifyDuration; fetch.Timeout > left || fetch.Timeout < left-time.Minute {
+		t.Errorf("the delta was given %s, want what remained of the one %s bound after the stream and its verification: at most %s", fetch.Timeout, FetchTimeout, left)
+	}
 	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
 		if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "config", "--get", key)); got != want {
 			t.Errorf("the feed's %s is %q, want %q", key, got, want)
@@ -1150,7 +1262,8 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 
 // A fresh feed comes from the repository cache alone: while the cache is not ready, Fetch waits on
 // it, asking its /healthz every CachePoll and logging what it answered, then streams it once it is
-// ready. Nothing is cloned from GitHub meanwhile.
+// ready. Nothing is cloned from GitHub meanwhile. The health polls carry no credential: the cache's
+// token goes with the tar alone.
 func TestFetchWaitsForTheRepositoryCacheToBeReady(t *testing.T) {
 	run := newLocalRunner(t)
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: 3}
@@ -1170,6 +1283,9 @@ func TestFetchWaitsForTheRepositoryCacheToBeReady(t *testing.T) {
 	}
 	if want := []time.Duration{CachePoll, CachePoll, CachePoll}; !slices.Equal(clock.waits, want) {
 		t.Errorf("Fetch waited %v between polls, want %v", clock.waits, want)
+	}
+	if len(served.healthCredentials) != 0 {
+		t.Errorf("Fetch's health polls carried %q, want no credential", served.healthCredentials)
 	}
 	want := "waiting for the repository cache " + req.CacheURL + " to be ready: GET " + req.CacheURL + "/healthz answered 503 Service Unavailable"
 	if len(logged) == 0 || !strings.HasPrefix(logged[0], want) {
@@ -1211,6 +1327,79 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 			assertNothingFilledTheFeed(t, run, req)
 		})
 	}
+}
+
+// The cache's stream, its verification and the delta from GitHub share one FetchTimeout, counted
+// from when the cache is ready, so a fetch ends within FetchBudget however long it waited. A cache
+// ready 35 minutes in, whose pack takes 20 minutes to index and whose history takes 5 to check,
+// leaves the delta the last 5 minutes, and the fresh feed is filled. A cache ready on the wait's
+// last ask, 39 min 50 s in, whose pack takes the whole bound to index, leaves nothing to check its
+// history in: the fetch fails then, 69 min 50 s in, naming the bound, and fills nothing.
+func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
+	polls := func(d time.Duration) int { return int(d / CachePoll) }
+	for _, tc := range []struct {
+		name     string
+		notReady int
+		took     map[string]time.Duration
+		timeouts map[string][]time.Duration
+		fails    string
+		elapsed  time.Duration
+	}{
+		{
+			name: "a cache ready 35 minutes in", notReady: polls(35 * time.Minute),
+			took:     map[string]time.Duration{"index-pack": 20 * time.Minute, "fsck": 5 * time.Minute},
+			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}, "fsck": {FetchTimeout - 20*time.Minute}, "fetch": {FetchTimeout - 25*time.Minute}},
+			elapsed:  35*time.Minute + 25*time.Minute,
+		},
+		{
+			name: "a pack that takes the whole bound to index", notReady: polls(CacheWaitTimeout) - 1,
+			took:     map[string]time.Duration{"index-pack": FetchTimeout},
+			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}},
+			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before checking the repository cache's history is whole",
+			elapsed:  CacheWaitTimeout - CachePoll + FetchTimeout,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			clock := newTestClock()
+			start := clock.Now()
+			slow := &slowSteps{recordingRunner: run, clock: clock, step: cacheFetchStep, took: tc.took, timeouts: map[string][]time.Duration{}}
+			served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: tc.notReady}
+			req := fetchRequest(t)
+			req.CacheURL, req.CacheToken, req.Clock, req.Log = served.serve(t), testCacheToken, clock, func(string) {}
+
+			report, err := Fetch(context.Background(), slow, req)
+			if tc.fails == "" && err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if tc.fails != "" && (err == nil || !strings.Contains(err.Error(), tc.fails)) {
+				t.Fatalf("Fetch = %+v, %v; want it failed: %q", report, err, tc.fails)
+			}
+			if !maps.EqualFunc(slow.timeouts, tc.timeouts, slices.Equal[[]time.Duration]) {
+				t.Errorf("the fetch's commands were given %v, want %v: what remained of one bound from the cache's readiness", slow.timeouts, tc.timeouts)
+			}
+			if elapsed := clock.Now().Sub(start); elapsed != tc.elapsed || elapsed > FetchBudget {
+				t.Errorf("the fetch ran %s, want %s, within FetchBudget %s", elapsed, tc.elapsed, FetchBudget)
+			}
+			if tc.fails != "" {
+				assertNothingFilledTheFeed(t, run, req)
+			}
+		})
+	}
+}
+
+// cacheFetchStep names the steps of a fetch from the cache whose duration follows the
+// repository's size: each pack's indexing, the history's check, and the delta from GitHub.
+func cacheFetchStep(argv []string) string {
+	switch {
+	case slices.Contains(argv, "index-pack"):
+		return "index-pack"
+	case slices.Contains(argv, "fsck"):
+		return "fsck"
+	case len(argv) > 2 && argv[0] == "git" && argv[2] == "fetch":
+		return "fetch"
+	}
+	return ""
 }
 
 // assertNothingFilledTheFeed fails when Fetch cloned from GitHub or left anything at, or beside,
@@ -1283,11 +1472,11 @@ func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
 	}
 }
 
-// A fetch asks only its own repository's cache, which it proves twice: it presents that cache's
-// token, which another repository's cache refuses with 401, and it takes nothing from a cache whose
-// answer names another repository — its /healthz, or the /tar itself, read before any of the
-// tar's content. Each is refused at once, without waiting, and nothing reaches the feed. A cache
-// named without its token is refused before anything is asked.
+// A fetch asks only its own repository's cache, which it proves twice: it takes nothing from a
+// cache whose answer names another repository — its /healthz, or the /tar itself, read before any
+// of the tar's content — and it presents that cache's token for the tar, which another
+// repository's cache refuses with 401. Each is refused at once, without waiting, and nothing
+// reaches the feed. A cache named without its token is refused before anything is asked.
 func TestFetchTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1297,7 +1486,7 @@ func TestFetchTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 		health int
 		tars   int
 	}{
-		{"a cache that refuses the token", &fakeCache{}, "another-cache's-token", "/healthz answered 401 Unauthorized", 0, 0},
+		{"a cache that refuses the token", &fakeCache{}, "another-cache's-token", "/tar answered 401 Unauthorized", 1, 1},
 		{"a cache whose health names another repository", &fakeCache{repo: "acme/gadgets"}, testCacheToken,
 			"is the repository cache of acme/gadgets, not of acme/widgets", 1, 0},
 		{"a cache whose tar names another repository", &fakeCache{tarRepo: "acme/gadgets"}, testCacheToken,

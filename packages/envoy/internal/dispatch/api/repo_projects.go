@@ -54,7 +54,8 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 // moved to another project is never that project's default unless the body says so. A mapping
 // issues name as their repository is not moved (409 REPO_PROJECT_IN_USE). Every mapping the write
 // changes emits settings.repo_project.updated on its project, and a moved mapping emits one on the
-// project it left too, deleted:true there.
+// project it left too, deleted:true there. lockRepoProjectWrite orders the write against every
+// other one.
 func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	repo, err := repoProjectPath(r)
 	if err != nil {
@@ -95,7 +96,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	previous, err := lockRepoProject(r.Context(), tx, repo)
+	previous, err := s.lockRepoProjectWrite(r.Context(), tx, repo, actor, input.Project)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -191,7 +192,7 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	previous, err := lockRepoProject(r.Context(), tx, repo)
+	previous, err := s.lockRepoProjectWrite(r.Context(), tx, repo, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -223,10 +224,47 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// lockRepoProject reads repo's mapping for update, nil when it has none. The row lock conflicts with
-// the key-share lock an issue write naming the mapping takes (checkIssueRepoMapped and the issues
-// foreign key), so the count refuseRepoProjectInUse reads after it holds until the write commits.
-func lockRepoProject(ctx context.Context, tx pgx.Tx, repo string) (*model.RepoProject, error) {
+// lockRepoProjectWrite takes, in this order, every lock a write to repo's mapping needs, and returns
+// the mapping as it stands under them (nil when repo has none). projects are the projects the write
+// may put the mapping in.
+//
+//   - repo's own advisory lock, which every writer of the mapping takes whether or not its row
+//     exists yet, so the mapping's project and its existence hold still from here on (a default
+//     switch in its project may still clear its is_default until the project lock below is held,
+//     and the row read after that lock sees it);
+//   - the event owners of the mapping's current project and of projects, in one LockOwners call
+//     before the first event, which serializes each project's default switch and orders two
+//     moves between the same projects;
+//   - the mapping's row, for update, which conflicts with the key-share lock an issue write naming
+//     it takes (checkIssueRepoMapped and the issues foreign key), so the count
+//     refuseRepoProjectInUse reads after it holds until the write commits.
+//
+// An issue create locks its project before the mapping too (createIssue), so the two never wait on
+// each other in a circle.
+func (s *server) lockRepoProjectWrite(ctx context.Context, tx pgx.Tx, repo string, actor model.Actor, projects ...string) (*model.RepoProject, error) {
+	if _, err := tx.Exec(ctx, `
+		select pg_advisory_xact_lock(hashtext('dispatch-repo-project'), hashtext($1))
+	`, repo); err != nil {
+		return nil, fmt.Errorf("lock repository mapping %s: %w", repo, err)
+	}
+	var current string
+	err := tx.QueryRow(ctx, `select project from repo_projects where repo = $1`, repo).Scan(&current)
+	switch {
+	case err == nil:
+		projects = append(projects, current)
+	case !errors.Is(err, pgx.ErrNoRows):
+		return nil, err
+	}
+	if len(projects) == 0 {
+		return nil, nil
+	}
+	owners := make([]model.Event, 0, len(projects))
+	for _, project := range projects {
+		owners = append(owners, projectOwner(project).event("", actor, nil))
+	}
+	if err := s.deps.Events.LockOwners(ctx, tx, owners...); err != nil {
+		return nil, err
+	}
 	mapping, err := scanRepoProject(tx.QueryRow(ctx, `
 		select `+repoProjectColumns+` from repo_projects where repo = $1 for update
 	`, repo))

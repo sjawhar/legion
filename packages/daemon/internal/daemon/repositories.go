@@ -373,9 +373,10 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 
 // heardRepositories is what GitHub intake hears: every repository of served and every repository
 // a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
-// GitHub spells it, which Envoy's subjects carry, whatever spelling a record keeps (a backfilled
-// record keeps its clone's): a served repository as the mapping names it, and any other in the
-// spelling GitHub last named for it, the record's own until the daemon has read it.
+// GitHub spells it, which Envoy's subjects carry and NATS matches case-sensitively, whatever
+// spelling a record keeps for its workspace (a backfilled record keeps its clone's): a served
+// repository as the mapping names it, and any other as its record keeps GitHub's spelling
+// (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -386,7 +387,7 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		return nil, fmt.Errorf("read the repositories live records name: %w", err)
 	}
 	for _, issue := range issues {
-		if _, ok := heard[strings.ToLower(issue.Repo)]; ok {
+		if _, ok := heard[strings.ToLower(issue.GitHubRepo)]; ok {
 			continue
 		}
 		root, err := w.records.Issue(ctx, tx, issue.Tree)
@@ -400,11 +401,7 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		if !live {
 			continue
 		}
-		spelling := issue.Repo
-		if read, ok := w.defaultBranches.Kept(issue.Repo); ok {
-			spelling = read.Name.String()
-		}
-		repo, err := ghrepo.Parse("the repository of "+issue.Key, spelling)
+		repo, err := ghrepo.Parse("GitHub's spelling of the repository of "+issue.Key, issue.GitHubRepo)
 		if err != nil {
 			return nil, err
 		}
@@ -507,7 +504,7 @@ func (w *workflowRuntime) ResolveRepository(resolved string) (workflow.Resolutio
 	if !ok {
 		return workflow.Resolution{}, fmt.Errorf("the default branch of %s was never read before an issue on it was recorded", mapped.Repo)
 	}
-	return workflow.Resolution{Repo: read.Name.String(), DefaultBranch: read.DefaultBranch}, nil
+	return workflow.Resolution{Repo: read.Name.String(), DefaultBranch: read.DefaultBranch, GitHubRepo: read.Name.String()}, nil
 }
 
 func repositoryNames(repos []ghrepo.Repository) []string {

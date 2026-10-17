@@ -137,6 +137,9 @@ func populatedState() State {
 				},
 			},
 		},
+		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due
+		// two and a half minutes ago and waits behind it (record.Store.HeldRows).
+		HeldOutboxRows: []HeldOutboxRow{{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801}},
 		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
 		// and nothing retries the claim until its architect retries the phase.
 		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
@@ -165,7 +168,7 @@ func populatedState() State {
 			Owners: []string{"acme", "zeta"},
 			Mapped: []MappedRepositoryView{
 				{Repo: "acme/widgets", Default: true, Cache: &CacheView{
-					Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://10.8.1.4:8418",
+					Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
 					Head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992", LastFetchAt: time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC), Bytes: 6612345678,
 				}},
 				{Repo: "zeta/tools", Cache: &CacheView{
