@@ -1,0 +1,45 @@
+Display the description and the README of a GitHub repository.
+
+With no argument, the repository for the current directory is displayed.
+
+With `--web`, open the repository in a web browser instead.
+
+With `--branch`, view a specific branch of the repository.
+
+For more information about output formatting flags, see `gh help formatting`.
+
+USAGE
+  gh repo view [<repository>] [flags]
+
+FLAGS
+  -b, --branch string     View a specific branch of the repository
+  -q, --jq expression     Filter JSON output using a jq expression
+      --json fields       Output JSON with the specified fields
+  -t, --template string   Format JSON output using a Go template; see "gh help formatting"
+  -w, --web               Open a repository in the browser
+
+INHERITED FLAGS
+  --help   Show help for command
+
+JSON FIELDS
+  archivedAt, assignableUsers, codeOfConduct, contactLinks, createdAt,
+  defaultBranchRef, deleteBranchOnMerge, description, diskUsage, forkCount,
+  fundingLinks, hasDiscussionsEnabled, hasIssuesEnabled, hasProjectsEnabled,
+  hasWikiEnabled, homepageUrl, id, isArchived, isBlankIssuesEnabled, isEmpty,
+  isFork, isInOrganization, isMirror, isPrivate, isSecurityPolicyEnabled,
+  isTemplate, isUserConfigurationRepository, issueTemplates, issues, labels,
+  languages, latestRelease, licenseInfo, mentionableUsers, mergeCommitAllowed,
+  milestones, mirrorUrl, name, nameWithOwner, openGraphImageUrl, owner, parent,
+  primaryLanguage, projects, projectsV2, pullRequestTemplates, pullRequests,
+  pushedAt, rebaseMergeAllowed, repositoryTopics, securityPolicyUrl,
+  squashMergeAllowed, sshUrl, stargazerCount, templateRepository, updatedAt, url,
+  usesCustomOpenGraphImage, viewerCanAdminister, viewerDefaultCommitEmail,
+  viewerDefaultMergeMethod, viewerHasStarred, viewerPermission,
+  viewerPossibleCommitEmails, viewerSubscription, visibility, watchers
+
+LEARN MORE
+  Use `gh <command> <subcommand> --help` for more information about a command.
+  Read the manual at https://cli.github.com/manual
+  Learn about exit codes using `gh help exit-codes`
+  Learn about accessibility experiences using `gh help accessibility`
+

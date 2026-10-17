@@ -302,8 +302,11 @@ func TestHelpListsEveryCommand(t *testing.T) {
 }
 
 // Every command answers -h, -help and --help with its usage, `usage: legion <command>…`, and exit
-// 0: the docs site's CLI generator fails the build on any other answer.
+// 0: the docs site's CLI generator fails the build on any other answer. It runs each help with no
+// LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
+// --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
+	unsetenv(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer

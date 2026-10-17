@@ -42,9 +42,9 @@ type specs struct {
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
-	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
-	// GitHub Apps.
-	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity every pane commits as, minted for the owner of the
+	// repository the launch works; nil for a daemon with no GitHub Apps.
+	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
 	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of); nil
 	// for a daemon with no GitHub Apps, which can launch no claim on a repository.
 	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
@@ -101,16 +101,8 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 	if c.Role == claim.RoleMerger {
 		addressing += " " + MergeRulesFragment(s.mergeRules)
 	}
-	env := map[string]string{}
-	if s.identity != nil {
-		id, err := s.identity(ctx, c.Role)
-		if err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
-		}
-		env = id.Env()
-	}
 	spec := runtime.SpawnSpec{
-		Env:     env,
+		Env:     map[string]string{},
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            promptPaths,
@@ -118,6 +110,13 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			DeploymentInstructionsPath: s.instructions,
 		},
 		Repository: s.repo,
+	}
+	if s.identity != nil {
+		id, err := s.identity(ctx, c.Role, spec.Repository.Owner())
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
+		}
+		spec.Env = id.Env()
 	}
 	if !s.repo.IsZero() {
 		if s.defaultBranch == nil {

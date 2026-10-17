@@ -54,7 +54,7 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 	h.handler = NewServer("127.0.0.1", 0, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store, Grants: credential.New(nil),
 		Pool: h.store.Pool(), Record: record.NewStore(), Handlers: []intake.Handler{&factRecorder{}}, Dispatch: &statusRecorder{},
-		Tokens: tokens, GitHubOwner: repository.Owner(),
+		Tokens: tokens, GitHubOwners: func() []string { return []string{repository.Owner()} },
 		Repository: func(project string) (ghrepo.Repository, bool) { return repository, project == testProject },
 	}).Handler
 	seedIssueAt(t, h, issue, phase.Merging)

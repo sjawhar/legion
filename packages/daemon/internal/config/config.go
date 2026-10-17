@@ -660,14 +660,16 @@ type ProviderKey struct {
 const providerKeysShape = "provider_keys must be a mapping of the variable OMP reads to the key that holds it (a secretsd key; under runtime kubernetes, a key of the providers Secret), e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}"
 
 // paneGitHubEnv are the gh variables the daemon sets on every pane and pod (tmux's panePairs, the
-// sandbox runtime's issuePod.agentEnv): GH_CONFIG_DIR, the role's gh files rendered from its App
-// token, and GH_TOKEN, GITHUB_TOKEN and GH_HOST set to the empty string so nothing outranks them.
-// Each runtime's runtimeOwned holds the four and refuses a provider key named for one — tmux at its
-// construction, after boot has read every provider key from secretsd, kubernetes in CheckPod — so
-// the loader refuses it first, where `legion start --check-config` sees it: the shim refuses to
-// start over a provider key its own environment already names, an empty value included
-// (shim.ReadProviderEnv, LEGION-186), so such a key would stop every pane.
-var paneGitHubEnv = []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"}
+// sandbox runtime's ghAgentEnv): LEGION_GH_OWNERS_DIR, the role's gh bundle (one directory of gh
+// files per owner of the project), GH_CONFIG_DIR, its issue's owner's directory, LEGION_GH_PATH,
+// the real gh the `legion gh` wrapper runs, and GH_TOKEN, GITHUB_TOKEN and GH_HOST set to the
+// empty string so nothing outranks the files. Each runtime's runtimeOwned holds the six and refuses
+// a provider key named for one — tmux at its construction, after boot has read every provider key
+// from secretsd, kubernetes in CheckPod — so the loader refuses it first, where `legion start
+// --check-config` sees it: the shim refuses to start over a provider key its own environment
+// already names, an empty value included (shim.ReadProviderEnv, LEGION-186), so such a key would
+// stop every pane.
+var paneGitHubEnv = []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"}
 
 // readProviderKeys is `provider_keys`: a mapping of the variable OMP reads to the key that holds
 // it, both sides environment variable names, in file order. A variable named twice is refused
@@ -691,7 +693,7 @@ func readProviderKeys(value *yaml.Node, key string) ([]ProviderKey, error) {
 			return nil, fmt.Errorf("%s names %s: an AGENT_SECRETS_* variable is the runtime's (AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR) or the daemon's own agent-secrets machine login, and is never exported into an agent's environment", key, env)
 		}
 		if slices.Contains(paneGitHubEnv, env) {
-			return nil, fmt.Errorf("%s names %s, which the daemon sets on every pane and pod (the role's GitHub App token is the gh files under GH_CONFIG_DIR; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name", key, env)
+			return nil, fmt.Errorf("%s names %s, which the daemon sets on every pane and pod (the role's GitHub App tokens are the gh files under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's owner's and LEGION_GH_PATH the real gh `legion gh` runs; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name", key, env)
 		}
 		if seen[env] {
 			return nil, fmt.Errorf("%s names %s twice", key, env)

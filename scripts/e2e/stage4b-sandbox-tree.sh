@@ -824,39 +824,51 @@ pod_exec() {
 
 # ---- each role's GitHub credential: the gh files its container alone mounts (LEGION-631) ---------
 
-# A role's GitHub App token is gh's hosts.yml under /var/run/legion/gh in its container, projected
-# from its role Secret and rewritten in place by the daemon as the lease turns over. The checks read
-# the file through sha256 (gh_hosts_hash) and read the token itself into a shell variable only
+# A role's GitHub App tokens are a gh bundle under /var/run/legion/gh in its container
+# (LEGION_GH_OWNERS_DIR), one directory per owner of the project, projected from its role Secret and
+# rewritten in place by the daemon as a lease turns over; its GH_CONFIG_DIR is the directory of
+# the run's repository's owner, which holds its App's write token. The checks read that hosts.yml
+# through sha256 (gh_hosts_hash) and read the token itself into a shell variable only
 # (gh_hosts_token), never into the evidence or a note; `pod_viewer` is what the role's plain gh
 # says it is, which only that App's token answers.
-gh_config_dir=/var/run/legion/gh
+gh_owners_dir=/var/run/legion/gh
+gh_config_dir=$gh_owners_dir/$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")
 gh_hosts_hash() { pod_exec "$1" "$2" sh -c "sha256sum $gh_config_dir/hosts.yml | cut -d' ' -f1"; }
 gh_hosts_token() { pod_exec "$1" "$2" sh -c "sed -n 's/^    oauth_token: //p' $gh_config_dir/hosts.yml | head -1"; }
-# pod_viewer POD ROLE [DIR] runs the role container's own gh with GH_CONFIG_DIR set (an exec gets
-# no environment of the role's Oh My Pi, whose variables travel in its launcher's start command) and
-# prints the GitHub login the token answers for; DIR other than the role's directory is a control.
+# An exec gets no environment of the role's Oh My Pi, whose variables travel in its launcher's
+# start command, so a check hands the image's gh — the wrapper /opt/legion/bin/gh, which runs `legion
+# gh` — the two variables it needs beside GH_CONFIG_DIR (gh_wrapper_env): the real gh it runs and the
+# bundle's root. pod_viewer POD ROLE [DIR] runs the role container's gh so and prints the GitHub
+# login the token answers for; DIR other than the role's directory is a control.
+gh_wrapper_env="LEGION_GH_PATH=/usr/local/bin/gh LEGION_GH_OWNERS_DIR=$gh_owners_dir"
 pod_viewer() {
-  pod_exec "$1" "$2" sh -c "GH_CONFIG_DIR=${3:-$gh_config_dir} GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login"
+  pod_exec "$1" "$2" sh -c "$gh_wrapper_env GH_CONFIG_DIR=${3:-$gh_config_dir} GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login"
 }
-# assert_gh_files POD CONTAINER WHO fails the check unless CONTAINER's gh config directory in POD
-# holds both gh files and nothing beside them but the kubelet's. The directory is a whole-volume
-# Secret projection (the mount the hour-boundary refresh needs: the kubelet rewrites it in place
-# when the Secret changes, where a subPath mount never sees an update), so beside the two gh files
-# it always lists the kubelet's atomic-writer entries, `..data` and a `..<timestamp>` directory.
-# The two files are required, and so is `..data`, which a subPath mount (which never refreshes)
-# would not have; any other `..`-prefixed entry is the kubelet's; anything else is a stranger,
+# assert_gh_files POD CONTAINER WHO fails the check unless CONTAINER's gh bundle in POD holds the
+# repository owner's directory with both gh files and nothing else, beside nothing but other
+# owners' directories and the kubelet's entries. The bundle is a whole-volume Secret projection
+# (the mount the hour-boundary refresh needs: the kubelet rewrites it in place when the Secret
+# changes, where a subPath mount never sees an update), so beside the owners' directories its root
+# always lists the kubelet's atomic-writer entries, `..data` and a `..<timestamp>` directory. The
+# owner's directory is required, and so is `..data`, which a subPath mount (which never refreshes)
+# would not have; any other `..`-prefixed entry is the kubelet's, and any other entry must be a
+# lowercased GitHub login; anything else, at the root or in the owner's directory, is a stranger,
 # named. WHO names the container in the failure. Call it outside a command substitution: fail must
 # end the run.
 assert_gh_files() {
-  local listed want strangers
-  listed=$(pod_exec "$1" "$2" sh -c "ls -A $gh_config_dir") || fail "could not list $3's $gh_config_dir"
+  local root owned want strangers
+  root=$(pod_exec "$1" "$2" sh -c "ls -A $gh_owners_dir") || fail "could not list $3's $gh_owners_dir"
+  grep -qxF -- "${gh_config_dir##*/}" <<<"$root" || fail "$3's $gh_owners_dir lacks ${gh_config_dir##*/}; it holds: $(tr '\n' ' ' <<<"$root")"
+  grep -qxF -- ..data <<<"$root" ||
+    fail "$3's $gh_owners_dir holds no ..data: it is not the whole-volume projection the kubelet refreshes in place; it holds: $(tr '\n' ' ' <<<"$root")"
+  strangers=$(grep -v '^\.\.' <<<"$root" | grep -vxE '[a-z0-9][a-z0-9-]*' || true)
+  [ -z "$strangers" ] || fail "$3's $gh_owners_dir holds an entry that is neither an owner's directory nor the kubelet's: $(tr '\n' ' ' <<<"$strangers")"
+  owned=$(pod_exec "$1" "$2" sh -c "ls -A $gh_config_dir") || fail "could not list $3's $gh_config_dir"
   for want in config.yml hosts.yml; do
-    grep -qxF -- "$want" <<<"$listed" || fail "$3's $gh_config_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$listed")"
+    grep -qxF -- "$want" <<<"$owned" || fail "$3's $gh_config_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$owned")"
   done
-  grep -qxF -- ..data <<<"$listed" ||
-    fail "$3's $gh_config_dir holds no ..data: it is not the whole-volume projection the kubelet refreshes in place; it holds: $(tr '\n' ' ' <<<"$listed")"
-  strangers=$(grep -vxF -e config.yml -e hosts.yml <<<"$listed" | grep -v '^\.\.' || true)
-  [ -z "$strangers" ] || fail "$3's $gh_config_dir holds an entry that is neither a gh file nor the kubelet's: $(tr '\n' ' ' <<<"$strangers")"
+  strangers=$(grep -vxF -e config.yml -e hosts.yml <<<"$owned" || true)
+  [ -z "$strangers" ] || fail "$3's $gh_config_dir holds an entry that is not a gh file: $(tr '\n' ' ' <<<"$strangers")"
 }
 # operator_gh DIR args… runs the real gh (real_gh, mise's) with the same three variables pod_viewer
 # empties, against the controller's gh config directory rather than a pod's. The devbox's `gh` on
@@ -1847,15 +1859,20 @@ shape_problems() {
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s | role_containers[] | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "a role launcher mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end),
-      # Each role holds its GitHub App token in a gh volume of its own (LEGION-631): gh-<role>
-      # projects the two gh keys of that role Secret, read-only at GH_CONFIG_DIR in that role
-      # container alone, so no container reads another role token; the clone helper is gh itself;
-      # and the containers share no process namespace, which would let one read another /proc.
+      # Each role holds its GitHub App tokens in a gh volume of its own (LEGION-631): gh-<role>
+      # projects the two gh keys of each owner in that role Secret as <owner>/hosts.yml and
+      # <owner>/config.yml, read-only at LEGION_GH_OWNERS_DIR in that role container alone, so no
+      # container reads another role token; the clone helper is legion git-credential; and the
+      # containers share no process namespace, which would let one read another /proc.
       ($roles[] | . as $role | ([$s.volumes[] | select(.name == "gh-\($role)")] | first) as $v
         | ([$s.volumes[] | select(.name == "launcher-\($role)")] | first | .secret.secretName) as $own
         | if $v == null then "no gh-\($role) volume" else
             (if $v.secret.secretName != $own then "gh-\($role) projects Secret \($v.secret.secretName), not the role Secret \($own) its launcher token comes from" else empty end),
-            (if (($v.secret.items // []) | map({(.key): .path}) | add) != {"github-hosts": "hosts.yml", "github-config": "config.yml"} then "gh-\($role) projects \($v.secret.items | tostring), not hosts.yml and config.yml" else empty end),
+            (($v.secret.items // []) as $items
+              | ([$items[] | .key | capture("^github-hosts-(?<o>[a-z0-9][a-z0-9-]*)$") | .o] | sort) as $owners
+              | if ($owners | length) == 0 or ($items | length) != 2 * ($owners | length)
+                  or ($items | map({(.key): .path}) | add) != ($owners | map({("github-hosts-" + .): (. + "/hosts.yml"), ("github-config-" + .): (. + "/config.yml")}) | add)
+                then "gh-\($role) projects \($items | tostring), not <owner>/hosts.yml and <owner>/config.yml for each owner" else empty end),
             (if $v.secret.defaultMode != 288 then "gh-\($role) has defaultMode \($v.secret.defaultMode), not 0440" else empty end)
           end),
       ($s | role_containers[] | .name as $role
@@ -1866,7 +1883,7 @@ shape_problems() {
         | "container \($c.name) mounts \(.name) under /var/run/legion/gh"),
       (if $s.shareProcessNamespace == true then "shareProcessNamespace is set" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init")] | .[] | (.command | index("--credential-helper")) as $i
-        | if $i == null or .command[$i + 1] != "!gh auth git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !gh auth git-credential" else empty end),
+        | if $i == null or .command[$i + 1] != "!legion git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !legion git-credential" else empty end),
       # Every container reserves the cpu and memory of its role, request and limit alike, and its
       # ephemeral-storage bound, request under limit; the pod is Guaranteed and asks nothing of its
       # placement.
@@ -1875,8 +1892,9 @@ shape_problems() {
 }
 # check_pod_shape SPEC prints the pod's shape problems, then whether any Secret value of the pod's
 # claim is in a container's command, args or environment: the provisioning token, each role's
-# launcher token, and each role's GitHub App token — the `oauth_token` lines of its `github-hosts`
-# key (gh's hosts.yml, two lines of which carry the token); `github-config` holds no secret.
+# launcher token, and each role's GitHub App tokens — the `oauth_token` lines of each owner's
+# `github-hosts-<owner>` key (gh's hosts.yml, two lines of which carry the token); the
+# `github-config-<owner>` keys and `github-default` hold no secret.
 check_pod_shape() {
   local spec=$1 tokens name role values
   shape_problems <<<"$spec"
@@ -1884,8 +1902,8 @@ check_pod_shape() {
   tokens=$(op get secret "$name-boot" -o json 2>/dev/null | jq -r '.data // {} | .[] | @base64d') || tokens=
   for role in architect planner implementer tester reviewer merger; do
     values=$(op get secret "$name-$role-boot" -o json 2>/dev/null | jq -r '.data // {} | to_entries[]
-      | if .key == "github-hosts" then (.value | @base64d | split("\n")[] | select(test("oauth_token: ")) | sub("^.*oauth_token: "; ""))
-        elif .key == "github-config" then empty
+      | if (.key | startswith("github-hosts-")) then (.value | @base64d | split("\n")[] | select(test("oauth_token: ")) | sub("^.*oauth_token: "; ""))
+        elif (.key | startswith("github-config-")) or .key == "github-default" then empty
         else (.value | @base64d) end') || values=
     tokens+="${tokens:+$'\n'}$values"
   done
@@ -4005,8 +4023,8 @@ begin github-credential
 # implementer's code head has its check runs (acceptance 4a).
 gh_pod=$(claim_sandbox "$tree1" implementer) || fail "tree 1's implementer has no Sandbox locator"
 gh_bin=$(pod_exec "$gh_pod" implementer sh -c 'command -v gh') || fail "no gh in the implementer container of $gh_pod"
-[ "$gh_bin" = /usr/local/bin/gh ] || fail "the implementer container's gh is $gh_bin, want the image's /usr/local/bin/gh"
-status=$(pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh auth status 2>&1") || fail "gh auth status in the implementer container failed: $(scrub <<<"$status" | head -5)"
+[ "$gh_bin" = /opt/legion/bin/gh ] || fail "the implementer container's gh is $gh_bin, want the image's wrapper /opt/legion/bin/gh"
+status=$(pod_exec "$gh_pod" implementer sh -c "$gh_wrapper_env GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh auth status 2>&1") || fail "gh auth status in the implementer container failed: $(scrub <<<"$status" | head -5)"
 grep -q "x-access-token" <<<"$status" || fail "gh auth status in the implementer container names no x-access-token account: $(scrub <<<"$status" | head -5)"
 for role in implementer reviewer; do
   want=$(role_app "$role")
@@ -4018,10 +4036,10 @@ impl_hash=$(gh_hosts_hash "$gh_pod" implementer) || fail "could not hash the imp
 rev_hash=$(gh_hosts_hash "$gh_pod" reviewer) || fail "could not hash the reviewer's hosts.yml"
 [ "$impl_hash" != "$rev_hash" ] || fail "the implementer's and the reviewer's hosts.yml in $gh_pod are the same file (hash $impl_hash): the two roles hold one token"
 impl_env=$(pod_env "$gh_pod" implementer) || fail "no readable Oh My Pi environment in the implementer container of $gh_pod"
-for want in "GH_CONFIG_DIR=$gh_config_dir" "GH_TOKEN=" "GITHUB_TOKEN=" "GH_HOST="; do
-  grep -qxF -- "$want" <<<"$impl_env" || fail "the implementer's Oh My Pi environment lacks $want: $(grep -E '^(GH_|GITHUB_)' <<<"$impl_env" | tr '\n' ' ')"
+for want in "GH_CONFIG_DIR=$gh_config_dir" "GH_TOKEN=" "GITHUB_TOKEN=" "GH_HOST=" "LEGION_GH_OWNERS_DIR=$gh_owners_dir" "LEGION_GH_PATH=/usr/local/bin/gh"; do
+  grep -qxF -- "$want" <<<"$impl_env" || fail "the implementer's Oh My Pi environment lacks $want: $(grep -E '^(GH_|GITHUB_|LEGION_GH_)' <<<"$impl_env" | tr '\n' ' ')"
 done
-for absent in LEGION_GH_PATH LEGION_GIT_PATH LEGION_JJ_PATH LEGION_CREDENTIAL_HELPER LEGION_GRANT_FILE LEGION_GRANT LEGION_IMPLEMENT_APP_LOGIN LEGION_REVIEW_APP_LOGIN; do
+for absent in LEGION_GIT_PATH LEGION_JJ_PATH LEGION_CREDENTIAL_HELPER LEGION_GRANT_FILE LEGION_GRANT LEGION_IMPLEMENT_APP_LOGIN LEGION_REVIEW_APP_LOGIN; do
   ! grep -q "^$absent=" <<<"$impl_env" || fail "the implementer's Oh My Pi environment still carries $(grep "^$absent=" <<<"$impl_env")"
 done
 impl_path=$(sed -n 's/^PATH=//p' <<<"$impl_env")
@@ -5039,29 +5057,33 @@ instructions: $work/instructions.md
 omp_invocation: mise x $pin -- omp
 state_dir: $work/controller-state
 EOF
+# LEGION_GH_PATH is the real gh the controller's `legion gh` runs, mise's: the devbox's gh on PATH
+# is a wrapper that replaces GH_CONFIG_DIR in an agent session.
 tmux -L "legion-e2e4b-$$" new-session -d -s controller -x 200 -y 50 \
-  "cd '$work' && HOME='$omp_home' OMP_PROFILE='$profile' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/logs/controller.stderr'; sleep 3600"
+  "cd '$work' && HOME='$omp_home' OMP_PROFILE='$profile' LEGION_GH_PATH='$real_gh' '$work/legion' controller start --config '$work/controller.yaml' 2>'$evidence/logs/controller.stderr'; sleep 3600"
 until_true 300 "controllerLocator in the state" sh -c "'$work/legion' state --json --config '$work/legion.yaml' | jq -e '.controllerLocator.sessionId != null' >/dev/null"
 controller_session=$(daemon_state | jq -r .controllerLocator.sessionId)
 note "controllerLocator $(daemon_state | jq -c .controllerLocator)"
-# The operator-launched controller's own gh, from $work/controller-state/gh: it answers tree 1's
-# pull request's state and the review App's viewer, a directory elsewhere answers neither, the
-# stderr names the review App, and the daemon's credential refresh log exists.
+# The operator-launched controller's own gh bundle, $work/controller-state/gh: from the repository
+# owner's directory it answers tree 1's pull request's state and the review App's viewer, a
+# directory elsewhere answers neither, the stderr names the review App and the bundle's owners, and
+# the daemon's credential refresh log exists.
 [ -n "$pr_number" ] || fail "the controller's GitHub credential check needs tree 1's pull request, but pr_number is empty"
-state=$(operator_gh "$work/controller-state/gh" pr view "$pr_number" -R "$repo" --json state -q .state 2>&1) || fail "the operator-launched controller's gh could not read $repo#$pr_number: $(scrub <<<"$state")"
+controller_gh=$work/controller-state/gh/${gh_config_dir##*/}
+state=$(operator_gh "$controller_gh" pr view "$pr_number" -R "$repo" --json state -q .state 2>&1) || fail "the operator-launched controller's gh could not read $repo#$pr_number: $(scrub <<<"$state")"
 case "$state" in
   OPEN | MERGED | CLOSED) ;;
   *) fail "the operator-launched controller's gh answered pull request state '$state' for $repo#$pr_number, want OPEN, MERGED or CLOSED" ;;
 esac
-viewer=$(operator_gh "$work/controller-state/gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1) || fail "the operator-launched controller's gh answered no viewer: $(scrub <<<"$viewer")"
+viewer=$(operator_gh "$controller_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1) || fail "the operator-launched controller's gh answered no viewer: $(scrub <<<"$viewer")"
 [ "$viewer" = "$(role_app controller)" ] || fail "the operator-launched controller's gh answered viewer $viewer, want the review App's $(role_app controller)"
 if out=$(operator_gh /nonexistent pr view "$pr_number" -R "$repo" --json state -q .state 2>&1); then
   fail "gh with GH_CONFIG_DIR=/nonexistent unexpectedly answered pull request state: $(scrub <<<"$out")"
 fi
-grep -qF "[legion] the controller's gh acts as the review App from $work/controller-state/gh" "$evidence/logs/controller.stderr" ||
-  fail "controller.stderr does not name the review App and $work/controller-state/gh: $(cat "$evidence/logs/controller.stderr")"
+grep -qF "[legion] the controller's gh acts as the review App for owners ${gh_config_dir##*/} (read-only) from $work/controller-state/gh" "$evidence/logs/controller.stderr" ||
+  fail "controller.stderr does not name the review App, ${gh_config_dir##*/} and $work/controller-state/gh: $(cat "$evidence/logs/controller.stderr")"
 [ -f "$work/controller-state/github-credential.log" ] || fail "$work/controller-state/github-credential.log does not exist"
-note "the operator-launched controller's gh: pull request state $state, viewer $viewer; GH_CONFIG_DIR=/nonexistent failed; controller.stderr names the review App; github-credential.log exists"
+note "the operator-launched controller's gh: pull request state $state, viewer $viewer from $controller_gh; GH_CONFIG_DIR=/nonexistent failed; controller.stderr names the review App and its owners; github-credential.log exists"
 # The controller's first turn starts itself (LEGION-392): nothing is ever typed into its pane, so
 # its session's first user message is the start message `legion controller start` carries as
 # LEGION_CONTROLLER_START_MESSAGE (daemon.ControllerStartMessage, internal/daemon/controller.go) and
@@ -5490,12 +5512,13 @@ op exec "$pod" -c "$(jq -r .locator.sandbox.container <<<"$claim")" -- tar -C /h
 if [ -n "$skip_controller" ]; then
   note "STAGE4B_SKIP_CONTROLLER: the daemon-launched controller's GitHub credential is not checked"
 else
-# The controller the daemon launched: its gh, from the pod's /var/run/legion/gh, answers tree 1's
-# pull request's state and the review App's viewer, the directory holds both gh files beside the
-# kubelet's own entries alone (assert_gh_files), and GH_CONFIG_DIR=/nonexistent answers neither.
+# The controller the daemon launched: its gh, from its owner's directory of the pod's gh bundle,
+# answers tree 1's pull request's state and the review App's viewer, the bundle holds that
+# directory with both gh files beside the kubelet's own entries alone (assert_gh_files), and the
+# real gh with GH_CONFIG_DIR=/nonexistent answers neither.
 [ -n "$pr_number" ] || fail "the controller's GitHub credential check needs tree 1's pull request, but pr_number is empty"
 container=$(jq -r .locator.sandbox.container <<<"$claim")
-state=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state 2>&1") || fail "the daemon-launched controller's gh in $pod/$container could not read $repo#$pr_number: $(scrub <<<"$state")"
+state=$(pod_exec "$pod" "$container" sh -c "$gh_wrapper_env GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state 2>&1") || fail "the daemon-launched controller's gh in $pod/$container could not read $repo#$pr_number: $(scrub <<<"$state")"
 case "$state" in
   OPEN | MERGED | CLOSED) ;;
   *) fail "the daemon-launched controller's gh answered pull request state '$state' for $repo#$pr_number, want OPEN, MERGED or CLOSED" ;;
@@ -5503,10 +5526,10 @@ esac
 viewer=$(pod_viewer "$pod" "$container") || fail "the daemon-launched controller's gh in $pod/$container answered no viewer"
 [ "$viewer" = "$(role_app controller)" ] || fail "the daemon-launched controller's gh answered viewer $viewer, want the review App's $(role_app controller)"
 assert_gh_files "$pod" "$container" "the daemon-launched controller's container $pod/$container"
-if out=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state" 2>&1); then
+if out=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= /usr/local/bin/gh pr view $pr_number -R $repo --json state -q .state" 2>&1); then
   fail "gh with GH_CONFIG_DIR=/nonexistent in $pod/$container unexpectedly answered pull request state: $(scrub <<<"$out")"
 fi
-note "the daemon-launched controller's gh in $pod/$container: pull request state $state, viewer $viewer, $gh_config_dir holds both gh files and only the kubelet's entries beside them; GH_CONFIG_DIR=/nonexistent failed"
+note "the daemon-launched controller's gh in $pod/$container: pull request state $state, viewer $viewer, $gh_config_dir holds both gh files and $gh_owners_dir only owners' directories and the kubelet's entries beside it; GH_CONFIG_DIR=/nonexistent failed"
 fi
 # 2. The controller cannot come back.
 controller_cpu=100000

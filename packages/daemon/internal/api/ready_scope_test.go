@@ -26,8 +26,9 @@ const smokeRetroCompare = `{"status":"ahead","ahead_by":2,"files":[` +
 
 // After the reviewer approves a head, retro's commits sit above it: its learnings under
 // docs/solutions/, and its last commit's removal of the issue's own .legion/<issue>/. READY reads
-// GitHub's compare of the approved head with READY's head, as the implement App, and publishes a
-// READY whose change since the approval is only those, as legion-smoke#589's was, or none at all.
+// GitHub's compare of the approved head with READY's head, as the implement App for the
+// repository's owner, and publishes a READY whose change since the approval is only those, as
+// legion-smoke#589's was, or none at all.
 func TestHandoffCompleteReadyAcceptsOnlyRetrosChangesAboveTheApprovedHead(t *testing.T) {
 	for _, tc := range []struct{ name, compare string }{
 		{"legion-smoke#589's retro: two learnings added and the issue's handoffs removed", smokeRetroCompare},
@@ -49,8 +50,8 @@ func TestHandoffCompleteReadyAcceptsOnlyRetrosChangesAboveTheApprovedHead(t *tes
 			github.mu.Lock()
 			defer github.mu.Unlock()
 			for _, bearer := range github.bearers {
-				if bearer != "Bearer implement-token" {
-					t.Fatalf("GitHub was read with %q, want the implement App's token alone", bearer)
+				if bearer != "Bearer implement-token-for-acme" {
+					t.Fatalf("GitHub was read with %q, want the implement App's token for acme, the repository's owner, alone", bearer)
 				}
 			}
 		})

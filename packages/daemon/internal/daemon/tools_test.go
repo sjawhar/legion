@@ -29,9 +29,9 @@ func fakeJJ(t *testing.T, dir, version string) string {
 	return path
 }
 
-// Boot resolves the binaries Legion itself runs — git and jj, never gh — once, each by its
-// LEGION_<TOOL>_PATH override or on the daemon's PATH, and names every missing one with its
-// override.
+// Boot resolves the binaries Legion itself runs or hands a pane — git, jj and the real gh a pane's
+// `legion gh` runs — once, each by its LEGION_<TOOL>_PATH override or on the daemon's PATH, and
+// names every missing one with its override.
 func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	onPath, elsewhere := t.TempDir(), t.TempDir()
 	executable(t, onPath, "git")
@@ -40,19 +40,19 @@ func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
 
 	_, err := resolveTools(lookup)
-	if err == nil || !strings.Contains(err.Error(), "jj (set LEGION_JJ_PATH to an absolute executable path)") || strings.Contains(err.Error(), "git (") {
-		t.Fatalf("resolveTools with no jj = %v, want only jj named with its override", err)
+	if err == nil || !strings.Contains(err.Error(), "jj (set LEGION_JJ_PATH to an absolute executable path)") ||
+		!strings.Contains(err.Error(), "gh (set LEGION_GH_PATH to an absolute executable path)") || strings.Contains(err.Error(), "git (") {
+		t.Fatalf("resolveTools with no jj or gh = %v, want only jj and gh named with their overrides", err)
 	}
 	fakeJJ(t, onPath, currentJJ)
+	gh := executable(t, elsewhere, "gh")
+	env["LEGION_GH_PATH"] = gh
 	tools, err := resolveTools(lookup)
 	if err != nil {
 		t.Fatalf("resolveTools: %v", err)
 	}
-	if tools["git"] != pinned || tools["jj"] != filepath.Join(onPath, "jj") {
-		t.Fatalf("resolveTools = %v, want the override for git and PATH for jj", tools)
-	}
-	if _, resolved := tools["gh"]; resolved || len(tools) != 2 {
-		t.Fatalf("resolveTools = %v, want git and jj alone: a pane's gh is its PATH's", tools)
+	if tools["git"] != pinned || tools["jj"] != filepath.Join(onPath, "jj") || tools["gh"] != gh || len(tools) != 3 {
+		t.Fatalf("resolveTools = %v, want the override for git and gh and PATH for jj", tools)
 	}
 	env["LEGION_JJ_PATH"] = "jj"
 	if _, err := resolveTools(lookup); err == nil || !strings.Contains(err.Error(), "LEGION_JJ_PATH") {
@@ -80,6 +80,7 @@ func TestResolveToolsRefusesAJJOlderThanTheLayoutProvisioningReliesOn(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			onPath, elsewhere := t.TempDir(), t.TempDir()
 			executable(t, onPath, "git")
+			executable(t, onPath, "gh")
 			env := map[string]string{"PATH": onPath}
 			if tc.override {
 				env["LEGION_JJ_PATH"] = fakeJJ(t, elsewhere, tc.version)

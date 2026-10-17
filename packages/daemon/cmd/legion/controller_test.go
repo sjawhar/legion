@@ -108,20 +108,20 @@ func newControllerDaemonGated(t *testing.T, gate config.DesignGate) *controllerD
 	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: gate})
 }
 
-// newControllerDaemonWithTokens is newControllerDaemon whose GitHub credential route mints a
-// review App token from tokens, for the tests of the controller's GitHub credential fetch and
-// refresh loop.
+// newControllerDaemonWithTokens is newControllerDaemon whose GitHub credential route mints review
+// App tokens from tokens for a project under two owners, acme and sjawhar, for the tests of the
+// controller's GitHub credential fetch and refresh loop.
 func newControllerDaemonWithTokens(t *testing.T, tokens appauth.Tokens) *controllerDaemon {
-	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens, githubOwner: "acme"})
+	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens, owners: []string{"sjawhar", "acme"}})
 }
 
 // controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate,
-// and, for the tests of the controller's GitHub credential route, a Tokens fake and the
-// repository owner its mints need.
+// and, for the tests of the controller's GitHub credential route, a Tokens fake and the owners of
+// the project's repositories its mints need.
 type controllerDaemonOptions struct {
-	gate        config.DesignGate
-	tokens      appauth.Tokens
-	githubOwner string
+	gate   config.DesignGate
+	tokens appauth.Tokens
+	owners []string
 }
 
 // newControllerDaemonWithOptions is the daemon's HTTP surface as `legion controller start` and
@@ -133,7 +133,7 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
 		DesignGate: opts.gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Tokens: opts.tokens, GitHubOwner: opts.githubOwner,
+		Tokens: opts.tokens, GitHubOwners: func() []string { return opts.owners },
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -168,7 +168,8 @@ func (d *controllerDaemon) requests() []seenRequest {
 }
 
 // operatorMachine is one operator's machine: a controller.yaml naming every key, the files it
-// points at, a HOME of its own, and an Oh My Pi that records how it was launched and exits.
+// points at, a HOME of its own, an Oh My Pi that records how it was launched and exits, and the
+// real gh its LEGION_GH_PATH names.
 type operatorMachine struct {
 	t          *testing.T
 	daemon     *controllerDaemon
@@ -177,6 +178,7 @@ type operatorMachine struct {
 	tokenFile  string
 	record     string
 	defaultDir string
+	gh         string
 }
 
 type controllerOptions struct {
@@ -282,6 +284,13 @@ exit %[2]d
 	t.Setenv("PI_CODING_AGENT_DIR", "")
 	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
+	// The real gh the controller's `legion gh` runs, which the operator's environment names here so
+	// the run never depends on a gh this machine may or may not have.
+	c.gh = filepath.Join(record, "gh")
+	if err := os.WriteFile(c.gh, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_GH_PATH", c.gh)
 	c.installPlugin(api.DaemonAPIVersion)
 	return c
 }
@@ -590,6 +599,8 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"GH_TOKEN":                        "",
 		"GITHUB_TOKEN":                    "",
 		"GH_HOST":                         "",
+		"LEGION_GH_OWNERS_DIR":            filepath.Join(c.defaultDir, "gh"),
+		"LEGION_GH_PATH":                  c.gh,
 		"LEGION_CONTROLLER_START_MESSAGE": daemon.ControllerStartMessage,
 		"DISPATCH_URL":                    "https://dispatch.test",
 		"DISPATCH_TOKEN_FILE":             filepath.Join(c.dir, "dispatch-token"),
@@ -1147,23 +1158,26 @@ func TestControllerStartUsage(t *testing.T) {
 	}
 }
 
-// controllerCredentialTokens is a Tokens fake for the controller's GitHub credential route: its
-// token is read and set under a lock, so a test can flip it between the refresh loop's ticks, or
-// have every mint fail, for the 502 case.
+// controllerCredentialTokens is a Tokens fake for the controller's GitHub credential route: each
+// owner's token is read and set under a lock, so a test can turn one owner's between the refresh
+// loop's ticks, or have every mint fail, for the 502 case. An owner with no token of its own gets
+// the fake's base token.
 type controllerCredentialTokens struct {
-	mu    sync.Mutex
-	token string
-	err   error
+	mu     sync.Mutex
+	token  string
+	owners map[string]string
+	err    error
 }
 
 func newControllerCredentialTokens(token string) *controllerCredentialTokens {
-	return &controllerCredentialTokens{token: token}
+	return &controllerCredentialTokens{token: token, owners: map[string]string{}}
 }
 
-func (c *controllerCredentialTokens) set(token string) {
+// setOwner turns owner's token to token.
+func (c *controllerCredentialTokens) setOwner(owner, token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.token = token
+	c.owners[owner] = token
 }
 
 func (c *controllerCredentialTokens) failWith(err error) {
@@ -1172,13 +1186,23 @@ func (c *controllerCredentialTokens) failWith(err error) {
 	c.err = err
 }
 
-func (c *controllerCredentialTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+func (c *controllerCredentialTokens) Token(_ context.Context, _ appauth.AppRole, owner string) (appauth.Lease, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.err != nil {
 		return appauth.Lease{}, c.err
 	}
-	return appauth.Lease{Token: c.token, ExpiresAt: time.Now().Add(time.Hour)}, nil
+	token := c.token
+	if own, ok := c.owners[owner]; ok {
+		token = own
+	}
+	return appauth.Lease{Token: token, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (c *controllerCredentialTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := c.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
 }
 
 // requestsTo answers how many of d's recorded requests were to path.
@@ -1192,9 +1216,26 @@ func requestsTo(d *controllerDaemon, path string) int {
 	return n
 }
 
-// The controller's gh directory holds the review App's token as the daemon's credential route
-// rendered it, written before Oh My Pi starts, under GH_CONFIG_DIR, with one request made before
-// the loop.
+// credentialRequests are the bodies of d's recorded github-credential requests, in order.
+func credentialRequests(t *testing.T, d *controllerDaemon) []api.ControllerCredentialRequest {
+	t.Helper()
+	var bodies []api.ControllerCredentialRequest
+	for _, r := range d.requests() {
+		if r.path == "/legion/v1/controller/github-credential" {
+			var body api.ControllerCredentialRequest
+			if err := json.Unmarshal(r.body, &body); err != nil {
+				t.Fatalf("github-credential request body %s: %v", r.body, err)
+			}
+			bodies = append(bodies, body)
+		}
+	}
+	return bodies
+}
+
+// The controller's gh directory holds the review App's read-only token for every owner of the
+// project, as the daemon's credential route rendered them, one directory per owner, written before
+// Oh My Pi starts, whose GH_CONFIG_DIR names the first owner's directory and LEGION_GH_OWNERS_DIR
+// the bundle's root, with one request made before the loop, naming no default yet.
 func TestControllerStartWritesTheControllersGitHubCredentialUnderGh(t *testing.T) {
 	tokens := newControllerCredentialTokens("ghs_first")
 	d := newControllerDaemonWithTokens(t, tokens)
@@ -1204,53 +1245,49 @@ func TestControllerStartWritesTheControllersGitHubCredentialUnderGh(t *testing.T
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	ghDir := filepath.Join(c.defaultDir, "gh")
-	hosts, err := os.ReadFile(filepath.Join(ghDir, "hosts.yml"))
-	if err != nil || string(hosts) != ghconfig.Hosts("ghs_first") {
-		t.Fatalf("hosts.yml = %q, %v, want %q", hosts, err, ghconfig.Hosts("ghs_first"))
+	for _, owner := range []string{"acme", "sjawhar"} {
+		hosts, err := os.ReadFile(filepath.Join(ghDir, owner, "hosts.yml"))
+		if err != nil || string(hosts) != ghconfig.Hosts("ghs_first-read") {
+			t.Fatalf("%s's hosts.yml = %q, %v, want %q", owner, hosts, err, ghconfig.Hosts("ghs_first-read"))
+		}
+		cfg, err := os.ReadFile(filepath.Join(ghDir, owner, "config.yml"))
+		if err != nil || string(cfg) != ghconfig.Config {
+			t.Fatalf("%s's config.yml = %q, %v, want %q", owner, cfg, err, ghconfig.Config)
+		}
 	}
-	cfg, err := os.ReadFile(filepath.Join(ghDir, "config.yml"))
-	if err != nil || string(cfg) != ghconfig.Config {
-		t.Fatalf("config.yml = %q, %v, want %q", cfg, err, ghconfig.Config)
+	if entries, err := os.ReadDir(ghDir); err != nil || len(entries) != 2 || entries[0].Name() != "acme" || entries[1].Name() != "sjawhar" {
+		t.Errorf("the gh directory holds %v (%v), want the two owners' directories alone", entries, err)
 	}
-	if got := c.env()["GH_CONFIG_DIR"]; got != ghDir {
-		t.Errorf("GH_CONFIG_DIR = %q, want %s", got, ghDir)
+	env := c.env()
+	if env["GH_CONFIG_DIR"] != filepath.Join(ghDir, "acme") || env["LEGION_GH_OWNERS_DIR"] != ghDir || env["LEGION_GH_PATH"] != c.gh {
+		t.Errorf("GH_CONFIG_DIR = %q, LEGION_GH_OWNERS_DIR = %q, LEGION_GH_PATH = %q; want %s, %s and %s",
+			env["GH_CONFIG_DIR"], env["LEGION_GH_OWNERS_DIR"], env["LEGION_GH_PATH"], filepath.Join(ghDir, "acme"), ghDir, c.gh)
 	}
 	startHosts, err := os.ReadFile(filepath.Join(c.record, "hosts-at-start"))
-	if err != nil || string(startHosts) != ghconfig.Hosts("ghs_first") {
+	if err != nil || string(startHosts) != ghconfig.Hosts("ghs_first-read") {
 		t.Fatalf("hosts.yml at Oh My Pi's start = %q, %v; want it to already hold the token", startHosts, err)
-	}
-	if n := requestsTo(d, "/legion/v1/controller/github-credential"); n != 1 {
-		t.Fatalf("%d github-credential requests, want 1", n)
 	}
 	secret, err := os.ReadFile(filepath.Join(c.defaultDir, "secrets", "legion-demo-controller"))
 	if err != nil {
 		t.Fatalf("read the secret file: %v", err)
 	}
-	wantBody, err := json.Marshal(map[string]string{"secret": string(secret)})
-	if err != nil {
-		t.Fatal(err)
+	if requests := credentialRequests(t, d); len(requests) != 1 || requests[0] != (api.ControllerCredentialRequest{Secret: string(secret)}) {
+		t.Fatalf("github-credential requests = %+v, want one carrying the secret and no default", requests)
 	}
-	var credentialRequest seenRequest
-	for _, r := range d.requests() {
-		if r.path == "/legion/v1/controller/github-credential" {
-			credentialRequest = r
-		}
-	}
-	if string(credentialRequest.body) != string(wantBody) {
-		t.Errorf("github-credential request body = %s, want %s", credentialRequest.body, wantBody)
-	}
-	if !strings.Contains(errb, "[legion] the controller's gh acts as the review App from "+ghDir) {
-		t.Errorf("stderr = %q; want it to name the review App and the gh directory", errb)
+	if !strings.Contains(errb, "[legion] the controller's gh acts as the review App for owners acme, sjawhar (read-only) from "+ghDir) {
+		t.Errorf("stderr = %q; want it to name the review App, both owners and the gh directory", errb)
 	}
 	if _, err := os.Stat(filepath.Join(c.defaultDir, "github-credential.log")); err != nil {
 		t.Errorf("github-credential.log does not exist: %v", err)
 	}
 }
 
-// The refresh loop keeps the controller's gh directory fresh while Oh My Pi runs: a token the
-// daemon mints after Oh My Pi starts reaches hosts.yml before Oh My Pi exits, and the log records
-// the refresh. The recording Oh My Pi runs until the test releases it, once it has seen the second
-// token land, so the proof does not depend on the machine's speed.
+// The refresh loop keeps the controller's gh bundle fresh while Oh My Pi runs: a token the daemon
+// mints for one owner after Oh My Pi starts reaches that owner's hosts.yml before Oh My Pi exits,
+// the other owner's is not rewritten, every refresh asks for the default the first answer named,
+// and the log records the refresh, naming the owner. The recording Oh My Pi runs until the test
+// releases it, once it has seen the second token land, so the proof does not depend on the
+// machine's speed.
 func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T) {
 	old := controllerGitHubRefreshInterval
 	controllerGitHubRefreshInterval = 50 * time.Millisecond
@@ -1270,16 +1307,21 @@ func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T
 		code, _, errb := c.run()
 		done <- result{code, errb}
 	}()
-	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
-	// The first write holds the first token; only then does the daemon's lease change, so the
-	// loop, not the first fetch, is what carries the second token into the file.
-	testwait.Eventually(t, hostsFile+" to hold ghs_first", func() bool {
-		body, err := os.ReadFile(hostsFile)
+	ghDir := filepath.Join(c.defaultDir, "gh")
+	acme, sjawhar := filepath.Join(ghDir, "acme", "hosts.yml"), filepath.Join(ghDir, "sjawhar", "hosts.yml")
+	// The first write holds the first token; only then does sjawhar's lease turn, so the loop,
+	// not the first fetch, is what carries the second token into the file.
+	testwait.Eventually(t, sjawhar+" to hold ghs_first", func() bool {
+		body, err := os.ReadFile(sjawhar)
 		return err == nil && strings.Contains(string(body), "ghs_first")
 	})
-	tokens.set("ghs_second")
-	testwait.Eventually(t, hostsFile+" to hold ghs_second", func() bool {
-		body, err := os.ReadFile(hostsFile)
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(acme, past, past); err != nil {
+		t.Fatal(err)
+	}
+	tokens.setOwner("sjawhar", "ghs_second")
+	testwait.Eventually(t, sjawhar+" to hold ghs_second", func() bool {
+		body, err := os.ReadFile(sjawhar)
 		return err == nil && strings.Contains(string(body), "ghs_second")
 	})
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
@@ -1295,18 +1337,29 @@ func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T
 	if r.code != 7 {
 		t.Fatalf("legion controller start = %d, want 7 (Oh My Pi's exit code); stderr %q", r.code, r.errb)
 	}
-	hosts, err := os.ReadFile(hostsFile)
-	if err != nil || string(hosts) != ghconfig.Hosts("ghs_second") {
-		t.Fatalf("hosts.yml = %q, %v; want the second token", hosts, err)
+	if hosts, err := os.ReadFile(sjawhar); err != nil || string(hosts) != ghconfig.Hosts("ghs_second-read") {
+		t.Fatalf("sjawhar's hosts.yml = %q, %v; want the second token", hosts, err)
+	}
+	if info, err := os.Stat(acme); err != nil || !info.ModTime().Equal(past) {
+		t.Errorf("acme's hosts.yml was rewritten (%v, %v), want it left as it was", info, err)
+	}
+	requests := credentialRequests(t, d)
+	if len(requests) < 2 || requests[0].Default != "" {
+		t.Fatalf("github-credential requests = %+v, want the first naming no default and a refresh after it", requests)
+	}
+	for _, req := range requests[1:] {
+		if req.Default != "acme" {
+			t.Errorf("a refresh asked for default %q, want acme, the one the first answer named", req.Default)
+		}
 	}
 	logBody, err := os.ReadFile(filepath.Join(c.defaultDir, "github-credential.log"))
-	if err != nil || !strings.Contains(string(logBody), "github credential refreshed") {
-		t.Fatalf("github-credential.log = %q, %v; want a refreshed line", logBody, err)
+	if err != nil || !strings.Contains(string(logBody), "github credential refreshed") || !strings.Contains(string(logBody), "owners=[sjawhar]") {
+		t.Fatalf("github-credential.log = %q, %v; want a refreshed line naming sjawhar", logBody, err)
 	}
 }
 
 // A superseded capability (a later legion controller start) ends the refresh loop: the gh
-// directory keeps the first token, the log records the stop, and no further request reaches the
+// directory keeps the first tokens, the log records the stop, and no further request reaches the
 // daemon. The recording Oh My Pi runs until the test releases it, once it has seen the stop logged
 // and the requests settle.
 func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *testing.T) {
@@ -1324,7 +1377,7 @@ func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *test
 		c.run()
 		close(done)
 	}()
-	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
+	hostsFile := filepath.Join(c.defaultDir, "gh", "acme", "hosts.yml")
 	testwait.Eventually(t, hostsFile+" to exist", func() bool {
 		_, err := os.Stat(hostsFile)
 		return err == nil
@@ -1354,13 +1407,13 @@ func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *test
 		t.Fatal("legion controller start did not return")
 	}
 	hosts, err := os.ReadFile(hostsFile)
-	if err != nil || string(hosts) != ghconfig.Hosts("ghs_first") {
+	if err != nil || string(hosts) != ghconfig.Hosts("ghs_first-read") {
 		t.Fatalf("hosts.yml = %q, %v; want it to keep the first token", hosts, err)
 	}
 }
 
 // A daemon with no GitHub App for the project writes an empty gh directory and runs no loop,
-// stating so, and Oh My Pi still starts.
+// stating so, and Oh My Pi still starts, its GH_CONFIG_DIR the empty directory.
 func TestControllerStartWithNoGitHubAppWritesAnEmptyGhDirectory(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -1372,8 +1425,11 @@ func TestControllerStartWithNoGitHubAppWritesAnEmptyGhDirectory(t *testing.T) {
 	if got := modeOf(t, ghDir); got != 0o700 {
 		t.Errorf("gh directory mode = %o, want 0700", got)
 	}
-	if _, err := os.Stat(filepath.Join(ghDir, "hosts.yml")); !os.IsNotExist(err) {
-		t.Errorf("hosts.yml exists (%v); want none, since the daemon has no GitHub App", err)
+	if entries, err := os.ReadDir(ghDir); err != nil || len(entries) != 0 {
+		t.Errorf("gh directory holds %v (%v); want nothing, since the daemon has no GitHub App", entries, err)
+	}
+	if got := c.env()["GH_CONFIG_DIR"]; got != ghDir {
+		t.Errorf("GH_CONFIG_DIR = %q, want the empty %s", got, ghDir)
 	}
 	if !strings.Contains(errb, "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody\n") {
 		t.Errorf("stderr = %q; want the no-App line", errb)
@@ -1387,15 +1443,20 @@ func TestControllerStartWithNoGitHubAppWritesAnEmptyGhDirectory(t *testing.T) {
 }
 
 // The state directory outlives a run, so a gh directory an earlier start wrote against a daemon
-// that had a GitHub App can still hold that run's hosts.yml. A start against a daemon with no
-// GitHub App says the controller's gh acts as nobody, so it must leave no token for gh to act
-// with: the stale hosts.yml goes, and gh answers no token (LEGION-668, found by the tester).
+// that had a GitHub App can still hold that run's files: a bundle of owner directories, or the one
+// hosts.yml a start wrote before bundles. A start against a daemon with no GitHub App says the
+// controller's gh acts as nobody, so it must leave no token for gh to act with: every stale file
+// goes (LEGION-668, found by the tester).
 func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
 	ghDir := filepath.Join(c.defaultDir, "gh")
-	if _, err := ghconfig.Write(ghDir, ghconfig.Render("ghs_stale_from_an_earlier_run", "review", time.Now().Add(time.Hour))); err != nil {
-		t.Fatalf("seed the stale gh directory: %v", err)
+	stale := ghconfig.Render("ghs_stale_from_an_earlier_run", "review", time.Now().Add(time.Hour))
+	if _, err := ghconfig.WriteBundle(ghDir, ghconfig.Bundle{Default: "acme", Owners: map[string]ghconfig.Rendered{"acme": stale}}); err != nil {
+		t.Fatalf("seed the stale gh bundle: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ghDir, "hosts.yml"), []byte(stale.Hosts), 0o600); err != nil {
+		t.Fatalf("seed the stale pre-bundle hosts.yml: %v", err)
 	}
 	code, _, errb := c.run()
 	if code != 0 {
@@ -1404,11 +1465,69 @@ func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
 	if !strings.Contains(errb, "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody\n") {
 		t.Fatalf("stderr = %q; want the no-App line", errb)
 	}
-	if hosts, err := os.ReadFile(filepath.Join(ghDir, "hosts.yml")); !os.IsNotExist(err) {
-		t.Errorf("hosts.yml = %q, %v; want none: the command said gh acts as nobody, but gh would act as the stale token", hosts, err)
+	if entries, err := os.ReadDir(ghDir); err != nil || len(entries) != 0 {
+		t.Errorf("gh directory holds %v (%v); want nothing: the command said gh acts as nobody, but gh would act as the stale token", entries, err)
 	}
 	if got := modeOf(t, ghDir); got != 0o700 {
 		t.Errorf("gh directory mode = %o, want 0700", got)
+	}
+}
+
+// The real gh the controller's `legion gh` runs is the operator's LEGION_GH_PATH when set, and
+// otherwise the first gh on the operator's PATH that is not this state directory's own wrapper. A
+// start that finds none, and a LEGION_GH_PATH that is relative, absent, or no executable file, is
+// refused naming it before the daemon is asked for anything: a mint would replace the running
+// controller's capability with one whose gh cannot run.
+func TestControllerStartResolvesTheRealGh(t *testing.T) {
+	t.Run("on PATH, past the controller's own wrapper", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		bin := t.TempDir()
+		real := filepath.Join(bin, "gh")
+		if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		wrapper := filepath.Join(c.defaultDir, "bin")
+		if err := os.MkdirAll(wrapper, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wrapper, "gh"), []byte("#!/bin/sh\nexit 97\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unsetenv(t, "LEGION_GH_PATH")
+		t.Setenv("PATH", wrapper+":"+bin+":/usr/bin:/bin")
+		if code, _, errb := c.run(); code != 0 {
+			t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+		}
+		if got := c.env()["LEGION_GH_PATH"]; got != real {
+			t.Errorf("LEGION_GH_PATH = %q, want the gh on PATH past the wrapper, %s", got, real)
+		}
+	})
+	notExecutable := filepath.Join(t.TempDir(), "gh")
+	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, value, want string }{
+		{"no gh at all", "", "gh is not on PATH"},
+		{"a relative LEGION_GH_PATH", "gh", `LEGION_GH_PATH "gh" is not an absolute path`},
+		{"an absent LEGION_GH_PATH", "/nonexistent/gh", `LEGION_GH_PATH "/nonexistent/gh"`},
+		{"a LEGION_GH_PATH that is no executable", notExecutable, `LEGION_GH_PATH "` + notExecutable + `" is not an executable file`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newControllerDaemon(t)
+			c := newControllerStart(t, d, controllerOptions{})
+			if tc.value == "" {
+				unsetenv(t, "LEGION_GH_PATH")
+				t.Setenv("PATH", t.TempDir())
+			} else {
+				t.Setenv("LEGION_GH_PATH", tc.value)
+			}
+			code, _, errb := c.run()
+			if code != 1 || !strings.Contains(errb, tc.want) {
+				t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal containing %q", code, errb, tc.want)
+			}
+			c.wantNoSecretRequest()
+		})
 	}
 }
 

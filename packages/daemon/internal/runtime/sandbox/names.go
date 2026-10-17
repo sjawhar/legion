@@ -15,12 +15,14 @@ import (
 // role launcher, and sessions stay on it. Each role container has its own launcher token
 // projection at LauncherDir, and its own memory-backed LauncherPrivateDir, where its launcher
 // writes the generation's boot token and launch credentials, and StateDir. GHConfigDir is a role
-// container's GH_CONFIG_DIR, in an issue pod or the controller's: the read-only projection of its
-// role Secret's two gh files (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as
-// ghconfig.ConfigFile), mounted in that role's container alone, which its plain `gh` and the
-// clone's `gh auth git-credential` helper read the role's App token from. The kubelet rewrites a
-// whole-volume Secret projection in place when the Secret changes, so the refresher's Secret
-// update is what the next gh runs with.
+// container's gh bundle root (LEGION_GH_OWNERS_DIR), in an issue pod or the controller's: the
+// read-only projection of its role Secret's gh files, one directory per GitHub owner of the
+// project (GitHubHostsKey(owner) as <owner>/ghconfig.HostsFile, GitHubConfigKey(owner) as
+// <owner>/ghconfig.ConfigFile), mounted in that role's container alone, whose default owner's
+// directory (GitHubDefaultKey) is its GH_CONFIG_DIR, and which its gh (the image's `legion gh`)
+// and the clone's `legion git-credential` helper read the token of the owner a command names from.
+// The kubelet rewrites a whole-volume Secret projection in place when the Secret changes, so the
+// refresher's Secret update is what the next gh runs with.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
@@ -88,14 +90,18 @@ const (
 	dispatchTokenKey  = "DISPATCH_TOKEN"
 )
 
-// The keys of a role's Secret that carry its GitHub credential beside the launcher token: the
-// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every launcher role: every
-// workflow role of an issue pod and the controller's. credentialFromSecret hashes the launcher
-// token alone, so the refresher rewrites these two without changing the launcher's binding.
-const (
-	GitHubHostsKey  = "github-hosts"
-	GitHubConfigKey = "github-config"
-)
+// The keys of a role's Secret that carry its GitHub credential beside the launcher token: each
+// owner's rendered hosts.yml and config.yml (ghconfig.Bundle), and the bundle's default owner,
+// written for every launcher role: every workflow role of an issue pod and the controller's.
+// credentialFromSecret hashes the launcher token alone, so the refresher rewrites the gh keys
+// without changing the launcher's binding.
+const GitHubDefaultKey = "github-default"
+
+// GitHubHostsKey is the role Secret's key holding owner's hosts.yml.
+func GitHubHostsKey(owner string) string { return "github-hosts-" + owner }
+
+// GitHubConfigKey is the role Secret's key holding owner's config.yml.
+func GitHubConfigKey(owner string) string { return "github-config-" + owner }
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the
 // controller copies pod labels from), the claim's Secret, and, less the tree (claimLabels), its

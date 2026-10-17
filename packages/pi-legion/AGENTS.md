@@ -69,8 +69,10 @@ shapes that client parses, and the pane's environment — the identity variables
 (where the claim session writes its jj attribution overlay), `LEGION_WORKSPACE` (the issue
 workspace, the pane's cwd; read by nothing here), `LEGION_GENERATION` (set by the daemon, read by
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, the GitHub
-variables (`GH_CONFIG_DIR`, the role's directory of gh files, with `GH_TOKEN`, `GITHUB_TOKEN` and
-`GH_HOST` set empty: read by the pane's `gh` and `git`, by nothing here), the Envoy
+variables (`LEGION_GH_OWNERS_DIR`, the role's gh bundle of one directory per GitHub owner;
+`GH_CONFIG_DIR`, its issue's owner's directory; `LEGION_GH_PATH`, the real gh the pane's `gh`
+wrapper runs; with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty: read by the pane's `gh` and
+`git`, by nothing here), the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
 when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
@@ -87,8 +89,10 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 29's daemon-launched
-controller (sjawhar/legion#1998: its pod enrolled
+number is the one `DaemonAPIVersion` declares, last bumped by contract 30's per-owner gh bundle
+(sjawhar/legion#1986: `LEGION_GH_OWNERS_DIR` with one gh directory per owner, `LEGION_GH_PATH`,
+the `legion gh` wrapper and `legion git-credential`, and the controller's per-owner credential
+answer), after contract 29's daemon-launched controller (sjawhar/legion#1998: its pod enrolled
 with the secrets broker, and the project's `slack_channels` handed to it as
 `LEGION_SLACK_CHANNELS`, which the plugin subscribes to), after contract 28's `heldOutboxRows`
 list on `GET /legion/v1/state` (LEGION-694: every due lifecycle outbox row held behind its issue's
@@ -142,11 +146,12 @@ registeredAt}`) on `/legion/v1/state`.
 Contract 5 added `LEGION_GRANT_FILE` to the pane's environment (LEGION-262), the file the tool-call
 hook minted a grant into before a bash command that invoked `legion`; contract 19 removes it with
 that hook. Nothing in a pane runs `legion` from bash: the `legion` tool mints each operation's grant
-in-process and posts it with the request, and `gh` and `git` read the role's GitHub App token from
-the gh files under the pane's `GH_CONFIG_DIR` (`hosts.yml` and `config.yml`, rendered and refreshed
-by the daemon: `/var/run/legion/gh` in a pod, `<state_dir>/secrets/<claim>-gh` on tmux), with
+in-process and posts it with the request, and `gh` and `git` read the role's GitHub App tokens from
+the gh bundle under the pane's `LEGION_GH_OWNERS_DIR` (one directory per owner, each a `hosts.yml`
+and `config.yml` rendered and refreshed by the daemon: `/var/run/legion/gh` in a pod,
+`<state_dir>/secrets/<claim>-gh` on tmux; `GH_CONFIG_DIR` names the issue owner's), with
 `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty so no token in the daemon's environment outranks
-the file.
+the files.
 Contract 6 adds `phase` to a claim's pending delivery on `/legion/v1/state` — the issue phase the
 task was queued for, absent for a task of no phase — and `unrecorded` as the `phase` and `status`
 the state route reads for an issue the workflow does not record, where an operator's claim exists
@@ -341,7 +346,7 @@ pull request's head, each refusal named in the merger's role prompt
 (`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
-plain `gh` and `git`, which read the role's App token from the gh files under `GH_CONFIG_DIR`; no
+`gh` and `git`, which read the role's App tokens from the gh bundle under `LEGION_GH_OWNERS_DIR`; no
 tool operation writes to GitHub for a role. Review threads are the pull request author's to
 resolve: the reviewer, whose review
 App GitHub refuses `resolveReviewThread` on the implementer's pull request, names the bot threads

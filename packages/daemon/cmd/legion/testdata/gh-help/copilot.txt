@@ -1,0 +1,46 @@
+Runs the GitHub Copilot CLI.
+
+Executing the Copilot CLI through `gh` is currently in preview and subject to change.
+
+If already installed, `gh` will execute the Copilot CLI found in your `PATH`.
+If the Copilot CLI is not installed, it will be downloaded to /tmp/tmp.3OAEt1I9Fd/data/gh/copilot.
+
+Use `--remove` to remove the downloaded Copilot CLI.
+
+This command is only supported on Windows, Linux, and Darwin, on amd64/x64
+or arm64 architectures.
+
+To prevent `gh` from interpreting flags intended for Copilot,
+use `--` before Copilot flags and args.
+
+Learn more at https://gh.io/copilot-cli
+
+
+USAGE
+  gh copilot [flags] [args]
+
+FLAGS
+  --remove   Remove the downloaded Copilot CLI
+
+INHERITED FLAGS
+  --help   Show help for command
+
+EXAMPLES
+  # Download and run the Copilot CLI
+  $ gh copilot
+  
+  # Run the Copilot CLI
+  $ gh copilot -p "Summarize this week's commits" --allow-tool 'shell(git)'
+  
+  # Remove the Copilot CLI (if installed through gh)
+  $ gh copilot --remove
+  
+  # Run the Copilot CLI help command
+  $ gh copilot -- --help
+
+LEARN MORE
+  Use `gh <command> <subcommand> --help` for more information about a command.
+  Read the manual at https://cli.github.com/manual
+  Learn about exit codes using `gh help exit-codes`
+  Learn about accessibility experiences using `gh help accessibility`
+

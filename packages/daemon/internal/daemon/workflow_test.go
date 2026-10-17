@@ -41,6 +41,12 @@ func (t loginTokens) Token(_ context.Context, role appauth.AppRole, _ string) (a
 	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: t[role]}}, nil
 }
 
+func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // The engine judges a push by its pusher against the review App's login, so a configuration whose
 // two roles resolve to one App would count no fix attempt at all: boot refuses it, and a review
 // lease with no login, before anything else opens.

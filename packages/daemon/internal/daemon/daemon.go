@@ -491,8 +491,9 @@ func closeStore(st *store.Store, log *slog.Logger) {
 
 // plan is what the daemon resolved from its configuration before touching anything.
 type plan struct {
-	// identity is the role's App bot identity, from the workflow's token source; nil without one.
-	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity for the owner of the repository it works, from the
+	// workflow's token source; nil without one.
+	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
 	// defaultBranch is a repository's default branch as GitHub names it, read with the workflow's
 	// token source (defaultBranches.Of); nil without one.
 	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
@@ -695,7 +696,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools["gh"], log)
 	}
 	return nil
 }
@@ -703,15 +704,18 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
-// Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
-// scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), with gh, the
+// real gh boot resolved (daemonTools), the one each pane's `legion gh` runs, and the project's
+// configured repository's owner the record of every claim's owner (repositoryOwner); a daemon with
+// no GitHub Apps hands the runtime none, and its panes hold no gh files. The private server's
+// environment is scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, projectOwners(cfg)), gh
+			opts.RepositoryOwner = repositoryOwner(cfg)
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -906,7 +910,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			identity: p.identity, defaultBranch: p.defaultBranch, designGate: cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
-		Identity:     p.identity,
+		Identity:     adoptIdentity(p.identity, githubOwner(cfg)),
 		Secrets:      p.secretsEnroller,
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
@@ -1319,7 +1323,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwner:        githubOwner(cfg),
+		GitHubOwners:       projectOwners(cfg),
 		GitHubAPI:          githubAPI,
 		Repository:         projectRepository(cfg),
 		MergeRules:         projectMergeRules(cfg),
@@ -1539,6 +1543,34 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
 	return cfg.Projects[cfg.Project].Repo.Owner()
+}
+
+// projectOwners is the GitHub owners of the project's repositories, every one of which a role's gh
+// bundle holds a directory for (appauth.GitHubCredential): the configured repository's owner.
+func projectOwners(cfg config.Config) func() []string {
+	owner := githubOwner(cfg)
+	return func() []string { return []string{owner} }
+}
+
+// repositoryOwner is the daemon's record of the owner of the repository a claim's issue works, the
+// owner a tmux pane adopted after a restart holds its write token for (tmux.Options.
+// RepositoryOwner): the configured repository's, the one every claim of the project works.
+func repositoryOwner(cfg config.Config) func(context.Context, claim.Token) (string, error) {
+	owner := githubOwner(cfg)
+	return func(context.Context, claim.Token) (string, error) { return owner, nil }
+}
+
+// adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
+// over identity, minted for owner, the project's repository's owner: an App's bot identity is the
+// same on every owner it is installed on, so the owner only names the installation that mints the
+// lease it is read with. nil without a workflow.
+func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), owner string) func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+	if identity == nil {
+		return nil
+	}
+	return func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error) {
+		return identity(ctx, role, owner)
+	}
 }
 
 // projectRepository answers the repository a project works in (`projects.<KEY>.repo`), as the

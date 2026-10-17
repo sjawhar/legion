@@ -354,15 +354,19 @@ func TestControllerSecretResponseGolden(t *testing.T) {
 	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
 }
 
-// What `legion controller start` fetches for the review App's token, rendered as the two files
-// `gh` reads.
+// What `legion controller start` fetches for the review App's read-only tokens, one per owner,
+// each rendered as the two files `gh` reads.
 func TestControllerCredentialResponseGolden(t *testing.T) {
 	expiresAt := time.Date(2026, 9, 22, 10, 15, 2, 0, time.UTC)
-	rendered := ghconfig.Render("ghs_placeholder_token", "review", expiresAt)
+	acme := ghconfig.Render("ghs_placeholder_acme_token", "review", expiresAt)
+	sjawhar := ghconfig.Render("ghs_placeholder_sjawhar_token", "review", expiresAt)
 	golden(t, "controller-github-credential.json", ControllerCredentialResponse{
-		Hosts:     rendered.Hosts,
-		Config:    rendered.Config,
-		App:       rendered.App,
+		Owners: map[string]ControllerOwnerCredential{
+			"acme":    {Hosts: acme.Hosts, Config: acme.Config},
+			"sjawhar": {Hosts: sjawhar.Hosts, Config: sjawhar.Config},
+		},
+		Default:   "acme",
+		App:       "review",
 		ExpiresAt: expiresAt.UTC().Format(timeFormat),
 	})
 }

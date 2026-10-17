@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -13,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -43,21 +46,31 @@ type ControllerSecretResponse struct {
 
 // ControllerCredentialRequest is `POST /legion/v1/controller/github-credential`'s body: the
 // current controller capability, the same secret `legion controller start` holds from
-// `ControllerSecretResponse`.
+// `ControllerSecretResponse`, and Default, the owner whose directory the controller's
+// GH_CONFIG_DIR names once a first answer named it; empty on that first fetch.
 type ControllerCredentialRequest struct {
-	Secret string `json:"secret"`
+	Secret  string `json:"secret"`
+	Default string `json:"default,omitempty"`
 }
 
 // ControllerCredentialResponse is `POST /legion/v1/controller/github-credential`'s answer: the
-// two files `ghconfig.Rendered` renders for the review App's token (Hosts for `gh`'s hosts.yml,
-// Config for its config.yml), the App name, and the token's expiry. `legion controller start`
-// writes them under `<state_dir>/gh` and refreshes them every minute; the plugin never reads this
-// route or that directory.
+// review App's read-only token for every GitHub owner of the project, each rendered as the two
+// files gh reads (`ghconfig.Rendered`: Hosts for hosts.yml, Config for config.yml) and keyed by
+// lowercased owner; Default, the owner whose directory the controller's GH_CONFIG_DIR names (the
+// request's, or the first owner, sorted); the App name; and the soonest of the tokens' expiries.
+// `legion controller start` writes them under `<state_dir>/gh/<owner>` and refreshes them every
+// minute; the plugin never reads this route or that directory.
 type ControllerCredentialResponse struct {
-	Hosts     string `json:"hosts"`
-	Config    string `json:"config"`
-	App       string `json:"app"`
-	ExpiresAt string `json:"expiresAt"`
+	Owners    map[string]ControllerOwnerCredential `json:"owners"`
+	Default   string                               `json:"default"`
+	App       string                               `json:"app"`
+	ExpiresAt string                               `json:"expiresAt"`
+}
+
+// ControllerOwnerCredential is one owner's two gh files in a ControllerCredentialResponse.
+type ControllerOwnerCredential struct {
+	Hosts  string `json:"hosts"`
+	Config string `json:"config"`
 }
 
 // ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
@@ -127,16 +140,17 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
-// controller capability buys a fresh review App token, rendered as the two files `gh` reads
-// (ghconfig.Render). The capability compare runs under controllerMu, the same lock the mint and
-// the controller-session grant take, so a capability a concurrent mint just replaced is never
-// matched; the token mint itself runs after the lock is released, since GitHub is the slow step
-// and holding the lock across it would block every other controller-record read or mint for as
-// long as GitHub takes to answer. A caller whose capability a later `legion controller start` has
-// since replaced is refused with a code the CLI can tell apart from a missing or malformed
-// secret, so its refresh loop stops rather than retrying forever; a daemon that launches its own
-// controller (`controller: daemon`) refuses every call, as controllerSecret does, since its
-// controller's token lives in its pod's Secret and no `legion controller start` runs against it.
+// controller capability buys the review App's fresh read-only tokens for every owner of the
+// project (appauth.GitHubCredential), each rendered as the two files `gh` reads. The capability
+// compare runs under controllerMu, the same lock the mint and the controller-session grant take,
+// so a capability a concurrent mint just replaced is never matched; the token mints run after the
+// lock is released, since GitHub is the slow step and holding the lock across it would block every
+// other controller-record read or mint for as long as GitHub takes to answer. A caller whose
+// capability a later `legion controller start` has since replaced is refused with a code the CLI
+// can tell apart from a missing or malformed secret, so its refresh loop stops rather than
+// retrying forever; a daemon that launches its own controller (`controller: daemon`) refuses every
+// call, as controllerSecret does, since its controller's tokens live in its pod's Secret and no
+// `legion controller start` runs against it.
 func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
 	if s.controllerLaunched {
 		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
@@ -163,19 +177,43 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 			"the controller capability is not the current one: a later legion controller start replaced it")
 		return
 	}
-	app := appauth.AppRoleFor(claim.RoleController)
-	lease, ok := s.appLease(w, r, app, string(claim.RoleController))
-	if !ok {
+	if req.Default != "" && !ghconfig.IsOwner(strings.ToLower(req.Default)) {
+		writeFailure(w, http.StatusBadRequest, "INVALID_DEFAULT_OWNER", "default is not a GitHub login")
 		return
 	}
-	rendered := ghconfig.Render(lease.Token, string(app), lease.ExpiresAt)
-	s.log.Info("api: controller github credential served", "app", rendered.App, "expiresAt", lease.ExpiresAt)
-	writeJSON(w, http.StatusOK, ControllerCredentialResponse{
-		Hosts:     rendered.Hosts,
-		Config:    rendered.Config,
-		App:       rendered.App,
-		ExpiresAt: lease.ExpiresAt.UTC().Format(timeFormat),
-	})
+	if s.tokens == nil {
+		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
+		return
+	}
+	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners)(r.Context(), claim.RoleController, req.Default)
+	switch {
+	case errors.Is(err, runtime.ErrNoGitHubOwner):
+		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
+		return
+	case errors.Is(err, appauth.ErrOwnerOutsideProject):
+		s.log.Warn("api: refused a controller GitHub credential: DEFAULT_OWNER_OUTSIDE_PROJECT", "default", strings.ToLower(req.Default))
+		writeFailure(w, http.StatusBadRequest, "DEFAULT_OWNER_OUTSIDE_PROJECT", err.Error())
+		return
+	case err != nil:
+		s.log.Error("api: mint the controller's GitHub App tokens", "error", err)
+		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
+		return
+	}
+	answer := ControllerCredentialResponse{
+		Owners:  make(map[string]ControllerOwnerCredential, len(bundle.Owners)),
+		Default: bundle.Default,
+		App:     bundle.Owners[bundle.Default].App,
+	}
+	var soonest time.Time
+	for owner, rendered := range bundle.Owners {
+		answer.Owners[owner] = ControllerOwnerCredential{Hosts: rendered.Hosts, Config: rendered.Config}
+		if soonest.IsZero() || rendered.ExpiresAt.Before(soonest) {
+			soonest = rendered.ExpiresAt
+		}
+	}
+	answer.ExpiresAt = soonest.UTC().Format(timeFormat)
+	s.log.Info("api: controller github credential served", "app", answer.App, "expiresAt", soonest, "owners", bundle.OwnerNames())
+	writeJSON(w, http.StatusOK, answer)
 }
 
 // controllerCapabilityCurrent compares secret against the project's current controller
