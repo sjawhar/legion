@@ -6,11 +6,14 @@ import { join } from "node:path";
 // scripts/e2e/multi-repo-acceptance.sh is the Task 6.3 observer for the live Task 6.4 run. It
 // reads only structured sources: the daemon's state JSON (a Bun.serve stub here), Dispatch's own
 // JSON API (a second Bun.serve stub, never `dispatch read`'s prose), GitHub's API (a fake `gh`),
-// and `kubectl` (a fake binary that really execs what it is given, so the observer's own in-pod
-// mechanism — finding the role's process by its environment and re-executing under it — runs for
-// real against a fixture process this suite spawns, never a canned answer). Every fake, stub and
-// fixture is isolated per test; the host's real dispatch/gh/kubectl are never on PATH, so this
-// suite stays hermetic on CI.
+// and `kubectl` (a fake binary that really execs what it is given, against a FAKE `/proc` tree
+// this suite builds under its own temp directory, via MULTIREPO_PROC_ROOT — never the host's own
+// `/proc`, which a shared devbox's live Legion panes would otherwise pollute, picking a sibling
+// session's process instead of the test's own (R1): the observer's real in-pod mechanism — find
+// the one process whose parent's cmdline is `worker-shim`, then re-exec under its environment —
+// runs unmodified, just against a tree this suite fully controls). Every fake, stub and fixture is
+// isolated per test; the host's real dispatch/gh/kubectl/proc are never reachable, so this suite
+// stays hermetic on any machine, not only a freshly booted CI runner.
 const script = join(import.meta.dir, "..", "multi-repo-acceptance.sh");
 const dir = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -18,21 +21,12 @@ afterAll(() => rmSync(dir, { recursive: true, force: true }));
 let runs = 0;
 let daemonServer: Server | undefined;
 let dispatchServer: Server | undefined;
-let roleFixtures: Array<ReturnType<typeof Bun.spawn>> = [];
 
 afterEach(() => {
   daemonServer?.stop(true);
   dispatchServer?.stop(true);
   daemonServer = undefined;
   dispatchServer = undefined;
-  for (const proc of roleFixtures) {
-    try {
-      proc.kill("SIGKILL");
-    } catch {
-      /* already gone */
-    }
-  }
-  roleFixtures = [];
 });
 
 function fakeBin(binDir: string, name: string, body: string): void {
@@ -59,10 +53,9 @@ function isolatedPath(bin: string): string {
 
 const bashPath = `${realDir("bash")}/bash`;
 
-// realKubectl forwards `exec <pod> -c <container> -- <rest...>` to a real local exec of <rest>,
-// standing in for a pod exec: this is what lets the observer's own as_role /proc scan and
-// `env -i` re-exec run unmodified against a role fixture process (spawnRoleFixture), rather than
-// a canned stand-in for the mechanism under test.
+// realKubectl forwards `exec <pod> -c <container> -- <rest...>` to a real local exec of <rest>:
+// this is what lets the observer's own as_role fragment run unmodified, scanning
+// MULTIREPO_PROC_ROOT (a fake tree this suite builds) instead of a real pod's `/proc`.
 const realKubectl = `
 if [ "$1" = exec ]; then
   shift; shift; shift; shift; shift
@@ -79,7 +72,7 @@ function newFakeDir(fakes: { gh?: string; kubectl?: string } = {}) {
   mkdirSync(evidence, { recursive: true });
   fakeBin(bin, "gh", fakes.gh ?? defaultFake("gh"));
   fakeBin(bin, "kubectl", fakes.kubectl ?? defaultFake("kubectl"));
-  return { bin, evidence };
+  return { bin, evidence, work };
 }
 
 async function spawnScript(
@@ -111,14 +104,70 @@ async function run(
   return { ...result, evidence };
 }
 
-// spawnRoleFixture starts a real background process whose exact environment is `env` (replaced,
-// never inherited) so its /proc/<pid>/environ is exactly what the observer's as_role mechanism
-// will find and re-exec under — the same contract a role's own process has in a pod, none of
-// which a bare `kubectl exec` carries.
-function spawnRoleFixture(env: Record<string, string>) {
-  const proc = Bun.spawn(["sleep", "300"], { env, stdout: "ignore", stderr: "ignore" });
-  roleFixtures.push(proc);
-  return proc;
+// ---- a fake /proc tree for second-owner's as_role mechanism (R1) --------------------------
+//
+// writeProcEntry builds one /proc/<pid>-shaped directory: status (PPid: line), cmdline
+// (NUL-separated argv, trailing NUL), and environ (NUL-separated VAR=value pairs, trailing NUL
+// when non-empty) — exactly what the observer's as_role_find_and_run fragment reads.
+function writeProcEntry(
+  root: string,
+  pid: string,
+  opts: {
+    ppid: string;
+    cmdline: string[];
+    environ?: Record<string, string>;
+    unreadableEnviron?: boolean;
+  }
+): void {
+  const procDir = join(root, pid);
+  mkdirSync(procDir, { recursive: true });
+  writeFileSync(join(procDir, "status"), `Name:\tproc${pid}\nPPid:\t${opts.ppid}\n`);
+  writeFileSync(join(procDir, "cmdline"), `${opts.cmdline.join("\0")}\0`);
+  const pairs = Object.entries(opts.environ ?? {}).map(([k, v]) => `${k}=${v}`);
+  writeFileSync(join(procDir, "environ"), pairs.length > 0 ? `${pairs.join("\0")}\0` : "");
+  if (opts.unreadableEnviron) {
+    writeFileSync(join(procDir, "environ"), "", { mode: 0o000 });
+  }
+}
+
+// fakeProcTree builds a minimal pod process tree under a fresh directory: pid 1 (the launcher,
+// no role markers), pid 7 (worker-shim, child of 1), pid 9 (the agent, child of 7 — the one
+// as_role must select), pid 10 (a descendant of the agent, e.g. a bash tool child, also carrying
+// the role's own environment since it inherited it — must NOT be selected, since its parent (9) is
+// not worker-shim), and pid 15 (a zombie, child of 9, empty environ — skipped). `roleEnviron` is
+// pid 7 and 9's environment (the shim and the agent it execs share one, per Stage 4a's own
+// reproduction); omit entries from `extraPids` to build other shapes (zero or two worker-shim
+// children, for the refusal tests).
+function fakeProcTree(
+  roleEnviron: Record<string, string>,
+  opts: { shimPids?: string[]; skipAgent?: boolean } = {}
+): string {
+  const root = join(dir, `proc-${++runs}`);
+  mkdirSync(root, { recursive: true });
+  writeProcEntry(root, "1", { ppid: "0", cmdline: ["launcher"], environ: { PATH: "/usr/bin" } });
+  const shimPids = opts.shimPids ?? ["7"];
+  for (const shimPid of shimPids) {
+    writeProcEntry(root, shimPid, {
+      ppid: "1",
+      cmdline: ["legion", "worker-shim", "--connect", "tcp://x:1"],
+      environ: roleEnviron,
+    });
+    if (!opts.skipAgent) {
+      const agentPid = String(Number(shimPid) + 2);
+      writeProcEntry(root, agentPid, {
+        ppid: shimPid,
+        cmdline: ["omp", "--mode", "rpc"],
+        environ: roleEnviron,
+      });
+    }
+  }
+  writeProcEntry(root, "10", {
+    ppid: "9",
+    cmdline: ["bash", "-c", "sleep 1"],
+    environ: roleEnviron,
+  });
+  writeProcEntry(root, "15", { ppid: "9", cmdline: ["zombie"], environ: {} });
+  return root;
 }
 
 const tokenFile = join(dir, "dispatch-token");
@@ -390,11 +439,13 @@ describe("children: structured Dispatch + state agreement, with raw evidence (N7
     expect(stdout).toContain("CHECK children: PASS");
     expect(stdout).toContain("ACME-2: dispatch=acme/widgets state=acme/widgets");
     // N7: the raw Dispatch and state reads this observation judged are kept, not just a summary.
+    // R6: named per observation (children-*), never a bare state.raw every observation shares.
     expect(
-      JSON.parse(readFileSync(join(evidence, "dispatch-issue-ACME-2.raw"), "utf8")).resolved_repo
+      JSON.parse(readFileSync(join(evidence, "children-dispatch-issue-ACME-2.raw"), "utf8"))
+        .resolved_repo
     ).toBe("acme/widgets");
     expect(
-      JSON.parse(readFileSync(join(evidence, "state.raw"), "utf8")).issues["ACME-2"].repo
+      JSON.parse(readFileSync(join(evidence, "children-state.raw"), "utf8")).issues["ACME-2"].repo
     ).toBe("acme/widgets");
   });
 
@@ -449,6 +500,94 @@ describe("done: Dispatch's structured .status field", () => {
     const { status, stderr } = await run(["done", "ACME-2"], env);
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK done: FAIL");
+  });
+});
+
+describe("R2: a failed Dispatch read never prints the bearer", () => {
+  test("done against a 404'd issue fails without the Dispatch token anywhere in stdout or stderr", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout, stderr } = await run(["done", "ACME-404"], env);
+    expect(status).not.toBe(0);
+    expect(stdout).not.toContain("dispatch-bearer");
+    expect(stderr).not.toContain("dispatch-bearer");
+    expect(stderr).not.toContain("Authorization");
+    expect(stderr).toContain("GET");
+    expect(stderr).toContain("failed");
+  });
+});
+
+describe("R6: raw evidence is named per observation, never overwritten by a later one", () => {
+  test("children's state.raw survives a later, different observation's own state read", async () => {
+    const { server, setBody } = mutableDaemonStub(
+      makeStateBody({
+        issues: {
+          "ACME-2": {
+            key: "ACME-2",
+            generation: 1,
+            phase: "implementing",
+            status: "todo",
+            repo: "acme/widgets",
+          },
+          "ACME-3": {
+            key: "ACME-3",
+            generation: 1,
+            phase: "implementing",
+            status: "todo",
+            repo: "acme/gadgets",
+          },
+        },
+      })
+    );
+    daemonServer = server;
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
+      "ACME-2": JSON.stringify({
+        key: "ACME-2",
+        repo: "acme/widgets",
+        resolved_repo: "acme/widgets",
+      }),
+      "ACME-3": JSON.stringify({
+        key: "ACME-3",
+        repo: "acme/gadgets",
+        resolved_repo: "acme/gadgets",
+      }),
+      "ACME-9": JSON.stringify({ key: "ACME-9", resolved_repo: null }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const path = isolatedPath(bin);
+    const children1 = await spawnScript(["children", "ACME-1"], path, evidence, env);
+    expect(children1.status).toBe(0);
+    const childrenStateBefore = readFileSync(join(evidence, "children-state.raw"), "utf8");
+    // The daemon's state moves on (ACME-9 now admitted) before a later, unrelated observation
+    // reads it; children's own earlier raw read must still be what it actually read, not this one.
+    setBody(
+      makeStateBody({
+        issues: {
+          "ACME-9": {
+            key: "ACME-9",
+            generation: 1,
+            phase: "implementing",
+            status: "todo",
+            repo: "acme/widgets",
+          },
+        },
+      })
+    );
+    await spawnScript(["negative", "no-repo", "ACME-9"], path, evidence, env);
+    const childrenStateAfter = readFileSync(join(evidence, "children-state.raw"), "utf8");
+    expect(childrenStateAfter).toBe(childrenStateBefore);
+    expect(readFileSync(join(evidence, "negative-no-repo-state.raw"), "utf8")).not.toBe(
+      childrenStateBefore
+    );
   });
 });
 
@@ -540,7 +679,7 @@ esac`;
   });
 });
 
-describe("second-owner: real in-pod exec as the role (N1), with a positive push control (N2)", () => {
+describe("second-owner: real in-pod exec as the role, resolved once (N1, R1, R3), with a positive push control (N2)", () => {
   const stateWithPR = (phase: string, extra: Record<string, unknown> = {}) =>
     makeStateBody({
       issues: {
@@ -625,6 +764,20 @@ case "$*" in
     ;;
 esac`;
 
+  // runSecondOwner runs second-owner with procRoot wired as MULTIREPO_PROC_ROOT (R1: the fake
+  // tree, never the host's real /proc).
+  async function runSecondOwner(
+    env: Record<string, string>,
+    procRoot: string,
+    fakes: { gh: string; kubectl: string }
+  ) {
+    return run(
+      ["second-owner", "ACME-2", "the-pod"],
+      { ...env, MULTIREPO_PROC_ROOT: procRoot },
+      fakes
+    );
+  }
+
   test("a pre-merge phase (awaiting_merge) is a FAIL even with a merged PR and valid credentials", async () => {
     daemonServer = daemonStub(stateWithPR("awaiting_merge"));
     dispatchServer = dispatchStub({});
@@ -638,30 +791,51 @@ esac`;
       bin,
       'echo "remote: Permission to acme/widgets.git denied. fatal: unable to access" >&2; exit 128'
     );
-    spawnRoleFixture(fixtureEnv(bin));
-    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+    const procRoot = fakeProcTree(fixtureEnv(bin));
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
       gh: goodGh,
       kubectl: podLabelKubectl,
     });
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK second-owner: FAIL");
-  }, 30000);
+  });
 
-  test("no process in the container carries LEGION_GH_PATH (the bare pod shell, N1's own reproduction): FAIL", async () => {
+  test("no process whose parent is worker-shim (the bare pod shell, N1's own reproduction): FAIL", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
     dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
     );
-    // No spawnRoleFixture at all: the /proc scan finds no LEGION_GH_PATH-carrying process.
-    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+    const procRoot = fakeProcTree(fixtureEnv(roleBin()), { shimPids: [] });
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
       gh: goodGh,
       kubectl: podLabelKubectl,
     });
     expect(status).not.toBe(0);
-    expect(stderr).toContain("could not read the role's own environment");
-  }, 30000);
+    expect(stderr).toContain("could not identify or run as the role's own process");
+  });
+
+  // R3's own reproduction: two processes both carrying the role's markers (e.g. a second
+  // worker-shim-parented child) must refuse, naming both candidates, never pick the lexically
+  // first one.
+  test("two processes whose parent is worker-shim: refused, naming both candidates", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const procRoot = fakeProcTree(fixtureEnv(roleBin()), { shimPids: ["7", "20"] });
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("expected exactly one process whose parent is worker-shim, found 2");
+    expect(stderr).toContain("9");
+    expect(stderr).toContain("22");
+  });
 
   test("production_check, merged, read succeeds, O's own push succeeds, but T's push also succeeds (no refusal): FAIL", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
@@ -673,18 +847,19 @@ esac`;
     const bin = roleBin();
     fakeRoleGh(bin);
     fakeRoleGit(bin, "exit 0"); // T's push succeeds too: never a refusal
-    spawnRoleFixture(fixtureEnv(bin));
-    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+    const procRoot = fakeProcTree(fixtureEnv(bin));
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
       gh: goodGh,
       kubectl: podLabelKubectl,
     });
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK second-owner: FAIL");
-  }, 30000);
+  });
 
   // N2's own reproduction table: a push refused for a non-permission reason (bad ref, network,
   // not-a-repo, unanswered credential helper) is never counted as proof — only a 403 or an
-  // explicit "Permission to ... denied" is.
+  // explicit "Permission to <T>.git denied" is (the hardening anchor: neither pattern is ever
+  // satisfied by kubectl's own wrapper noise since it is now anchored to git's own lines).
   for (const [name, tBehavior] of [
     [
       "network unreachable",
@@ -695,6 +870,10 @@ esac`;
     [
       "credential helper answers nothing",
       `echo "fatal: could not read Username for 'https://github.com': No such device or address" >&2; exit 128`,
+    ],
+    [
+      "403 for the wrong repository (never anchored to T)",
+      'echo "remote: Permission to other/outside.git denied. The requested URL returned error: 403" >&2; exit 128',
     ],
   ] as const) {
     test(`a dry-run push to T failing for a non-permission reason (${name}) is a FAIL, not a PASS`, async () => {
@@ -707,14 +886,14 @@ esac`;
       const bin = roleBin();
       fakeRoleGh(bin);
       fakeRoleGit(bin, tBehavior);
-      spawnRoleFixture(fixtureEnv(bin));
-      const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+      const procRoot = fakeProcTree(fixtureEnv(bin));
+      const { status, stderr } = await runSecondOwner(env, procRoot, {
         gh: goodGh,
         kubectl: podLabelKubectl,
       });
       expect(status).not.toBe(0);
       expect(stderr).toContain("CHECK second-owner: FAIL");
-    }, 30000);
+    });
   }
 
   test("GH_CONFIG_DIR not naming the issue's own owner directory is a FAIL", async () => {
@@ -730,16 +909,16 @@ esac`;
       bin,
       'echo "remote: Permission to acme/widgets.git denied. fatal: unable to access" >&2; exit 128'
     );
-    spawnRoleFixture({ ...fixtureEnv(bin), GH_CONFIG_DIR: "/gh/other-owner" });
-    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+    const procRoot = fakeProcTree({ ...fixtureEnv(bin), GH_CONFIG_DIR: "/gh/other-owner" });
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
       gh: goodGh,
       kubectl: podLabelKubectl,
     });
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK second-owner: FAIL");
-  }, 30000);
+  });
 
-  test("production_check, merged, role read succeeds, O's push succeeds, T's push refused 403: PASS", async () => {
+  test("production_check, merged, role read succeeds, O's push succeeds, T's push refused 403: PASS, pid and cmdline recorded", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
     dispatchServer = dispatchStub({});
     const env = fullInputs(
@@ -752,8 +931,8 @@ esac`;
       bin,
       `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
     );
-    spawnRoleFixture(fixtureEnv(bin));
-    const { status, stdout, evidence } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+    const procRoot = fakeProcTree(fixtureEnv(bin));
+    const { status, stdout, evidence } = await runSecondOwner(env, procRoot, {
       gh: goodGh,
       kubectl: podLabelKubectl,
     });
@@ -761,7 +940,10 @@ esac`;
     expect(stdout).toContain("CHECK second-owner: PASS");
     const written = readFileSync(join(evidence, "second-owner.txt"), "utf8");
     expect(written).toContain("403");
-  }, 30000);
+    // R3: the resolved pid (9, the agent — worker-shim's own child) and its cmdline are recorded.
+    expect(written).toContain("role pid: 9");
+    expect(written).toContain("role cmdline: omp --mode rpc");
+  });
 
   test("an unrelated pod (legion.dev/issue mismatch) is refused before any exec as a role", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
@@ -867,6 +1049,26 @@ esac`;
     expect(readFileSync(join(evidence, "cache-logs-ACME-2.raw"), "utf8")).toContain(
       "workspace-init fetch:"
     );
+  });
+
+  // The duration class was [0-9.]+(µs|ms|s), which a duration of a minute or more (Go's
+  // time.Duration.String(), e.g. "1m2.345s") never matches: a slow fetch would FAIL a real PASS.
+  test("a fetch slower than a minute (Go's 1m2.345s duration form) is still a PASS", async () => {
+    daemonServer = daemonStub(stateWithCache);
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const kubectl = `
+case "$*" in
+  "get pod the-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-2' ;;
+  "logs the-pod -c workspace-fetch") printf 'workspace-init fetch: 6,612,345,678 bytes from the repository cache http://cache:8418 in 1m2.345s, its history verified in 1m0.1s; 128 bytes from GitHub for the delta (2 refs)\\n' ;;
+  *) echo "kubectl: unexpected call: $*" >&2; exit 1 ;;
+esac`;
+    const { status, stdout } = await run(["cache", "ACME-2", "the-pod"], env, { kubectl });
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK cache: PASS");
   });
 });
 
@@ -1314,6 +1516,52 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
     );
+    const { bin, evidence } = newFakeDir();
+    const path = isolatedPath(bin);
+    const before = await spawnScript(
+      ["negative", "repo-edit", "before", "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(before.status).toBe(0);
+    const runId = baselineRunId(before.stdout);
+    dispatchServer.stop(true);
+    dispatchServer = dispatchStub(
+      { "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }) },
+      {
+        "ACME-2": JSON.stringify([
+          issueUpdatedEvent(20, "other/outside"),
+          daemonActorEvent("ACME", 19, `${xTargetedNote}\n\n<!-- legion-outbox:9 -->`),
+        ]),
+      }
+    );
+    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${dispatchServer.port}` };
+    const after = await spawnScript(
+      ["negative", "repo-edit", "after", runId, "ACME-2"],
+      path,
+      evidence,
+      env2
+    );
+    expect(after.status).toBe(0);
+    expect(after.stdout).toContain("CHECK negative-repo-edit-ACME-2: PASS");
+  });
+
+  // R7's own reproduction: the operator spells X differently than Dispatch resolved and wrote it
+  // (LEGION_E2E_REPO_X=Other/Outside here; Dispatch's own .repo and the daemon's note both read
+  // "other/outside"). The comparisons above already fold case; the note's own quoted spelling must
+  // come from Dispatch's resolved spelling (dispatch_repo_now), never the operator's literal
+  // LEGION_E2E_REPO_X, or this would wrongly FAIL on a mere case difference.
+  test("the operator's case for X differs from Dispatch's own resolved spelling: still PASS", async () => {
+    daemonServer = daemonStub(stateBody);
+    dispatchServer = dispatchStub({
+      "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    env.LEGION_E2E_REPO_X = "Other/Outside";
     const { bin, evidence } = newFakeDir();
     const path = isolatedPath(bin);
     const before = await spawnScript(

@@ -11,7 +11,8 @@
 # role itself (below), never as the bare pod shell. The one exception is a daemon message whose
 # exact format the daemon itself produces (quoted below with its file:line): those are matched as
 # the complete literal sentence, bound to the daemon's own actor identity, with the repository
-# names the run supplies substituted in, never a loose substring over any author's messages.
+# names Dispatch itself resolved substituted in, never a loose substring over any author's
+# messages.
 #
 # Usage:
 #   bash scripts/e2e/multi-repo-acceptance.sh record-head <T>
@@ -50,6 +51,11 @@
 #   DISPATCH_URL            Dispatch's own API root (GET /api/v1/issues/<key>[/events])
 #   DISPATCH_TOKEN_FILE     the Dispatch bearer token file
 #   MULTIREPO_EVIDENCE_DIR  where each observation's evidence file is kept
+#
+# Optional, a test seam only: MULTIREPO_PROC_ROOT overrides the `/proc`-shaped directory
+# `second-owner`'s `as_role` scans for the role's own process. Production never sets it — the pod
+# always scans its own real `/proc` — but it lets a hermetic test build a fake proc tree instead of
+# scanning the host's, which a shared devbox's own live Legion panes would otherwise pollute.
 set -Eeuo pipefail
 
 self=${0##*/}
@@ -133,6 +139,10 @@ done
 # so every comparison below folds case before comparing, never after.
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
+# regex_escape escapes '.', the only regex metacharacter an owner/name shape (repo_shape_re) can
+# contain, so a repository name is safe to embed literally in a grep -E pattern.
+regex_escape() { printf '%s' "$1" | sed 's/\./\\./g'; }
+
 repo_t=$(lower "$LEGION_E2E_REPO_T") repo_c=$(lower "$LEGION_E2E_REPO_C")
 repo_x=$(lower "$LEGION_E2E_REPO_X") repo_o=$(lower "$LEGION_E2E_REPO_O")
 
@@ -167,54 +177,84 @@ rm -f "$healthz_file"
 dispatch_token=$(cat "$DISPATCH_TOKEN_FILE") || fail "could not read DISPATCH_TOKEN_FILE"
 [ -n "$dispatch_token" ] || fail "DISPATCH_TOKEN_FILE is empty"
 
-# raw_fetch <evidence file> <command...> runs command with its stdout redirected straight to a
-# fresh, uniquely-named temporary file (byte for byte, trailing bytes included — never through
+# The Dispatch bearer never reaches argv (never a curl -H argument, which /proc/<curl>/cmdline and
+# any echoed command line would then carry): it is written once, owner-only, into a curl config
+# file every Dispatch read passes with -K, and removed on exit, interrupt or termination.
+dispatch_curl_config=$(mktemp)
+chmod 600 "$dispatch_curl_config"
+printf 'header = "Authorization: Bearer %s"\n' "$dispatch_token" >"$dispatch_curl_config"
+
+# current_raw_fetch_tmp names raw_fetch's in-flight temporary file, if any, so the cleanup trap
+# below removes it on a signal, not only when raw_fetch's own command fails.
+current_raw_fetch_tmp=""
+cleanup() {
+  [ -z "$current_raw_fetch_tmp" ] || rm -f "$current_raw_fetch_tmp"
+  rm -f "$dispatch_curl_config"
+}
+trap cleanup EXIT INT TERM
+
+# raw_fetch <evidence file> <label> <command...> runs command with its stdout redirected straight
+# to a fresh, uniquely-named temporary file (byte for byte, trailing bytes included — never through
 # $(...), which strips trailing newlines and is why an earlier round's pin evidence was two bytes
 # short), then renames it onto <evidence file> — a same-filesystem rename is atomic, so a second
-# invocation of this script against the same evidence directory at the same time (two concurrent
-# `before` calls, say) never leaves a reader mid-read of a truncated or interleaved file: every
-# reader sees either the whole old file or the whole new one. A nonzero exit fails the whole
-# observation; the caller then reads <evidence file> itself, with jq's own filename argument
-# (never a second `cat`/`$(...)` round trip) when it needs to parse it.
+# invocation of this script against the same evidence directory at the same time never leaves a
+# reader mid-read of a truncated or interleaved file. A nonzero exit (the command's, or a failed
+# rename — checked explicitly, since errexit alone does not catch it inside every caller's own
+# $(...)) fails the whole observation, naming only <label> — never the command's own argv, which
+# for a Dispatch read would otherwise print the bearer `-H` carried in earlier rounds; curl's own
+# stderr (a URL and a status, no credential) still reaches the terminal. The caller then reads
+# <evidence file> itself, with jq's own filename argument, never a second `cat`/`$(...)` round trip.
 raw_fetch() {
-  local file=$1
-  shift
+  local file=$1 label=$2
+  shift 2
   local tmp
   tmp=$(mktemp "$file.XXXXXX") || fail "could not create a temporary file for $file"
+  current_raw_fetch_tmp=$tmp
   if ! "$@" >"$tmp"; then
     rm -f "$tmp"
-    fail "$*: failed"
+    current_raw_fetch_tmp=""
+    fail "$label: failed"
   fi
-  mv -f "$tmp" "$file"
+  if ! mv -f "$tmp" "$file"; then
+    rm -f "$tmp"
+    current_raw_fetch_tmp=""
+    fail "$label: could not write $file"
+  fi
+  current_raw_fetch_tmp=""
 }
 
-# state_raw refreshes $MULTIREPO_EVIDENCE_DIR/state.raw from GET /legion/v1/state (no bearer: the
-# route is open, the same bytes `legion state --json` prints) and prints its path.
+# state_raw <observation> refreshes $MULTIREPO_EVIDENCE_DIR/<observation>-state.raw from
+# GET /legion/v1/state (no bearer: the route is open, the same bytes `legion state --json` prints)
+# and prints its path. Named per observation (never a bare state.raw every observation shares), so
+# a later observation's read never overwrites an earlier one's evidence.
 state_raw() {
-  local file="$MULTIREPO_EVIDENCE_DIR/state.raw"
-  raw_fetch "$file" curl -sS --fail --max-time 30 "$LEGION_E2E_DAEMON_URL/legion/v1/state"
+  local observation=$1
+  local file="$MULTIREPO_EVIDENCE_DIR/$observation-state.raw"
+  raw_fetch "$file" "GET $LEGION_E2E_DAEMON_URL/legion/v1/state" curl -sS --fail --max-time 30 "$LEGION_E2E_DAEMON_URL/legion/v1/state"
   printf '%s' "$file"
 }
 
-# dispatch_issue_raw <KEY> refreshes $MULTIREPO_EVIDENCE_DIR/dispatch-issue-<KEY>.raw from
-# Dispatch's own GET /api/v1/issues/<KEY> (the same JSON the dashboard reads, carrying .repo,
-# .resolved_repo, .status, .generation and .children[] structurally — never `dispatch read`'s
-# human prose) and prints its path.
+# dispatch_issue_raw <observation> <KEY> refreshes
+# $MULTIREPO_EVIDENCE_DIR/<observation>-dispatch-issue-<KEY>.raw from Dispatch's own
+# GET /api/v1/issues/<KEY> (the same JSON the dashboard reads, carrying .repo, .resolved_repo,
+# .status, .generation and .children[] structurally — never `dispatch read`'s human prose) and
+# prints its path.
 dispatch_issue_raw() {
-  local key=$1
-  local file="$MULTIREPO_EVIDENCE_DIR/dispatch-issue-$key.raw"
-  raw_fetch "$file" curl -sS --fail --max-time 30 -H "Authorization: Bearer $dispatch_token" "$DISPATCH_URL/api/v1/issues/$key"
+  local observation=$1 key=$2
+  local file="$MULTIREPO_EVIDENCE_DIR/$observation-dispatch-issue-$key.raw"
+  raw_fetch "$file" "GET $DISPATCH_URL/api/v1/issues/$key" curl -sS --fail --max-time 30 -K "$dispatch_curl_config" "$DISPATCH_URL/api/v1/issues/$key"
   printf '%s' "$file"
 }
 
-# dispatch_events_raw <KEY> refreshes $MULTIREPO_EVIDENCE_DIR/dispatch-events-<KEY>.raw from
-# Dispatch's own GET /api/v1/issues/<KEY>/events (newest first, up to 200): each event's .type,
-# .seq, .actor and, for message.created, the complete .payload.body (never truncated, unlike
-# `dispatch read`'s event summaries). Prints its path.
+# dispatch_events_raw <observation> <KEY> refreshes
+# $MULTIREPO_EVIDENCE_DIR/<observation>-dispatch-events-<KEY>.raw from Dispatch's own
+# GET /api/v1/issues/<KEY>/events (newest first, up to 200): each event's .type, .seq, .actor and,
+# for message.created, the complete .payload.body (never truncated, unlike `dispatch read`'s event
+# summaries). Prints its path.
 dispatch_events_raw() {
-  local key=$1
-  local file="$MULTIREPO_EVIDENCE_DIR/dispatch-events-$key.raw"
-  raw_fetch "$file" curl -sS --fail --max-time 30 -H "Authorization: Bearer $dispatch_token" \
+  local observation=$1 key=$2
+  local file="$MULTIREPO_EVIDENCE_DIR/$observation-dispatch-events-$key.raw"
+  raw_fetch "$file" "GET $DISPATCH_URL/api/v1/issues/$key/events" curl -sS --fail --max-time 30 -K "$dispatch_curl_config" \
     "$DISPATCH_URL/api/v1/issues/$key/events?order=desc&limit=200"
   printf '%s' "$file"
 }
@@ -227,8 +267,7 @@ issue_project() { printf '%s' "${1%%-*}"; }
 # summary <name> <text> writes an observation's own computed summary to its evidence file
 # (<name>.txt) and prints it back — the fields it judged and what it found, never the sole record
 # of a structured read: every structured source this script reads also keeps its own
-# <source>.raw file beside it (state.raw, dispatch-issue-<key>.raw, dispatch-events-<key>.raw),
-# written byte for byte by raw_fetch.
+# <observation>-<source>.raw file beside it, written byte for byte by raw_fetch.
 summary() {
   local name=$1 text=$2
   printf '%s' "$text" >"$MULTIREPO_EVIDENCE_DIR/$name.txt"
@@ -276,13 +315,16 @@ head: $sha
 # children <parent KEY>: one child resolves to T and one to C, structurally, in both Dispatch's own
 # record (.resolved_repo) and the daemon's state (.issues[<key>].repo).
 children() {
-  local parent=$1 keys key d_repo s_repo saw_t=0 saw_c=0 mismatch=0 out=""
-  keys=$(jq -r '.children[].key' "$(dispatch_issue_raw "$parent")")
+  local parent=$1 parent_file keys key child_file d_repo state_file s_repo saw_t=0 saw_c=0 mismatch=0 out=""
+  parent_file=$(dispatch_issue_raw children "$parent")
+  keys=$(jq -r '.children[].key' "$parent_file")
   [ -n "$keys" ] || fail "children: $parent has no children on Dispatch"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    d_repo=$(jq -r '.resolved_repo // "none"' "$(dispatch_issue_raw "$key")")
-    s_repo=$(jq -r --arg k "$key" '.issues[$k].repo // "none"' "$(state_raw)")
+    child_file=$(dispatch_issue_raw children "$key")
+    d_repo=$(jq -r '.resolved_repo // "none"' "$child_file")
+    state_file=$(state_raw children)
+    s_repo=$(jq -r --arg k "$key" '.issues[$k].repo // "none"' "$state_file")
     out+="$key: dispatch=$d_repo state=$s_repo
 "
     [ "$(lower "$d_repo")" = "$(lower "$s_repo")" ] || mismatch=1
@@ -325,7 +367,7 @@ pin() {
   [ "$(lower "$repo")" = "$repo_c" ] || fail "pin's repository argument $repo is not LEGION_E2E_REPO_C ($LEGION_E2E_REPO_C)"
   [[ $sha =~ $sha_re ]] || fail "pin's merge-sha argument $(printf '%q' "$sha") is not a full 40-character commit id"
   default=$(default_branch "$repo")
-  raw_fetch "$content_file.b64" gh api "repos/$repo/contents/$LEGION_E2E_PIN_FILE?ref=$default" --jq .content
+  raw_fetch "$content_file.b64" "GET repos/$repo/contents/$LEGION_E2E_PIN_FILE" gh api "repos/$repo/contents/$LEGION_E2E_PIN_FILE?ref=$default" --jq .content
   base64 -d <"$content_file.b64" >"$content_file" || fail "pin: $LEGION_E2E_PIN_FILE's content is not valid base64"
   rm -f "$content_file.b64"
   [ -s "$content_file" ] || fail "pin: $LEGION_E2E_PIN_FILE on $repo@$default is empty"
@@ -336,10 +378,11 @@ pin() {
 
 # done <KEY>...: every named issue's Dispatch status (.status, structurally) is done.
 done_check() {
-  local key out="" ok=1 status
+  local key file out="" ok=1 status
   [ "$#" -gt 0 ] || fail "done: name at least one issue key"
   for key in "$@"; do
-    status=$(jq -r '.status' "$(dispatch_issue_raw "$key")")
+    file=$(dispatch_issue_raw "done" "$key")
+    status=$(jq -r '.status' "$file")
     if [ "$status" = "done" ]; then
       out+="$key: done
 "
@@ -370,60 +413,93 @@ require_pod_for_issue() {
   [ "$label" = "$issue" ] || fail "pod $pod's legion.dev/issue label is $(printf '%q' "$label"), not $issue: this is not that issue's pod"
 }
 
-# ---- running as the role, not the bare pod shell (N1) ----------------------------------------
+# ---- running as the role, not the bare pod shell (N1), resolved once (R3) --------------------
 #
 # `kubectl exec` carries none of a role's own variables — only PATH, HOME and POD_UID, the three a
 # container spec sets on exec itself (packages/daemon/internal/runtime/sandbox/manifest.go,
 # podkind.go); LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH and LEGION_WORKSPACE are plain
 # variables the launcher's start command gave the role's own process, never exec's. `legion gh`
 # (found via a bare exec's PATH) refuses with exit 2 when LEGION_GH_PATH is unset
-# (cmd/legion/gh.go), so a read run as the bare pod can never pass. Stage 4a's own live proof runs
-# these exact probes as the role instead, reading its environment from /proc/<pid>/environ and
-# re-executing under exactly that environment with `env -i`
-# (internal/runtime/sandbox/live_lifecycle_test.go:1096-1105, asAgent).
+# (cmd/legion/gh.go), so a read run as the bare pod can never pass. Stage 4a's own live proof reads
+# that environment from /proc/<pid>/environ and re-executes under exactly that environment with
+# `env -i` (internal/runtime/sandbox/live_lifecycle_test.go:1096-1105, asAgent); its pid comes from
+# `shimPid`/`agentPid` (live_operator_test.go:300-339), which requires exactly one process whose
+# own parent's cmdline is literally `worker-shim`, itself PID 1's child — never the first match a
+# lexically-sorted scan happens to find, which in a role container also carries every descendant of
+# the role's own process (bash tool children, subagent processes, any long-running child), any of
+# which a lexical-first pick could just as well select.
 
-# as_role_find_and_run is the POSIX-sh fragment a single `kubectl exec ... -- sh -c` sends into
-# the pod: find the one process in this container whose environment carries LEGION_GH_PATH (the
-# role's own, however it is named or spawned — never a hardcoded process name), then re-exec the
-# script this function's own first argument carries under exactly that environment, exactly as
-# asAgent's xargs/env -i pattern does. Single-quoted deliberately: every $-expansion inside runs
-# in the pod's own remote shell, never this one.
+# as_role_find_and_run is the POSIX-sh fragment a single `kubectl exec ... -- sh -c` sends into the
+# pod: resolve the role's pid exactly once — the one process whose parent's cmdline is the literal
+# line `worker-shim` and whose grandparent is PID 1 — refusing by name when that is not exactly one
+# process, record it (PID, cmdline) into the output, then re-exec the given script under exactly
+# that one process's environment with `env -i`, exactly as asAgent's xargs/env -i pattern does.
+# Single-quoted deliberately: every $-expansion inside runs in the pod's own remote shell, never
+# this one.
 # shellcheck disable=SC2016
 as_role_find_and_run='
-pid=""
-for d in /proc/[0-9]*; do
-  [ -r "$d/environ" ] || continue
-  if tr "\0" "\n" <"$d/environ" 2>/dev/null | grep -q "^LEGION_GH_PATH="; then
-    pid=${d#/proc/}
-    break
+proc_root=$1
+script=$2
+candidates=""
+for d in "$proc_root"/[0-9]*; do
+  pid=${d##*/}
+  [ -r "$d/status" ] || continue
+  ppid=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
+  [ -n "$ppid" ] || continue
+  [ -r "$proc_root/$ppid/cmdline" ] || continue
+  if tr "\0" "\n" <"$proc_root/$ppid/cmdline" 2>/dev/null | grep -qx worker-shim; then
+    candidates="$candidates $pid"
   fi
 done
-if [ -z "$pid" ]; then
-  echo "as_role: no process in this container carries LEGION_GH_PATH" >&2
+candidates=$(printf "%s" "$candidates" | sed "s/^ *//;s/ *$//")
+count=0
+for c in $candidates; do count=$((count + 1)); done
+if [ "$count" -ne 1 ]; then
+  echo "as_role: expected exactly one process whose parent is worker-shim, found $count ($candidates)" >&2
   exit 1
 fi
-xargs -0 sh -c '"'"'inner=$1; shift; exec env -i "$@" sh -c "$inner"'"'"' agent-env "$1" <"/proc/$pid/environ"
+pid=$candidates
+cmdline=$(tr "\0" " " <"$proc_root/$pid/cmdline" 2>/dev/null)
+echo "@@@PID@@@"
+echo "$pid"
+echo "@@@CMDLINE@@@"
+echo "$cmdline"
+xargs -0 sh -c '"'"'inner=$1; shift; exec env -i "$@" sh -c "$inner"'"'"' agent-env "$script" <"$proc_root/$pid/environ"
 '
 
-# as_role <pod> <container> <script> runs script with sh -c under the role's own environment, as
-# the role's own bash tool would run it — never the bare pod shell's.
+# as_role <pod> <container> <script> resolves the role's pid once and runs script under its own
+# environment with sh -c, as the role's own bash tool would run it — never the bare pod shell's.
+# proc_root defaults to /proc (the pod's own) and is overridable only for tests
+# (MULTIREPO_PROC_ROOT).
 as_role() {
   local pod=$1 container=$2 script=$3
-  kubectl exec "$pod" -c "$container" -- sh -c "$as_role_find_and_run" as-role "$script"
+  local proc_root=${MULTIREPO_PROC_ROOT:-/proc}
+  kubectl exec "$pod" -c "$container" -- sh -c "$as_role_find_and_run" as-role "$proc_root" "$script"
+}
+
+# extract_section <text> <start marker> <end marker> is the lines strictly between
+# `@@@<start>@@@` and `@@@<end>@@@` in text (both exclusive): second-owner's one combined as_role
+# call prints every probe's result this way, so every probe runs under one pid resolution and one
+# environment snapshot (R3) instead of as_role scanning /proc again for each.
+extract_section() {
+  local text=$1 start=$2 end=$3
+  printf '%s\n' "$text" | sed -n "/^@@@${start}@@@\$/,/^@@@${end}@@@\$/p" | sed '1d;$d'
 }
 
 # second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
 # .pullRequest.repo) and GitHub confirms it merged there (gh api .../pulls/<n> --jq .merged — the
 # daemon's own `done` phase is accepted only alongside `production_check`, never alone, since the
 # phase is not merge proof by itself, linger.go:32-33); the pod is bound to the issue by its
-# legion.dev/issue label, as `cache` binds it. The credential evidence runs live, as the role (N1):
-# its own LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR are read and checked against the expected
+# legion.dev/issue label, as `cache` binds it. The credential evidence runs live, as the role, in
+# one `as_role` call carrying all four probes under one resolved pid and one environment snapshot
+# (R3): the role's own LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR are checked against the expected
 # directories first, then a read of T (`gh api repos/<T> --jq .full_name`, must equal T exactly), a
 # positive control (a dry-run push to O's own repository, which must succeed — proving the
 # network, the credential helper and the ref are all sound before the negative probe can be
 # trusted), and the negative probe itself: a dry-run push to T, which must fail with a permission
-# refusal (403, or "Permission to ... denied") — never merely "any nonzero exit", which a bad ref,
-# an unreachable network or an unanswered credential helper would also give (N2). Both pushes run
+# refusal anchored to git's own lines (`remote: Permission to <T>.git denied` or
+# `The requested URL returned error: 403`) — never merely "any nonzero exit", which a bad ref, an
+# unreachable network or an unanswered credential helper would also give (N2). Both pushes run
 # `--no-verify -c core.hooksPath=/dev/null` (a dry-run still runs the workspace's own pre-push
 # hook, which is agent-writable) from the issue's own clone's git dir ($LEGION_WORKSPACE/.git).
 second_owner() {
@@ -432,7 +508,7 @@ second_owner() {
   require_pod_for_issue "$pod" "$child"
 
   local state_file
-  state_file=$(state_raw)
+  state_file=$(state_raw second-owner)
   pr_repo=$(jq -r --arg k "$child" '.issues[$k].pullRequest.repo // "none"' "$state_file")
   pr_number=$(jq -r --arg k "$child" '.issues[$k].pullRequest.number // empty' "$state_file")
   phase=$(jq -r --arg k "$child" '.issues[$k].phase // "none"' "$state_file")
@@ -447,40 +523,82 @@ second_owner() {
   fi
   [ "$merged" = true ] || ok=0
 
-  local env_check owners_dir config_dir want_config_dir
-  # shellcheck disable=SC2016 # expands in the pod's own remote shell, as a role's bash tool would
-  env_check=$(as_role "$pod" "$container" 'printf "%s|%s" "$LEGION_GH_OWNERS_DIR" "$GH_CONFIG_DIR"' 2>/dev/null) ||
-    fail "second-owner: could not read the role's own environment in $pod ($container)"
+  local probe_branch push_flags
+  probe_branch="legion-probe-$$-$(date +%s)"
+  push_flags='-c core.hooksPath=/dev/null push --no-verify --dry-run'
+  local combined
+  combined="
+env_check=\"\$LEGION_GH_OWNERS_DIR|\$GH_CONFIG_DIR\"
+read_out=\$(gh api repos/$LEGION_E2E_REPO_T --jq .full_name 2>&1)
+read_status=\$?
+push_o_out=\$(git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_O\" \"HEAD:refs/heads/$probe_branch\" 2>&1)
+push_o_status=\$?
+push_t_out=\$(git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_T\" \"HEAD:refs/heads/$probe_branch\" 2>&1)
+push_t_status=\$?
+echo '@@@ENV@@@'
+echo \"\$env_check\"
+echo '@@@READ@@@'
+echo \"\$read_out\"
+echo '@@@READ_STATUS@@@'
+echo \"\$read_status\"
+echo '@@@PUSH_O@@@'
+echo \"\$push_o_out\"
+echo '@@@PUSH_O_STATUS@@@'
+echo \"\$push_o_status\"
+echo '@@@PUSH_T@@@'
+echo \"\$push_t_out\"
+echo '@@@PUSH_T_STATUS@@@'
+echo \"\$push_t_status\"
+echo '@@@END@@@'
+"
+  local combined_out
+  combined_out=$(as_role "$pod" "$container" "$combined") ||
+    fail "second-owner: could not identify or run as the role's own process in $pod ($container)"
+
+  local pid cmdline env_check owners_dir config_dir want_config_dir
+  pid=$(extract_section "$combined_out" PID CMDLINE)
+  cmdline=$(extract_section "$combined_out" CMDLINE ENV)
+  env_check=$(extract_section "$combined_out" ENV READ)
   owners_dir=${env_check%%|*}
   config_dir=${env_check#*|}
   want_config_dir="$owners_dir/$o_owner"
   [ -n "$owners_dir" ] && [ "$config_dir" = "$want_config_dir" ] || ok=0
 
-  local read_full_name
-  read_full_name=$(as_role "$pod" "$container" "gh api repos/$LEGION_E2E_REPO_T --jq .full_name" 2>/dev/null) || read_full_name=""
-  [ "$(lower "$read_full_name")" = "$repo_t" ] || ok=0
+  local read_out read_status
+  read_out=$(extract_section "$combined_out" READ READ_STATUS)
+  read_status=$(extract_section "$combined_out" READ_STATUS PUSH_O)
+  [ "$read_status" = 0 ] && [ "$(lower "$read_out")" = "$repo_t" ] || ok=0
 
-  local probe_branch push_flags
-  probe_branch="legion-probe-$$-$(date +%s)"
-  push_flags='-c core.hooksPath=/dev/null push --no-verify --dry-run'
-
-  local push_o_out push_o_status=0
-  push_o_out=$(as_role "$pod" "$container" \
-    "git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_O\" \"HEAD:refs/heads/$probe_branch\"" 2>&1) || push_o_status=$?
+  local push_o_out push_o_status
+  push_o_out=$(extract_section "$combined_out" PUSH_O PUSH_O_STATUS)
+  push_o_status=$(extract_section "$combined_out" PUSH_O_STATUS PUSH_T)
   [ "$push_o_status" = 0 ] || ok=0
 
-  local push_t_out push_t_status=0
-  push_t_out=$(as_role "$pod" "$container" \
-    "git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_T\" \"HEAD:refs/heads/$probe_branch\"" 2>&1) || push_t_status=$?
+  local push_t_out push_t_status t_repo_re
+  push_t_out=$(extract_section "$combined_out" PUSH_T PUSH_T_STATUS)
+  push_t_status=$(extract_section "$combined_out" PUSH_T_STATUS END)
+  t_repo_re=$(regex_escape "$LEGION_E2E_REPO_T")
   [ "$push_t_status" != 0 ] || ok=0
-  printf '%s' "$push_t_out" | grep -qiE '403|Permission to .* denied' || ok=0
+  # Both alternatives are anchored to T: a plain "error: 403" or "denied" elsewhere (another
+  # repository, a different push) never counts — only git's own permission-denial line naming T,
+  # or a 403 on a line that also names T's own GitHub URL.
+  if printf '%s' "$push_t_out" | grep -qE "remote: Permission to ${t_repo_re}\.git denied"; then
+    :
+  elif printf '%s' "$push_t_out" | grep -qE "github\.com/${t_repo_re}([./'\"]|$)" &&
+    printf '%s' "$push_t_out" | grep -q "error: 403"; then
+    :
+  else
+    ok=0
+  fi
 
   summary second-owner "pullRequest.repo: $pr_repo
 pullRequest.number: $pr_number
 phase: $phase
 merged (GitHub, repos/$LEGION_E2E_REPO_O/pulls/$pr_number): $merged
+role pid: $pid
+role cmdline: $cmdline
 role env: LEGION_GH_OWNERS_DIR=$owners_dir GH_CONFIG_DIR=$config_dir (want $want_config_dir)
-as role: gh api repos/$LEGION_E2E_REPO_T --jq .full_name = $read_full_name
+as role: gh api repos/$LEGION_E2E_REPO_T --jq .full_name = $read_out (exit $read_status)
 positive control: dry-run push to $LEGION_E2E_REPO_O as role, exit $push_o_status
 ---
 $push_o_out
@@ -495,17 +613,18 @@ $push_t_out
 # cache <issue KEY> <pod> [container]: the named pod's legion.dev/issue label matches the issue,
 # its fetch container's log carries the producer's exact, anchored cache-stream-with-delta success
 # line (packages/daemon/cmd/legion/workspace_fetch.go:83, the form workspace_fetch_test.go:572
-# pins), and the daemon's state shows that issue's repository's cache ready.
-cache_success_re='^workspace-init fetch: [0-9,]+ bytes from the repository cache .+ in [0-9.]+(µs|ms|s), its history verified in [0-9.]+(µs|ms|s); [0-9,]+ bytes from GitHub for the delta \([0-9]+ refs?\)$'
+# pins, with the duration fields permissive enough for Go's own minute-and-above format, 1m2.345s),
+# and the daemon's state shows that issue's repository's cache ready.
+cache_success_re='^workspace-init fetch: [0-9,]+ bytes from the repository cache .+ in [0-9a-zµ.]+, its history verified in [0-9a-zµ.]+; [0-9,]+ bytes from GitHub for the delta \([0-9]+ refs?\)$'
 cache_check() {
   local key=$1 pod=$2 container=${3:-workspace-fetch} repo ready logs_file ok=1
   command -v kubectl >/dev/null || fail "cache: kubectl is required and is not on PATH"
   require_pod_for_issue "$pod" "$key"
   logs_file="$MULTIREPO_EVIDENCE_DIR/cache-logs-$key.raw"
-  raw_fetch "$logs_file" kubectl logs "$pod" -c "$container"
+  raw_fetch "$logs_file" "kubectl logs $pod -c $container" kubectl logs "$pod" -c "$container"
   grep -qE "$cache_success_re" "$logs_file" || ok=0
   local state_file
-  state_file=$(state_raw)
+  state_file=$(state_raw cache)
   repo=$(jq -r --arg k "$key" '.issues[$k].repo // "none"' "$state_file")
   [ "$repo" != "none" ] || ok=0
   ready=$(jq -r --arg r "$repo" '.repositories.mapped[] | select((.repo|ascii_downcase)==($r|ascii_downcase)) | .cache.ready' "$state_file")
@@ -571,14 +690,15 @@ baseline_capture() {
   echo "BASELINE $operation-$issue: captured"
 }
 
-# baseline_verify <operation> <issue> <run id> reads and validates the baseline: a safe id, present,
-# not foreign (operation, issue, project and daemon URL all match this call's, and the issue's
-# current generation still equals the baseline's — a hand-over or re-admission since `before`
-# invalidates the comparison), and not older than 24 hours (a negative control's operator action is
-# expected to complete well within one working day; a much older file is a stale leftover from
-# another session, never evidence for this one). Prints the baseline JSON on success.
+# baseline_verify <observation> <operation> <issue> <run id> reads and validates the baseline: a
+# safe id, present, not foreign (operation, issue, project and daemon URL all match this call's,
+# and the issue's current generation still equals the baseline's — a hand-over or re-admission
+# since `before` invalidates the comparison), and not older than 24 hours (a negative control's
+# operator action is expected to complete well within one working day; a much older file is a
+# stale leftover from another session, never evidence for this one). Prints the baseline JSON on
+# success.
 baseline_verify() {
-  local operation=$1 issue=$2 run_id=$3
+  local observation=$1 operation=$2 issue=$3 run_id=$4
   validate_run_id "$run_id"
   local dir
   dir=$(baseline_dir "$run_id")
@@ -600,18 +720,20 @@ baseline_verify() {
   started_epoch=$(date -u -d "$b_started" +%s 2>/dev/null) || fail "run $run_id's baseline has an unreadable started_at ($b_started)"
   now_epoch=$(date -u +%s)
   [ $((now_epoch - started_epoch)) -le 86400 ] || fail "run $run_id's baseline is more than 24h old (captured $b_started): too stale to trust; capture a fresh one with 'negative $operation before $issue'"
-  local now_generation
-  now_generation=$(jq -r --arg k "$issue" '.issues[$k].generation // -1' "$(state_raw)")
+  local state_file now_generation
+  state_file=$(state_raw "$observation")
+  now_generation=$(jq -r --arg k "$issue" '.issues[$k].generation // -1' "$state_file")
   [ "$now_generation" = "$b_generation" ] || fail "run $run_id's baseline was taken at generation $b_generation; $issue is now generation $now_generation (a hand-over or re-admission since): capture a fresh baseline"
   printf '%s' "$baseline"
 }
 
-# negative_issue_repo_of <control> <issue> requires issue already recorded on T or C, in the
-# daemon's own state (.issues[<key>].repo), and returns it: the control needs a real recorded
-# child to mean anything.
+# negative_issue_repo_of <observation> <control> <issue> requires issue already recorded on T or
+# C, in the daemon's own state (.issues[<key>].repo), and returns it: the control needs a real
+# recorded child to mean anything.
 negative_issue_repo_of() {
-  local control=$1 issue=$2 repo
-  repo=$(jq -r --arg k "$issue" '.issues[$k].repo // "none"' "$(state_raw)")
+  local observation=$1 control=$2 issue=$3 repo state_file
+  state_file=$(state_raw "$observation")
+  repo=$(jq -r --arg k "$issue" '.issues[$k].repo // "none"' "$state_file")
   { [ "$(lower "$repo")" = "$repo_t" ] || [ "$(lower "$repo")" = "$repo_c" ]; } ||
     fail "negative $control: $issue's recorded repository is $repo, neither T ($LEGION_E2E_REPO_T) nor C ($LEGION_E2E_REPO_C): not the recorded child this control needs"
   printf '%s' "$repo"
@@ -629,9 +751,9 @@ negative_pr_in_x() {
   if [ "$phase" = before ]; then
     local child=$2
     local repo
-    repo=$(negative_issue_repo_of pr-in-x "$child")
+    repo=$(negative_issue_repo_of negative-pr-in-x pr-in-x "$child")
     local state_file
-    state_file=$(state_raw)
+    state_file=$(state_raw negative-pr-in-x)
     local record generation
     record=$(jq --arg k "$child" '.issues[$k] // null' "$state_file")
     generation=$(jq -r --arg k "$child" '.issues[$k].generation // -1' "$state_file")
@@ -646,18 +768,18 @@ negative_pr_in_x() {
   fi
   local run_id=$2 child=$3
   local baseline b_highest b_record_repo
-  baseline=$(baseline_verify pr-in-x "$child" "$run_id")
+  baseline=$(baseline_verify negative-pr-in-x pr-in-x "$child" "$run_id")
   b_highest=$(jq -r '.highest_pr' <<<"$baseline")
   b_record_repo=$(jq -r '.record.repo // "none"' <<<"$baseline")
 
   local prs_file found_number
   prs_file="$MULTIREPO_EVIDENCE_DIR/negative-pr-in-x-$child-$run_id-pulls.raw"
-  raw_fetch "$prs_file" gh api "repos/$LEGION_E2E_REPO_X/pulls?state=all&per_page=100"
+  raw_fetch "$prs_file" "GET repos/$LEGION_E2E_REPO_X/pulls" gh api "repos/$LEGION_E2E_REPO_X/pulls?state=all&per_page=100"
   found_number=$(jq --arg ref "legion/$child" --argjson since "$b_highest" \
     '[.[] | select(.head.ref == $ref and .state == "closed" and .number > $since)] | length' "$prs_file")
 
   local state_file now_repo now_pr_repo ok=1
-  state_file=$(state_raw)
+  state_file=$(state_raw negative-pr-in-x)
   now_repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' "$state_file")
   now_pr_repo=$(jq -r --arg k "$child" '.issues[$k].pullRequest.repo // "none"' "$state_file")
   { [ -n "${found_number:-}" ] && [ "$found_number" -gt 0 ]; } 2>/dev/null || ok=0
@@ -684,18 +806,18 @@ $(cat "$prs_file")
 negative_no_repo() {
   local key=$1 ok=1 has
   local state_file
-  state_file=$(state_raw)
+  state_file=$(state_raw negative-no-repo)
   has=$(jq -r 'if (.issues | type) != "object" then "invalid" else (.issues | has($k)) end' --arg k "$key" "$state_file")
   [ "$has" = "false" ] || ok=0
 
   local detail_file
-  detail_file=$(dispatch_issue_raw "$key")
+  detail_file=$(dispatch_issue_raw negative-no-repo "$key")
   local resolved_repo
   resolved_repo=$(jq -r '.resolved_repo // "null"' "$detail_file")
   [ "$resolved_repo" = "null" ] || ok=0
 
   local events_file project daemon_actor
-  events_file=$(dispatch_events_raw "$key")
+  events_file=$(dispatch_events_raw negative-no-repo "$key")
   project=$(issue_project "$key")
   daemon_actor="legion-daemon:$project"
   local none_note="Legion did not admit this issue: its repository resolves to none. Set its repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name) and move it to todo again."
@@ -724,8 +846,10 @@ latest daemon repository note is the none-note: $latest_is_none
 # own last-seen `.seq` with `.payload.repo` equal to X (Dispatch's own sequence cursor, never a
 # wall-clock comparison, and never merely "any issue.updated", which the daemon's own routine
 # status writes also emit), and (4) the daemon's own exact kept-repository message
-# (internal/workflow/repository.go:94) appears among its messages, word for word with the
-# baseline's repository and X substituted in, bound to the daemon's own actor and outbox marker. A
+# (internal/workflow/repository.go:94) appears among its messages, word for word, with the
+# baseline's own repository spelling and Dispatch's own resolved spelling of X substituted in —
+# never the operator's own LEGION_E2E_REPO_X spelling, which may differ only in case from what
+# Dispatch actually resolved and wrote — bound to the daemon's own actor and outbox marker. A
 # rerun needs no second message: `noteOnce` posts the kept-repository note once per resolution
 # (internal/workflow/repository.go:101-113), so check (3) is this protocol's primary proof and (4)
 # is the format checked, not required fresh.
@@ -734,16 +858,16 @@ negative_repo_edit() {
   if [ "$phase" = before ]; then
     local child=$2
     local repo
-    repo=$(negative_issue_repo_of repo-edit "$child")
+    repo=$(negative_issue_repo_of negative-repo-edit repo-edit "$child")
     local detail_file resolved_repo
-    detail_file=$(dispatch_issue_raw "$child")
+    detail_file=$(dispatch_issue_raw negative-repo-edit "$child")
     resolved_repo=$(jq -r '.resolved_repo // "none"' "$detail_file")
     [ "$(lower "$resolved_repo")" != "$repo_x" ] || fail "negative repo-edit: $child already resolves to X ($resolved_repo) before any baseline; capture before only when the issue still resolves to T or C"
     local state_file generation
-    state_file=$(state_raw)
+    state_file=$(state_raw negative-repo-edit)
     generation=$(jq -r --arg k "$child" '.issues[$k].generation // -1' "$state_file")
     local events_file last_seq
-    events_file=$(dispatch_events_raw "$child")
+    events_file=$(dispatch_events_raw negative-repo-edit "$child")
     last_seq=$(jq '[.[].seq] | max // 0' "$events_file")
     local extra
     extra=$(jq -n --arg repo "$repo" --argjson generation "$generation" --argjson last_seq "$last_seq" \
@@ -753,22 +877,22 @@ negative_repo_edit() {
   fi
   local run_id=$2 child=$3
   local baseline b_repo b_last_seq
-  baseline=$(baseline_verify repo-edit "$child" "$run_id")
+  baseline=$(baseline_verify negative-repo-edit repo-edit "$child" "$run_id")
   b_repo=$(jq -r '.daemon_repo' <<<"$baseline")
   b_last_seq=$(jq -r '.last_seq' <<<"$baseline")
 
   local state_file now_repo ok=1
-  state_file=$(state_raw)
+  state_file=$(state_raw negative-repo-edit)
   now_repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' "$state_file")
   [ "$(lower "$now_repo")" = "$(lower "$b_repo")" ] || ok=0
 
   local detail_file dispatch_repo_now
-  detail_file=$(dispatch_issue_raw "$child")
+  detail_file=$(dispatch_issue_raw negative-repo-edit "$child")
   dispatch_repo_now=$(jq -r '.repo // "none"' "$detail_file")
   [ "$(lower "$dispatch_repo_now")" = "$repo_x" ] || ok=0
 
   local events_file edit_after
-  events_file=$(dispatch_events_raw "$child")
+  events_file=$(dispatch_events_raw negative-repo-edit "$child")
   edit_after=$(jq --argjson since "$b_last_seq" --arg x "$repo_x" \
     '[.[] | select(.type=="issue.updated" and .seq > $since and ((.payload.repo // "") | ascii_downcase) == $x)] | length' "$events_file")
   { [ -n "${edit_after:-}" ] && [ "$edit_after" -gt 0 ]; } 2>/dev/null || ok=0
@@ -776,7 +900,10 @@ negative_repo_edit() {
   local project daemon_actor note has_note
   project=$(issue_project "$child")
   daemon_actor="legion-daemon:$project"
-  note="Legion keeps $b_repo as this issue's repository; the change to $LEGION_E2E_REPO_X in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for $LEGION_E2E_REPO_X instead."
+  # The note's own repository names are Dispatch's own spellings (the baseline's kept repository,
+  # $dispatch_repo_now for the one it refused), never the operator's LEGION_E2E_REPO_X, which the
+  # case-insensitive comparisons above tolerate differing from but a literal quote must not.
+  note="Legion keeps $b_repo as this issue's repository; the change to $dispatch_repo_now in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for $dispatch_repo_now instead."
   has_note=$(jq --arg actor "$daemon_actor" --arg note "$note" '
     any(.[]; .type=="message.created" and .actor.kind=="session" and .actor.id==$actor
       and (.payload.body | startswith($note + "\n\n<!-- legion-outbox:")))
