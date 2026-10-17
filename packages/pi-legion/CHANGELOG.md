@@ -7,18 +7,6 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- Daemon API contract 29 and plugin interface version 3 (sjawhar/legion#1998): the daemon-launched
-  controller is told the project's Slack channels as `LEGION_SLACK_CHANNELS`, always set (empty for
-  none), and the plugin subscribes to each channel's mention topic while the session holds the
-  controller role, registering none with the listener. A resume first drops, from the listener and
-  from what it restores, every Slack topic an earlier session registered, a listed channel's
-  included, since a restored one would outlive the role; it hears the channels its launch names
-  and no others. A daemon restarted with a changed `slack_channels` relaunches the controller,
-  resuming its session, since the list is one of the addresses its generation records. Any other
-  controller ignores the variable. The controller skill answers each mention in its thread with
-  `slack_post` (`references/slack-mentions.md`). Under `runtime.kubernetes.agent_secrets` the
-  controller's pod is enrolled with the secrets broker. Install this release's pair with a daemon
-  at 29.
 - The `dispatch-envoy-tools` capability row expects `slack_post` among the Envoy tools, eleven in
   all.
 - Every root architect's and phase worker's session measures six live capabilities as it boots
