@@ -10,6 +10,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
+| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach.
@@ -118,6 +119,131 @@ above, or GitHub's digest for it, which
 lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
 and on `PATH`.
 
+## gcp:Dispatch
+
+`envoy-infra:gcp:Dispatch` deploys one private Autopilot cluster, its VPC and Cloud NAT, a
+private-IP Cloud SQL for PostgreSQL instance, and one Dispatch pod. The pod contains
+`envoy-dispatch`, `envoy-listener`, a userspace Tailscale native sidecar, and the Cloud SQL Auth
+Proxy native sidecar. Dispatch listens on port 8766 on the pod's address, behind a ClusterIP
+Service, and a NetworkPolicy admits, with `allowedNamespaces` unset, no ingress at all — the
+Tailscale sidecar only dials out and every probe is an exec probe — so Tailscale Serve is then the
+only way in. `allowedNamespaces` names the cluster's namespaces whose pods the policy admits on
+port 8766, through that Service; the listener binds the pod's loopback either way.
+
+| Resource | Purpose |
+| --- | --- |
+| VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
+| Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
+| Autopilot cluster | Enables the Secret Manager add-on and Workload Identity. |
+| Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
+| Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
+| Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
+| ClusterIP Service | Port 8766 to the Dispatch pod: the in-cluster path the NetworkPolicy opens to the namespaces `allowedNamespaces` names. |
+| NetworkPolicy | Ingress to the Dispatch pod: no rule at all with `allowedNamespaces` unset or empty, so no other pod reaches it (Kubernetes still admits the pod's own node); otherwise one rule admitting the named namespaces' pods on port 8766. |
+| Project IAM member and secret IAM member | `roles/cloudsql.client`, conditioned to this Cloud SQL instance alone, and `roles/secretmanager.secretAccessor` on the NATS seed secret, each granted to the pod's Workload Identity principal. |
+
+### Inputs
+
+The required plain inputs are `region`, `hostname`, `tailnetDnsName`, `tags`, the three
+digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
+`natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
+resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
+defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
+`deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
+`deletionProtectionEnabled`, which refuses a delete from the API or the console too. `allowedNamespaces` (optional, each a DNS label) names the
+Kubernetes namespaces, in the Dispatch pod's own cluster, whose pods the NetworkPolicy admits on
+port 8766; unset or empty, the policy admits no ingress at all.
+
+Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
+names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
+and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses a
+seed in `tailnetAuthKey`, `signInClientSecret` and `natsSeedSecret` once each resolves, before any
+child takes it, and a `natsUrl` that holds a seed, is local (the pod reaches NATS only through the
+Tailscale sidecar's SOCKS5 proxy), is empty, or holds a comma or a control character once it
+resolves, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
+creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
+running Pulumi needs `gke-gcloud-auth-plugin`.
+
+The generated `principal` output is the Kubernetes service account's Workload Identity principal,
+built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
+creates the pool exists. The component itself grants that principal `roles/cloudsql.client` — at
+project scope with an IAM condition limiting it to this component's Cloud SQL instance, since
+Cloud SQL has no per-instance IAM — and `roles/secretmanager.secretAccessor` only on the NATS seed
+secret; the Deployment waits for both grants to be written. IAM can take minutes to apply a new
+binding (Google cites typically two, sometimes seven or more), and the pod restarts until the
+proxy may connect. The
+Cloud SQL grant is an additive IAM member beside whatever the project already holds, and writing
+it needs `resourcemanager.projects.setIamPolicy` on the identity the `gcp` provider runs as
+(`roles/resourcemanager.projectIamAdmin` or equivalent). The pod's Kubernetes Role lets it read and
+update its Tailscale state Secret and create Secrets in its namespace, since Tailscale creates its
+state Secret on first start.
+
+### The pod
+
+The Tailscale sidecar joins with the supplied tag, serves
+`https://<hostname>.<tailnetDnsName>`, and routes the pod's NATS clients through its SOCKS5 proxy.
+The Cloud SQL Auth Proxy listens only on `127.0.0.1:5432` with `--private-ip`. The two Envoy
+containers mount the NATS seed at `/var/run/secrets/envoy/nats-seed`; the seed remains outside
+Pulumi state.
+
+The deployment intentionally has no liveness probe for Dispatch because its health endpoint reads
+Cloud SQL. A rolling input or image update recreates its one pod and causes brief downtime. A
+region change replaces the component's networked resources. Keep `deletionProtection` enabled
+outside deliberate teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups.
+
+To inspect pending migrations before an image update, run the image with the deployment's service
+account and `DATABASE_URL` from its Secret:
+
+```sh
+kubectl -n dispatch run census --rm -it --restart=Never --image=<envoyImage> \
+  --overrides='{"spec":{"serviceAccountName":"<hostname>"}}' \
+  --command -- /usr/local/bin/envoy-dispatch census
+```
+
+### First deployment
+
+The first Google Cloud deployment proves the Autopilot admission of both native sidecars, the
+Secret Manager CSI mount, the Auth Proxy's private-IP connection, the cluster's IP allocation,
+tailnet Serve for HTTPS, SSE and websockets, the SOCKS5 connection to the hub, the non-root image
+user, and the exec-plugin credentials on the machine that runs Pulumi. It also verifies that the
+pod is ready, Dispatch reports a schema version, the site signs in through the configured client,
+and the database retains backups and point-in-time recovery.
+
+The first `pulumi up` needs no out-of-band grant: the component writes the conditioned
+`roles/cloudsql.client` member and the seed accessor itself, and the Deployment waits for both, so
+the only IAM prerequisite is that the `gcp` provider's identity may set the project's IAM policy
+(`resourcemanager.projects.setIamPolicy`, §Inputs). If the new binding takes longer to apply than
+the Deployment's ten-minute readiness wait, that `pulumi up` fails on the wait, and the next one
+resumes it.
+
+### YAML
+
+```yaml
+resources:
+  gcp:
+    type: pulumi:providers:gcp
+  random:
+    type: pulumi:providers:random
+  dispatch:
+    type: envoy-infra:gcp:Dispatch
+    properties:
+      region: <region>
+      hostname: example-dispatch
+      tailnetDnsName: example-tailnet.ts.net
+      tags: [tag:example-dispatch]
+      tailnetAuthKey: ${tailnetAuthKey}
+      envoyImage: example/envoy@sha256:<digest>
+      tailscaleImage: example/tailscale@sha256:<digest>
+      cloudSqlProxyImage: example/cloud-sql-proxy@sha256:<digest>
+      natsUrl: ${hub.natsUrl}
+      natsSeedSecret: projects/example-project/secrets/example-nats-seed
+      signInClientId: <client-id>
+      signInClientSecret: ${signInClientSecret}
+      signInDomain: example.com
+    options:
+      providers: [${gcp}, ${random}]
+```
+
 ## host:Listener
 
 ### What `host:Listener` deploys
@@ -223,15 +349,16 @@ another stack.
 
 A component creates its resources only with providers you pass it in its `providers` resource
 option. The listener takes a `docker` provider always, and a `command` provider too when
-`watchdog` is set; the hub takes a `gcp` provider. Their resources use that provider at the
-version and with the configuration you give it: a docker provider's `host` decides which Docker
-daemon the listener runs on, and a gcp provider's `project` which project the hub is created in.
-The plugin never falls back to a default provider of its own. Without one, the component fails
-before it registers anything:
+`watchdog` is set; the hub takes a `gcp` provider; `gcp:Dispatch` takes `gcp` and `random`
+providers. Their resources use those providers at the version and with the configuration you give
+them. `gcp:Dispatch` creates its Kubernetes provider from the cluster it creates, so no default
+Kubernetes provider is used. The plugin never falls back to a default provider of its own. Without
+one, the component fails before it registers anything:
 
 ```text
 envoy-infra:host:Listener needs a "docker" provider in its providers option
 envoy-infra:gcp:NatsHub needs a "gcp" provider in its providers option
+envoy-infra:gcp:Dispatch needs a "random" provider in its providers option
 ```
 
 ### Readiness

@@ -1,0 +1,323 @@
+{
+  "metadata": {
+    "labels": {
+      "app": "example-dispatch"
+    }
+  },
+  "spec": {
+    "containers": [
+      {
+        "command": [
+          "/usr/local/bin/envoy-dispatch"
+        ],
+        "env": [
+          {
+            "name": "HOME",
+            "value": "/home/envoy"
+          },
+          {
+            "name": "DATABASE_URL",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "DATABASE_URL",
+                "name": "example-dispatch-dispatch"
+              }
+            }
+          },
+          {
+            "name": "DISPATCH_AGENT_TOKEN",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "DISPATCH_AGENT_TOKEN",
+                "name": "example-dispatch-dispatch"
+              }
+            }
+          },
+          {
+            "name": "DISPATCH_SIGNING_KEY",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "DISPATCH_SIGNING_KEY",
+                "name": "example-dispatch-dispatch"
+              }
+            }
+          },
+          {
+            "name": "DISPATCH_SIGNIN_CLIENT_SECRET",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "DISPATCH_SIGNIN_CLIENT_SECRET",
+                "name": "example-dispatch-dispatch"
+              }
+            }
+          },
+          {
+            "name": "DISPATCH_SIGNIN_ISSUER",
+            "value": "https://accounts.google.com"
+          },
+          {
+            "name": "DISPATCH_SIGNIN_CLIENT_ID",
+            "value": "example-client-id"
+          },
+          {
+            "name": "DISPATCH_SIGNIN_DOMAIN",
+            "value": "example.com"
+          },
+          {
+            "name": "DISPATCH_SERVER_URL",
+            "value": "https://example-dispatch.example-tailnet.ts.net"
+          },
+          {
+            "name": "DISPATCH_LISTEN_HOST",
+            "value": "0.0.0.0"
+          },
+          {
+            "name": "NATS_URLS",
+            "value": "nats://example-hub.example-tailnet.ts.net:4222"
+          },
+          {
+            "name": "ENVOY_ALLOW_REMOTE_NATS",
+            "value": "1"
+          },
+          {
+            "name": "NATS_NKEY_SEED_FILE",
+            "value": "/var/run/secrets/envoy/nats-seed"
+          },
+          {
+            "name": "ENVOY_NATS_SOCKS5_PROXY",
+            "value": "127.0.0.1:1055"
+          },
+          {
+            "name": "ENVOY_URL",
+            "value": "http://127.0.0.1:9020"
+          }
+        ],
+        "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "name": "envoy-dispatch",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-fsS",
+              "http://127.0.0.1:8766/healthz"
+            ]
+          },
+          "failureThreshold": 3,
+          "initialDelaySeconds": 5,
+          "periodSeconds": 10,
+          "timeoutSeconds": 3
+        },
+        "resources": {
+          "limits": {
+            "cpu": "1",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "1",
+            "memory": "4Gi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/run/secrets/envoy",
+            "name": "nats-seed",
+            "readOnly": true
+          }
+        ]
+      },
+      {
+        "env": [
+          {
+            "name": "PORT",
+            "value": "9020"
+          },
+          {
+            "name": "ENVOY_MACHINE_ID",
+            "value": "example-dispatch"
+          },
+          {
+            "name": "NATS_URLS",
+            "value": "nats://example-hub.example-tailnet.ts.net:4222"
+          },
+          {
+            "name": "ENVOY_ALLOW_REMOTE_NATS",
+            "value": "1"
+          },
+          {
+            "name": "ENVOY_NATS_SOCKS5_PROXY",
+            "value": "127.0.0.1:1055"
+          },
+          {
+            "name": "NATS_NKEY_SEED_FILE",
+            "value": "/var/run/secrets/envoy/nats-seed"
+          }
+        ],
+        "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        "name": "envoy-listener",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "curl",
+              "-fsS",
+              "http://127.0.0.1:9020/healthz"
+            ]
+          }
+        },
+        "resources": {
+          "limits": {
+            "cpu": "200m",
+            "memory": "512Mi"
+          },
+          "requests": {
+            "cpu": "200m",
+            "memory": "512Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/var/run/secrets/envoy",
+            "name": "nats-seed",
+            "readOnly": true
+          }
+        ]
+      }
+    ],
+    "enableServiceLinks": false,
+    "initContainers": [
+      {
+        "env": [
+          {
+            "name": "TS_AUTHKEY",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "TS_AUTHKEY",
+                "name": "example-dispatch-tailnet-auth-key"
+              }
+            }
+          },
+          {
+            "name": "TS_AUTH_ONCE",
+            "value": "true"
+          },
+          {
+            "name": "TS_KUBE_SECRET",
+            "value": "example-dispatch-tailscale-state"
+          },
+          {
+            "name": "TS_USERSPACE",
+            "value": "true"
+          },
+          {
+            "name": "TS_SOCKS5_SERVER",
+            "value": "127.0.0.1:1055"
+          },
+          {
+            "name": "TS_SERVE_CONFIG",
+            "value": "/etc/tailscale/serve.json"
+          },
+          {
+            "name": "TS_HOSTNAME",
+            "value": "example-dispatch"
+          },
+          {
+            "name": "TS_EXTRA_ARGS",
+            "value": "--advertise-tags=tag:example-dispatch"
+          },
+          {
+            "name": "TS_ENABLE_HEALTH_CHECK",
+            "value": "true"
+          },
+          {
+            "name": "TS_LOCAL_ADDR_PORT",
+            "value": "127.0.0.1:9002"
+          }
+        ],
+        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        "name": "tailscale",
+        "readinessProbe": {
+          "exec": {
+            "command": [
+              "wget",
+              "-qO-",
+              "http://127.0.0.1:9002/healthz"
+            ]
+          },
+          "periodSeconds": 10
+        },
+        "resources": {
+          "limits": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          },
+          "requests": {
+            "cpu": "100m",
+            "memory": "128Mi"
+          }
+        },
+        "restartPolicy": "Always",
+        "startupProbe": {
+          "exec": {
+            "command": [
+              "wget",
+              "-qO-",
+              "http://127.0.0.1:9002/healthz"
+            ]
+          },
+          "failureThreshold": 36,
+          "periodSeconds": 5
+        },
+        "volumeMounts": [
+          {
+            "mountPath": "/etc/tailscale",
+            "name": "serve"
+          }
+        ]
+      },
+      {
+        "args": [
+          "--private-ip",
+          "--structured-logs",
+          "--address=127.0.0.1",
+          "--port=5432",
+          "example-project:us-central1:example-dispatch"
+        ],
+        "image": "example.invalid/cloud-sql-proxy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        "name": "cloud-sql-proxy",
+        "resources": {
+          "limits": {
+            "cpu": "200m",
+            "memory": "256Mi"
+          },
+          "requests": {
+            "cpu": "200m",
+            "memory": "256Mi"
+          }
+        },
+        "restartPolicy": "Always",
+        "securityContext": {
+          "runAsNonRoot": true
+        }
+      }
+    ],
+    "serviceAccountName": "example-dispatch",
+    "terminationGracePeriodSeconds": 30,
+    "volumes": [
+      {
+        "csi": {
+          "driver": "secrets-store-gke.csi.k8s.io",
+          "readOnly": true,
+          "volumeAttributes": {
+            "secretProviderClass": "example-dispatch-nats-seed"
+          }
+        },
+        "name": "nats-seed"
+      },
+      {
+        "configMap": {
+          "name": "example-dispatch-serve"
+        },
+        "name": "serve"
+      }
+    ]
+  }
+}

@@ -52,22 +52,44 @@ const (
 // an account's email and member, a network's and a health check's self link, a template's unique
 // self link and a group's name.
 func newMocks() *pulumitest.Mocks {
-	return &pulumitest.Mocks{Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
-		out := resource.PropertyMap{}
-		switch args.TypeToken {
-		case accountType:
-			email := args.Inputs["accountId"].StringValue() + "@example-project.iam.gserviceaccount.com"
-			out["email"] = resource.NewProperty(email)
-			out["member"] = resource.NewProperty("serviceAccount:" + email)
-		case networkType, healthCheckType:
-			out["selfLink"] = resource.NewProperty(args.Name + "-self-link")
-		case templateType:
-			out["selfLinkUnique"] = resource.NewProperty(args.Name + "-self-link-unique")
-		case groupType:
-			out["name"] = resource.NewProperty(args.Name + "-group")
-		}
-		return "", out
-	}}
+	return &pulumitest.Mocks{
+		Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
+			out := resource.PropertyMap{}
+			switch args.TypeToken {
+			case accountType:
+				email := args.Inputs["accountId"].StringValue() + "@example-project.iam.gserviceaccount.com"
+				out["email"] = resource.NewProperty(email)
+				out["member"] = resource.NewProperty("serviceAccount:" + email)
+			case networkType, healthCheckType:
+				out["selfLink"] = resource.NewProperty(args.Name + "-self-link")
+			case templateType:
+				out["selfLinkUnique"] = resource.NewProperty(args.Name + "-self-link-unique")
+			case groupType:
+				out["name"] = resource.NewProperty(args.Name + "-group")
+			case "gcp:container/cluster:Cluster":
+				out["endpoint"] = resource.NewProperty("example-endpoint")
+				out["masterAuth"] = resource.NewProperty(resource.PropertyMap{
+					"clusterCaCertificate": resource.NewProperty("ZXhhbXBsZS1jYQ=="),
+				})
+				out["name"] = resource.NewProperty(args.Name)
+			case "gcp:sql/databaseInstance:DatabaseInstance":
+				out["name"] = resource.NewProperty(args.Name)
+				out["connectionName"] = resource.NewProperty("example-project:us-central1:example-dispatch")
+			case "random:index/randomPassword:RandomPassword":
+				out["result"] = resource.NewProperty(args.Name + "-result")
+			}
+			return "", out
+		},
+		CallResult: func(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
+			if args.Token == "gcp:organizations/getProject:getProject" {
+				return resource.PropertyMap{
+					"projectId": resource.NewProperty("example-project"),
+					"number":    resource.NewProperty("123456789012"),
+				}, nil
+			}
+			return args.Args, nil
+		},
+	}
 }
 
 // children returns every registration but the hub and the test's provider.

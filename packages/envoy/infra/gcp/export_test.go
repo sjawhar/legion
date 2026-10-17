@@ -18,3 +18,40 @@ func CloudConfigOf(args *NatsHubArgs) (CloudConfig, string, error) {
 	}
 	return s.vm.document(), s.userData, nil
 }
+
+// DispatchSettings is the resolved Dispatch configuration the external tests assert without
+// exporting the component's internal representation.
+type DispatchSettings struct {
+	DatabaseVersion    string
+	DatabaseTier       string
+	DeletionProtection bool
+	Namespace          string
+	ServeConfig        string
+}
+
+// ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
+func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
+	s, err := newDispatchSettings(args)
+	if err != nil {
+		return DispatchSettings{}, err
+	}
+	return DispatchSettings{
+		DatabaseVersion:    s.databaseVersion,
+		DatabaseTier:       s.databaseTier,
+		DeletionProtection: s.deletionProtection,
+		Namespace:          s.namespace,
+		ServeConfig:        s.serveConfig,
+	}, nil
+}
+
+// DispatchKubeconfig renders the component's stable exec-plugin kubeconfig for the golden test.
+func DispatchKubeconfig(endpoint, ca, name string) string {
+	return renderKubeconfig(endpoint, ca, name)
+}
+
+// DispatchListenerEnvError resolves the listener container's environment from the one NATS URL,
+// for the refusal tests: nil when the URL renders an environment.
+func DispatchListenerEnvError(hostname, url string) error {
+	_, err := dispatchListenerEnv(hostname, url)
+	return err
+}

@@ -125,6 +125,15 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.ElementsMatch(t, []string{"allow"}, s.Types["envoy-infra:nats:Rules"].Required)
 }
 
+func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
+	dispatch, ok := servedSchema(t).Resources["envoy-infra:gcp:Dispatch"]
+	require.True(t, ok, "the schema lists envoy-infra:gcp:Dispatch")
+	require.True(t, dispatch.IsComponent)
+	require.True(t, dispatch.InputProperties["tailnetAuthKey"].Secret)
+	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
+	require.True(t, dispatch.Properties["agentToken"].Secret)
+}
+
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
 	s := servedSchema(t)
 	nats, ok := s.Resources["envoy-infra:aws:NatsService"]

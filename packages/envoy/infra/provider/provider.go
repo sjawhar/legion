@@ -29,6 +29,7 @@ func New() (p.Provider, error) {
 			infer.ComponentF(aws.NewNatsService),
 			infer.ComponentF(aws.NewWebhookListener),
 			infer.ComponentF(gcp.NewNatsHub),
+			infer.ComponentF(gcp.NewDispatch),
 		).
 		Build()
 }
