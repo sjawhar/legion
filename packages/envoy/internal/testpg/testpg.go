@@ -1,4 +1,6 @@
-// Package testpg provides a throwaway Postgres container for Envoy integration tests.
+// Package testpg starts a throwaway Postgres container for a test that brings its own servers, as a
+// natslive test does with testnats, and needs the URL to hand a binary. A test of Dispatch's store
+// against a server CI provides uses internal/dispatch/store/storetest instead.
 package testpg
 
 import (

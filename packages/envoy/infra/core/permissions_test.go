@@ -1,7 +1,6 @@
 package core_test
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -98,11 +97,7 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 }
 
 func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
-	dispatchPublish := append([]string{}, listenerPublish...)
-	for index, subject := range dispatchPublish {
-		dispatchPublish[index] = strings.ReplaceAll(subject, "example-host-a", "example-dispatch")
-	}
-	dispatchPublish = append(dispatchPublish,
+	dispatchPublish := append(append([]string{}, listenerPublish...),
 		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
 		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",
 		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-events",
@@ -124,11 +119,11 @@ func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
 	want := core.Permissions{
 		Publish: core.Rules{Allow: dispatchPublish},
 		Subscribe: core.Rules{Allow: []string{
-			"_INBOX.>", "notifications.role.> envoy-listener-example-dispatch",
+			"_INBOX.>", "notifications.role.> envoy-listener-example-host-a",
 			"agentstream.*.frames",
 		}},
 	}
-	got := core.DispatchPermissions("example-dispatch")
+	got := core.DispatchPermissions("example-host-a")
 	require.Equal(t, want, got)
 }
 
