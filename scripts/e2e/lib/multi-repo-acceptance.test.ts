@@ -3,33 +3,32 @@ import { accessSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// scripts/e2e/multi-repo-acceptance.sh is the Task 6.3 observer for the live Task 6.4 run. These
-// tests pin its refusals and the jq paths its state-reading observations use against a fixed
-// /legion/v1/state body, standing in for a live daemon with a Bun.serve stub, and a fake
-// dispatch/gh/kubectl on an isolated PATH — the script never gets a real daemon, Dispatch, or
-// GitHub in this suite, and never reads the host's own dispatch/gh/kubectl (finding 13: the host
-// PATH must never leak in, or this suite is not hermetic on CI).
+// scripts/e2e/multi-repo-acceptance.sh is the Task 6.3 observer for the live Task 6.4 run. It
+// reads only structured sources: the daemon's state JSON (a Bun.serve stub here), Dispatch's own
+// JSON API (a second Bun.serve stub, never `dispatch read`'s prose), GitHub's API (a fake `gh`),
+// and `kubectl` (a fake binary). Every fake and stub is isolated per test; the host's real
+// dispatch/gh/kubectl are never on PATH, so this suite stays hermetic on CI.
 const script = join(import.meta.dir, "..", "multi-repo-acceptance.sh");
 const dir = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 let runs = 0;
-let server: Server | undefined;
+let daemonServer: Server | undefined;
+let dispatchServer: Server | undefined;
 
 afterEach(() => {
-  server?.stop(true);
-  server = undefined;
+  daemonServer?.stop(true);
+  dispatchServer?.stop(true);
+  daemonServer = undefined;
+  dispatchServer = undefined;
 });
 
-// fakeBin writes an executable `name` on a fresh PATH-only directory running `body`.
 function fakeBin(binDir: string, name: string, body: string): void {
   writeFileSync(join(binDir, name), `#!/usr/bin/env bash\n${body}\n`, { mode: 0o755 });
 }
 
 const defaultFake = (name: string) => `echo "${name}: unexpected call: $*" >&2; exit 1`;
 
-// realDir is the first directory on the host's own PATH holding name, for the few real binaries
-// (jq, curl, base64) this suite deliberately keeps instead of faking.
 function realDir(name: string): string {
   for (const candidate of (process.env.PATH ?? "").split(":")) {
     try {
@@ -42,33 +41,23 @@ function realDir(name: string): string {
   throw new Error(`${name} not found on PATH`);
 }
 
-// isolatedPath is a PATH naming only bin (the test's fake dispatch/gh/kubectl directory) and the
-// host's real jq, curl, and base64: no other host directory, so a stray dependency on anything
-// else fails loudly instead of silently reading the host's copy.
 function isolatedPath(bin: string): string {
   return [bin, realDir("jq"), realDir("curl"), realDir("base64"), "/usr/bin", "/bin"].join(":");
 }
 
-// newFakeDir makes a fresh bin directory under a fresh work directory, with dispatch, gh and
-// kubectl faked (defaultFake unless fakes overrides one), and returns both the bin directory and
-// a ready-made evidence directory beside it.
-function newFakeDir(fakes: { dispatch?: string; gh?: string; kubectl?: string } = {}) {
+const bashPath = `${realDir("bash")}/bash`;
+
+function newFakeDir(fakes: { gh?: string; kubectl?: string } = {}) {
   const work = join(dir, `run-${++runs}`);
   const bin = join(work, "bin");
   const evidence = join(work, "evidence");
   mkdirSync(bin, { recursive: true });
   mkdirSync(evidence, { recursive: true });
-  fakeBin(bin, "dispatch", fakes.dispatch ?? defaultFake("dispatch"));
   fakeBin(bin, "gh", fakes.gh ?? defaultFake("gh"));
   fakeBin(bin, "kubectl", fakes.kubectl ?? defaultFake("kubectl"));
   return { bin, evidence };
 }
 
-// spawnScript runs the script once against path/evidence/env and collects its outcome. bash is
-// resolved to an absolute path once, from this process's own PATH: a test that gives the child an
-// empty PATH must still be able to exec bash itself (PATH resolution happens for the child's own
-// argv[0] lookup too, not only for commands the script later runs).
-const bashPath = `${realDir("bash")}/bash`;
 async function spawnScript(
   args: string[],
   path: string,
@@ -88,137 +77,31 @@ async function spawnScript(
   return { status, stdout, stderr };
 }
 
-// run is spawnScript over a fresh fake dir, for the common case of one call per test.
 async function run(
   args: string[],
   env: Record<string, string> = {},
-  fakes: { dispatch?: string; gh?: string; kubectl?: string } = {}
+  fakes: { gh?: string; kubectl?: string } = {}
 ) {
   const { bin, evidence } = newFakeDir(fakes);
   const result = await spawnScript(args, isolatedPath(bin), evidence, env);
   return { ...result, evidence };
 }
 
-const fullInputs = (daemonUrl: string): Record<string, string> => ({
+const tokenFile = join(dir, "dispatch-token");
+writeFileSync(tokenFile, "dispatch-bearer\n");
+
+const fullInputs = (daemonUrl: string, dispatchUrl: string): Record<string, string> => ({
   LEGION_E2E_REPO_T: "acme/widgets",
   LEGION_E2E_REPO_C: "acme/gadgets",
   LEGION_E2E_PIN_FILE: "toolchain-pin.txt",
   LEGION_E2E_REPO_X: "other/outside",
   LEGION_E2E_REPO_O: "zeta/tools",
   LEGION_E2E_DAEMON_URL: daemonUrl,
-  DISPATCH_URL: "http://127.0.0.1:1",
-  DISPATCH_TOKEN_FILE: "/dev/null",
+  DISPATCH_URL: dispatchUrl,
+  DISPATCH_TOKEN_FILE: tokenFile,
 });
 
-describe("usage: an absent or invalid observation is refused before any env, tool, or network check", () => {
-  test("no observation named: exit 2, with no env set and no PATH at all", async () => {
-    const work = join(dir, `run-${++runs}`);
-    mkdirSync(work, { recursive: true });
-    const { status, stderr } = await spawnScript([], "", work, {});
-    expect(status).toBe(2);
-    expect(stderr).toContain("usage:");
-  });
-
-  test("an unknown observation name is refused usage, exit 2, with no env set", async () => {
-    const work = join(dir, `run-${++runs}`);
-    mkdirSync(work, { recursive: true });
-    const { status } = await spawnScript(["not-a-real-observation"], "", work, {});
-    expect(status).toBe(2);
-  });
-
-  test("the wrong argument count for a known observation is refused usage, exit 2", async () => {
-    const work = join(dir, `run-${++runs}`);
-    mkdirSync(work, { recursive: true });
-    const { status } = await spawnScript(["pin", "only-one-arg"], "", work, {});
-    expect(status).toBe(2);
-  });
-
-  test("negative pr-in-x without before|after is refused usage, exit 2", async () => {
-    const work = join(dir, `run-${++runs}`);
-    mkdirSync(work, { recursive: true });
-    const { status } = await spawnScript(["negative", "pr-in-x", "ACME-2"], "", work, {});
-    expect(status).toBe(2);
-  });
-});
-
-describe("required inputs", () => {
-  test("every input unset: the refusal names the first missing one", async () => {
-    const { status, stderr } = await run(["done", "X-1"], {});
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("LEGION_E2E_REPO_T is unset");
-  });
-
-  test("each input missing in turn names itself", async () => {
-    const all = fullInputs("http://127.0.0.1:1");
-    for (const name of Object.keys(all)) {
-      const env = { ...all };
-      delete (env as Record<string, string>)[name];
-      const { status, stderr } = await run(["done", "X-1"], env);
-      expect(status).not.toBe(0);
-      expect(stderr).toContain(`${name} is unset`);
-    }
-  });
-});
-
-describe("repository shape and collisions", () => {
-  test("a malformed repository value is refused before any network read", async () => {
-    const env = fullInputs("http://127.0.0.1:1");
-    env.LEGION_E2E_REPO_T = "not-a-repo; $(touch /tmp/pwned)";
-    const { status, stderr } = await run(["done", "X-1"], env);
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("LEGION_E2E_REPO_T");
-    expect(stderr).toContain("not an owner/name repository");
-  });
-
-  test("T and O sharing an owner is refused", async () => {
-    const env = fullInputs("http://127.0.0.1:1");
-    env.LEGION_E2E_REPO_O = `${env.LEGION_E2E_REPO_T.split("/")[0]}/other-repo`;
-    const { status, stderr } = await run(["done", "X-1"], env);
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("LEGION_E2E_REPO_T and LEGION_E2E_REPO_O share an owner");
-  });
-
-  test("T and O sharing an owner in a different case is still refused (case-insensitive)", async () => {
-    const env = fullInputs("http://127.0.0.1:1");
-    env.LEGION_E2E_REPO_T = "Acme/widgets";
-    env.LEGION_E2E_REPO_O = "ACME/other-repo";
-    const { status, stderr } = await run(["done", "X-1"], env);
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("share an owner");
-  });
-
-  test("two repository variables naming the same repository is refused", async () => {
-    const env = fullInputs("http://127.0.0.1:1");
-    env.LEGION_E2E_REPO_C = env.LEGION_E2E_REPO_T;
-    const { status, stderr } = await run(["done", "X-1"], env);
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("LEGION_E2E_REPO_T and LEGION_E2E_REPO_C both name");
-  });
-
-  test("two repository variables naming the same repository in different case is still refused", async () => {
-    const env = fullInputs("http://127.0.0.1:1");
-    env.LEGION_E2E_REPO_C = "ACME/Widgets"; // same as T's acme/widgets, folded
-    const { status, stderr } = await run(["done", "X-1"], env);
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("both name");
-  });
-});
-
-describe("the daemon health refusal", () => {
-  test("a stub whose /healthz answers 404 is refused, naming the status", async () => {
-    server = Bun.serve({ port: 0, fetch: () => new Response("not found", { status: 404 }) });
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["done", "X-1"], env);
-    expect(status).not.toBe(0);
-    expect(stderr).toContain(
-      `LEGION_E2E_DAEMON_URL http://127.0.0.1:${server.port} is not a Legion daemon`
-    );
-    expect(stderr).toContain("404");
-  });
-});
-
-// A fixed /legion/v1/state body: two children of PARENT-1, one on T and one on C, matching the
-// fake dispatch's own Repository: lines, and an issue with no record at all for negative no-repo.
+// A fixed daemon /legion/v1/state body, overridable per test.
 function makeStateBody(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     daemon: { project: "ACME" },
@@ -248,7 +131,7 @@ function makeStateBody(overrides: Record<string, unknown> = {}): string {
 }
 const stateBody = makeStateBody();
 
-function stateServer(body: string = stateBody): Server {
+function daemonStub(body: string = stateBody): Server {
   return Bun.serve({
     port: 0,
     fetch(req) {
@@ -262,198 +145,266 @@ function stateServer(body: string = stateBody): Server {
   });
 }
 
-describe("children: the state half against a fixed body", () => {
-  const dispatchFake = `
-case "$*" in
-  "read --ref dispatch://ACME-1/children")
-    printf 'Key: ACME-1\\nChildren:\\n- ACME-2: widgets child (todo)\\n- ACME-3: gadgets child (todo)\\n'
-    ;;
-  "read --issue ACME-2")
-    printf 'Key: ACME-2\\nStatus: todo\\nRepository: acme/widgets (own)\\n'
-    ;;
-  "read --issue ACME-3")
-    printf 'Key: ACME-3\\nStatus: todo\\nRepository: acme/gadgets (own)\\n'
-    ;;
-  *)
-    echo "dispatch: unexpected call: $*" >&2
-    exit 1
-    ;;
-esac`;
+// mutableDaemonStub is daemonStub whose /legion/v1/state body can change after the server starts,
+// without changing its URL: the baseline protocol binds a baseline to the daemon URL it captured
+// against, so a test that must change the daemon's answer between `before` and `after` needs the
+// same server, not a fresh one on a new port.
+function mutableDaemonStub(initial: string): { server: Server; setBody: (body: string) => void } {
+  let body = initial;
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+      if (url.pathname === "/legion/v1/state") {
+        return new Response(body, { headers: { "content-type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+  return {
+    server,
+    setBody: (next: string) => {
+      body = next;
+    },
+  };
+}
 
+// dispatchStub serves Dispatch's own GET /api/v1/issues/:key and /events, as issues/events map
+// key -> response body (a JSON string). A key with no entry answers 404.
+function dispatchStub(issues: Record<string, string>, events: Record<string, string> = {}): Server {
+  return Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url);
+      const eventsMatch = url.pathname.match(/^\/api\/v1\/issues\/([^/]+)\/events$/);
+      if (eventsMatch) {
+        const key = eventsMatch.at(1) ?? "";
+        if (key in events)
+          return new Response(events[key], { headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify([]), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const issueMatch = url.pathname.match(/^\/api\/v1\/issues\/([^/]+)$/);
+      if (issueMatch) {
+        const key = issueMatch.at(1) ?? "";
+        if (key in issues)
+          return new Response(issues[key], { headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+      }
+      return new Response("not found", { status: 404 });
+    },
+  });
+}
+
+function messageEvent(
+  body: string,
+  createdAt: string
+): { type: string; created_at: string; payload: { body: string } } {
+  return { type: "message.created", created_at: createdAt, payload: { body } };
+}
+
+describe("usage: an absent or invalid observation is refused before any env, tool, or network check", () => {
+  test("no observation named: exit 2, with no env set and no PATH at all", async () => {
+    const work = join(dir, `run-${++runs}`);
+    mkdirSync(work, { recursive: true });
+    const { status, stderr } = await spawnScript([], "", work, {});
+    expect(status).toBe(2);
+    expect(stderr).toContain("usage:");
+  });
+
+  test("negative pr-in-x without before|after is refused usage, exit 2", async () => {
+    const work = join(dir, `run-${++runs}`);
+    mkdirSync(work, { recursive: true });
+    const { status } = await spawnScript(["negative", "pr-in-x", "ACME-2"], "", work, {});
+    expect(status).toBe(2);
+  });
+
+  test("negative pr-in-x after with the wrong argument count is refused usage, exit 2", async () => {
+    const work = join(dir, `run-${++runs}`);
+    mkdirSync(work, { recursive: true });
+    const { status } = await spawnScript(["negative", "pr-in-x", "after", "run-1"], "", work, {});
+    expect(status).toBe(2);
+  });
+});
+
+describe("required inputs", () => {
+  test("every input unset: the refusal names the first missing one", async () => {
+    const { status, stderr } = await run(["done", "X-1"], {});
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("LEGION_E2E_REPO_T is unset");
+  });
+
+  test("each input missing in turn names itself", async () => {
+    const all = fullInputs("http://127.0.0.1:1", "http://127.0.0.1:1");
+    for (const name of Object.keys(all)) {
+      const env = { ...all };
+      delete (env as Record<string, string>)[name];
+      const { status, stderr } = await run(["done", "X-1"], env);
+      expect(status).not.toBe(0);
+      expect(stderr).toContain(`${name} is unset`);
+    }
+  });
+});
+
+describe("repository shape and collisions", () => {
+  test("a malformed repository value is refused before any network read", async () => {
+    const env = fullInputs("http://127.0.0.1:1", "http://127.0.0.1:1");
+    env.LEGION_E2E_REPO_T = "not-a-repo; $(touch /tmp/pwned)";
+    const { status, stderr } = await run(["done", "X-1"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("not an owner/name repository");
+  });
+
+  test("T and O sharing an owner in a different case is still refused (case-insensitive)", async () => {
+    const env = fullInputs("http://127.0.0.1:1", "http://127.0.0.1:1");
+    env.LEGION_E2E_REPO_T = "Acme/widgets";
+    env.LEGION_E2E_REPO_O = "ACME/other-repo";
+    const { status, stderr } = await run(["done", "X-1"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("share an owner");
+  });
+
+  test("two repository variables naming the same repository in different case is still refused", async () => {
+    const env = fullInputs("http://127.0.0.1:1", "http://127.0.0.1:1");
+    env.LEGION_E2E_REPO_C = "ACME/Widgets";
+    const { status, stderr } = await run(["done", "X-1"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("both name");
+  });
+});
+
+describe("the daemon health refusal", () => {
+  test("a stub whose /healthz answers 404 is refused, naming the status", async () => {
+    daemonServer = Bun.serve({ port: 0, fetch: () => new Response("not found", { status: 404 }) });
+    const env = fullInputs(`http://127.0.0.1:${daemonServer.port}`, "http://127.0.0.1:1");
+    const { status, stderr } = await run(["done", "X-1"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain(
+      `LEGION_E2E_DAEMON_URL http://127.0.0.1:${daemonServer.port} is not a Legion daemon`
+    );
+  });
+});
+
+describe("children: structured Dispatch + state agreement (no CLI prose)", () => {
   test("one child resolves to T and one to C in both Dispatch and the daemon's state: PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stdout, evidence } = await run(["children", "ACME-1"], env, {
-      dispatch: dispatchFake,
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
+      "ACME-2": JSON.stringify({
+        key: "ACME-2",
+        repo: "acme/widgets",
+        resolved_repo: "acme/widgets",
+      }),
+      "ACME-3": JSON.stringify({
+        key: "ACME-3",
+        repo: "acme/gadgets",
+        resolved_repo: "acme/gadgets",
+      }),
     });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout, evidence } = await run(["children", "ACME-1"], env);
     expect(status).toBe(0);
     expect(stdout).toContain("CHECK children: PASS");
     expect(stdout).toContain("ACME-2: dispatch=acme/widgets state=acme/widgets");
-    expect(stdout).toContain("ACME-3: dispatch=acme/gadgets state=acme/gadgets");
     expect(Bun.file(join(evidence, "children.txt")).size).toBeGreaterThan(0);
   });
 
   test("a child Dispatch and the daemon's state disagree on: FAIL", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const disagree = dispatchFake.replace(
-      "Repository: acme/widgets (own)",
-      "Repository: acme/gadgets (own)"
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
+      "ACME-2": JSON.stringify({
+        key: "ACME-2",
+        repo: "acme/gadgets",
+        resolved_repo: "acme/gadgets",
+      }),
+      "ACME-3": JSON.stringify({
+        key: "ACME-3",
+        repo: "acme/gadgets",
+        resolved_repo: "acme/gadgets",
+      }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
     );
-    const { status, stderr } = await run(["children", "ACME-1"], env, { dispatch: disagree });
+    const { status, stderr } = await run(["children", "ACME-1"], env);
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK children: FAIL");
   });
 
-  // Finding 11: a nonzero dispatch exit with stdout that happens to match must never PASS — the
-  // exit status is checked before the output is parsed, for every dispatch call this observation
-  // makes.
-  test("a dispatch read that exits nonzero but prints a matching Repository line is never a PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const failingButMatching = dispatchFake.replace(
-      "\"read --issue ACME-2\")\n    printf 'Key: ACME-2\\nStatus: todo\\nRepository: acme/widgets (own)\\n'\n    ;;",
-      "\"read --issue ACME-2\")\n    printf 'Key: ACME-2\\nStatus: todo\\nRepository: acme/widgets (own)\\n'\n    exit 1\n    ;;"
-    );
-    const { status, stderr } = await run(["children", "ACME-1"], env, {
-      dispatch: failingButMatching,
+  test("Dispatch answering a non-2xx for a child fails the whole observation", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }] }),
+      // ACME-2 deliberately absent: dispatchStub answers 404 for it.
     });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["children", "ACME-1"], env);
     expect(status).not.toBe(0);
-    expect(stderr).toContain("exited");
+    expect(stderr).toContain("failed");
   });
 });
 
-describe("done: exit-status discipline (finding 11)", () => {
-  test("a dispatch read that exits nonzero with a matching Status line is never a PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
-case "$*" in
-  "read --issue ACME-2")
-    printf 'Key: ACME-2\\nStatus: done\\n'
-    exit 1
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stderr } = await run(["done", "ACME-2"], env, { dispatch: dispatchFake });
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("exited");
-  });
-
-  test("every named issue reading Status: done is a PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
-case "$*" in
-  "read --issue ACME-2") printf 'Key: ACME-2\\nStatus: done\\n' ;;
-  "read --issue ACME-3") printf 'Key: ACME-3\\nStatus: done\\n' ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stdout } = await run(["done", "ACME-2", "ACME-3"], env, {
-      dispatch: dispatchFake,
+describe("done: Dispatch's structured .status field", () => {
+  test("every named issue reading status done is a PASS", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({
+      "ACME-2": JSON.stringify({ key: "ACME-2", status: "done" }),
+      "ACME-3": JSON.stringify({ key: "ACME-3", status: "done" }),
     });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout } = await run(["done", "ACME-2", "ACME-3"], env);
     expect(status).toBe(0);
     expect(stdout).toContain("CHECK done: PASS");
   });
-});
 
-describe("negative no-repo: the state half against a fixed body, and the exact refusal (finding 9)", () => {
-  test("an unrecorded issue with Repository: none and the no-repository admission refusal: PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
-case "$*" in
-  "read --issue ACME-9")
-    printf 'Key: ACME-9\\nStatus: todo\\nRepository: none\\nEvents:\\n- #1 message.created · session s · 2026-01-01T00:00:00Z · Legion did not admit this issue: its repository resolves to none\\n'
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stdout } = await run(["negative", "no-repo", "ACME-9"], env, {
-      dispatch: dispatchFake,
+  test("one issue still todo is a FAIL", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({
+      "ACME-2": JSON.stringify({ key: "ACME-2", status: "todo" }),
     });
-    expect(status).toBe(0);
-    expect(stdout).toContain("CHECK negative-no-repo-ACME-9: PASS");
-  });
-
-  test("an issue the state does record: FAIL", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
-case "$*" in
-  "read --issue ACME-2")
-    printf 'Key: ACME-2\\nStatus: todo\\nRepository: acme/widgets (own)\\nEvents:\\n- none\\n'
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stderr } = await run(["negative", "no-repo", "ACME-2"], env, {
-      dispatch: dispatchFake,
-    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["done", "ACME-2"], env);
     expect(status).not.toBe(0);
-    expect(stderr).toContain("CHECK negative-no-repo-ACME-2: FAIL");
-  });
-
-  // Finding 9: a different admission failure (the Apps not installed) must never satisfy this
-  // control, even when the issue is unrecorded and the repository line happens to name a real one.
-  test("a different admission failure (an App not installed) on a recorded repository: FAIL", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
-case "$*" in
-  "read --issue ACME-9")
-    printf 'Key: ACME-9\\nStatus: todo\\nRepository: acme/widgets (own)\\nEvents:\\n- #1 message.created · session s · 2026-01-01T00:00:00Z · Legion did not admit this issue: the Apps are not installed\\n'
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stderr } = await run(["negative", "no-repo", "ACME-9"], env, {
-      dispatch: dispatchFake,
-    });
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("CHECK negative-no-repo-ACME-9: FAIL");
-  });
-
-  test("Repository: none but no admission-refusal message at all: FAIL", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
-case "$*" in
-  "read --issue ACME-9")
-    printf 'Key: ACME-9\\nStatus: todo\\nRepository: none\\nEvents:\\n- none\\n'
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stderr } = await run(["negative", "no-repo", "ACME-9"], env, {
-      dispatch: dispatchFake,
-    });
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("CHECK negative-no-repo-ACME-9: FAIL");
+    expect(stderr).toContain("CHECK done: FAIL");
   });
 });
 
-describe("record-head and pin: empty/invalid values never pass (finding 10)", () => {
+describe("record-head and pin: empty/invalid values never pass", () => {
   test("record-head refuses a repository argument that is not T", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
     const { status, stderr } = await run(["record-head", "acme/gadgets"], env, {});
     expect(status).not.toBe(0);
     expect(stderr).toContain("not LEGION_E2E_REPO_T");
   });
 
-  test("an empty default_branch is never recorded as a head", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const gh = `
-case "$*" in
-  "api repos/acme/widgets --jq .default_branch") printf '' ;;
-  *) echo "gh: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stderr } = await run(["record-head", "acme/widgets"], env, { gh });
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("empty default_branch");
-  });
-
   test("an empty commit sha from GitHub is never recorded as the head: FAIL, not PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
     const gh = `
 case "$*" in
   "api repos/acme/widgets --jq .default_branch") printf 'main' ;;
@@ -466,8 +417,12 @@ esac`;
   });
 
   test("a well-formed record-head is a PASS", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
     const sha = "a".repeat(40);
     const gh = `
 case "$*" in
@@ -482,24 +437,20 @@ esac`;
   });
 
   test("pin refuses an empty merge-sha argument", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
     const { status, stderr } = await run(["pin", "acme/gadgets", ""], env, {});
     expect(status).not.toBe(0);
     expect(stderr).toContain("not a full 40-character commit id");
   });
-
-  test("pin's repository argument must be C", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["pin", "acme/widgets", "a".repeat(40)], env, {});
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("not LEGION_E2E_REPO_C");
-  });
 });
 
-describe("second-owner: phase and distinct success/refusal evidence (finding 5)", () => {
-  const stateWithPR = (phase: string) =>
+describe("second-owner: GitHub merge proof and in-pod credential checks (no prose matching)", () => {
+  const stateWithPR = (phase: string, extra: Record<string, unknown> = {}) =>
     makeStateBody({
       issues: {
         "ACME-2": {
@@ -508,211 +459,124 @@ describe("second-owner: phase and distinct success/refusal evidence (finding 5)"
           phase,
           status: "todo",
           repo: "zeta/tools",
-          pullRequest: { repo: "zeta/tools", number: 1, head: "a".repeat(40) },
+          pullRequest: { repo: "zeta/tools", number: 7 },
+          ...extra,
         },
       },
     });
-  const goodDispatch = `
+  const goodKubectl = `
 case "$*" in
-  "read --issue ACME-2")
-    printf 'Key: ACME-2\\nStatus: todo\\nEvents:\\n- #1 message.created · session s · 2026-01-01T00:00:00Z · gh api repos/acme/widgets succeeded; git push to acme/widgets refused\\n'
+  "exec the-pod -c implementer -- gh api repos/acme/widgets --jq .full_name") printf 'acme/widgets' ;;
+  "get pod the-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-2' ;;
+  *)
+    if [[ "$*" == "exec the-pod -c implementer -- git push --dry-run"* ]]; then exit 1; fi
+    echo "kubectl: unexpected call: $*" >&2
+    exit 1
     ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
+esac`;
+  const goodGh = `
+case "$*" in
+  "api repos/zeta/tools/pulls/7 --jq .merged") printf 'true' ;;
+  *) echo "gh: unexpected call: $*" >&2; exit 1 ;;
 esac`;
 
-  test("a pre-merge phase (awaiting_merge) with full message evidence is still a FAIL", async () => {
-    server = stateServer(stateWithPR("awaiting_merge"));
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["second-owner", "ACME-2"], env, {
-      dispatch: goodDispatch,
+  test("a pre-merge phase (awaiting_merge) is a FAIL even with a merged PR and valid credentials", async () => {
+    daemonServer = daemonStub(stateWithPR("awaiting_merge"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+      gh: goodGh,
+      kubectl: goodKubectl,
     });
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK second-owner: FAIL");
   });
 
-  test("production_check with only a refusal phrase, no successful-read evidence, is a FAIL", async () => {
-    server = stateServer(stateWithPR("production_check"));
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const dispatchFake = `
+  test("production_check but GitHub says the PR is not merged: FAIL", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const notMergedGh = `
 case "$*" in
-  "read --issue ACME-2")
-    printf 'Key: ACME-2\\nStatus: todo\\nEvents:\\n- #1 message.created · session s · 2026-01-01T00:00:00Z · push to acme/widgets refused; read failed\\n'
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
+  "api repos/zeta/tools/pulls/7 --jq .merged") printf 'false' ;;
+  *) echo "gh: unexpected call: $*" >&2; exit 1 ;;
 esac`;
-    const { status, stderr } = await run(["second-owner", "ACME-2"], env, {
-      dispatch: dispatchFake,
+    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+      gh: notMergedGh,
+      kubectl: goodKubectl,
     });
     expect(status).not.toBe(0);
     expect(stderr).toContain("CHECK second-owner: FAIL");
   });
 
-  test("production_check with both distinct evidence lines is a PASS", async () => {
-    server = stateServer(stateWithPR("production_check"));
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stdout } = await run(["second-owner", "ACME-2"], env, {
-      dispatch: goodDispatch,
+  test("production_check, merged, but the in-pod dry-run push to T succeeds (no refusal): FAIL", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const pushSucceedsKubectl = `
+case "$*" in
+  "exec the-pod -c implementer -- gh api repos/acme/widgets --jq .full_name") printf 'acme/widgets' ;;
+  "get pod the-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-2' ;;
+  *)
+    if [[ "$*" == "exec the-pod -c implementer -- git push --dry-run"* ]]; then exit 0; fi
+    echo "kubectl: unexpected call: $*" >&2
+    exit 1
+    ;;
+esac`;
+    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+      gh: goodGh,
+      kubectl: pushSucceedsKubectl,
+    });
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("CHECK second-owner: FAIL");
+  });
+
+  test("production_check, merged, read succeeds, push refused, pod matches the issue: PASS", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+      gh: goodGh,
+      kubectl: goodKubectl,
     });
     expect(status).toBe(0);
     expect(stdout).toContain("CHECK second-owner: PASS");
   });
 
-  test("a pull request in another repository than O is a FAIL even post-merge", async () => {
-    server = stateServer(
-      makeStateBody({
-        issues: {
-          "ACME-2": {
-            key: "ACME-2",
-            generation: 1,
-            phase: "production_check",
-            status: "todo",
-            repo: "zeta/tools",
-            pullRequest: { repo: "acme/widgets", number: 1, head: "a".repeat(40) },
-          },
-        },
-      })
+  test("an unrelated pod (legion.dev/issue mismatch) is refused before any other check", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
     );
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["second-owner", "ACME-2"], env, {
-      dispatch: goodDispatch,
+    const otherPodKubectl = `
+case "$*" in
+  "get pod the-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-99' ;;
+  *) echo "kubectl: unexpected call: $*" >&2; exit 1 ;;
+esac`;
+    const { status, stderr } = await run(["second-owner", "ACME-2", "the-pod"], env, {
+      gh: goodGh,
+      kubectl: otherPodKubectl,
     });
     expect(status).not.toBe(0);
-    expect(stderr).toContain("CHECK second-owner: FAIL");
+    expect(stderr).toContain("is not that issue's pod");
   });
 });
 
-describe("negative pr-in-x: the two-call protocol (finding 7)", () => {
-  test("before on an unrecorded issue is refused: no recorded child, nothing to snapshot", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["negative", "pr-in-x", "before", "ACME-404"], env, {});
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("not the recorded child this control needs");
-  });
-
-  test("after without a prior before call is refused", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["negative", "pr-in-x", "after", "ACME-2"], env, {});
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("no before snapshot");
-  });
-
-  test("before, unchanged, after: PASS (byte-identical snapshots of a recorded child)", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { bin, evidence } = newFakeDir();
-    const path = isolatedPath(bin);
-    const before = await spawnScript(
-      ["negative", "pr-in-x", "before", "ACME-2"],
-      path,
-      evidence,
-      env
-    );
-    expect(before.status).toBe(0);
-    expect(before.stdout).toContain("CHECK negative-pr-in-x-ACME-2: PASS");
-    const after = await spawnScript(
-      ["negative", "pr-in-x", "after", "ACME-2"],
-      path,
-      evidence,
-      env
-    );
-    expect(after.status).toBe(0);
-    expect(after.stdout).toContain("CHECK negative-pr-in-x-ACME-2: PASS");
-  });
-});
-
-describe("negative repo-edit: the two-call protocol preserves the original (finding 8)", () => {
-  test("before on an unrecorded issue is refused", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["negative", "repo-edit", "before", "ACME-404"], env, {});
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("not the recorded child this control needs");
-  });
-
-  test("after without a prior before call is refused", async () => {
-    server = stateServer();
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const { status, stderr } = await run(["negative", "repo-edit", "after", "ACME-2"], env, {});
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("no before snapshot");
-  });
-
-  const xTargetedRefusal = `
-case "$*" in
-  "read --issue ACME-2")
-    printf 'Key: ACME-2\\nStatus: todo\\nEvents:\\n- #1 message.created · session s · 2026-01-01T00:00:00Z · repo edit to other/outside is not applied\\n'
-    ;;
-  *) echo "dispatch: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-
-  // Finding 8: the record could have changed T -> C between the two calls, and without the
-  // original saved by `before`, that change would be invisible to `after`'s single read.
-  test("a repository changed between before and after is a FAIL, not a PASS", async () => {
-    const { bin, evidence } = newFakeDir();
-    const path = isolatedPath(bin);
-
-    server = stateServer(stateBody); // ACME-2 is acme/widgets
-    const before = await spawnScript(
-      ["negative", "repo-edit", "before", "ACME-2"],
-      path,
-      evidence,
-      fullInputs(`http://127.0.0.1:${server.port}`)
-    );
-    expect(before.status).toBe(0);
-    server.stop(true);
-
-    // ACME-2 now reads acme/gadgets (C) instead of acme/widgets (T): a changed record.
-    server = stateServer(
-      makeStateBody({
-        issues: {
-          "ACME-2": {
-            key: "ACME-2",
-            generation: 1,
-            phase: "implementing",
-            status: "todo",
-            repo: "acme/gadgets",
-          },
-        },
-      })
-    );
-    fakeBin(bin, "dispatch", xTargetedRefusal);
-    const after = await spawnScript(
-      ["negative", "repo-edit", "after", "ACME-2"],
-      path,
-      evidence,
-      fullInputs(`http://127.0.0.1:${server.port}`)
-    );
-    expect(after.status).not.toBe(0);
-    expect(after.stderr).toContain("CHECK negative-repo-edit-ACME-2: FAIL");
-  });
-
-  test("an unchanged repository with the X-targeted refusal message is a PASS", async () => {
-    const { bin, evidence } = newFakeDir();
-    const path = isolatedPath(bin);
-    server = stateServer(stateBody);
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const before = await spawnScript(
-      ["negative", "repo-edit", "before", "ACME-2"],
-      path,
-      evidence,
-      env
-    );
-    expect(before.status).toBe(0);
-    fakeBin(bin, "dispatch", xTargetedRefusal);
-    const after = await spawnScript(
-      ["negative", "repo-edit", "after", "ACME-2"],
-      path,
-      evidence,
-      env
-    );
-    expect(after.status).toBe(0);
-    expect(after.stdout).toContain("CHECK negative-repo-edit-ACME-2: PASS");
-  });
-});
-
-describe("cache: pod/issue binding and the producer's exact success line (finding 6)", () => {
+describe("cache: pod binding and the producer's exact success line", () => {
   const stateWithCache = makeStateBody({
     issues: {
       "ACME-2": {
@@ -737,9 +601,13 @@ describe("cache: pod/issue binding and the producer's exact success line (findin
     },
   });
 
-  test("an unrelated pod (legion.dev/issue mismatch) is refused, not read as the issue's", async () => {
-    server = stateServer(stateWithCache);
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
+  test("an unrelated pod is refused, not read as the issue's", async () => {
+    daemonServer = daemonStub(stateWithCache);
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
     const kubectl = `
 case "$*" in
   "get pod other-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-99' ;;
@@ -750,23 +618,13 @@ esac`;
     expect(stderr).toContain("is not that issue's pod");
   });
 
-  test("an error line mentioning cache and github, on the right pod, is a FAIL not a PASS", async () => {
-    server = stateServer(stateWithCache);
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
-    const kubectl = `
-case "$*" in
-  "get pod the-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-2' ;;
-  "logs the-pod -c workspace-fetch") printf 'ERROR: could not read bytes from the repository cache; fetching full history from GitHub\\n' ;;
-  *) echo "kubectl: unexpected call: $*" >&2; exit 1 ;;
-esac`;
-    const { status, stderr } = await run(["cache", "ACME-2", "the-pod"], env, { kubectl });
-    expect(status).not.toBe(0);
-    expect(stderr).toContain("CHECK cache: FAIL");
-  });
-
   test("the producer's exact success line, on the right pod, with cache.ready true: PASS", async () => {
-    server = stateServer(stateWithCache);
-    const env = fullInputs(`http://127.0.0.1:${server.port}`);
+    daemonServer = daemonStub(stateWithCache);
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
     const kubectl = `
 case "$*" in
   "get pod the-pod -o jsonpath={.metadata.labels.legion\\.dev/issue}") printf 'ACME-2' ;;
@@ -776,5 +634,306 @@ esac`;
     const { status, stdout } = await run(["cache", "ACME-2", "the-pod"], env, { kubectl });
     expect(status).toBe(0);
     expect(stdout).toContain("CHECK cache: PASS");
+  });
+});
+
+describe("negative no-repo: Dispatch's structured absence plus the daemon's exact refusal", () => {
+  test("an unrecorded issue with the exact no-repository admission refusal: PASS", async () => {
+    daemonServer = daemonStub();
+    const body =
+      "Legion did not admit this issue: its repository resolves to none. Set its repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name) and move it to todo again.";
+    dispatchServer = dispatchStub(
+      {},
+      { "ACME-9": JSON.stringify([messageEvent(body, "2026-01-01T00:00:00Z")]) }
+    );
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout } = await run(["negative", "no-repo", "ACME-9"], env);
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK negative-no-repo-ACME-9: PASS");
+  });
+
+  test("an issue the state does record: FAIL", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({}, {});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["negative", "no-repo", "ACME-2"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("CHECK negative-no-repo-ACME-2: FAIL");
+  });
+
+  // A different admission failure (an App not installed) must never satisfy this control, even
+  // though the issue is unrecorded: the exact resolves-to-none sentence is required, word for word.
+  test("a different admission failure (an App not installed) is a FAIL", async () => {
+    daemonServer = daemonStub();
+    const body =
+      "Legion did not admit this issue: the review App is not installed on acme/widgets. Install it on acme/widgets, or set another repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name), and move the issue to todo again.";
+    dispatchServer = dispatchStub(
+      {},
+      { "ACME-9": JSON.stringify([messageEvent(body, "2026-01-01T00:00:00Z")]) }
+    );
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["negative", "no-repo", "ACME-9"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("CHECK negative-no-repo-ACME-9: FAIL");
+  });
+
+  // Finding (round 2, #4): a failed read whose text happens to contain "token" or any other
+  // loose substring must never satisfy this exact-sentence check.
+  test("an unrelated message containing fragments of the refusal wording is a FAIL", async () => {
+    daemonServer = daemonStub();
+    const body =
+      "the token expired; this issue did not admit of a simple fix, and its repository picker is broken";
+    dispatchServer = dispatchStub(
+      {},
+      { "ACME-9": JSON.stringify([messageEvent(body, "2026-01-01T00:00:00Z")]) }
+    );
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["negative", "no-repo", "ACME-9"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("CHECK negative-no-repo-ACME-9: FAIL");
+  });
+});
+
+describe("negative pr-in-x: the two-call baseline protocol", () => {
+  test("before prints BASELINE, never PASS, for a recorded child", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout } = await run(["negative", "pr-in-x", "before", "ACME-2"], env);
+    expect(status).toBe(0);
+    expect(stdout).toContain("BASELINE pr-in-x-ACME-2: captured");
+    expect(stdout).not.toContain("PASS");
+    expect(stdout).toMatch(/RUN_ID: \S+/);
+  });
+
+  test("before on an unrecorded issue is refused: no recorded child, nothing to baseline", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(["negative", "pr-in-x", "before", "ACME-404"], env);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("not the recorded child this control needs");
+  });
+
+  test("after with an unknown run id is refused", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stderr } = await run(
+      ["negative", "pr-in-x", "after", "nonexistent-run", "ACME-2"],
+      env
+    );
+    expect(status).not.toBe(0);
+    expect(stderr).toContain("no baseline for run");
+  });
+
+  test("after with no closed pull request in X on legion/<child> is a FAIL (no operation happened)", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir({
+      gh: `case "$*" in "api repos/other/outside/pulls?state=all&per_page=100 --jq .") printf '[]' ;; *) echo "gh: unexpected call: $*" >&2; exit 1 ;; esac`,
+    });
+    const path = isolatedPath(bin);
+    const before = await spawnScript(
+      ["negative", "pr-in-x", "before", "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(before.status).toBe(0);
+    const runId = before.stdout.match(/RUN_ID: (\S+)/)?.[1] ?? "";
+    expect(runId).not.toBe("");
+    const after = await spawnScript(
+      ["negative", "pr-in-x", "after", runId, "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(after.status).not.toBe(0);
+    expect(after.stderr).toContain("CHECK negative-pr-in-x-ACME-2: FAIL");
+  });
+
+  test("after with a closed PR on legion/<child> in X, opened and closed after the baseline: PASS", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const path = isolatedPath(bin);
+    const before = await spawnScript(
+      ["negative", "pr-in-x", "before", "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(before.status).toBe(0);
+    const runId = before.stdout.match(/RUN_ID: (\S+)/)?.[1] ?? "";
+    expect(runId).not.toBe("");
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const matchingGh = `case "$*" in "api repos/other/outside/pulls?state=all&per_page=100 --jq .") printf '[{"head":{"ref":"legion/ACME-2"},"state":"closed","created_at":"${future}","closed_at":"${future}"}]' ;; *) echo "gh: unexpected call: $*" >&2; exit 1 ;; esac`;
+    fakeBin(bin, "gh", matchingGh);
+    const after = await spawnScript(
+      ["negative", "pr-in-x", "after", runId, "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(after.status).toBe(0);
+    expect(after.stdout).toContain("CHECK negative-pr-in-x-ACME-2: PASS");
+  });
+
+  test("two overlapping before calls for the same issue never collide: each gets its own run id and baseline", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const path = isolatedPath(bin);
+    const [first, second] = await Promise.all([
+      spawnScript(["negative", "pr-in-x", "before", "ACME-2"], path, evidence, env),
+      spawnScript(["negative", "pr-in-x", "before", "ACME-2"], path, evidence, env),
+    ]);
+    expect(first.status).toBe(0);
+    expect(second.status).toBe(0);
+    const firstRun = first.stdout.match(/RUN_ID: (\S+)/)?.[1];
+    const secondRun = second.stdout.match(/RUN_ID: (\S+)/)?.[1];
+    expect(firstRun).toBeDefined();
+    expect(secondRun).toBeDefined();
+    expect(firstRun).not.toBe(secondRun);
+  });
+});
+
+describe("negative repo-edit: the two-call baseline protocol", () => {
+  test("before prints BASELINE, never PASS", async () => {
+    daemonServer = daemonStub();
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout } = await run(["negative", "repo-edit", "before", "ACME-2"], env);
+    expect(status).toBe(0);
+    expect(stdout).toContain("BASELINE repo-edit-ACME-2: captured");
+    expect(stdout).not.toContain("PASS");
+  });
+
+  // Finding (round 2, #8): a repository that actually changed between before and after — with no
+  // exact kept-repository message — is a FAIL, not a PASS on stale or partial evidence.
+  test("the daemon's record changed between before and after: FAIL", async () => {
+    const { server, setBody } = mutableDaemonStub(stateBody); // ACME-2 starts as acme/widgets
+    daemonServer = server;
+    dispatchServer = dispatchStub({
+      "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${server.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const path = isolatedPath(bin);
+    const before = await spawnScript(
+      ["negative", "repo-edit", "before", "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(before.status).toBe(0);
+    const runId = before.stdout.match(/RUN_ID: (\S+)/)?.[1];
+    expect(runId).toBeDefined();
+    // The daemon's own record now reads acme/gadgets instead of acme/widgets: a changed record,
+    // same daemon URL as the baseline (so this is not merely the foreign-baseline refusal).
+    setBody(
+      makeStateBody({
+        issues: {
+          "ACME-2": {
+            key: "ACME-2",
+            generation: 1,
+            phase: "implementing",
+            status: "todo",
+            repo: "acme/gadgets",
+          },
+        },
+      })
+    );
+    const after = await spawnScript(
+      ["negative", "repo-edit", "after", runId as string, "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(after.status).not.toBe(0);
+    expect(after.stderr).toContain("CHECK negative-repo-edit-ACME-2: FAIL");
+  });
+
+  test("unchanged daemon record, Dispatch shows X, a postdating edit event, and the exact kept message: PASS", async () => {
+    daemonServer = daemonStub(stateBody); // ACME-2 stays acme/widgets throughout
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const path = isolatedPath(bin);
+    const before = await spawnScript(
+      ["negative", "repo-edit", "before", "ACME-2"],
+      path,
+      evidence,
+      env
+    );
+    expect(before.status).toBe(0);
+    const runId = before.stdout.match(/RUN_ID: (\S+)/)?.[1] ?? "";
+    expect(runId).not.toBe("");
+    const future = new Date(Date.now() + 60_000).toISOString();
+    dispatchServer.stop(true);
+    dispatchServer = dispatchStub(
+      { "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }) },
+      {
+        "ACME-2": JSON.stringify([
+          { type: "issue.updated", created_at: future, payload: {} },
+          messageEvent(
+            "Legion keeps acme/widgets as this issue's repository; the change to other/outside in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for other/outside instead.",
+            future
+          ),
+        ]),
+      }
+    );
+    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${dispatchServer.port}` };
+    const after = await spawnScript(
+      ["negative", "repo-edit", "after", runId, "ACME-2"],
+      path,
+      evidence,
+      env2
+    );
+    expect(after.status).toBe(0);
+    expect(after.stdout).toContain("CHECK negative-repo-edit-ACME-2: PASS");
   });
 });

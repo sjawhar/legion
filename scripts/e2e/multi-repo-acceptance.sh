@@ -2,10 +2,15 @@
 # The acceptance observer for LEGION-1986's Task 6.4, the operator's live multi-repository run.
 # It never starts a daemon, Dispatch, or any agent of its own, and it writes nothing remote: every
 # admission, push, pull request and Dispatch write in the spec's acceptance checklist is the
-# operator's and the agents' own. This script only reads the daemon's state, Dispatch and GitHub,
-# and judges one observation at a time, failing closed on every judgment: a subprocess's nonzero
-# exit, an empty or malformed value, or a mismatch between the operator's named repository and the
-# one the evidence actually names is a FAIL, never a PASS on a technicality.
+# operator's and the agents' own.
+#
+# Every judgment reads a structured source: the daemon's state JSON (GET /legion/v1/state),
+# Dispatch's own JSON API (GET /api/v1/issues/<key> and /events, the same routes the dashboard
+# reads — not `dispatch read`'s human prose, which truncates and has no stable grammar), GitHub's
+# API (`gh api ... --jq`), and `kubectl get`/`logs`/`exec` as the operator. The one exception is a
+# daemon message whose exact format the daemon itself produces (quoted below with its file:line):
+# those are matched as the complete literal sentence, with the repository names the run supplies
+# substituted in, never a loose substring.
 #
 # Usage:
 #   bash scripts/e2e/multi-repo-acceptance.sh record-head <T>
@@ -13,18 +18,22 @@
 #   bash scripts/e2e/multi-repo-acceptance.sh branch-base <T child KEY>
 #   bash scripts/e2e/multi-repo-acceptance.sh pin <C> <T merge sha>
 #   bash scripts/e2e/multi-repo-acceptance.sh done <KEY>...
-#   bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY>
+#   bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY> <pod> [container]
 #   bash scripts/e2e/multi-repo-acceptance.sh cache <issue KEY> <pod> [container]
-#   bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x before|after <T child KEY>
+#   bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x before <T child KEY>
+#   bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x after <run id> <T child KEY>
 #   bash scripts/e2e/multi-repo-acceptance.sh negative no-repo <KEY>
-#   bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit before|after <child KEY>
+#   bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit before <child KEY>
+#   bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit after <run id> <child KEY>
 #
-# `negative pr-in-x` and `negative repo-edit` are two-call protocols, explicit about which call is
-# which (never inferred from whether a snapshot file happens to exist): `before` takes and stores
-# a snapshot, requiring the named issue to already be a recorded child of T or C; `after` compares
-# a fresh snapshot against the stored one, requiring the same issue still recorded, and PASSes only
-# when they are exactly equal (`pr-in-x`) or the repository is unchanged (`repo-edit`). Run `before`
-# ahead of the operator's edit in X/Dispatch, and `after` once it is done.
+# `negative pr-in-x` and `negative repo-edit` are explicit two-call protocols. `before` mints a
+# fresh run id, captures a baseline exclusively under its own per-run directory (never shared with
+# another run, so two overlapping captures can never overwrite each other), and prints
+# `BASELINE <name>: captured` — never PASS, since capturing a baseline is not an acceptance
+# judgment. `after` takes that exact run id back, refuses a missing, foreign (another issue,
+# operation, or daemon), or stale (more than 24 hours old) baseline, and PASSes only once GitHub's
+# or Dispatch's own structured record shows the negative control's operation demonstrably happened
+# after the baseline was taken.
 #
 # Required inputs (every one an operator input; the script refuses to start without any of
 # them, naming the first missing one, and never carries a literal of its own):
@@ -34,16 +43,9 @@
 #   LEGION_E2E_REPO_X       the negative control's repository, owner/name
 #   LEGION_E2E_REPO_O       the second owner's repository, owner/name
 #   LEGION_E2E_DAEMON_URL   the daemon's API root (GET /legion/v1/state, GET /healthz)
-#   DISPATCH_URL            the Dispatch server `dispatch` reads
-#   DISPATCH_TOKEN_FILE     the Dispatch bearer token file `dispatch` reads
+#   DISPATCH_URL            Dispatch's own API root (GET /api/v1/issues/<key>[/events])
+#   DISPATCH_TOKEN_FILE     the Dispatch bearer token file
 #   MULTIREPO_EVIDENCE_DIR  where each observation's evidence file is kept
-#
-# `dispatch` is the real Dispatch CLI (bundled by `@sjawhar/pi-envoy`), not a stand-in: it refuses
-# to run without DISPATCH_HOST and a session id, and it keeps its own session-state root (ledger,
-# memory, pruning) wherever DISPATCH_STATE_DIR points. This script sets DISPATCH_HOST=omp, a
-# DISPATCH_SESSION_ID of its own, and DISPATCH_STATE_DIR under MULTIREPO_EVIDENCE_DIR, so every
-# `dispatch` call it makes writes only inside this run's own evidence directory, never the shared
-# session-state root an interactive agent uses.
 set -Eeuo pipefail
 
 self=${0##*/}
@@ -53,8 +55,6 @@ fail() {
   exit 1
 }
 
-# usage prints with the shell's own builtin echo, never `cat`: validate_argv must refuse before
-# any external command is required, even when PATH is unset.
 usage() {
   echo "usage: multi-repo-acceptance.sh <observation> [args...]" >&2
   echo "  record-head <T>" >&2
@@ -62,11 +62,13 @@ usage() {
   echo "  branch-base <T child KEY>" >&2
   echo "  pin <C> <T merge sha>" >&2
   echo "  done <KEY>..." >&2
-  echo "  second-owner <O child KEY>" >&2
+  echo "  second-owner <O child KEY> <pod> [container]" >&2
   echo "  cache <issue KEY> <pod> [container]" >&2
-  echo "  negative pr-in-x before|after <T child KEY>" >&2
+  echo "  negative pr-in-x before <T child KEY>" >&2
+  echo "  negative pr-in-x after <run id> <T child KEY>" >&2
   echo "  negative no-repo <KEY>" >&2
-  echo "  negative repo-edit before|after <child KEY>" >&2
+  echo "  negative repo-edit before <child KEY>" >&2
+  echo "  negative repo-edit after <run id> <child KEY>" >&2
   exit 2
 }
 
@@ -76,16 +78,20 @@ usage() {
 validate_argv() {
   [ "$#" -ge 1 ] || usage
   case "$1" in
-    record-head | children | branch-base | second-owner) [ "$#" = 2 ] || usage ;;
+    record-head | children | branch-base) [ "$#" = 2 ] || usage ;;
     pin) [ "$#" = 3 ] || usage ;;
     done) [ "$#" -ge 2 ] || usage ;;
+    second-owner) { [ "$#" = 3 ] || [ "$#" = 4 ]; } || usage ;;
     cache) { [ "$#" = 3 ] || [ "$#" = 4 ]; } || usage ;;
     negative)
       [ "$#" -ge 2 ] || usage
       case "$2" in
         pr-in-x | repo-edit)
-          [ "$#" = 4 ] || usage
-          case "$3" in before | after) ;; *) usage ;; esac
+          case "${3:-}" in
+            before) [ "$#" = 4 ] || usage ;;
+            after) [ "$#" = 5 ] || usage ;;
+            *) usage ;;
+          esac
           ;;
         no-repo) [ "$#" = 3 ] || usage ;;
         *) usage ;;
@@ -107,7 +113,7 @@ require_env LEGION_E2E_PIN_FILE "the path inside the consumer repository that na
 require_env LEGION_E2E_REPO_X "the negative control's repository, owner/name"
 require_env LEGION_E2E_REPO_O "the second owner's repository, owner/name"
 require_env LEGION_E2E_DAEMON_URL "the daemon's API root"
-require_env DISPATCH_URL "the Dispatch server's URL"
+require_env DISPATCH_URL "Dispatch's own API root"
 require_env DISPATCH_TOKEN_FILE "the Dispatch bearer token file"
 require_env MULTIREPO_EVIDENCE_DIR "where this run's observation evidence is kept"
 
@@ -137,7 +143,7 @@ t_owner=$(lower "${LEGION_E2E_REPO_T%%/*}")
 o_owner=$(lower "${LEGION_E2E_REPO_O%%/*}")
 [ "$t_owner" != "$o_owner" ] || fail "LEGION_E2E_REPO_T and LEGION_E2E_REPO_O share an owner ($t_owner, case-insensitively): the second-owner observation needs two owners"
 
-for tool in curl jq gh dispatch; do
+for tool in curl jq gh; do
   command -v "$tool" >/dev/null || fail "$tool is required and is not on PATH"
 done
 
@@ -154,19 +160,33 @@ rm -f "$healthz_file"
 [ "$healthz_status" = 200 ] && [ "$healthz_body" = '{"status":"ok"}' ] ||
   fail "LEGION_E2E_DAEMON_URL $LEGION_E2E_DAEMON_URL is not a Legion daemon: GET /healthz answered $healthz_status $healthz_body"
 
-# Isolate every `dispatch` call this script makes to this run's own evidence directory: the real
-# CLI requires DISPATCH_HOST and a session id (it refuses to run without either), and keeps its
-# ledger, memory and pruning under DISPATCH_STATE_DIR (default a shared root under the caller's
-# HOME, which this script must never touch).
-export DISPATCH_HOST=omp
-export DISPATCH_SESSION_ID="multi-repo-acceptance-$$"
-export DISPATCH_STATE_DIR="$MULTIREPO_EVIDENCE_DIR/dispatch-state"
-mkdir -p "$DISPATCH_STATE_DIR"
+dispatch_token=$(cat "$DISPATCH_TOKEN_FILE") || fail "could not read DISPATCH_TOKEN_FILE"
+[ -n "$dispatch_token" ] || fail "DISPATCH_TOKEN_FILE is empty"
 
 # state_json is the one reading of the daemon's state every observation below that needs it uses,
 # byte-for-byte what `legion state --json` prints (GET /legion/v1/state takes no bearer).
 state_json() {
   curl -sS --fail --max-time 30 "$LEGION_E2E_DAEMON_URL/legion/v1/state"
+}
+
+# dispatch_issue <KEY> is Dispatch's own GET /api/v1/issues/<KEY> (the same JSON the dashboard
+# reads), carrying .repo, .resolved_repo, .status, and .children[] structurally — never the `dispatch
+# read` CLI's human prose, which truncates and has no stable grammar to parse. A nonzero exit (a
+# network failure, or Dispatch answering anything but 2xx) fails the whole observation.
+dispatch_issue() {
+  local key=$1
+  curl -sS --fail --max-time 30 -H "Authorization: Bearer $dispatch_token" "$DISPATCH_URL/api/v1/issues/$key" ||
+    fail "GET $DISPATCH_URL/api/v1/issues/$key failed"
+}
+
+# dispatch_events <KEY> is Dispatch's own GET /api/v1/issues/<KEY>/events (newest first, up to
+# 200): each event's .type, .created_at and, for message.created, the complete .payload.body (never
+# truncated, unlike `dispatch read`'s event summaries).
+dispatch_events() {
+  local key=$1
+  curl -sS --fail --max-time 30 -H "Authorization: Bearer $dispatch_token" \
+    "$DISPATCH_URL/api/v1/issues/$key/events?order=desc&limit=200" ||
+    fail "GET $DISPATCH_URL/api/v1/issues/$key/events failed"
 }
 
 # evidence <name> <text> writes the observation's evidence file verbatim (the external bytes it is
@@ -200,29 +220,8 @@ default_branch() {
   printf '%s' "$branch"
 }
 
-# repository_of <dispatch read output> is the owner/name on its `Repository:` line, or `none`;
-# fails the whole observation when the output carries no such line at all (a malformed or
-# truncated read is not silently read as "none").
-repository_of() {
-  local line
-  line=$(grep -m1 '^Repository: ' <<<"$1") || fail "the dispatch read output carries no Repository: line"
-  case "$line" in
-    "Repository: none") echo none ;;
-    *) sed -E 's/^Repository: ([^ ]+).*/\1/' <<<"$line" ;;
-  esac
-}
-
-# dispatch_read_issue <KEY> prints `dispatch read --issue <KEY>`'s output, or fails naming the
-# nonzero exit: a failed call is never parsed for a value that happens to look right.
-dispatch_read_issue() {
-  local key=$1 out
-  out=$(dispatch read --issue "$key") || fail "dispatch read --issue $key exited $?"
-  printf '%s' "$out"
-}
-
 # record-head <T>: the commit at T's default branch head, read now (run when T's child is
 # recorded), stored for branch-base to compare the child branch's first commit's parent against.
-# Requires repo to be exactly T (case-insensitively) and the head to be a full commit id.
 record_head() {
   local repo=$1 default sha ok=1
   [ "$(lower "$repo")" = "$repo_t" ] || fail "record-head's repository argument $repo is not LEGION_E2E_REPO_T ($LEGION_E2E_REPO_T)"
@@ -237,17 +236,17 @@ head: $sha
   check record-head "$ok"
 }
 
-# children <parent KEY>: one child on T, one on C, in both Dispatch and the daemon's state, both
-# agreeing with each other; a failed dispatch read for any child fails the whole observation.
+# children <parent KEY>: one child resolves to T and one to C, structurally, in both Dispatch's own
+# record (.resolved_repo) and the daemon's state (.issues[<key>].repo).
 children() {
-  local parent=$1 read keys key d_repo s_state s_repo saw_t=0 saw_c=0 mismatch=0 out=""
-  read=$(dispatch read --ref "dispatch://$parent/children") || fail "dispatch read --ref dispatch://$parent/children exited $?"
-  keys=$(grep -E '^- ' <<<"$read" | sed -E 's/^- ([A-Za-z0-9]+-[0-9]+):.*/\1/')
+  local parent=$1 detail keys key d_repo s_state s_repo saw_t=0 saw_c=0 mismatch=0 out=""
+  detail=$(dispatch_issue "$parent")
+  keys=$(jq -r '.children[].key' <<<"$detail")
   [ -n "$keys" ] || fail "children: $parent has no children on Dispatch"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
-    d_repo=$(repository_of "$(dispatch_read_issue "$key")")
-    s_state=$(state_json) || fail "GET $LEGION_E2E_DAEMON_URL/legion/v1/state failed"
+    d_repo=$(dispatch_issue "$key" | jq -r '.resolved_repo // "none"')
+    s_state=$(state_json)
     s_repo=$(jq -r --arg k "$key" '.issues[$k].repo // "none"' <<<"$s_state")
     out+="$key: dispatch=$d_repo state=$s_repo
 "
@@ -260,8 +259,8 @@ children() {
   check children "$([ "$mismatch" = 0 ] && [ "$saw_t" = 1 ] && [ "$saw_c" = 1 ] && echo 1 || echo 0)"
 }
 
-# branch-base <T child KEY>: legion/<child>'s first commit's first parent is record-head's stored
-# sha, exactly (never an empty-vs-empty match: both sides must be full commit ids).
+# branch-base <T child KEY>: legion/<child>'s first commit's first parent on GitHub equals the
+# stored record-head, exactly (both required to be full commit ids).
 branch_base() {
   local child=$1 default stored_head first_commit parent_sha ok=0
   [ -s "$MULTIREPO_EVIDENCE_DIR/record-head.txt" ] || fail "branch-base: run record-head first"
@@ -298,18 +297,17 @@ pin() {
   check pin "$ok"
 }
 
-# done <KEY>...: every named issue reads Status: done on Dispatch; a failed read fails the whole
-# observation rather than being read as "not done" alongside a real failure.
+# done <KEY>...: every named issue's Dispatch status (.status, structurally) is done.
 done_check() {
-  local key out="" ok=1 read
+  local key out="" ok=1 status
   [ "$#" -gt 0 ] || fail "done: name at least one issue key"
   for key in "$@"; do
-    read=$(dispatch_read_issue "$key")
-    if grep -qx "Status: done" <<<"$read"; then
+    status=$(dispatch_issue "$key" | jq -r '.status')
+    if [ "$status" = "done" ]; then
       out+="$key: done
 "
     else
-      out+="$key: not done
+      out+="$key: $status
 "
       ok=0
     fi
@@ -319,52 +317,81 @@ done_check() {
   check "done" "$ok"
 }
 
-# second-owner <O child KEY>: its pull request names O, its phase is production_check or done (the
-# planned post-merge phases — never merging/awaiting_merge/retro, which precede the merge), and the
-# issue's own messages separately record a successful `gh api repos/<T>` read and a refused `git
-# push` to T, as two distinct lines rather than two substrings anywhere in the text.
+# pod_issue_label <pod> is the pod's legion.dev/issue label, or a failure naming why it could not
+# be read.
+pod_issue_label() {
+  local pod=$1
+  kubectl get pod "$pod" -o 'jsonpath={.metadata.labels.legion\.dev/issue}' 2>/dev/null ||
+    fail "kubectl get pod $pod failed: cannot confirm whose pod it is"
+}
+
+# require_pod_for_issue <pod> <issue> refuses when pod's legion.dev/issue label does not name
+# issue: an operator's pod argument always names the pod, never implies it.
+require_pod_for_issue() {
+  local pod=$1 issue=$2 label
+  label=$(pod_issue_label "$pod")
+  [ "$label" = "$issue" ] || fail "pod $pod's legion.dev/issue label is $(printf '%q' "$label"), not $issue: this is not that issue's pod"
+}
+
+# second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
+# .pullRequest.repo) and GitHub confirms it merged there (gh api .../pulls/<n> --jq .merged); the
+# credential evidence is no longer prose — it is run live, through `kubectl exec` as the operator,
+# inside the issue's own role container: a read of T succeeds (`gh api repos/<T> --jq .full_name`
+# must equal T exactly) and a dry-run push to T is refused (nonzero exit; a dry-run push only talks
+# to receive-pack's advertisement, so it writes nothing to T).
 second_owner() {
-  local child=$1 state pr_repo phase read ok=1
-  state=$(state_json) || fail "GET $LEGION_E2E_DAEMON_URL/legion/v1/state failed"
+  local child=$1 pod=$2 container=${3:-implementer} state pr_repo pr_number phase merged ok=1
+  command -v kubectl >/dev/null || fail "second-owner: kubectl is required and is not on PATH"
+  require_pod_for_issue "$pod" "$child"
+  state=$(state_json)
   pr_repo=$(jq -r --arg k "$child" '.issues[$k].pullRequest.repo // "none"' <<<"$state")
+  pr_number=$(jq -r --arg k "$child" '.issues[$k].pullRequest.number // empty' <<<"$state")
   phase=$(jq -r --arg k "$child" '.issues[$k].phase // "none"' <<<"$state")
   [ "$(lower "$pr_repo")" = "$repo_o" ] || ok=0
   case "$phase" in
     production_check | done) ;;
     *) ok=0 ;;
   esac
-  read=$(dispatch_read_issue "$child")
-  grep -qiE "gh api repos/${LEGION_E2E_REPO_T//\//\\/}[^$'\n']*(succeed|success|ok|200)" <<<"$read" || ok=0
-  grep -qiE "git push[^$'\n']*${LEGION_E2E_REPO_T//\//\\/}[^$'\n']*refus" <<<"$read" || ok=0
+  merged=false
+  if [ -n "$pr_number" ]; then
+    merged=$(gh api "repos/$LEGION_E2E_REPO_O/pulls/$pr_number" --jq .merged) || merged=false
+  fi
+  [ "$merged" = true ] || ok=0
+  local read_full_name
+  read_full_name=$(kubectl exec "$pod" -c "$container" -- gh api "repos/$LEGION_E2E_REPO_T" --jq .full_name 2>/dev/null) || read_full_name=""
+  [ "$(lower "$read_full_name")" = "$repo_t" ] || ok=0
+  local probe_branch
+  probe_branch="legion-probe-$$-$(date +%s)"
+  local push_status=0
+  kubectl exec "$pod" -c "$container" -- git push --dry-run "https://github.com/$LEGION_E2E_REPO_T" "HEAD:refs/heads/$probe_branch" >/dev/null 2>&1 || push_status=$?
+  [ "$push_status" != 0 ] || ok=0
   evidence second-owner "pullRequest.repo: $pr_repo
+pullRequest.number: $pr_number
 phase: $phase
----
-$read
+merged (GitHub): $merged
+read repos/$LEGION_E2E_REPO_T --jq .full_name (in-pod): $read_full_name
+dry-run push to $LEGION_E2E_REPO_T (in-pod) exit status: $push_status
 " >/dev/null
   check second-owner "$ok"
 }
 
-# cache <issue KEY> <pod> [container]: the named pod's label legion.dev/issue matches the named
-# issue (so the operator cannot point the observation at an unrelated pod's successful fetch), its
-# fetch container's log carries the producer's exact cache-stream-with-delta success line
-# (workspace_fetch.go's one `report.CacheBytes > 0` branch, not merely the words "cache" and
-# "github" anywhere, which an error line also contains), and the daemon's state shows that issue's
-# repository's cache ready.
+# cache <issue KEY> <pod> [container]: the named pod's legion.dev/issue label matches the issue,
+# its fetch container's log carries the producer's exact cache-stream-with-delta success line
+# (packages/daemon/cmd/legion/workspace_fetch.go's one `report.CacheBytes > 0` branch), and the
+# daemon's state shows that issue's repository's cache ready.
 cache_check() {
-  local key=$1 pod=$2 container=${3:-workspace-fetch} state repo ready logs pod_issue ok=1
+  local key=$1 pod=$2 container=${3:-workspace-fetch} state repo ready logs ok=1
   command -v kubectl >/dev/null || fail "cache: kubectl is required and is not on PATH"
-  pod_issue=$(kubectl get pod "$pod" -o jsonpath='{.metadata.labels.legion\.dev/issue}' 2>/dev/null) ||
-    fail "kubectl get pod $pod failed: cannot confirm it is $key's pod"
-  [ "$pod_issue" = "$key" ] || fail "pod $pod's legion.dev/issue label is $(printf '%q' "$pod_issue"), not $key: this is not that issue's pod"
+  require_pod_for_issue "$pod" "$key"
   logs=$(kubectl logs "$pod" -c "$container") || fail "kubectl logs $pod -c $container failed"
   grep -qE 'workspace-init fetch: [0-9,]+ bytes from the repository cache .*; [0-9,]+ bytes from GitHub for the delta' <<<"$logs" || ok=0
-  state=$(state_json) || fail "GET $LEGION_E2E_DAEMON_URL/legion/v1/state failed"
+  state=$(state_json)
   repo=$(jq -r --arg k "$key" '.issues[$k].repo // "none"' <<<"$state")
   [ "$repo" != "none" ] || ok=0
   ready=$(jq -r --arg r "$repo" '.repositories.mapped[] | select((.repo|ascii_downcase)==($r|ascii_downcase)) | .cache.ready' <<<"$state")
   [ "$ready" = true ] || ok=0
   evidence cache "issue: $key
-pod: $pod ($container), legion.dev/issue=$pod_issue
+pod: $pod ($container)
 repo: $repo
 cache.ready: $ready
 ---
@@ -373,98 +400,173 @@ $logs
   check cache "$ok"
 }
 
-# negative_pr_in_x_snapshot <child> is the comparable state for that negative control: the issue's
-# own record plus its pending status writes, requiring the issue to be a recorded child of T or C
-# (never null — a nonexistent issue proves nothing about a pull request opened and closed in X).
-negative_pr_in_x_snapshot() {
-  local child=$1 state issue_repo snap
-  state=$(state_json) || fail "GET $LEGION_E2E_DAEMON_URL/legion/v1/state failed"
-  issue_repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' <<<"$state")
-  { [ "$(lower "$issue_repo")" = "$repo_t" ] || [ "$(lower "$issue_repo")" = "$repo_c" ]; } ||
-    fail "negative pr-in-x: $child's recorded repository is $issue_repo, neither T ($LEGION_E2E_REPO_T) nor C ($LEGION_E2E_REPO_C): not the recorded child this control needs"
-  snap=$(jq --arg k "$child" '{issue: .issues[$k], pending: [.pendingStatusWrites[] | select(.issue==$k)]}' <<<"$state")
-  printf '%s' "$snap"
+# ---- the two-call baseline protocol (negative pr-in-x, negative repo-edit) ------------------
+
+# baseline_dir <run id> is the per-run directory a baseline lives under: unique per invocation of
+# `before`, so two overlapping captures can never collide or overwrite each other.
+baseline_dir() {
+  printf '%s/runs/%s' "$MULTIREPO_EVIDENCE_DIR" "$1"
 }
 
-# negative pr-in-x before|after <T child KEY>: see the usage note above for the two-call protocol.
+# baseline_capture <operation> <issue> <extra JSON object> mints a fresh run id, creates its
+# directory and its baseline file exclusively (mkdir, then `set -o noclobber`, both of which fail
+# loudly rather than overwrite), and prints the run id and a BASELINE line — never PASS: capturing
+# a baseline observes nothing about the negative control yet.
+baseline_capture() {
+  local operation=$1 issue=$2 extra=$3
+  local run_id
+  run_id="${operation}-${issue}-$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
+  local dir
+  dir=$(baseline_dir "$run_id")
+  mkdir -p "$MULTIREPO_EVIDENCE_DIR/runs"
+  mkdir "$dir" 2>/dev/null || fail "a baseline directory for run $run_id already exists; this should be impossible for a freshly minted run id"
+  local started_at
+  started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local payload
+  payload=$(jq -n --arg run "$run_id" --arg op "$operation" --arg issue "$issue" \
+    --arg daemon "$LEGION_E2E_DAEMON_URL" --arg started "$started_at" --argjson extra "$extra" \
+    '{run_id: $run, operation: $op, issue: $issue, daemon_url: $daemon, started_at: $started} + $extra')
+  (
+    set -o noclobber
+    printf '%s' "$payload" >"$dir/baseline.json"
+  ) 2>/dev/null || fail "the baseline file for run $run_id already exists; this should be impossible for a freshly minted run id"
+  printf '%s' "$payload" >"$MULTIREPO_EVIDENCE_DIR/negative-$operation-$issue-$run_id.txt"
+  echo "RUN_ID: $run_id"
+  echo "BASELINE $operation-$issue: captured"
+}
+
+# baseline_verify <operation> <issue> <run id> reads and validates the baseline: present, not
+# foreign (operation, issue and daemon URL all match this call's), and not older than 24 hours (a
+# negative control's operator action is expected to complete well within one working day; a much
+# older file is a stale leftover from another session, never evidence for this one). Prints the
+# baseline JSON on success.
+baseline_verify() {
+  local operation=$1 issue=$2 run_id=$3 dir
+  dir=$(baseline_dir "$run_id")
+  [ -f "$dir/baseline.json" ] || fail "no baseline for run $run_id: run 'negative $operation before $issue' first"
+  local baseline
+  baseline=$(cat "$dir/baseline.json")
+  local b_op b_issue b_daemon b_started
+  b_op=$(jq -r '.operation' <<<"$baseline")
+  b_issue=$(jq -r '.issue' <<<"$baseline")
+  b_daemon=$(jq -r '.daemon_url' <<<"$baseline")
+  b_started=$(jq -r '.started_at' <<<"$baseline")
+  [ "$b_op" = "$operation" ] || fail "run $run_id's baseline is for operation $b_op, not $operation: a foreign baseline"
+  [ "$b_issue" = "$issue" ] || fail "run $run_id's baseline is for issue $b_issue, not $issue: a foreign baseline"
+  [ "$b_daemon" = "$LEGION_E2E_DAEMON_URL" ] || fail "run $run_id's baseline is against $b_daemon, not $LEGION_E2E_DAEMON_URL: a foreign baseline"
+  local started_epoch now_epoch
+  started_epoch=$(date -u -d "$b_started" +%s 2>/dev/null) || fail "run $run_id's baseline has an unreadable started_at ($b_started)"
+  now_epoch=$(date -u +%s)
+  [ $((now_epoch - started_epoch)) -le 86400 ] || fail "run $run_id's baseline is more than 24h old (captured $b_started): too stale to trust; capture a fresh one with 'negative $operation before $issue'"
+  printf '%s' "$baseline"
+}
+
+# negative_pr_in_x_repo requires child already recorded on T or C, in the daemon's own state
+# (.issues[<key>].repo), and returns it: the control needs a real recorded child to mean anything.
+negative_issue_repo_of() {
+  local control=$1 child=$2 state repo
+  state=$(state_json)
+  repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' <<<"$state")
+  { [ "$(lower "$repo")" = "$repo_t" ] || [ "$(lower "$repo")" = "$repo_c" ]; } ||
+    fail "negative $control: $child's recorded repository is $repo, neither T ($LEGION_E2E_REPO_T) nor C ($LEGION_E2E_REPO_C): not the recorded child this control needs"
+  printf '%s' "$repo"
+}
+
+# negative pr-in-x before|after <run id>? <T child KEY>: the baseline is the issue's record and
+# pendingStatusWrites; `after` PASSes only when GitHub's own record of X shows a pull request whose
+# head is legion/<child>, created and then closed strictly after the baseline's timestamp — proof
+# the operator's open-then-close in X actually happened, not merely that nothing is currently open.
 negative_pr_in_x() {
-  local phase=$1 child=$2 now ok
-  local snapshot_file="$MULTIREPO_EVIDENCE_DIR/negative-pr-in-x-$child-before.json"
+  local phase=$1
   if [ "$phase" = before ]; then
-    now=$(negative_pr_in_x_snapshot "$child")
-    printf '%s' "$now" >"$snapshot_file"
-    evidence "negative-pr-in-x-$child" "before snapshot (the recorded child's issue + pendingStatusWrites):
-$now
-" >/dev/null
-    check "negative-pr-in-x-$child" 1
+    local child=$2
+    negative_issue_repo_of pr-in-x "$child" >/dev/null
+    local state snap
+    state=$(state_json)
+    snap=$(jq -n --argjson state "$state" --arg k "$child" \
+      '{record: ($state.issues[$k] // null), pending: [$state.pendingStatusWrites[] | select(.issue==$k)]}')
+    baseline_capture pr-in-x "$child" "$snap"
     return
   fi
-  [ -s "$snapshot_file" ] || fail "negative pr-in-x after: no before snapshot for $child; run 'negative pr-in-x before $child' first"
-  now=$(negative_pr_in_x_snapshot "$child")
-  if diff -q <(printf '%s' "$now") "$snapshot_file" >/dev/null; then ok=1; else ok=0; fi
-  evidence "negative-pr-in-x-$child" "before:
-$(cat "$snapshot_file")
-after:
-$now
+  local run_id=$2 child=$3
+  local baseline b_started
+  baseline=$(baseline_verify pr-in-x "$child" "$run_id")
+  b_started=$(jq -r '.started_at' <<<"$baseline")
+  local prs found
+  prs=$(gh api "repos/$LEGION_E2E_REPO_X/pulls?state=all&per_page=100" --jq '.') || fail "gh api repos/$LEGION_E2E_REPO_X/pulls failed"
+  found=$(jq --arg ref "legion/$child" --arg since "$b_started" \
+    '[.[] | select(.head.ref == $ref and .state == "closed" and .created_at > $since and ((.closed_at // "") > $since))] | length' <<<"$prs")
+  local ok=0
+  [ "${found:-0}" -gt 0 ] 2>/dev/null && ok=1
+  evidence "negative-pr-in-x-$child-$run_id" "baseline started_at: $b_started
+matching closed pull requests on legion/$child in $LEGION_E2E_REPO_X opened and closed after the baseline: $found
+---
+$prs
 " >/dev/null
   check "negative-pr-in-x-$child" "$ok"
 }
 
-# negative no-repo <KEY>: the daemon never recorded it, Dispatch itself shows the issue resolves to
-# no repository (`Repository: none`, not merely an absence from state, which a daemon outage would
-# also produce), and the issue's messages hold the specific no-repository admission refusal.
+# negative no-repo <KEY>: the daemon never recorded it (.issues has no such key, structurally), and
+# the issue's own events carry the daemon's exact no-repository admission refusal
+# (internal/workflow/repository.go:76, the resolvesToNone case), word for word.
 negative_no_repo() {
-  local key=$1 state has read ok=1
-  state=$(state_json) || fail "GET $LEGION_E2E_DAEMON_URL/legion/v1/state failed"
+  local key=$1 state has events ok=1
+  state=$(state_json)
   has=$(jq -r --arg k "$key" '.issues | has($k)' <<<"$state")
   [ "$has" = false ] || ok=0
-  read=$(dispatch_read_issue "$key")
-  grep -qx "Repository: none" <<<"$read" || ok=0
-  grep -qiE "Legion did not admit this issue.*repository.*(none|resolves to none)" <<<"$read" || ok=0
+  events=$(dispatch_events "$key")
+  local bodies
+  bodies=$(jq -r '[.[] | select(.type=="message.created") | .payload.body] | join("\n---\n")' <<<"$events")
+  grep -qF "Legion did not admit this issue: its repository resolves to none. Set its repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name) and move it to todo again." <<<"$bodies" || ok=0
   evidence "negative-no-repo-$key" "issues has($key): $has
 ---
-$read
+$bodies
 " >/dev/null
   check "negative-no-repo-$key" "$ok"
 }
 
-# negative_repo_edit_repo <child> is the repository negative-repo-edit compares, requiring the
-# issue to be a recorded child of T or C.
-negative_repo_edit_repo() {
-  local child=$1 state repo
-  state=$(state_json) || fail "GET $LEGION_E2E_DAEMON_URL/legion/v1/state failed"
-  repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' <<<"$state")
-  { [ "$(lower "$repo")" = "$repo_t" ] || [ "$(lower "$repo")" = "$repo_c" ]; } ||
-    fail "negative repo-edit: $child's recorded repository is $repo, neither T ($LEGION_E2E_REPO_T) nor C ($LEGION_E2E_REPO_C): not the recorded child this control needs"
-  printf '%s' "$repo"
-}
-
-# negative repo-edit before|after <child KEY>: the record's repository is unchanged across the
-# operator's edit, and the issue's messages record that edit targeted X specifically and was not
-# applied.
+# negative repo-edit before|after <run id>? <child KEY>: the baseline is the daemon's own recorded
+# repository (unaffected by the edit) before it. `after` PASSes only when (1) the daemon's record
+# is unchanged from the baseline, (2) Dispatch's own `.repo` field for the issue now reads X,
+# confirming the edit really happened there, (3) an issue.updated event postdates the baseline
+# (Dispatch's own structured proof of when the edit landed), and (4) the issue's events carry the
+# daemon's exact kept-repository message (internal/workflow/repository.go:94), word for word with
+# the baseline's repository and X substituted in.
 negative_repo_edit() {
-  local phase=$1 child=$2 original now ok
-  local snapshot_file="$MULTIREPO_EVIDENCE_DIR/negative-repo-edit-$child-before.txt"
+  local phase=$1
   if [ "$phase" = before ]; then
-    original=$(negative_repo_edit_repo "$child")
-    printf '%s' "$original" >"$snapshot_file"
-    evidence "negative-repo-edit-$child" "before: repo=$original
-" >/dev/null
-    check "negative-repo-edit-$child" 1
+    local child=$2
+    local repo
+    repo=$(negative_issue_repo_of repo-edit "$child")
+    local snap
+    snap=$(jq -n --arg repo "$repo" '{daemon_repo: $repo}')
+    baseline_capture repo-edit "$child" "$snap"
     return
   fi
-  [ -s "$snapshot_file" ] || fail "negative repo-edit after: no before snapshot for $child; run 'negative repo-edit before $child' first"
-  original=$(cat "$snapshot_file")
-  now=$(negative_repo_edit_repo "$child")
-  ok=1
-  [ "$(lower "$now")" = "$(lower "$original")" ] || ok=0
-  local read
-  read=$(dispatch_read_issue "$child")
-  grep -qiE "repo[^$'\n']*${LEGION_E2E_REPO_X//\//\\/}[^$'\n']*is not applied" <<<"$read" || ok=0
-  evidence "negative-repo-edit-$child" "before: repo=$original
-after:  repo=$now
+  local run_id=$2 child=$3
+  local baseline b_started b_repo
+  baseline=$(baseline_verify repo-edit "$child" "$run_id")
+  b_started=$(jq -r '.started_at' <<<"$baseline")
+  b_repo=$(jq -r '.daemon_repo' <<<"$baseline")
+  local state now_repo ok=1
+  state=$(state_json)
+  now_repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' <<<"$state")
+  [ "$(lower "$now_repo")" = "$(lower "$b_repo")" ] || ok=0
+  local detail dispatch_repo_now
+  detail=$(dispatch_issue "$child")
+  dispatch_repo_now=$(jq -r '.repo // "none"' <<<"$detail")
+  [ "$(lower "$dispatch_repo_now")" = "$repo_x" ] || ok=0
+  local events edit_after bodies
+  events=$(dispatch_events "$child")
+  edit_after=$(jq --arg since "$b_started" '[.[] | select(.type=="issue.updated" and .created_at > $since)] | length' <<<"$events")
+  { [ -n "${edit_after:-}" ] && [ "$edit_after" -gt 0 ]; } 2>/dev/null || ok=0
+  bodies=$(jq -r '[.[] | select(.type=="message.created") | .payload.body] | join("\n---\n")' <<<"$events")
+  grep -qF "Legion keeps $b_repo as this issue's repository; the change to $LEGION_E2E_REPO_X in Dispatch is not applied" <<<"$bodies" || ok=0
+  evidence "negative-repo-edit-$child-$run_id" "baseline: repo=$b_repo started_at=$b_started
+now: daemon repo=$now_repo, Dispatch repo=$dispatch_repo_now
+issue.updated events after baseline: $edit_after
 ---
-$read
+$bodies
 " >/dev/null
   check "negative-repo-edit-$child" "$ok"
 }
@@ -478,13 +580,13 @@ case "$1" in
     shift
     done_check "$@"
     ;;
-  second-owner) second_owner "$2" ;;
+  second-owner) second_owner "$2" "$3" "${4:-}" ;;
   cache) cache_check "$2" "$3" "${4:-}" ;;
   negative)
     case "$2" in
-      pr-in-x) negative_pr_in_x "$3" "$4" ;;
+      pr-in-x) negative_pr_in_x "$3" "${4:-}" "${5:-}" ;;
       no-repo) negative_no_repo "$3" ;;
-      repo-edit) negative_repo_edit "$3" "$4" ;;
+      repo-edit) negative_repo_edit "$3" "${4:-}" "${5:-}" ;;
     esac
     ;;
 esac

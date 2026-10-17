@@ -1271,28 +1271,34 @@ The Task 6.3 observer for the multi-repository live acceptance (Task 6.4, LEGION
 read-only CLI the operator runs by hand, one observation at a time, as the tree advances on the
 deployment's own repositories. It never starts a daemon, Dispatch, or any agent of its own, and it
 writes nothing remote: every admission, push, pull request and Dispatch write the acceptance
-checklist names is the operator's and the agents' own. It fails closed on every judgment — a
-subprocess's nonzero exit, an empty or malformed value, or a repository that does not match the
-one the operator named is a FAIL, never a PASS on a technicality.
+checklist names is the operator's and the agents' own.
+
+**Every judgment reads a structured source**: the daemon's state JSON (`GET /legion/v1/state`),
+Dispatch's own JSON API (`GET /api/v1/issues/<key>` and `/events` — the same routes the dashboard
+reads, never `dispatch read`'s human prose, which truncates and has no stable grammar to parse),
+GitHub's API (`gh api … --jq`), and `kubectl get`/`logs`/`exec` as the operator. The one exception
+is a daemon message whose exact format the daemon itself produces: those are matched as the
+complete literal sentence, with the run's own repository names substituted in, never a loose
+substring — two such sentences are quoted below with their file:line.
 
 ```sh
 export LEGION_E2E_REPO_T=<owner>/<toolchain repo> LEGION_E2E_REPO_C=<owner>/<consumer repo>
 export LEGION_E2E_PIN_FILE=<path inside C that pins T's commit>
 export LEGION_E2E_REPO_X=<owner>/<negative control repo> LEGION_E2E_REPO_O=<second owner>/<repo>
-export LEGION_E2E_DAEMON_URL=http://127.0.0.1:<port> DISPATCH_URL=<dispatch> DISPATCH_TOKEN_FILE=<0600 file>
+export LEGION_E2E_DAEMON_URL=http://127.0.0.1:<port> DISPATCH_URL=<dispatch API root> DISPATCH_TOKEN_FILE=<0600 file>
 export MULTIREPO_EVIDENCE_DIR=<dir kept for the PR body>
 bash scripts/e2e/multi-repo-acceptance.sh record-head "$LEGION_E2E_REPO_T"
 bash scripts/e2e/multi-repo-acceptance.sh children <parent KEY>
 bash scripts/e2e/multi-repo-acceptance.sh branch-base <T child KEY>
 bash scripts/e2e/multi-repo-acceptance.sh pin "$LEGION_E2E_REPO_C" <T merge sha>
 bash scripts/e2e/multi-repo-acceptance.sh done <KEY>...
-bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY>
+bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY> <pod> [container]
 bash scripts/e2e/multi-repo-acceptance.sh cache <issue KEY> <pod> [container]
-bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x before <T child KEY>   # before X's pull request
-bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x after <T child KEY>    # after it closes
+bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x before <T child KEY>        # before the operator opens the pull request in X
+bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x after <run id> <T child KEY>   # after it closes
 bash scripts/e2e/multi-repo-acceptance.sh negative no-repo <KEY>
-bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit before <child KEY>   # before the operator's edit
-bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit after <child KEY>    # after it
+bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit before <child KEY>        # before the operator's edit
+bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit after <run id> <child KEY>   # after it
 ```
 
 Every input above is required and is an operator value, never a literal in the script: an absent
@@ -1302,48 +1308,52 @@ that is unset, refuses a value that is not an `owner/name` repository shape, ref
 `LEGION_E2E_REPO_{T,C,X,O}` naming the same repository (case-insensitively), refuses
 `LEGION_E2E_REPO_T` and `LEGION_E2E_REPO_O` sharing an owner (the second-owner observation needs
 two), and refuses a `LEGION_E2E_DAEMON_URL` whose `GET /healthz` does not answer `{"status":"ok"}`.
-`dispatch`, `gh`, `jq` and `curl` must be on `PATH`; `cache` also needs `kubectl`.
-
-`dispatch` is the real Dispatch CLI (bundled by `@sjawhar/pi-envoy`), never a stand-in: it refuses
-to run without `DISPATCH_HOST` and a session id, and keeps its own session-state root (ledger,
-memory, pruning) under `DISPATCH_STATE_DIR`. The script sets `DISPATCH_HOST=omp`, a
-`DISPATCH_SESSION_ID` of its own, and `DISPATCH_STATE_DIR` under `MULTIREPO_EVIDENCE_DIR`, so every
-`dispatch` call it makes writes only inside this run's own evidence directory, never the operator's
-shared session-state root.
+`gh`, `jq` and `curl` must be on `PATH`; `second-owner` and `cache` also need `kubectl`. There is no
+`dispatch` CLI dependency at all: Dispatch reads go straight to its own JSON API with the bearer
+`DISPATCH_TOKEN_FILE` holds, so the script never touches a shared session-state root.
 
 State reads go through one helper, `state_json` (`curl --fail
 "$LEGION_E2E_DAEMON_URL/legion/v1/state"`, no bearer: `GET /legion/v1/state` is served openly, the
 same bytes `legion state --json` prints), so every jq path below reads the one live shape.
 
 Each observation prints `CHECK <name>: PASS` or `CHECK <name>: FAIL` (a FAIL exits non-zero) and
-writes its own evidence file under `MULTIREPO_EVIDENCE_DIR`, the whole state or Dispatch read it
-judged beside the fields it checked — keep that directory and quote each file in the PR body:
+writes its own evidence file under `MULTIREPO_EVIDENCE_DIR` — the raw JSON or log text it judged,
+byte for byte, trailing newline kept — keep that directory and quote each file in the PR body:
 
 | observation | judges |
 | :--- | :--- |
 | `record-head <T>` | T's default-branch head now (both nonempty, the head a full commit id), for `branch-base` to compare the first child commit's parent against; refuses a repository argument that is not T |
-| `children <parent>` | `dispatch read --ref dispatch://<parent>/children`, then each child's `Repository:` line and `.issues[<key>].repo` from `state_json`: one child resolves to T and one to C, in both, case-insensitively; a nonzero `dispatch` exit fails the observation outright, whatever its stdout said |
+| `children <parent>` | Dispatch's own `GET /api/v1/issues/<parent>` for `.children[].key`, then each child's `.resolved_repo` against `state_json`'s `.issues[<key>].repo`: one child resolves to T and one to C, in both, case-insensitively; a non-2xx Dispatch answer for any child fails the whole observation |
 | `branch-base <T child>` | `legion/<child>`'s first commit's first parent on GitHub equals the stored `record-head`, both required to be full commit ids |
 | `pin <C> <T merge sha>` | `LEGION_E2E_PIN_FILE` on C's default branch names the sha; refuses an empty or non-full-length sha argument and a repository argument that is not C |
-| `done <KEY>...` | `dispatch read --issue <KEY>` shows `Status: done` for every key named; a nonzero exit fails the observation |
-| `second-owner <O child>` | `.issues[<child>].pullRequest.repo` is O and its phase is `production_check` or `done` (never a pre-merge phase such as `awaiting_merge`), and the issue's Dispatch messages carry two distinct lines: a successful `gh api repos/<T>` read and a refused `git push` to T |
-| `cache <issue> <pod> [container]` | the named pod's `legion.dev/issue` label matches the issue (refusing an unrelated pod outright), its fetch container's log (`kubectl logs`, default container `workspace-fetch`) carries the producer's exact cache-stream-with-delta success line, and `.repositories.mapped[] | select(.repo==<repo>) | .cache.ready` is `true` |
-| `negative pr-in-x before\|after <T child>` | two explicit calls, never inferred from a snapshot file's presence: `before` snapshots `{issue, pendingStatusWrites}` for a child already recorded on T or C, before the operator opens the pull request on `legion/<child>` in X; `after` compares a fresh snapshot once that pull request closes, and PASSes only when the two are byte-equal |
-| `negative no-repo <KEY>` | `.issues \| has(<KEY>)` is `false`, Dispatch's own `Repository: none` line, and the issue's Dispatch messages hold the specific no-repository admission refusal (never a different admission failure, such as a missing App) |
-| `negative repo-edit before\|after <child>` | two explicit calls: `before` saves the child's original recorded repository (T or C); `after` requires it unchanged and the issue's Dispatch messages to name X as the edit's target and say it is not applied |
+| `done <KEY>...` | Dispatch's own `.status` field for every named issue reads `done`; a non-2xx Dispatch answer fails the observation |
+| `second-owner <O child> <pod> [container]` | `.issues[<child>].pullRequest.repo` is O and its phase is `production_check` or `done`; `gh api repos/<O>/pulls/<n> --jq .merged` is `true` (the daemon's `done` phase alone is never merge proof); the pod's `legion.dev/issue` label matches the issue; then, live through `kubectl exec` as the operator inside the pod's role container (default `implementer`), `gh api repos/<T> --jq .full_name` equals T exactly and a dry-run push to T (`git push --dry-run https://github.com/<T> HEAD:refs/heads/legion-probe-<run>`) exits nonzero |
+| `cache <issue> <pod> [container]` | the named pod's `legion.dev/issue` label matches the issue (refusing an unrelated pod outright), its fetch container's log (`kubectl logs`, default container `workspace-fetch`) carries the producer's exact cache-stream-with-delta success line (`packages/daemon/cmd/legion/workspace_fetch.go`'s one `report.CacheBytes > 0` branch), and `.repositories.mapped[] | select(.repo==<repo>) | .cache.ready` is `true` |
+| `negative pr-in-x before\|after <run id>? <T child>` | a two-call baseline protocol (below): `before` requires the child already recorded on T or C and captures its issue record and pending status writes; `after` PASSes only when GitHub shows a pull request on `legion/<child>` in X, created and then closed strictly after the baseline's timestamp |
+| `negative no-repo <KEY>` | `.issues \| has(<KEY>)` is `false`, and the issue's Dispatch events carry the daemon's exact no-repository admission refusal word for word — `"Legion did not admit this issue: its repository resolves to none. Set its repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name) and move it to todo again."` (`packages/daemon/internal/workflow/repository.go:76`) |
+| `negative repo-edit before\|after <run id>? <child>` | a two-call baseline protocol (below): `before` captures the daemon's recorded repository (T or C); `after` requires it unchanged, Dispatch's own `.repo` for the issue now reading X, an `issue.updated` event postdating the baseline, and the daemon's exact kept-repository message word for word — `"Legion keeps <repo> as this issue's repository; the change to <X> in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for <X> instead."` (`packages/daemon/internal/workflow/repository.go:94`) |
 
-`scripts/e2e/lib/multi-repo-acceptance.test.ts` pins the script's refusals and these jq paths
-against a `Bun.serve` stub daemon and fake `dispatch`/`gh`/`kubectl` on an isolated `PATH` (never
-the host's own copies, so the suite stays hermetic on CI), standing in for a live run: it runs the
-script with every input unset, with a malformed repository value, with T and O sharing an owner
-(plainly and case-folded), with the stub's `/healthz` answering 404, and with fixed
-`/legion/v1/state` bodies that every observation above judges both ways (one PASS, one FAIL per
-finding), including a dedicated regression for each vacuous-PASS case a review found: a nonzero
-`dispatch`/`gh` exit whose stdout happens to match, an empty default branch or commit sha, a
-pre-merge phase with full message evidence, an unrelated cache pod, an unrecorded issue in the two
-negative-control protocols, and a different admission refusal on `negative no-repo`. Task 6.4, the
-live run against the deployment's own repositories, is the operator's and has not run in this
-suite.
+**The two-call baseline protocol** (`negative pr-in-x`, `negative repo-edit`): `before` mints a
+fresh run id, captures the baseline under `$MULTIREPO_EVIDENCE_DIR/runs/<run id>/baseline.json`
+(the directory made with a plain `mkdir`, the file written with `set -o noclobber` — both fail
+loudly rather than overwrite, so two overlapping `before` calls for the same issue can never
+collide), and prints `BASELINE <name>: captured` — never `PASS`, since capturing a baseline is not
+an acceptance judgment. `after` takes that exact run id back and refuses a missing, foreign
+(another issue, operation, or daemon URL than the baseline's), or stale (more than 24 hours old)
+baseline before judging anything.
+
+`scripts/e2e/lib/multi-repo-acceptance.test.ts` pins the script's refusals and every jq path above
+against two `Bun.serve` stubs (the daemon's `/legion/v1/state` and Dispatch's own
+`/api/v1/issues/*` JSON API) and fake `gh`/`kubectl` on an isolated `PATH` (never the host's own
+copies, so the suite stays hermetic on CI), standing in for a live run. 38 tests, including a
+dedicated regression for every vacuous-PASS case two rounds of review found: a failed Dispatch read
+whose text happens to contain `token`, a `widgets-other`-shaped repository that must never match a
+word-bounded check meant for `widgets`, a merged-PR claim the daemon's phase alone can't prove
+(GitHub's own `.merged` is required), a successful credential read or push refusal that must come
+from a live `kubectl exec`, an unrelated pod, an immediate `after` with no baseline, a missing or
+foreign baseline, and two overlapping `before` calls that must never share a baseline file. Task
+6.4, the live run against the deployment's own repositories, is the operator's and has not run in
+this suite.
 
 ## lib/free-port.sh
 
