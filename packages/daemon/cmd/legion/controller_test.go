@@ -126,6 +126,13 @@ type controllerDaemonOptions struct {
 	tokens       appauth.Tokens
 	owners       []string
 	repositories []string
+	// rawStateBody, set, replaces GET /legion/v1/state's whole response body verbatim (for a
+	// malformed or structurally invalid body a real projection never produces: `{}`, `null`, a
+	// missing repositories field, or an invalid mapped entry).
+	rawStateBody string
+	// stateStatus, set, replaces GET /legion/v1/state's HTTP status (for a transient failure, e.g.
+	// 503), leaving rawStateBody (or the real handler's own body) as the body.
+	stateStatus int
 }
 
 // fakeTx is the no-op pgx.Tx the controller test daemon's state route opens: fixedStateSource
@@ -161,12 +168,18 @@ func (fixedStateTransactions) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, e
 
 // fixedStateSource is the controller test daemon's api.StateSource: a state holding only the
 // project's mapped repositories, as `GET /legion/v1/state` serves them for the controller's own
-// addressing (controllerRepositories).
+// addressing (controllerRepositories). A nil repositories (the zero value, most tests' default)
+// stands in for a normally configured daemon and answers one fixed repository; a non-nil empty
+// slice is the explicit "this daemon's workflow maps nothing" case a test must ask for by name.
 type fixedStateSource struct{ repositories []string }
 
 func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, error) {
-	mapped := make([]api.MappedRepositoryView, len(f.repositories))
-	for i, repo := range f.repositories {
+	repos := f.repositories
+	if repos == nil {
+		repos = []string{"acme/widgets"}
+	}
+	mapped := make([]api.MappedRepositoryView, len(repos))
+	for i, repo := range repos {
 		mapped[i] = api.MappedRepositoryView{Repo: repo}
 	}
 	return api.State{Repositories: api.RepositoriesView{Mapped: mapped}}, nil
@@ -192,17 +205,26 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, r)
+		code, answer := recorder.Code, recorder.Body.Bytes()
+		if r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state" {
+			if opts.rawStateBody != "" {
+				answer = []byte(opts.rawStateBody)
+			}
+			if opts.stateStatus != 0 {
+				code = opts.stateStatus
+			}
+		}
 		d.mu.Lock()
 		d.seen = append(d.seen, seenRequest{
 			method: r.Method, path: r.URL.Path, authorization: r.Header.Get("Authorization"),
-			contentType: r.Header.Get("Content-Type"), body: body, status: recorder.Code, answer: recorder.Body.Bytes(),
+			contentType: r.Header.Get("Content-Type"), body: body, status: code, answer: answer,
 		})
 		d.mu.Unlock()
 		for name, values := range recorder.Header() {
 			w.Header()[name] = values
 		}
-		w.WriteHeader(recorder.Code)
-		_, _ = w.Write(recorder.Body.Bytes())
+		w.WriteHeader(code)
+		_, _ = w.Write(answer)
 	}))
 	t.Cleanup(server.Close)
 	d.url = server.URL
@@ -505,6 +527,19 @@ func (c *operatorMachine) wantNoSecretRequest() {
 	}
 }
 
+// wantNoMintRequest is wantNoSecretRequest for a check that runs after the repositories fetch
+// (which itself reaches the daemon, GET /legion/v1/state): it asserts no POST
+// /legion/v1/controller/secret reached the daemon, so a repository-mapping refusal never mints — or
+// revokes — a capability.
+func (c *operatorMachine) wantNoMintRequest() {
+	c.t.Helper()
+	for _, r := range c.daemon.requests() {
+		if r.method == http.MethodPost && r.path == "/legion/v1/controller/secret" {
+			c.t.Fatalf("a POST /legion/v1/controller/secret reached the daemon, want none")
+		}
+	}
+}
+
 func (c *operatorMachine) wantNothingLaunchedOrWritten(stateDir string) {
 	c.t.Helper()
 	if c.launched() {
@@ -524,10 +559,10 @@ func modeOf(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// The one daemon call that mints the capability: POST /legion/v1/controller/secret, the operator
-// token as a bearer, and the contract the probe held the plugin to as the body. The
-// github-credential fetch and the GET /legion/v1/state read for the controller's repositories
-// addressing (Task 6.1) follow it.
+// The repository mapping is read before anything mints a capability: GET /legion/v1/state, then
+// the one call that mints it, POST /legion/v1/controller/secret with the operator token as a
+// bearer and the contract the probe held the plugin to as the body, then the github-credential
+// fetch.
 func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -536,17 +571,17 @@ func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	}
 	requests := d.requests()
 	if len(requests) != 3 {
-		t.Fatalf("%d requests reached the daemon, want the secret request, the github-credential fetch, and the state read", len(requests))
+		t.Fatalf("%d requests reached the daemon, want the state read, the secret request, and the github-credential fetch", len(requests))
 	}
-	got := requests[0]
+	state := requests[0]
+	if state.method != http.MethodGet || state.path != "/legion/v1/state" || state.authorization != "" || state.status != http.StatusOK {
+		t.Fatalf("state request = %s %s auth %q → %d, want an unauthenticated GET", state.method, state.path, state.authorization, state.status)
+	}
+	got := requests[1]
 	if got.method != http.MethodPost || got.path != "/legion/v1/controller/secret" ||
 		got.authorization != "Bearer "+controllerOperatorToken || got.contentType != "application/json" ||
 		string(got.body) != fmt.Sprintf(`{"pluginContract":%d}`, api.DaemonAPIVersion) || got.status != http.StatusOK {
 		t.Fatalf("secret request = %s %s auth %q type %q body %q → %d", got.method, got.path, got.authorization, got.contentType, got.body, got.status)
-	}
-	state := requests[2]
-	if state.method != http.MethodGet || state.path != "/legion/v1/state" || state.authorization != "" || state.status != http.StatusOK {
-		t.Fatalf("state request = %s %s auth %q → %d, want an unauthenticated GET", state.method, state.path, state.authorization, state.status)
 	}
 }
 
@@ -620,7 +655,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 	// `$(cat …)` drops each file's trailing newlines, as a shell does. The start message travels
 	// as LEGION_CONTROLLER_START_MESSAGE, not a CLI word: argv carries only the system prompt.
 	wantArgv := []string{"--append-system-prompt",
-		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`.\n\n" +
+		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`. the project's repositories are acme/widgets.\n\n" +
 			strings.TrimRight(string(instructions), "\n")}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
@@ -711,7 +746,7 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	argv := c.argv()
-	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
+	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`. the project's repositories are acme/widgets.\n\n") {
 		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
 	}
 }
@@ -735,19 +770,47 @@ func TestControllerStartsAddressingGainsTheProjectsRepositories(t *testing.T) {
 	}
 }
 
-// A daemon with no repository mapped tells the operator-launched controller its design gate
-// policy alone, as TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy checks: the
-// repositories clause is never appended empty.
-func TestControllerStartsAddressingOmitsTheClauseWithNoMappedRepository(t *testing.T) {
-	d := newControllerDaemon(t)
+// A daemon with an empty, missing, or invalid repository mapping refuses the controller's start
+// outright, naming why — it never silently omits the repositories clause (that test name and
+// behavior are gone: a correctly running daemon always maps at least one repository, since its own
+// workflow refuses to boot on an empty mapping, so an empty or invalid answer here means the state
+// read did not reach a real, fully-booted workflow).
+func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts controllerDaemonOptions
+		want string
+	}{
+		{"empty mapped", controllerDaemonOptions{repositories: []string{}}, "maps no repository to this project"},
+		{"empty object body", controllerDaemonOptions{rawStateBody: "{}"}, "names no repositories field"},
+		{"null body", controllerDaemonOptions{rawStateBody: "null"}, "not a JSON object"},
+		{"missing repositories field", controllerDaemonOptions{rawStateBody: `{"daemon":{"project":"demo"}}`}, "names no repositories field"},
+		{"an invalid mapped entry", controllerDaemonOptions{repositories: []string{"not a valid repo"}}, "an invalid mapped repository"},
+		{
+			"one valid, one invalid entry: the whole list is refused, not narrowed",
+			controllerDaemonOptions{repositories: []string{"acme/widgets", "not a valid repo"}},
+			"an invalid mapped repository",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newControllerDaemonWithOptions(t, tc.opts)
+			c := newControllerStart(t, d, controllerOptions{})
+			c.refused(tc.want)
+			c.wantNoMintRequest()
+			c.wantNothingLaunchedOrWritten(c.defaultDir)
+		})
+	}
+}
+
+// The repository mapping is fetched and validated before the capability mint: a daemon whose
+// GET /legion/v1/state fails transiently (here, 503) must never revoke a running controller's
+// capability for a replacement that will not start — no secret request reaches the daemon at all.
+func TestControllerStartNeverMintsWhenTheRepositoryReadFails(t *testing.T) {
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{stateStatus: http.StatusServiceUnavailable})
 	c := newControllerStart(t, d, controllerOptions{})
-	if code, _, errb := c.run(); code != 0 {
-		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
-	}
-	argv := c.argv()
-	if strings.Contains(argv[1], "repositories are") {
-		t.Fatalf("Oh My Pi's argv = %q; want no repositories clause", argv)
-	}
+	c.refused("/legion/v1/state")
+	c.wantNoMintRequest()
+	c.wantNothingLaunchedOrWritten(c.defaultDir)
 }
 
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the
@@ -833,6 +896,14 @@ func TestControllerStartRefusedByTheDaemonWritesNothing(t *testing.T) {
 // upgrade instead of quoting the daemon, and nothing is launched or written.
 func TestControllerStartAgainstADaemonBeforeContract12NamesTheSideToUpgrade(t *testing.T) {
 	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state" {
+			// A contract-11 daemon still serves state with a usable repository mapping: the
+			// repositories fetch, which now runs before the mint, must succeed here so the test
+			// reaches the contract refusal it is actually about.
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"repositories":{"mapped":[{"repo":"acme/widgets","default":true}]}}`))
+			return
+		}
 		// The contract-11 daemon's controllerSecret: readBody into struct{}, unknown fields refused.
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()
@@ -978,7 +1049,7 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion", "package.json")
 		c.refused(fmt.Sprintf("pi-legion at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
 			manifest, api.DaemonAPIVersion-1, api.DaemonAPIVersion))
-		c.wantNoSecretRequest()
+		c.wantNoMintRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
 	// Each refusal of the load probe says what Oh My Pi did, launched as the controller launches
@@ -1012,7 +1083,7 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 			if strings.Contains(errb, "OMP profile") {
 				t.Errorf("legion controller start's refusal names a profile, which only Oh My Pi resolves: %q", errb)
 			}
-			c.wantNoSecretRequest()
+			c.wantNoMintRequest()
 			c.wantNothingLaunchedOrWritten(c.defaultDir)
 		})
 	}
@@ -1048,7 +1119,7 @@ func TestControllerStartHoldsTheCopyOhMyPiLoadsToTheContract(t *testing.T) {
 		c.loads(loaded)
 		c.refused(fmt.Sprintf("pi-legion at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
 			filepath.Join(loaded, "package.json"), api.DaemonAPIVersion-1, api.DaemonAPIVersion))
-		c.wantNoSecretRequest()
+		c.wantNoMintRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
 }
