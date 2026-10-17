@@ -610,7 +610,7 @@ esac`
       POD_UID: "test-pod-uid",
       LEGION_GH_PATH: "/opt/legion/bin/gh",
       LEGION_GH_OWNERS_DIR: "/gh",
-      GH_CONFIG_DIR: "/gh/zeta-tools",
+      GH_CONFIG_DIR: "/gh/zeta",
       LEGION_WORKSPACE: "/workspace",
     };
   }
@@ -660,7 +660,7 @@ esac`;
       kubectl: podLabelKubectl,
     });
     expect(status).not.toBe(0);
-    expect(stderr).toContain("CHECK second-owner: FAIL");
+    expect(stderr).toContain("could not read the role's own environment");
   }, 30000);
 
   test("production_check, merged, read succeeds, O's own push succeeds, but T's push also succeeds (no refusal): FAIL", async () => {
