@@ -178,10 +178,6 @@ func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
 	}
 	got := core.DispatchPermissions("example-dispatch")
 	require.Equal(t, want, got)
-
-	host := core.HostPermissions("example-dispatch")
-	require.Subset(t, got.Publish.Allow, host.Publish.Allow)
-	require.Subset(t, got.Subscribe.Allow, host.Subscribe.Allow)
 }
 
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of

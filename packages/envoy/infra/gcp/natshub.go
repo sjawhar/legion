@@ -138,7 +138,7 @@ type NATSUserArgs struct {
 	Name              string           `pulumi:"name"`
 	NKey              string           `pulumi:"nkey"`                       // the user's public key; never its seed
 	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId)
-	DispatchMachineID *string          `pulumi:"dispatchMachineId,optional"` // permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user, named after the listener beside it
+	DispatchMachineID *string          `pulumi:"dispatchMachineId,optional"` // permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user; the id is the listener's beside it
 	Daemon            bool             `pulumi:"daemon,optional"`            // permissions = core.DaemonPermissions()
 	Permissions       *PermissionsArgs `pulumi:"permissions,optional"`       // explicit
 }
@@ -404,27 +404,24 @@ type userKind struct {
 	grant func() (core.Permissions, error)
 }
 
+// machineKind is a kind named by a machine id, which may not be empty: the grant grant gives it.
+func machineKind(where, name string, id *string, grant func(string) core.Permissions) userKind {
+	return userKind{name, id != nil, func() (core.Permissions, error) {
+		if *id == "" {
+			return core.Permissions{}, fmt.Errorf("%s: %s is empty", where, name)
+		}
+		return grant(*id), nil
+	}}
+}
+
 // userPermissions is the grant of the hub user at where, which names exactly one kind.
 func userPermissions(where string, u NATSUserArgs) (core.Permissions, error) {
 	kinds := []userKind{
-		{"machineId", u.MachineID != nil, func() (core.Permissions, error) {
-			if *u.MachineID == "" {
-				return core.Permissions{}, fmt.Errorf("%s: machineId is empty", where)
-			}
-			return core.HostPermissions(*u.MachineID), nil
-		}},
-		{"dispatchMachineId", u.DispatchMachineID != nil, func() (core.Permissions, error) {
-			if *u.DispatchMachineID == "" {
-				return core.Permissions{}, fmt.Errorf("%s: dispatchMachineId is empty", where)
-			}
-			return core.DispatchPermissions(*u.DispatchMachineID), nil
-		}},
+		machineKind(where, "machineId", u.MachineID, core.HostPermissions),
+		machineKind(where, "dispatchMachineId", u.DispatchMachineID, core.DispatchPermissions),
 		{"daemon", u.Daemon, func() (core.Permissions, error) { return core.DaemonPermissions(), nil }},
 		{"permissions", u.Permissions != nil, func() (core.Permissions, error) {
-			return core.Permissions{
-				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
-				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
-			}, nil
+			return core.Permissions{Publish: *u.Permissions.Publish.Core(), Subscribe: *u.Permissions.Subscribe.Core()}, nil
 		}},
 	}
 	var set []userKind

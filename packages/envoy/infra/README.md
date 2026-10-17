@@ -1588,7 +1588,8 @@ agent-stream control subject; and subscription to every session's agent-stream f
 `gcp:NatsHub` user with `dispatchMachineId` holds it. Whatever holds its seed, `envoy-dispatch` or
 the listener beside it, can read every session's agent-stream frames, send control to any session,
 and, through `HostPermissions`, publish frames as any session, so the seed is as sensitive as every
-session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and 2.15.1 in `core/dispatch_permissions_live_test.go`.
+session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and
+2.15.1 in `core/dispatch_permissions_live_test.go`.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
