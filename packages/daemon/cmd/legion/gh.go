@@ -79,9 +79,10 @@ func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
 // path of subcommands down to the leaf the arguments run, every option's arity, and the arguments
 // the leaf's USAGE line names. A word its parent's help lists as a gh alias, whose expansion may
 // name a repository of its own, or as an extension, which reads gh's token itself, is an error
-// before its help is read, since reading it would run them; so is `gh copilot`, which runs
-// another program on gh's token, and a word whose help is another command's that lists no such
-// alias of its own. Before the leaf only the inherited -R/--repo and --help/-h may come, read with
+// before its help is read, since reading it would run them; so is such a word as the target of
+// `gh help`, which for an extension gh runs (ghHelpTarget), and `gh copilot`, which runs another
+// program on gh's token, and a word whose help is another command's that lists no such alias of
+// its own. Before the leaf only the inherited -R/--repo and --help/-h may come, read with
 // the leaf's own options; anything else there, a subcommand gh does not know, help that lists an
 // option incompletely or not at all, an option the leaf's help does not list, and an argument its
 // USAGE has no place for or names in a way this does not know (ghSlotKinds) are errors. The leaf's
@@ -113,9 +114,10 @@ func ghTargetOf(argv []string, env map[string]string, help func(path []string) (
 	for i := 0; i < len(argv) && cmd == nil; i++ {
 		arg := argv[i]
 		switch {
-		case len(path) == 0 && (arg == "--version" || arg == "help"):
-			// gh's version, or its help of a command, which runs none.
+		case len(path) == 0 && arg == "--version":
 			return "", false, nil
+		case len(path) == 0 && arg == "help":
+			return "", false, ghHelpTarget(argv[i+1:], help)
 		case arg == "-R" || arg == "--repo":
 			if i+1 == len(argv) {
 				return "", false, cannotPlace(arg, "has no value", false)
@@ -349,6 +351,43 @@ func ghUsageNamesSubcommands(args string) bool {
 	return strings.HasPrefix(args, "<command>") || strings.HasPrefix(args, "[subcommand]") || strings.HasPrefix(args, "<subcommand>")
 }
 
+// ghHelpTarget reads the words of `gh help <words>` as the path of the command whose help it asks
+// for, refusing a gh alias or an extension among them as ghTargetOf refuses one run directly: gh
+// runs `gh help <extension>` as `gh <extension> --help`, which runs the extension on gh's token.
+// gh's own help, a command's and a help topic's, sends nothing, and is not named. A word past a
+// leaf is that leaf's argument, which gh's help ignores; an option, which `gh help` takes none of,
+// is an error.
+func ghHelpTarget(words []string, help func(path []string) (string, error)) error {
+	if len(words) == 0 {
+		return nil
+	}
+	gh, err := readGhCommand(nil, help)
+	if err != nil {
+		return err
+	}
+	parent, path := &gh, []string(nil)
+	for i, word := range words {
+		if strings.HasPrefix(word, "-") {
+			return cannotPlace(word, "is an option of `gh help`, which takes only the names of commands", false)
+		}
+		if err := parent.mayRead(word); err != nil {
+			return err
+		}
+		if i == len(words)-1 {
+			return nil
+		}
+		read, err := readGhCommand(append(slices.Clone(path), word), help)
+		if err != nil {
+			return err
+		}
+		if !read.group {
+			return nil
+		}
+		parent, path = &read, read.path
+	}
+	return nil
+}
+
 // mayRead refuses word as a subcommand of the group c when c's help lists it as a gh alias, whose
 // expansion may name a repository of its own, or an extension, which reads gh's token itself:
 // reading the help of either runs it, a shell alias or an extension with whatever it holds.
@@ -440,36 +479,45 @@ func ghSlots(args string) (slots []ghSlot, passthrough bool) {
 	return slots, passthrough
 }
 
-// ghSlotKinds is what each argument name gh's usages spell (gh 2.98.0's and 2.65.0's, every
-// command of their references) selects: a repository, another repository a command acts on beside
-// its own, an owner, a URL that may name a repository, a search query, a repository's name (`gh
-// repo create [<name>]`, OWNER/NAME or a name alone), or nothing (""). A name it does not hold is
-// one this cannot read: an argument filling it is refused, never read as naming nothing.
-var ghSlotKinds = map[string]string{
-	"repository":             "repository",
-	"destination-repo":       "second-repository",
-	"destination-repository": "second-repository",
-	"source-repository":      "second-repository",
-	"owner":                  "owner",
-	"url":                    "url",
-	"urls":                   "url",
-	"pr-url":                 "url",
-	"discussion-url":         "url",
-	"comment-url":            "url",
-	"query":                  "query",
-	"name":                   "name",
-	// Arguments naming no repository.
-	"alias": "", "asset-name": "", "branch": "", "cache-id": "", "cache-key": "", "comment-id": "",
-	"commit-sha": "", "commit-SHA": "", "dest": "", "directory": "", "expansion": "", "file-path": "",
-	"filename": "", "files": "", "flag": "", "gist": "", "id": "", "image-uri": "", "key": "",
-	"key-file": "", "key-id": "", "keyPrefix": "", "license-key": "", "local-port": "",
-	"new-filename": "", "newFilename": "", "new-name": "", "number": "", "numbers": "",
-	"old-filename": "", "oldFilename": "", "path": "", "pattern": "", "pr-branch": "",
-	"pr-number": "", "prompt": "", "remote-port": "", "ruleset-id": "", "run-id": "",
-	"secret-name": "", "session-id": "", "shell": "", "skill": "", "skill[@version]": "",
-	"sources": "", "spdx-id": "", "SPDX-ID": "", "tag": "", "task description": "", "template": "",
-	"type": "", "urlTemplate": "", "value": "", "variable-name": "", "workflow-id": "",
-	"workflow-name": "",
+// ghArgKind is what one argument name of gh's usages selects — a repository, another repository a
+// command acts on beside its own, an owner, a URL that may name a repository, a search query, a
+// repository's name (`gh repo create [<name>]`, OWNER/NAME or a name alone), or nothing ("") — and
+// whether it stands for one or more arguments, as a plural name does with no `...` (`gh issue edit
+// {<numbers> | <urls>}` edits one or more issues).
+type ghArgKind struct {
+	kind string
+	many bool
+}
+
+// ghSlotKinds is the ghArgKind of each argument name gh's usages spell, gh 2.98.0's and 2.65.0's,
+// every command of their references. A name it does not hold is one this cannot read: an argument
+// filling it is refused, never read as naming nothing.
+var ghSlotKinds = map[string]ghArgKind{
+	"repository":             {kind: "repository"},
+	"destination-repo":       {kind: "second-repository"},
+	"destination-repository": {kind: "second-repository"},
+	"source-repository":      {kind: "second-repository"},
+	"owner":                  {kind: "owner"},
+	"url":                    {kind: "url"},
+	"urls":                   {kind: "url", many: true},
+	"pr-url":                 {kind: "url"},
+	"discussion-url":         {kind: "url"},
+	"comment-url":            {kind: "url"},
+	"query":                  {kind: "query", many: true},
+	"name":                   {kind: "name"},
+	// Arguments naming no repository, several of them in one slot.
+	"files": {many: true}, "numbers": {many: true}, "sources": {many: true},
+	// Arguments naming no repository, one to a slot.
+	"alias": {}, "asset-name": {}, "branch": {}, "cache-id": {}, "cache-key": {}, "comment-id": {},
+	"commit-sha": {}, "commit-SHA": {}, "dest": {}, "directory": {}, "expansion": {}, "file-path": {},
+	"filename": {}, "flag": {}, "gist": {}, "id": {}, "image-uri": {}, "key": {}, "key-file": {},
+	"key-id": {}, "keyPrefix": {}, "license-key": {}, "local-port": {}, "new-filename": {},
+	"newFilename": {}, "new-name": {}, "number": {}, "old-filename": {}, "oldFilename": {},
+	"path": {}, "pattern": {}, "pr-branch": {}, "pr-number": {}, "prompt": {}, "remote-port": {},
+	"ruleset-id": {}, "run-id": {}, "secret-name": {}, "session-id": {}, "shell": {}, "skill": {},
+	"skill[@version]": {}, "spdx-id": {}, "SPDX-ID": {}, "tag": {}, "task description": {},
+	"template": {}, "type": {}, "urlTemplate": {}, "value": {}, "variable-name": {},
+	"workflow-id": {}, "workflow-name": {},
 }
 
 // ghKindRank orders the kinds of a slot's names: the slot is of its most specific name's kind
@@ -483,30 +531,47 @@ func (s ghSlot) kind() (kind, unknown string) {
 		return "", "an argument with no name"
 	}
 	for _, name := range s.names {
-		k, known := ghSlotKinds[name]
+		arg, known := ghSlotKinds[name]
 		if !known {
 			return "", name
 		}
-		if ghKindRank[k] > ghKindRank[kind] {
-			kind = k
+		if ghKindRank[arg.kind] > ghKindRank[kind] {
+			kind = arg.kind
 		}
 	}
 	return kind, ""
 }
 
-// slotFor is the slot the i-th positional argument fills: its own, or the last when that takes
-// more than one (a search query takes every word left), and none past the last otherwise.
-func (c *ghCommand) slotFor(i int) (ghSlot, bool) {
-	if i < len(c.slots) {
-		return c.slots[i], true
+// takesMany says whether the slot takes one or more arguments: spelled with `...`, or naming one
+// ghSlotKinds takes as several (a plural name, a search query's words).
+func (s ghSlot) takesMany() bool {
+	return s.variadic || slices.ContainsFunc(s.names, func(name string) bool { return ghSlotKinds[name].many })
+}
+
+// slotsFor is the slot each of n positional arguments fills, in order, as gh's usage places them:
+// the first slot taking more than one takes every argument the slots after it leave (`gh codespace
+// cp <sources>... <dest>`), and a usage with none takes no more arguments than it has slots.
+func (c *ghCommand) slotsFor(n int) ([]ghSlot, bool) {
+	many := slices.IndexFunc(c.slots, ghSlot.takesMany)
+	if many < 0 {
+		if n > len(c.slots) {
+			return nil, false
+		}
+		return c.slots[:n], true
 	}
-	if len(c.slots) > 0 {
-		last := c.slots[len(c.slots)-1]
-		if kind, _ := last.kind(); last.variadic || kind == "query" {
-			return last, true
+	after := len(c.slots) - many - 1
+	placed := make([]ghSlot, n)
+	for i := range placed {
+		switch {
+		case i < many:
+			placed[i] = c.slots[i]
+		case i >= max(n-after, many+1):
+			placed[i] = c.slots[len(c.slots)-(n-i)]
+		default:
+			placed[i] = c.slots[many]
 		}
 	}
-	return ghSlot{}, false
+	return placed, true
 }
 
 // readsGHRepo says whether the leaf takes the inherited -R, whose default GH_REPO is.
@@ -698,13 +763,13 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 			}
 		}
 	} else {
+		placed, ok := cmd.slotsFor(len(parsed.positionals))
+		if !ok {
+			return cannotPlace(parsed.positionals[len(cmd.slots)], "is an argument "+leaf+"'s usage has no place for", false)
+		}
 		var query []string
 		for i, arg := range parsed.positionals {
-			slot, ok := cmd.slotFor(i)
-			if !ok {
-				return cannotPlace(arg, "is an argument "+leaf+"'s usage has no place for", false)
-			}
-			kind, unknown := slot.kind()
+			kind, unknown := placed[i].kind()
 			if unknown != "" {
 				return cannotPlace(arg, fmt.Sprintf("fills <%s> of %s's usage, an argument this does not know", unknown, leaf), false)
 			}

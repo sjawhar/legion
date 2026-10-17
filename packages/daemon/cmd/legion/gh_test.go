@@ -120,6 +120,9 @@ func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
 	if status := read("auth", "status"); status.shorts['h'] != "hostname" {
 		t.Errorf("gh auth status's -h reads as %q, want --hostname", status.shorts['h'])
 	}
+	if edit := read("issue", "edit"); len(edit.slots) != 1 || kind(edit.slots[0]) != "url" || edit.slots[0].variadic || !edit.slots[0].takesMany() {
+		t.Errorf("gh issue edit reads as %+v, want one URL-capable slot of one or more arguments spelled with no ...", edit.slots)
+	}
 	if search := read("search", "issues"); search.readsGHRepo() || kind(search.slots[0]) != "query" {
 		t.Errorf("gh search issues reads as %+v, want a query and no inherited -R", search)
 	}
@@ -164,7 +167,10 @@ func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
 // ghSlotKinds knows, but for the few ghTargetOf refuses on purpose: what `gh copilot` and `gh
 // extension exec` hand another program, codespace arguments of no fixed shape, and gh api's
 // endpoint, which it reads itself. So the pinned gh refuses no command for an argument this does
-// not know, and a later gh's new spelling is refused rather than read as naming nothing.
+// not know, and a later gh's new spelling is refused rather than read as naming nothing. Each
+// name's cardinality holds too: a plural name (`{<numbers> | <urls>}`, one or more issues) is one
+// ghSlotKinds takes as one or more arguments even with no `...`, and every slot taking more than
+// one fits one argument more than the usage has slots, wherever the slot stands.
 func TestEveryArgumentGhsReferenceNamesIsOfAKnownKind(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(ghHelpDir, "reference.txt"))
 	if err != nil {
@@ -176,7 +182,9 @@ func TestEveryArgumentGhsReferenceNamesIsOfAKnownKind(t *testing.T) {
 			t.Errorf("ghSlotKinds knows <%s>, which ghTargetOf refuses on purpose", name)
 		}
 	}
-	leaves := 0
+	// The one name gh spells ending in "s" that stands for one argument.
+	singular := map[string]bool{"alias": true}
+	leaves, many := 0, 0
 	for _, line := range strings.Split(string(data), "\n") {
 		words := strings.Fields(strings.Trim(strings.TrimSpace(strings.TrimLeft(line, "#")), "`"))
 		if !strings.HasPrefix(line, "#") || len(words) < 2 || words[0] != "gh" {
@@ -191,17 +199,28 @@ func TestEveryArgumentGhsReferenceNamesIsOfAKnownKind(t *testing.T) {
 			continue
 		}
 		leaves++
+		usage := strings.Join(words, " ")
 		slots, _ := ghSlots(args)
 		for _, slot := range slots {
 			for _, name := range slot.names {
-				if _, known := ghSlotKinds[name]; !known && !refused[name] {
-					t.Errorf("`%s` names <%s>, of no kind ghSlotKinds knows", strings.Join(words, " "), name)
+				arg, known := ghSlotKinds[name]
+				switch {
+				case !known && !refused[name]:
+					t.Errorf("`%s` names <%s>, of no kind ghSlotKinds knows", usage, name)
+				case known && strings.HasSuffix(name, "s") && !singular[name] && !arg.many:
+					t.Errorf("`%s` names <%s>, a plural, which ghSlotKinds takes as one argument", usage, name)
+				}
+			}
+			if slot.takesMany() {
+				many++
+				if placed, ok := (&ghCommand{slots: slots}).slotsFor(len(slots) + 1); !ok || !slices.ContainsFunc(placed, func(s ghSlot) bool { return slices.Equal(s.names, slot.names) }) {
+					t.Errorf("`%s` takes one or more arguments in %v, and %d arguments do not fit its usage there: %v", usage, slot.names, len(slots)+1, placed)
 				}
 			}
 		}
 	}
-	if leaves < 150 {
-		t.Errorf("gh's reference lists %d commands this reads, want every one of its at least 150", leaves)
+	if leaves < 150 || many < 10 {
+		t.Errorf("gh's reference lists %d commands this reads and %d arguments taking more than one, want every one of its at least 150 and 10", leaves, many)
 	}
 }
 
@@ -286,6 +305,21 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"pr", "view", "1", "2"}, err: `"2" is an argument`},
 		{argv: []string{"pr", "list", "sjawhar/legion"}, err: `"sjawhar/legion" is an argument`},
 		{argv: []string{"api", "repos/acme/widgets", "repos/sjawhar/legion"}, err: `"repos/sjawhar/legion" is an argument`},
+		// The third re-review's: gh's help of an extension runs the extension, so the target of
+		// `gh help` is read as a command's path, a gh alias or an extension refused before anything
+		// runs; gh's own help and its topics are not. And a plural slot, `{<numbers> | <urls>}`,
+		// takes one or more arguments, every one a selector.
+		{argv: []string{"help"}},
+		{argv: []string{"help", "pr", "view"}},
+		{argv: []string{"help", "environment"}},
+		{argv: []string{"help", "co"}, err: `"co" is a gh alias`},
+		{argv: []string{"help", "hello"}, help: ghWithAnExtensionAndANestedAlias, err: `"hello" is a gh extension`},
+		{argv: []string{"help", "pr", "pv2"}, help: ghWithAnExtensionAndANestedAlias, err: `"pv2" is a gh alias`},
+		{argv: []string{"-R", "acme/widgets", "help", "hello"}, help: ghWithAnExtensionAndANestedAlias, err: `"hello" is a gh extension`},
+		{argv: []string{"help", "--bogus", "hello"}, err: "\"--bogus\" is an option of `gh help`"},
+		{argv: []string{"issue", "edit", "1", "2", "--title", "x", "-R", "sjawhar/legion"}, owner: "sjawhar"},
+		{argv: []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/1", "https://github.com/sjawhar/legion/issues/2", "--title", "x"}, owner: "sjawhar"},
+		{argv: []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/1", "https://github.com/acme/widgets/issues/2", "--title", "x"}, err: "more than one owner"},
 		// A URL is one in any case, as gh parses it.
 		{argv: []string{"pr", "view", "HTTPS://GITHUB.COM/sjawhar/legion/pull/1"}, owner: "sjawhar"},
 		{argv: []string{"api", "HTTPS://API.GITHUB.COM/repos/sjawhar/legion"}, owner: "sjawhar"},
