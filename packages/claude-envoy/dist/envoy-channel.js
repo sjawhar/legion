@@ -39592,7 +39592,16 @@ function dispatchSettings(env, config2) {
     }
     const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
     const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env);
-    return { enabled: true, url: url2, token };
+    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+    if (publicUrl !== undefined && httpUrl2(publicUrl) === undefined) {
+      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+    }
+    return {
+      enabled: true,
+      url: url2,
+      token,
+      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+    };
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
@@ -39898,7 +39907,12 @@ try {
 }
 `;
 var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
+var CLUSTER_INTERNAL_URL = /https?:\/\/[^\s/|>]+\.(?:svc|cluster\.local)(?::\d+)?(?=[/\s|>]|$)[^\s|>]*/i;
 async function postSlackReply(reply, options = {}) {
+  const internal = CLUSTER_INTERNAL_URL.exec(reply.text);
+  if (internal !== null) {
+    throw new Error(`the reply links ${internal[0]}, a cluster-internal address nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`);
+  }
   const env = options.env ?? process.env;
   const override = env[SLACK_POST_API_URL_VARIABLE];
   if (override !== undefined && override !== "" && !allowedAPIURL(override)) {

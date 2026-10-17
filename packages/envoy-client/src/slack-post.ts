@@ -180,15 +180,28 @@ interface PosterLine {
 const MAY_HAVE_POSTED =
   "the reply may have been posted, and posting it again may put it in the thread twice";
 
+/** A Kubernetes Service's in-cluster host (`<service>.<namespace>.svc`, with or without
+ * `.cluster.local`), which nobody reading Slack can reach. */
+const CLUSTER_INTERNAL_URL =
+  /https?:\/\/[^\s/|>]+\.(?:svc|cluster\.local)(?::\d+)?(?=[/\s|>]|$)[^\s|>]*/i;
+
 /**
  * Posts reply once. Nothing retries it: a post whose answer was lost may already be in the
- * thread. A broker that has not granted LEGION_SLACK_BOT_TOKEN (pending approval, denied, or any other
- * refusal) posts nothing, and the error names the state and quotes the client.
+ * thread. A reply linking a cluster-internal address is refused before anything is asked, since
+ * nobody in Slack can open it. A broker that has not granted LEGION_SLACK_BOT_TOKEN (pending
+ * approval, denied, or any other refusal) posts nothing, and the error names the state and quotes
+ * the client.
  */
 export async function postSlackReply(
   reply: SlackReply,
   options: { readonly env?: Record<string, string | undefined> } = {}
 ): Promise<SlackPosted> {
+  const internal = CLUSTER_INTERNAL_URL.exec(reply.text);
+  if (internal !== null) {
+    throw new Error(
+      `the reply links ${internal[0]}, a cluster-internal address nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`
+    );
+  }
   const env = options.env ?? process.env;
   const override = env[SLACK_POST_API_URL_VARIABLE];
   if (override !== undefined && override !== "" && !allowedAPIURL(override)) {

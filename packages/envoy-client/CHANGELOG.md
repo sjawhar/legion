@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `dispatch issue`'s `Created` line names the assignee Dispatch answered (`; assigned to <email>`
+  or `; unassigned`): Dispatch picks one when the call names none, so an agent reports it rather
+  than assuming.
+- `slack_post` refuses a reply linking a cluster-internal address (`*.svc`, `*.cluster.local`)
+  before it asks the broker anything, naming the link.
 - `dispatch issue`'s `Created <KEY>: <title>` line names the new issue's dashboard link
   (`→ <Dispatch URL>/issues/<KEY>`), so an agent can hand a person the issue it filed.
 - `subscribe` sends `host` (`machineID()`: `ENVOY_MACHINE_ID`, falling back to the kernel
@@ -101,6 +106,10 @@
 
 ### Added
 
+- `DISPATCH_PUBLIC_URL`, Dispatch's dashboard as people open it (sjawhar/legion#1998): every link
+  the `dispatch` command prints is resolved against it when it is set, so an agent that reaches
+  Dispatch at an in-cluster address prints links people can open, and a pasted dashboard link on
+  either address resolves. One that is not an http or https URL turns Dispatch off, naming it.
 - `slack_post` joins `envoyToolSpecs` after the ten `envoy_*` tools (`channel`, `thread_ts`,
   `text` at most `SLACK_POST_TEXT_MAX`), and `postSlackReply` (`@legion/envoy-client/slack-post`)
   posts it with Slack's `chat.postMessage` (sjawhar/legion#1998). The bot token is the secrets

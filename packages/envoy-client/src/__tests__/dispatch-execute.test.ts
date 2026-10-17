@@ -2429,6 +2429,47 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
   });
 
+  // A pod reaches Dispatch at its in-cluster address, which nobody outside the cluster can open:
+  // the link the command prints is Dispatch's public dashboard (DISPATCH_PUBLIC_URL) whenever the
+  // session has one, and the line names the assignee Dispatch answered, so an agent repeats
+  // Dispatch's state rather than assuming it.
+  test.each([
+    ["ada@example.com", "; assigned to ada@example.com"],
+    [null, "; unassigned"],
+  ] as const)("dispatch_issue links the public dashboard and names the assignee %p", async (assignee, said) => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return sourceNull();
+      }
+      return response({
+        key: "LEGION-13",
+        title: "New global search work",
+        project: "LEGION",
+        assignee,
+        components: issueComponents("inherit", []),
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "New global search work" },
+      cwd: "/workspace",
+      host: "omp",
+      config: {
+        ...config,
+        url: "http://dispatch.example-ns.svc.cluster.local:8766",
+        publicUrl: "https://dispatch.example.org",
+      },
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said} (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)`
+    );
+  });
+
   test("guides an unassigned new issue to architecture components when its project has a source", async () => {
     const { result, requests } = await createIssueWithComponents(issueComponents("inherit", []));
 
@@ -7551,6 +7592,52 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe("Key: DSP-42\nEvents:\n- none");
     expect(requested).toEqual(["/api/v1/issues/DSP-42", "/api/v1/issues/DSP-42/events"]);
+  });
+
+  // The links this command prints are on the public dashboard when DISPATCH_PUBLIC_URL is set, so
+  // a ref pasted from one resolves as one on the API's own address does.
+  test("reads an issue from its URL on the public dashboard", async () => {
+    const requested: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requested.push(`${target.origin}${target.pathname}`);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 0,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    for (const ref of [
+      "https://dispatch.example.org/issues/DSP-42/log",
+      "http://dispatch.test/issues/DSP-42/log",
+    ]) {
+      requested.length = 0;
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config: { ...config, publicUrl: "https://dispatch.example.org" },
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toBe("Key: DSP-42\nEvents:\n- none");
+      expect(requested).toEqual([
+        "http://dispatch.test/api/v1/issues/DSP-42",
+        "http://dispatch.test/api/v1/issues/DSP-42/events",
+      ]);
+    }
   });
 
   test("maps the SPA's version selector on dashboard URLs to a named-version read", async () => {

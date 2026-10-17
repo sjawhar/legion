@@ -4,6 +4,9 @@
 
 ### Changed
 
+- `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
+  `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
+  address.
 - Plugin interface version 3 (sjawhar/legion#1998): a resumed session restores its registered
   interests after dropping, from the listener and from what it restores, every Slack topic whose
   channel the daemon-launched controller's list (`roleClaim.slackChannels`) does not name, in that

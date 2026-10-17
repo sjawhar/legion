@@ -58,6 +58,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The controller skill's Slack replies give the link and assignee `dispatch` printed, never an
+  assumed one.
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that

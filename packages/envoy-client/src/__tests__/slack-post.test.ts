@@ -183,6 +183,23 @@ describe("postSlackReply", () => {
     expect(slack.calls).toEqual([]);
   });
 
+  // A reply goes to people in Slack, who cannot open a cluster's Service address: a reply linking
+  // one is refused before the broker is asked or Slack is called, naming the link.
+  test("refuses a reply that links a cluster-internal address, asking nothing of the broker", async () => {
+    const slack = fakeSlack({ ok: true, ts: "1.2" });
+    const { env, args } = brokerEnvironment("granted", slack.url);
+    for (const text of [
+      "Filed as ACME-12: http://dispatch.example-ns.svc.cluster.local:8766/issues/ACME-12",
+      "Filed as <http://dispatch.example-ns.svc:8766/issues/ACME-12|ACME-12>",
+    ]) {
+      await expect(postSlackReply({ ...reply, text }, { env })).rejects.toThrow(
+        "nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted"
+      );
+    }
+    expect(slack.calls).toEqual([]);
+    expect(() => readFileSync(args)).toThrow();
+  });
+
   test("Slack's refusal comes back verbatim", async () => {
     const slack = fakeSlack({ ok: false, error: "not_in_channel" });
     const { env } = brokerEnvironment("granted", slack.url);

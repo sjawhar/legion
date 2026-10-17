@@ -137,6 +137,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays, which the baseline composes with",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
+		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the
+		// in-cluster DISPATCH_URL the runtime hands every agent.
+		{name: "Dispatch's public dashboard", pod: env("DISPATCH_PUBLIC_URL", "https://dispatch.example.org")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")

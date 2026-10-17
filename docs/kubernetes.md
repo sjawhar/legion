@@ -2602,6 +2602,13 @@ issue's pod (every role container of it alike) and the image probe's.
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
   and how `pod` and `provider_keys` compose.
+- **Dispatch's public dashboard.** Every pod reaches Dispatch at `dispatch_url`, usually an
+  in-cluster address nobody outside the cluster can open. Set `DISPATCH_PUBLIC_URL` in
+  `runtime.kubernetes.pod.env` to Dispatch's dashboard as people open it, for example
+  `https://dispatch.example.org`: every link an agent's `dispatch` command prints, which agents
+  repeat in Slack replies, pull requests and comments, then points there, and a pasted dashboard
+  link on either address resolves. The controller's `slack_post` refuses a reply linking a
+  cluster-internal address.
 - **The Legion machine-user sign-in.** `legion model-token` is a model `apiKey` command that signs a
   pod in to Cognito with its projected service-account token and prints the access token; the
   [operator route README](../deploy/kubernetes/operator-route/README.md) shows the line and what the

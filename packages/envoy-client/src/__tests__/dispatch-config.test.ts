@@ -264,6 +264,38 @@ describe("Dispatch from a harness's envoy.json", () => {
     });
   });
 
+  // DISPATCH_PUBLIC_URL is Dispatch's dashboard as people open it, which a pod's in-cluster
+  // DISPATCH_URL is not: the settings carry it, less a trailing slash, only when it is set, and one
+  // that is not an http or https URL turns Dispatch off naming it rather than printing bad links.
+  test("carries DISPATCH_PUBLIC_URL beside the server it links people to, and refuses one that is not a URL", () => {
+    const env = {
+      HOME: tempDir(),
+      DISPATCH_URL: "http://dispatch.example-ns.svc.cluster.local:8766",
+      DISPATCH_TOKEN: "token",
+    };
+    expect(
+      dispatchFor(
+        { ...env, DISPATCH_PUBLIC_URL: "https://dispatch.example.org/" },
+        { ...command, cwd: tempDir() }
+      )
+    ).toEqual({
+      enabled: true,
+      url: "http://dispatch.example-ns.svc.cluster.local:8766",
+      token: "token",
+      publicUrl: "https://dispatch.example.org",
+    });
+    expect(dispatchFor(env, { ...command, cwd: tempDir() })).not.toHaveProperty("publicUrl");
+    for (const url of ["dispatch.example.org", "ftp://dispatch.example.org"]) {
+      expect(
+        dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
+      ).toEqual({
+        enabled: false,
+        notice: null,
+        error: "DISPATCH_PUBLIC_URL must be an http or https URL",
+      });
+    }
+  });
+
   // A plugin passes its whole environment, the dispatch command drops empty variables: both read
   // an empty one as unset, so the command reads what its plugin read.
   test("an empty DISPATCH_URL, DISPATCH_TOKEN or DISPATCH_TOKEN_FILE reads as unset", () => {

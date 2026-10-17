@@ -9,6 +9,9 @@
 
 ### Changed
 
+- `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
+  `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
+  address.
 - `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
   `machine_id` for a session whose plugin predates the field) rather than the listener that
