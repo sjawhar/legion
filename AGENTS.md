@@ -214,8 +214,8 @@ logged at debug, while a required check still runs. An arm or queue entry is not
 keeps reading GitHub until it reports the pull request merged at READY's head, and once it has seen
 the arm or entry it never submits again after a removal it did not make. The merge queue taking the
 pull request out because the merge failed (GitHub's reason `failed_checks`, or an unexplained reason
-with a check that failed, timed out or failed to start on the commit the queue built for its
-`merge_group` CI, every page of its checks read) sends the issue from `awaiting_merge` back to
+with a check that failed, timed out, failed to start, needed action or went stale on the commit the
+queue built for its `merge_group` CI, every page of its checks read) sends the issue from `awaiting_merge` back to
 `implementing`, its implementer told the failing run, as a red head does; any other removal (a person
 dequeuing it, whose cancelled runs are no failure, or a person or GitHub turning auto-merge off) ends
 the row and tells the architect once (`merge-removed`). Two removals are submitted again: the

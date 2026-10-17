@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/wait"
@@ -698,21 +699,27 @@ func (t *timelineItem) removalReason() string {
 
 // failingRuns is each of checks, every check on the commit the merge queue built for a queue
 // removal (mergeGroupCommit.checks), that failed there, named with how it ended and its run: a check
-// run that completed in failure, timed out or failed to start, and a commit status in failure or
-// error. A cancelled run is no failure: a person's dequeue cancels every run in flight.
+// run that ended in a result Legion's rule for a check run counts as failed (classify.RunResult:
+// failure, timed out, failed to start, action required, stale), and a commit status in failure or
+// error. A cancelled run is no failure here: a person's dequeue cancels every run in flight.
 func failingRuns(checks []checkContext) []string {
 	var runs []string
 	for _, check := range checks {
-		switch {
-		case check.Type == "CheckRun" && check.Status == "COMPLETED" &&
-			(check.Conclusion == "FAILURE" || check.Conclusion == "TIMED_OUT" || check.Conclusion == "STARTUP_FAILURE"):
+		switch check.Type {
+		case "CheckRun":
+			result := classify.RunResult(strings.ToLower(check.Status), strings.ToLower(check.Conclusion))
+			if result == classify.Pending || result == classify.Success || result == classify.Cancelled {
+				continue
+			}
 			url := check.DetailsURL
 			if check.CheckSuite != nil && check.CheckSuite.WorkflowRun != nil && check.CheckSuite.WorkflowRun.URL != "" {
 				url = check.CheckSuite.WorkflowRun.URL
 			}
-			runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Name, strings.ToLower(check.Conclusion), url))
-		case check.Type == "StatusContext" && (check.State == "FAILURE" || check.State == "ERROR"):
-			runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Context, strings.ToLower(check.State), check.TargetURL))
+			runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Name, result, url))
+		case "StatusContext":
+			if check.State == "FAILURE" || check.State == "ERROR" {
+				runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Context, strings.ToLower(check.State), check.TargetURL))
+			}
 		}
 	}
 	return runs

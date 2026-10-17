@@ -382,6 +382,11 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
 		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"CANCELLED","detailsUrl":"` + failedRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
 		`{"__typename":"CheckRun","name":"e2e","status":"COMPLETED","conclusion":"SKIPPED","detailsUrl":"` + failedRun + `/job/3","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}}}`
+	// needsAction is the queue's commit with a run that ended needing action, which Legion's rule for
+	// a check run counts as failed (classify.RunResult).
+	needsAction := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
+		`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
+		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"ACTION_REQUIRED","detailsUrl":"` + failedRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}}}`
 	// paged is a queue's commit whose checks GitHub lists over two pages: the first, cut at 100,
 	// all passed, and its integration failure is on the second (moreContexts).
 	var passing []string
@@ -422,6 +427,8 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			removed: []string{"a-maintainer", "merge queue", "manual"}},
 		{name: "the merge queue removes it on a merge group that only cancelled", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", cancelled)},
 			removed: []string{"github-merge-queue", "merge queue", "timed_out"}},
+		{name: "the merge queue removes it on a merge group whose run needs action", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", needsAction)},
+			failed: []string{"timed_out", "integration (action_required, " + failedRun + ")"}},
 		{name: "the merge queue removes it for failed_checks, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", paged)},
 			pages: 1, failed: []string{"failed_checks", "integration (failure, " + failedRun + ")"}},
 		{name: "the merge queue removes it for an unexplained reason, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", paged)},

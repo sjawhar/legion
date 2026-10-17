@@ -150,10 +150,11 @@ reviewing until you finish.
   request merged at READY's head. Once it has seen the arm or entry, it never submits that head
   again after someone else removes it: the merge queue taking the pull request out because the merge
   failed (GitHub's reason `failed_checks`, or an unexplained reason with a check that failed, timed
-  out or failed to start on the commit the queue built for its `merge_group` CI) sends the issue back
-  to `implementing`, the implementer's task naming each failing check and its run, as a red head
-  does; any other removal (a person dequeues it, cancelling its runs, or turns auto-merge off, GitHub
-  turns it off, the queue finds a conflict) ends the row and is told to the architect once
+  out, failed to start, needed action or went stale on the commit the queue built for its
+  `merge_group` CI) sends the issue back to `implementing`, the implementer's task naming each
+  failing check and its run, as a red head does; any other removal (a person dequeues it,
+  cancelling its runs, or turns auto-merge off, GitHub turns it off, the queue finds a conflict)
+  ends the row and is told to the architect once
   (`merge-removed`). Two removals are submitted again: the implement App's own disarm sent before
   READY that GitHub applied late (auto-merge `manually_disabled`, or a `manual` dequeue, by that
   App), and auto-merge a close turned off, which the reopen at READY's head undid. GitHub's
