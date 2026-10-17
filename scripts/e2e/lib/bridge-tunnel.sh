@@ -276,10 +276,14 @@ bridge_stop() {
   # NAP may reclaim along with it, and a GET-by-name confirmation (not a LIST, which this run no
   # longer depends on bridge_stop for — see teardown_sequence's own ordering fix) is the reliable
   # way to know it is actually gone: a lone chisel pod deleted by hand elsewhere on this cluster
-  # took under 6s, well inside this budget.
+  # took under 6s, well inside this budget. The `|| true` on each read is the same bug class as
+  # the wait calls above, found the same way (strace, 2026-10-17) once those alone did not fix it:
+  # `kubectl get` on a NotFound object — the very state this loop is waiting for — exits nonzero,
+  # and a bare `var=$(...)` assignment with no guard trips `set -e` the instant the pod actually
+  # disappears, ending the script right as the wait would have succeeded.
   for i in $(seq 1 300); do
-    pod_read=$(op get pod "$bridge_name" -o name 2>&1)
-    svc_read=$(op get service "$bridge_name" -o name 2>&1)
+    pod_read=$(op get pod "$bridge_name" -o name 2>&1) || true
+    svc_read=$(op get service "$bridge_name" -o name 2>&1) || true
     case "$pod_read" in *NotFound*)
       case "$svc_read" in *NotFound*) return 0 ;; esac
     esac
