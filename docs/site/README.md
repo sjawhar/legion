@@ -18,8 +18,9 @@ bun run docs:build   # generate the reference pages, then build into docs/site/d
 
 In this directory, `bun run lint` and `bun run typecheck` are the checks CI runs before the build.
 After it, `.github/scripts/check-private-names.sh docs/site/dist` (from the repository root) fails
-on any built page, caption or file name that names the private deployment repository, the company,
-or a private internal host.
+on any built page, caption or file name that names the private deployment repository or the
+company, and on any built page or caption whose text names a private internal host or a Tailscale
+MagicDNS host.
 
 ## Links between pages
 
