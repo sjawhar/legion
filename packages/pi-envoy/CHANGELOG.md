@@ -4,6 +4,10 @@
 
 ### Changed
 
+- `envoy_role_set` refuses, naming the role it already holds, when a session already holds a
+  different role: it used to end that role silently, closing every `whileHolding` subscription it
+  opened (a Legion controller's own daemon-wake subscription included). The internal replacement
+  path a deliberate takeover uses (`/legion-claim-controller`, say) is unaffected.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

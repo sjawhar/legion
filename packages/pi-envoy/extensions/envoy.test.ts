@@ -4155,7 +4155,6 @@ describe("envoy OMP extension", () => {
   test("injects a role event forwarded to the claimed agent subject with original role-topic framing", async () => {
     let currentRoleTopic = "";
     const requests: string[] = [];
-    const unregistrations: (readonly string[])[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
@@ -4169,13 +4168,6 @@ describe("envoy OMP extension", () => {
           dir: "/tmp/envoy-omp-test",
           topics: [currentRoleTopic],
         });
-      }
-      if (url.pathname === "/v1/interests/unsubscribe") {
-        const topics = Array.isArray(body?.topics)
-          ? body.topics.filter((topic): topic is string => typeof topic === "string")
-          : [];
-        unregistrations.push(topics);
-        return response({});
       }
       return responseWithRegistration(input, init, {});
     };
@@ -4191,9 +4183,7 @@ describe("envoy OMP extension", () => {
     });
     await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_a"));
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    if (roleTool === undefined || unsubscribeTool === undefined)
-      throw new Error("role tools were not registered");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
     await roleTool.execute("", { role: "legion-controller" });
 
     expect(natsState.controls.get(currentRoleTopic)).toBeUndefined();
@@ -4212,14 +4202,61 @@ describe("envoy OMP extension", () => {
       },
     });
     expect(requests).not.toContain("/v1/sessions");
+  });
 
-    await roleTool.execute("", { role: "legion-reviewer" });
-    expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
-    const result = await unsubscribeTool.execute("", {
-      topics: ["notifications.role.legion-reviewer"],
+  // A model reaching for envoy_role_set while this session already holds a different role (its
+  // own Legion role, say) must be refused loudly, naming the held role, rather than silently
+  // losing it: setEnvoyRole's old behavior ended the held role's whileHolding subscriptions
+  // on every implicit role change, which would deafen a Legion controller to its own daemon-wake
+  // topic with no trace of why.
+  test("envoy_role_set refuses a second role while this session already holds a different one, naming it and releasing nothing", async () => {
+    const setRoleCalls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        const role = typeof body?.role === "string" ? body.role : "";
+        setRoleCalls.push(role);
+        return response({
+          session_id: "ses_role_refuse",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${role}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-set-refuses-replace");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
     });
-    expect(result.content[0]?.text).toBe("Unsubscribed: (none)");
-    expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_refuse"));
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+    await roleTool.execute("", { role: "legion-controller" });
+    expect(setRoleCalls).toEqual(["legion-controller"]);
+
+    const refused = await roleTool.execute("", { role: "legion-reviewer" });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toBe(
+      "this session already holds role legion-controller; envoy_role_set never replaces a held role implicitly"
+    );
+    // Nothing reached the listener for the refused role, and the held role's subscription is
+    // still live: a message on its role topic still reaches this session.
+    expect(setRoleCalls).toEqual(["legion-controller"]);
+    const agent = natsState.controls.get("notifications.agent.ses_role_refuse");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+    agent.push(
+      forwardedRoleEnvelope("legion-controller", "still mine", "role-set-refuses-replace")
+    );
+    await injected.promise;
+    expect(fixture.messages.at(-1)).toContain("still mine");
   });
 
   test("injects a post-takeover forwarded role event into B only", async () => {
