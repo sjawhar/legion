@@ -206,7 +206,9 @@ package api
 // `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
 // `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
 // `expiresAt` in place of one `hosts` and `config`. An image built before 29 has neither the
-// wrapper nor the two commands, so the image probe refuses it.
+// wrapper nor the two commands, so the image probe refuses it. (This branch took 28 while
+// sjawhar/legion#1999 was open; pi-legion v10.4.0 was released from main declaring 28 without
+// these shapes, so this branch takes the number above it, as the collision note says.)
 //
 // 30: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
 // targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
