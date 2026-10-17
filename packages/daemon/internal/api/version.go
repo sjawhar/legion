@@ -209,7 +209,7 @@ package api
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
 //
-// 30: sjawhar/legion#PLACEHOLDER -- contract 29's Slack-channel surfaces are removed. A project's
+// 30: sjawhar/legion#2025 -- contract 29's Slack-channel surfaces are removed. A project's
 // `slack_channels`, the daemon's `LEGION_SLACK_CHANNELS` on the controller it launches (its place
 // in the controller's addressing, its generation's address record, and the reservation the
 // operator's pod refused), and `config.checkSlackChannels`'s refusal are all gone. The controller
