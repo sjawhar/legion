@@ -30,8 +30,22 @@ related_issues:
   `merge_commit_blocked`. `RemovedFromMergeQueueEvent` has no `afterCommit` field, and the merge
   queue's branch is gone with its entry (`checkSuite.branch` reads null).
 - **A timeline actor is a bot's login without `[bot]`; GraphQL's `viewer` is the same login with it**
-  (`sjawhar-agent` beside `sjawhar-agent[bot]`). Compare them with the suffix stripped, or the
-  daemon's own disarm reads as a person's removal.
+  (`sjawhar-agent` beside `sjawhar-agent[bot]`). Compare them with the suffix stripped. The actor
+  alone still does not make a removal the daemon's: GitHub names the App that enabled auto-merge as
+  the actor of its own disables (a `merge_commit_blocked` disable on the deployment repository names
+  `sjawhar-agent`, the viewer), so the daemon's own disarm is the viewer *and* the reason a disarm
+  leaves (`manually_disabled`, or a `manual` dequeue). Any other removal the timeline gives the
+  viewer is GitHub's own, and the architect's notice says so.
+- **A person's dequeue cancels the `merge_group` runs in flight, so a cancelled run is no failed
+  merge** (a real `manual` dequeue left 53 runs cancelled, 20 skipped and 15 passed). `failed_checks`
+  always counts, `manual` and `merge_conflict` never do, and a reason GitHub gives no other meaning
+  counts only with a run that failed on the queue's commit by Legion's rule for a check run
+  (`classify.RunResult`), cancelled excepted.
+- **A merge group's checks run past one page of 100** (a real `failed_checks` removal carried 118,
+  with a failure on each page). Read `statusCheckRollup.contexts` page by page through
+  `object(oid:)` on the queue's commit, which resolves after its branch is gone, and only for the
+  removals whose reason needs them: the queue's `merged` removal, read on every retry while GitHub
+  has yet to show the merge, never waits on a page or fails on one.
 - **On a merge-queue base, `enablePullRequestAutoMerge` enqueues only a pull request GitHub reports
   mergeable now** (`mergeStateStatus` `CLEAN`, `HAS_HOOKS` or `UNSTABLE`); on any other state it
   arms auto-merge. A required check that judges the arm (one triggered on `auto_merge_enabled`) then
