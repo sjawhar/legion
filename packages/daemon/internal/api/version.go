@@ -222,4 +222,4 @@ package api
 // sjawhar/legion#1999 landed at 28; main then landed sjawhar/legion#2003 at 29 and released
 // pi-legion v10.5.0 declaring it without these shapes, so this branch takes the number above it,
 // as the collision note says.)
-const DaemonAPIVersion = 29
+const DaemonAPIVersion = 30
