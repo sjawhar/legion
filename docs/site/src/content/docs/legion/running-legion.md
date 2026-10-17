@@ -25,14 +25,15 @@ your cluster, from one published worker image.
 
 ## The GitHub Apps
 
-Create the implement and review Apps and install both on the owner of every repository Legion
-works. The daemon mints each agent's token from its role's App, with the App's whole installation
-permissions, so these two Apps' permissions are exactly what Legion's agents can do on GitHub:
+Legion uses three GitHub Apps, each installed on the owner of every repository Legion works: an
+implement App, a review App and an Envoy App. The daemon mints each agent's token from its role's
+App, with the App's whole installation permissions, so the implement and review Apps' permissions
+are exactly what Legion's agents can do on GitHub:
 
 | App | Write | Read |
 | --- | --- | --- |
 | **review** (planner, tester, reviewer, architect) | contents, pull requests, checks, actions, issues | metadata, packages |
-| **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows, repository projects | checks, metadata, packages |
+| **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
@@ -40,27 +41,34 @@ GitHub with the implement App too: every two minutes it reads each open pull req
 and the checks that branch requires (its rulesets and its branch protection), the set the merger's
 `READY` checks, since only those decide whether CI is red at a head.
 
-`scripts/github-apps/create.ts` registers them from the manifests beside it
-(`scripts/github-apps/implement.json` and `review.json`, which hold these permissions). Neither
-carries a webhook: GitHub's events reach Envoy through a third App, `scripts/github-apps/envoy.json`,
-which subscribes to them and only reads, and is the App Dispatch reads GitHub with. The script
-serves a page on this machine's loopback address with one Create button per App; you click each,
-confirm on GitHub, and the script writes each App's id, private key and webhook secret to
-`<out>/<role>.json`, readable only by you:
+`scripts/github-apps/create.ts` registers all three from the manifests beside it:
+`scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
+webhook, and `scripts/github-apps/envoy.json` is the App whose webhook carries GitHub's events to
+Envoy. That App only reads, and Dispatch reads GitHub with it. The script serves a page on this
+machine's loopback address with one Create button per App. You click each and confirm on GitHub,
+and the script writes GitHub's whole answer for each App (its id, private key, client secret and
+webhook secret) to `<out>/implement.json`, `review.json` and `envoy.json`, readable only by you:
 
 ```sh
 bun scripts/github-apps/create.ts --out <new dir> --name-prefix <prefix>- \
-  --webhook-url https://<listener host>/webhook/github [--org <org>] \
+  --webhook-url https://<listener host>/webhook/github [--org <org>] [--public] \
   scripts/github-apps/implement.json scripts/github-apps/review.json scripts/github-apps/envoy.json
 ```
 
 `--org` registers them under an organization, which only its owners and App managers can do;
-without it they belong to the account that clicks. `--webhook-url` becomes the Envoy App's webhook,
-so that App's webhook secret is the listener's `ENVOY_GITHUB_WEBHOOK_SECRET` and its client id and
-key are Dispatch's `DISPATCH_APP_CLIENT_ID` and `DISPATCH_APP_PEM_B64`; the review App's id is the
-listener's `ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch
-read them, delete the files, then install every App from
-`https://github.com/apps/<slug>/installations/new` on the same repositories.
+without it they belong to the account that clicks. The Apps are private unless you pass
+`--public`, and GitHub lets a private App be installed only on the account that owns it. Register
+them under the one owner whose repositories Legion works, and keep them private. Pass `--public`
+only when Legion works repositories under more than one owner: then any account can install them,
+and an install of the Envoy App sends that account's repository events to your listener and adds
+an installation that Dispatch searches.
+
+`--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
+`ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
+private key, base64-encoded, is `DISPATCH_APP_PEM_B64`. The review App's id is the listener's
+`ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch read them,
+delete the files, then install every App from `https://github.com/apps/<slug>/installations/new`
+on the same repositories.
 
 ## The cluster
 

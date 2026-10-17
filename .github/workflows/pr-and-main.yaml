@@ -269,7 +269,10 @@ jobs:
       - name: Test the Dispatch census script
         run: bun test scripts/dispatch
 
-      # scripts/github-apps is no workspace either; the root `biome check .` lints it.
+      - name: Lint the GitHub App registration script
+        run: bunx biome check --error-on-warnings scripts/github-apps
+
+      # scripts/github-apps is no workspace either; the root package pins its TypeScript and Bun types.
       - name: Typecheck the GitHub App registration script
         run: bunx tsc --noEmit -p scripts/github-apps
 

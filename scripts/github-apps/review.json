@@ -1,7 +1,5 @@
 {
   "url": "https://github.com/sjawhar/legion",
-  "public": true,
-  "description": "Legion architect, planner, tester and reviewer: reviews pull requests and posts check runs.",
   "default_permissions": {
     "actions": "write",
     "checks": "write",
@@ -10,5 +8,6 @@
     "metadata": "read",
     "packages": "read",
     "pull_requests": "write"
-  }
+  },
+  "description": "Legion architect, planner, tester and reviewer: reviews pull requests and posts check runs."
 }

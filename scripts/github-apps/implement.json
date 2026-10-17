@@ -1,7 +1,5 @@
 {
   "url": "https://github.com/sjawhar/legion",
-  "public": true,
-  "description": "Legion implementer and merger: writes branches and pull requests, and merges READY heads.",
   "default_permissions": {
     "actions": "write",
     "checks": "read",
@@ -11,7 +9,7 @@
     "workflows": "write",
     "packages": "read",
     "pull_requests": "write",
-    "repository_projects": "write",
     "statuses": "write"
-  }
+  },
+  "description": "Legion implementer and merger: writes branches and pull requests, and merges READY heads."
 }

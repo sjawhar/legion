@@ -1,6 +1,13 @@
 {
   "url": "https://github.com/sjawhar/legion",
-  "public": true,
+  "default_permissions": {
+    "actions": "read",
+    "checks": "read",
+    "contents": "read",
+    "issues": "read",
+    "metadata": "read",
+    "pull_requests": "read"
+  },
   "description": "Envoy and Dispatch: delivers repository webhooks to the Envoy listener and reads GitHub for Dispatch.",
   "default_events": [
     "check_run",
@@ -12,13 +19,5 @@
     "pull_request_review_comment",
     "push",
     "workflow_run"
-  ],
-  "default_permissions": {
-    "actions": "read",
-    "checks": "read",
-    "contents": "read",
-    "issues": "read",
-    "metadata": "read",
-    "pull_requests": "read"
-  }
+  ]
 }
