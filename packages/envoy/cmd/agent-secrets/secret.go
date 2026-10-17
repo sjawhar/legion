@@ -45,19 +45,19 @@ func init() {
 	// Register after variable initialization: the handlers use commands for help.
 	secretForms = []secretForm{
 		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
-			"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."}, cmdSecretList},
+			"List every agent secret under your own cloud sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
 			"Print the agent secret NAME's owner, tier, dates and versions, never its value."}, cmdSecretShow},
 		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",
-			"Create the agent secret NAME under your own AWS sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."}, cmdSecretCreate},
+			"Create the agent secret NAME under your own cloud sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."}, cmdSecretCreate},
 		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
-			"Give the agent secret NAME a new value under your own AWS sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."}, cmdSecretSet},
+			"Give the agent secret NAME a new value under your own cloud sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."}, cmdSecretSet},
 		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--profile P]",
-			"Change the agent secret NAME's owner, tier or both under your own AWS sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."}, cmdSecretRetag},
+			"Change the agent secret NAME's owner, tier or both under your own cloud sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."}, cmdSecretRetag},
 		{command{"secret delete", "agent-secrets secret delete NAME [--profile P]",
-			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own AWS\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
+			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own cloud\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
 		{command{"secret restore", "agent-secrets secret restore NAME [--profile P]",
-			"Cancel the agent secret NAME's scheduled deletion under your own AWS sign-in, then ask\nthe broker to serve it again at once."}, cmdSecretRestore},
+			"Cancel the agent secret NAME's scheduled deletion under your own cloud sign-in, then ask\nthe broker to serve it again at once."}, cmdSecretRestore},
 	}
 	execForm := commands[len(commands)-1]
 	commands = commands[:len(commands)-1]
@@ -160,11 +160,12 @@ func secretFail(stderr io.Writer, form string, err error) int {
 // secretFlagValues are the secret forms' flags that take a value.
 var secretFlagValues = map[string]bool{"owner": true, "tier": true, "profile": true}
 
-// secretFlags is form's flag set with --profile, which every secret form takes since every one
-// calls AWS.
+// secretFlags is form's flag set with --profile, which every secret form takes but only the AWS
+// backend uses (GCP uses your Application Default Credentials instead; a non-empty --profile
+// there is a usage error, openSecretBackend).
 func secretFlags(form string, stderr io.Writer) (*flag.FlagSet, *string) {
 	flags := newFlagSet(form, stderr)
-	return flags, flags.String("profile", "", "the AWS profile to sign in with (default: AWS_PROFILE, else the AWS SDK's default credential chain)")
+	return flags, flags.String("profile", "", "the AWS profile to sign in with (AWS only; default: AWS_PROFILE, else the AWS SDK's default credential chain)")
 }
 
 // secretName is the one NAME a form takes, and its slug: the secret's name under the prefix.
@@ -476,6 +477,9 @@ func openSecretBackend(ctx context.Context, profile string, settings Settings) (
 		}
 		return &awsBackend{settings: settings, sm: sm, st: st}, nil
 	case secrets.StoreGCP:
+		if profile != "" {
+			return nil, usageErr{fmt.Errorf("--profile names an AWS profile; this broker's store is %s, which uses your Application Default Credentials (gcloud auth application-default login), not --profile", settings.Store)}
+		}
 		if err := checkSettingsKMSKeyName(settings); err != nil {
 			return nil, err
 		}
@@ -578,8 +582,8 @@ type secretView struct {
 	// EarliestPurge is the earliest Secrets Manager can purge it, set while it is scheduled for
 	// deletion (earliestPurge): restorable at least until then, perhaps longer.
 	EarliestPurge *time.Time `json:"earliest_purge,omitempty"`
-	// Versions maps each version id to its AWS staging labels; GCP leaves it empty. Only show
-	// answers it.
+	// Versions maps each version id to its AWS staging labels, or each GCP version number to its
+	// one-element state (ENABLED, DISABLED, DESTROYED). Only show answers it.
 	Versions map[string][]string `json:"versions,omitempty"`
 }
 

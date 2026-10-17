@@ -530,3 +530,16 @@ func TestOpenSecretBackendRefusesUnknownStore(t *testing.T) {
 		t.Fatalf("stderr: %q", stderr)
 	}
 }
+
+// TestOpenSecretBackendRefusesProfileOnGCP: --profile names an AWS profile; a GCP broker refuses
+// it as a usage error rather than silently ignoring it.
+func TestOpenSecretBackendRefusesProfileOnGCP(t *testing.T) {
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
+	_, stderr, code := runSecret("list", "--profile", "some-aws-profile")
+	if code != exitUsageError {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stderr, "--profile names an AWS profile") || !strings.Contains(stderr, secrets.StoreGCP) {
+		t.Fatalf("stderr: %q", stderr)
+	}
+}

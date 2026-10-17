@@ -147,9 +147,8 @@ an email (`@` and `.` are outside its alphabet), and the broker compares the own
 login byte for byte; an annotation holds the email as it is.
 
 People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
-changes them under the person's own AWS sign-in
-([manage a secret](/legion/broker/guides/manage-a-secret/)); under Secret Manager, `gcloud secrets`
-does ([operating the broker](/legion/broker/operate/#people-who-manage-secrets)).
+changes them under the person's own cloud sign-in, both stores
+([manage a secret](/legion/broker/guides/manage-a-secret/)).
 
 Who gets a secret follows from those two tags alone:
 

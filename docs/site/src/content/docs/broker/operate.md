@@ -213,7 +213,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
   `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
   `agent-secrets secret` sends one reread after each write it makes, from the person's own
-  address. When a limit refuses it, the write stands in Secrets Manager and the CLI exits 1 saying
+  address. When a limit refuses it, the write stands in the secret store and the CLI exits 1 saying
   so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag (or annotate) a
@@ -223,24 +223,24 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 
 The broker writes no secret. A person creates, changes and deletes agent secrets with
 `agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
-Secrets Manager itself under that person's own AWS sign-in, so IAM in the broker's account is what
-decides who may change which secret, and with the tags, who gets it. The CLI asks the broker only
-for its settings (`GET /v1/settings`) and, after each write, for a reread. Before anything else it
-refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
-a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. A
-person's access needs each form's permissions on the namespace's secrets, and the table says what
-each request carries that a policy's conditions can match. Against a broker on Google Secret
-Manager this release's forms refuse to run, naming the store; a person writes such a secret with
-`gcloud secrets create <id prefix><slug> --replication-policy=automatic --kms-key-name=<key>
---set-annotations=owner=<owner>,tier=<tier> --data-file=-`, the value on stdin, and then asks the
-broker to reread it with `POST /v1/secrets/<NAME>/reread`.
+the store itself under that person's own cloud sign-in - AWS, their own IAM Identity Center
+sign-in; GCP, their own Application Default Credentials, refusing a service account's - so that
+cloud's own IAM is what decides who may change which secret, and with the tags (AWS) or
+annotations (GCP), who gets it. The CLI asks the broker only for its settings (`GET
+/v1/settings`) and, after each write, for a reread. Before anything else it refuses a sign-in in
+another account or project than the agent-secrets key's, and for a write any sign-in but a
+person's own; those checks are the CLI's, and the cloud's IAM is the boundary. A person's access
+needs each form's permissions on the namespace's secrets, and the tables below say what each
+request carries that a policy's conditions can match.
+
+### AWS Secrets Manager
 
 | Form | Permissions | What a condition can match |
 | --- | --- | --- |
 | every form | `sts:GetCallerIdentity`, which needs no permission | |
 | `list` | `secretsmanager:ListSecrets` (on `*`: it takes no resource) | |
 | `show` | `secretsmanager:DescribeSecret` | The secret's own tags (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`) |
-| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); both request tags, `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` (`aws:TagKeys` is the two); the key, named by its ARN (`secretsmanager:KmsKeyArn`); the `TagResource` check made on the new secret sees the requested tags as its own (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`), so a policy that reserves a shared secret's tags for administrators still needs a statement that admits a shared create (request and resource owner both `shared`, the same tier). A secret created with `--owner shared` and `--tier agent` is served to every agent session without approval, so only a person whose access allows a shared create can create one. |
+| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); both request tags, `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` (`aws:TagKeys` is the two); the key, named by its ARN (`secretsmanager:KmsKeyArn`); the `TagResource` check made on the new secret sees the requested tags as its own (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`), so a policy that reserves a shared secret's tags for administrators still needs a statement that admits a shared create (request and resource owner both `shared`, …
 | `set` | `secretsmanager:PutSecretValue`; `kms:GenerateDataKey` on the agent-secrets key | The secret's own tags (`aws:ResourceTag/owner`) |
 | `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource` | Both request tags in every request, the unchanged one re-sent as the secret holds it, and the secret's own tags, so a policy can let a person tag their own secret (`aws:ResourceTag/owner` their email) to themselves or `shared`, and reserve a shared secret's tags for administrators |
 | `delete` | `secretsmanager:DeleteSecret` | The secret's own tags; `secretsmanager:RecoveryWindowInDays` is 30, and `secretsmanager:ForceDeleteWithoutRecovery` is never set |
@@ -254,6 +254,22 @@ compares it with a principal tag holding their email matches only where that tag
 No form calls `GetSecretValue` or prints a value. `delete` and `restore` are permissions of their
 own: an access that grants a person every other form on their own secret but not these refuses
 those two with `AccessDeniedException`.
+
+### GCP Secret Manager
+
+| Form | Permissions |
+| --- | --- |
+| `list` | `secretmanager.secrets.list` on the project |
+| `show` | `secretmanager.secrets.get` and `secretmanager.versions.list`, `secretmanager.versions.get` (for its versions and whether `versions/latest` is `ENABLED`) |
+| `create` | `secretmanager.secrets.create` and `secretmanager.versions.add`; `cloudkms.cryptoKeyVersions.useToEncrypt` on the CMEK key (automatic replication encrypts with it) |
+| `set` | `secretmanager.versions.add` |
+| `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update` (both owner and tier annotations in one call, the unchanged one re-sent as the secret holds it) |
+| `delete` | `secretmanager.secrets.update` (sets `expire_time` to 30 days out) |
+| `restore` | `secretmanager.secrets.update` (clears `expire_time`) |
+
+`secretmanager.secrets.get`/`.update` are each granted per secret or per project; a role bound at
+the project scoped to the agent-secrets prefix (an IAM condition on the resource name) is the GCP
+counterpart of AWS's per-tag conditions above.
 
 ## Health and logs
 
