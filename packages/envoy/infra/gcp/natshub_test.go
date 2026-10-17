@@ -386,15 +386,16 @@ func TestNatsHubRegistersEveryChildWithTheListedInputs(t *testing.T) {
 	require.Equal(t, "example-hub-group", instanceGroup, "instanceGroup is the group's name")
 }
 
-func TestNatsHubDaemonUserGetsDaemonPermissions(t *testing.T) {
+func TestNatsHubDaemonUserGetsItsProjectsDaemonPermissions(t *testing.T) {
 	args := exampleArgs()
-	args.Users = []gcp.NATSUserArgs{{Name: "example-daemon", NKey: keyA, Daemon: true}}
+	args.Users = []gcp.NATSUserArgs{{Name: "example-daemon", NKey: keyA, DaemonProject: pulumi.StringRef("ACME")}}
 	args.Listener = nil
 	args.SessionUser = nil
 
 	doc, _, err := gcp.CloudConfigOf(args)
 	require.NoError(t, err)
-	grant := core.DaemonPermissions()
+	grant, err := core.DaemonPermissions("ACME")
+	require.NoError(t, err)
 	want, err := core.Authorization{Users: []core.User{{
 		Name: "example-daemon", NKey: keyA, Publish: &grant.Publish, Subscribe: &grant.Subscribe, HasSeed: true,
 	}}}.Render([]string{"Rendered by envoy-infra. Public keys only."})
@@ -642,19 +643,26 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			err: []string{`users[0]: machineId and permissions are both set`},
 		},
 		{
-			name: "a user naming both a machine id and daemon",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[0].Daemon = true },
-			err:  []string{`users[0]: machineId and daemon are both set`},
+			name: "a user naming both a machine id and a daemon project",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[0].DaemonProject = pulumi.StringRef("ACME") },
+			err:  []string{`users[0]: machineId and daemonProject are both set`},
 		},
 		{
-			name: "a user naming both daemon and permissions",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Daemon = true },
-			err:  []string{`users[1]: daemon and permissions are both set`},
+			name: "a user naming both a daemon project and permissions",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[1].DaemonProject = pulumi.StringRef("ACME") },
+			err:  []string{`users[1]: daemonProject and permissions are both set`},
+		},
+		{
+			name: "a daemon project that is not a project key",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Users[1].Permissions, a.Users[1].DaemonProject = nil, pulumi.StringRef("ACME.>")
+			},
+			err: []string{`users[1]: daemonProject: the daemon's project must be a Legion project key`},
 		},
 		{
 			name: "a user naming neither a machine id nor permissions",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions = nil },
-			err:  []string{`users[1]: name machineId, daemon, or permissions`},
+			err:  []string{`users[1]: name machineId, daemonProject, or permissions`},
 		},
 		{
 			name: "a user with an empty machine id",
@@ -753,6 +761,9 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a machine id split by a space", "users[0].machineId", func(a *gcp.NatsHubArgs) {
 			a.Users[0].MachineID = pulumi.StringRef(splitSeed(seed, " "))
 		}},
+		{"a lowercase daemon project", "users[1].daemonProject", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions, a.Users[1].DaemonProject = nil, pulumi.StringRef(lower)
+		}},
 	})
 }
 
@@ -795,7 +806,7 @@ func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
 		}, "users[1]: machineId and permissions are both set; name one"},
 		{"a seed as the name of a user naming neither", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Name, a.Users[1].Permissions = lower, nil
-		}, "users[1]: name machineId, daemon, or permissions"},
+		}, "users[1]: name machineId, daemonProject, or permissions"},
 		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
 			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
 		}, "users[0]: machineId is empty"},

@@ -1266,22 +1266,32 @@ name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
 The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemon_nkey_seed_file`
 (relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else
 `NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's
-connection authenticates as. That user's grants, which `legion-pane` does not hold, cover what
-the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
-`$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
-`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
-two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
-the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
-lets the seed create a push consumer that delivers stream messages to any subject), and
-subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>` (which receives
-every reply any client on the server gets, key-value reads and watch updates included, such as
-the listener's `envoy_roles` and `envoy_sessions` watchers). It publishes on no core
-subject: role and controller notices go to the Envoy listener over HTTP, and control directives
-over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified
-live: a server granting exactly them logged no refusal across a boot creating both durables, a
-restart onto the existing ones, Dispatch and GitHub events acknowledged and a poison message
-terminated, and its trace showed no other API subject (no `$JS.API.INFO`, no
-`CONSUMER.DURABLE.CREATE`, which the TypeScript daemon uses instead). It is read by the same rule
+connection authenticates as, one per project, since its grant names the project. That user's
+grants, which `legion-pane` does not hold, are what the connection uses, `<p>` being the project:
+publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`; for its Dispatch consumer
+`legion-go-<p>-dispatch`, `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch`,
+`$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch.notifications.dispatch.issue.>`
+(nats.go puts a consumer's one filter on the end of its create subject),
+`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch` and
+`$JS.ACK.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch.>`; for its GitHub consumer
+`legion-go-<p>-github`, the same four with `legion-go-<p>-github` and a create subject that ends
+at the name, since that consumer has a filter per repository; and subscribe
+`notifications.envoy.exceptions.notifications.role.*` and `_INBOX_legion_daemon_<p>.>`, the
+connection's own reply inbox (`daemonpermissions.InboxPrefix`), which the daemon takes only when
+it connects as that user: as `legion-pane`, or with no credential, it keeps nats.go's `_INBOX.`.
+Those names are built in one place, `packages/envoy/daemonpermissions`, which the daemon's intake
+and the hub's rendering both read. The grant reaches no other consumer of the stream, each host's
+listener consumer and another project's daemon consumers included, and no other client's replies;
+through its own two consumers the seed still reads the whole stream and can have its messages
+delivered to any subject (`docs/site/src/content/docs/dispatch/envoy.md`, "The NATS grant a
+Legion daemon needs", says how). It publishes on no core subject: role and controller notices go
+to the Envoy listener over HTTP, and control directives over the worker stream, so the Go daemon
+needs no `legion.ctl` grant. `packages/daemon/internal/daemon/nats_permissions_test.go` runs the
+daemon's consumers under exactly this grant on the server images the hub runs: a boot creating both
+durables, a restart onto them, Dispatch and GitHub events nacked and acknowledged and a role-lane
+exception received with no refusal, every entry of the grant admitting a subject the server's trace
+shows the daemon sending, and the refusals of a grant missing one entry, of another consumer's
+create and of `_INBOX.>`. It is read by the same rule
 and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane
@@ -1380,15 +1390,16 @@ wait on that same API, so none of them succeeds until the daemon actually serves
 `gh` and `git` do not, since they read the role's credential from its gh files and call the daemon
 for nothing.
 
-Rollout order for the server's `legion-daemon` user: the server admits
-`legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
-every daemon gets it and restarts, and its `legion daemon connects to NATS` line must read
+Rollout order for the server's `legion-daemon` users, one per project: the server admits each
+(its public key applied) with its project's grant first; then its seed is stored, that project's
+daemon gets it and restarts, and its `legion daemon connects to NATS` line must read
 `paneUser=false` (#1494). Only then is the `legion-pane` seed written. A clean boot line
 proves the user, not every grant: the check before the pane seed is written also has each daemon
 consume a Dispatch and a GitHub event with no error
 line, and searches each daemon's log for `NATS refused the daemon`, since a missing grant on the
-exceptions lane (`notifications.envoy.exceptions.notifications.role.>`) still boots healthy and
-consumes both events, and that error line is its only sign. `legion-pane` is never granted the
+exceptions lane (`notifications.envoy.exceptions.notifications.role.*`) still boots healthy and
+consumes both events, and that error line is its only sign. A daemon given another project's seed
+refuses its boot, the refused consumer request logged the same way. `legion-pane` is never granted the
 daemon's subjects above. Reversed, a daemon holding only the `legion-pane` seed connects as
 `legion-pane`, and each refused subject logs the error line above (a refused consumer or
 subscription never delivers).

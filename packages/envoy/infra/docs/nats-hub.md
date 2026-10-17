@@ -58,7 +58,7 @@ The hub refuses these before it registers anything, with an error naming the inp
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in the
   hub's own name or an input it carries into the user data, a child or a refusal: `hostname`, a
-  tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId`, or the listener's
+  tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId` or `daemonProject`, or the listener's
   `image` or `seedSecret`. The error names the input by its path and never its value, as
   `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
   seed in the hub's own name as `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed
@@ -101,14 +101,17 @@ The hub refuses these before it registers anything, with an error naming the inp
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
   listener's own `machineId`: the set names that machine's durable consumer and queue group.
-- `daemon: true`: the dedicated user of one Legion daemon, granted `DaemonPermissions()` (see
-  [Permission sets](../README.md#permission-sets)). Its seed belongs only to that daemon.
+- `daemonProject`: the dedicated user of one Legion project's daemon, granted
+  `DaemonPermissions(daemonProject)` (see [Permission sets](../README.md#permission-sets)). Give it
+  the project key the daemon's `legion.yaml` names as `project`: the set names that project's two
+  durable consumers and its own reply inbox, so each project's daemon needs a user of its own. Its
+  seed belongs only to that daemon.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
   `deny` list of subject patterns, for any other client.
 
-`daemon: false` selects no permission set. `nats:Rules` is the one rules type every NATS component
-takes, whatever its cloud, and `nkey` is named as `aws:NatsService`'s users name it, so the two
-components spell a user's key and rules alike.
+`nats:Rules` is the one rules type every NATS component takes, whatever its cloud, and `nkey` is
+named as `aws:NatsService`'s users name it, so the two components spell a user's key and rules
+alike.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
@@ -133,9 +136,11 @@ policy is the gate on 4222: which devices it lets reach the hub's 4222 decides w
 A `listener` opens a second door, port 9020, with or without a session user, and it grants far
 more ([The hub's listener](#the-hubs-listener)).
 
-A user is refused when it names more than one of `machineId`, `daemon: true` and `permissions`, or
-none, or when its `machineId` or `nkey` is empty, named by its index alone, as
-`users[1]: nkey is required`, since these come before the authorization has checked the names. It is refused too for each of the
+A user is refused when it names more than one of `machineId`, `daemonProject` and `permissions`,
+or none, when its `machineId` or `nkey` is empty, or when its `daemonProject` is not a Legion
+project key (`^[A-Z][A-Z0-9]*$`, as `users[1]: daemonProject: the daemon's project must be a
+Legion project key (^[A-Z][A-Z0-9]*$)`), named by its index alone, as `users[1]: nkey is
+required`, since these come before the authorization has checked the names. It is refused too for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a

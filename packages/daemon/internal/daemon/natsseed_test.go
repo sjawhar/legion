@@ -134,17 +134,19 @@ func TestTheWorkflowConnectsAsTheDaemonSeedOverThePaneSeed(t *testing.T) {
 
 // chooseNATSConnection picks the daemon seed, else the pane seed, else none, and its one line says
 // which user that is and whether it is the pane user, the daemon seed naming the pane user included.
+// Only the daemon's own user, one the pane seed is not, takes the daemon's reply inbox.
 func TestChooseNATSConnectionNamesTheUserTheDaemonConnectsAs(t *testing.T) {
 	daemonSeed, daemonUser := testnats.User(t)
 	paneSeed, paneUser := testnats.User(t)
 	for _, tc := range []struct {
 		name, daemon, pane, paneUser, seed, line string
+		ownUser                                  bool
 	}{
-		{"both", daemonSeed, paneSeed, paneUser, daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon"},
-		{"the daemon seed alone", daemonSeed, "", "", daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon"},
-		{"a daemon seed that is the pane seed", paneSeed, paneSeed, paneUser, paneSeed, "user=" + paneUser + " paneUser=true seed=daemon"},
-		{"the pane seed alone", "", paneSeed, paneUser, paneSeed, "user=" + paneUser + " paneUser=true seed=pane"},
-		{"neither", "", "", "", "", `user="" paneUser=false seed=none`},
+		{"both", daemonSeed, paneSeed, paneUser, daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon", true},
+		{"the daemon seed alone", daemonSeed, "", "", daemonSeed, "user=" + daemonUser + " paneUser=false seed=daemon", true},
+		{"a daemon seed that is the pane seed", paneSeed, paneSeed, paneUser, paneSeed, "user=" + paneUser + " paneUser=true seed=daemon", false},
+		{"the pane seed alone", "", paneSeed, paneUser, paneSeed, "user=" + paneUser + " paneUser=true seed=pane", false},
+		{"neither", "", "", "", "", `user="" paneUser=false seed=none`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			nc, err := chooseNATSConnection(tc.daemon, tc.pane, tc.paneUser)
@@ -152,6 +154,9 @@ func TestChooseNATSConnectionNamesTheUserTheDaemonConnectsAs(t *testing.T) {
 			name := map[string]string{daemonSeed: "the daemon seed", paneSeed: "the pane seed", "": "none"}
 			if err != nil || nc.seed != tc.seed {
 				t.Fatalf("chooseNATSConnection = %s, %v; want %s", name[nc.seed], err, name[tc.seed])
+			}
+			if nc.ownUser() != tc.ownUser {
+				t.Errorf("ownUser = %v, want %v", nc.ownUser(), tc.ownUser)
 			}
 			var out bytes.Buffer
 			nc.log(slog.New(slog.NewTextHandler(&out, nil)))

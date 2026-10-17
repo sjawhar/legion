@@ -103,7 +103,8 @@ versions. Never add the module to the root `go.work`.
   with `network`; `network`, `subnetwork` and the secret `tailnetAuthKey` are checked for a seed
   once they resolve (`gcp.refuseSeed`, `gcp.refuseSeedInSecret`, which keeps the key secret and
   never quotes it). Its resolver refuses a seed in every string input the hub itself carries
-  first (`gcp.seededInput`: hostname, tags, zone, machine type, images, each user's machine id),
+  first (`gcp.seededInput`: hostname, tags, zone, machine type, images, each user's machine id and
+  daemon project),
   naming the input's path and never its value; a string input added to the hub joins that list,
   with a row in `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and rule entries are
   core's to refuse, and the hub's own user refusals, which run before core's, name a user by its

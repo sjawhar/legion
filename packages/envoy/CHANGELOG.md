@@ -385,6 +385,24 @@
 
 ### Changed
 
+- **Breaking (envoy-infra):** a `gcp:NatsHub` daemon user names its Legion project, and its
+  grant reaches only that project's daemon. The `daemon` field is gone from `gcp:NatsUser`.
+  Set `daemonProject: <project key>` instead, one user per project's daemon,
+  each with a seed of its own, since a user's grant now names its project's two durable consumers
+  (`legion-go-<project>-dispatch` and `-github`, the Dispatch one's create with its filter
+  `notifications.dispatch.issue.>`) and its own reply inbox, `_INBOX_legion_daemon_<project>.>`,
+  where the daemon connected as that user now takes its replies, in place of every consumer of
+  the stream and `_INBOX.>`. Its exceptions subscription is
+  `notifications.envoy.exceptions.notifications.role.*`, the subject the daemon subscribes to.
+  `core.DaemonPermissions(project)` and `daemonpermissions.Grant(project)` take the project and
+  refuse anything but a Legion project key. To migrate a hub whose daemons share one
+  `daemon: true` user: generate a seed per project (`envoy-infra seed generate`), give each a
+  `daemonProject` user, apply the hub, then hand each daemon its own seed
+  (`nats_daemon_nkey_seed_file`) and restart it onto a Legion built from this release, whose
+  daemon takes its own reply inbox: an older daemon still replies on `_INBOX.` and is refused
+  under the new grant, and a new daemon under the old grant is refused its inbox. Remove the
+  shared user once every daemon runs on its own.
+
 - An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
   a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,
   a loopback address (`127.0.0.0/8`, `::1`) or a name in the new `ENVOY_ALLOWED_HOSTS`

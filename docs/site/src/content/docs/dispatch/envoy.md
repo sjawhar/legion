@@ -92,33 +92,50 @@ exception naming the reason: `no_holder`, `delivery_failed`, or `receipt_timeout
 Legion's daemon reads Dispatch and GitHub events from the stream through two durable consumers
 per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.issue.>`) and
 `legion-go-<project>-github` (filtering each of the project's repositories). It sends its own
-notices to roles and to the controller through the listener's HTTP API, not over NATS.
+notices to roles and to the controller through the listener's HTTP API, not over NATS. Connected
+as its own NATS user, it takes its replies on an inbox of its own, `_INBOX_legion_daemon_<project>`,
+rather than the `_INBOX` every other client shares.
 
-So the NATS user the daemon connects as needs these permissions:
+So the NATS user one project's daemon connects as needs these permissions, `<p>` being the
+project key:
 
 | Publish | Subscribe |
 | --- | --- |
-| `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS` | `notifications.envoy.exceptions.notifications.role.>` |
-| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>` | `_INBOX.>` |
-| `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>` | |
-| `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` | |
-| `$JS.ACK.ENVOY_NOTIFICATIONS.>` | |
+| `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS` | `notifications.envoy.exceptions.notifications.role.*` |
+| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch` | `_INBOX_legion_daemon_<p>.>` |
+| `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch.notifications.dispatch.issue.>` | |
+| `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch` | |
+| `$JS.ACK.ENVOY_NOTIFICATIONS.legion-go-<p>-dispatch.>` | |
+| `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.legion-go-<p>-github` | |
+| `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.legion-go-<p>-github` | |
+| `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.legion-go-<p>-github` | |
+| `$JS.ACK.ENVOY_NOTIFICATIONS.legion-go-<p>-github.>` | |
 
-The last row is the subject a consumer acknowledges a message on. Replies to the API requests come
-back on `_INBOX.>`.
+The `$JS.ACK` rows are the subjects a consumer acknowledges a message on. The client library puts
+a consumer's one filter subject on the end of its create request, so the Dispatch consumer's create
+names its filter, and the server refuses a create whose filter is another; the GitHub consumer has
+a filter per repository, so its create names the consumer alone.
 
-The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
-not just the daemon's two: a holder of the daemon's seed can read, recreate with another filter,
-and drain any consumer of the stream, every host's listener consumer and another project's daemon
-consumers included. It can also create a push consumer whose delivery subject is any subject at
-all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,
-other clients' inboxes, `agentstream.*.control`. Treat the daemon's seed as a credential of the
-whole stream and of every subject a push consumer can deliver to. Its `_INBOX.>` subscription
-also receives every reply any client on the server gets, key-value reads and watch updates
-included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
+The grant names one project's two consumers and nothing else of the stream: it reads, creates,
+deletes and drains no other consumer, neither a host's listener consumer nor another project's
+daemon consumers, and its replies reach it alone. What it still reaches through its own two
+consumers:
 
-When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
-`core.DaemonPermissions()` instead of a host's or an explicit user's grant.
+- **Every message of the stream.** The GitHub consumer's filters are in its request body, not its
+  subject, so the seed can update that consumer to filter any of the stream's subjects and read
+  them, and the Dispatch consumer reads every project's Dispatch issue events, as it always does.
+- **Delivery to subjects it may not publish to.** The server delivers a pull consumer's messages
+  to the reply subject of the next-message request, which the client chooses, so the seed can have
+  the stream's messages sent to any subject, such as a role lane or `agentstream.*.control`. While
+  one of its consumer names does not exist (before the daemon's first boot, or once someone else
+  deletes it), the seed can also create it as a push consumer delivering to any subject the stream
+  does not itself capture. It cannot turn its existing pull consumers into push consumers; the
+  server refuses that update. Treat the daemon's seed as a credential that reads the whole stream
+  and can have its messages delivered anywhere.
+
+When `envoy-infra:gcp:NatsHub` renders this user, set its `daemonProject` field to the project
+key; that selects `core.DaemonPermissions(<project>)` instead of a host's or an explicit user's
+grant. Each project's daemon needs a NATS user of its own.
 
 The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same two
 consumers written against another client library ask for different ones. So a grant is proven by
@@ -127,8 +144,11 @@ refusal: create both consumers, restart onto them, and have Dispatch and GitHub 
 acknowledged. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
 subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that
-proof against the server images the hub runs, and `docs/kubernetes.md` says how the daemon's
-credential is configured.
+proof against the server images the hub runs: it reads every subject the daemon published and
+subscribed to from the server's trace and requires each entry of the grant to admit one of them,
+shows that removing an entry the daemon uses brings its refusal, and shows the grant refusing
+another consumer's create and a subscription to `_INBOX.>`. `docs/kubernetes.md` says how the
+daemon's credential is configured.
 
 ## Running the listener
 
