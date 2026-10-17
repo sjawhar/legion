@@ -12,8 +12,8 @@ the default branch and nothing there reads a handoff, and READY refuses a head t
 carries them. After the approval, only retro's commits leave it standing on their own: those that
 change only `docs/solutions/`, and that removal (*Retro*, below). A conflict-forced merge goes back
 to the reviewer for a confirmation or a new round, as the fingerprint decides (*The reviewer*,
-below, and `skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change to
-the head voids it.
+below, and `skill://legion-worker/references/conflicts-and-rewrites.md`), unless READY refused
+it, and any other change to the head voids it.
 
 ## The reviewer
 
@@ -100,9 +100,11 @@ reviewing until you finish.
   merger — never back to the tester or reviewer. Anything else above the approved head does void
   it: READY is refused `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the
   architect, who has it send the head back to review instead of completing, the move's reason
-  naming the refusal's code and what it found. A conflict merge after retro brings the base's paths above
-  the approved head, so READY refuses it the same way. Either return reaches the
-  reviewer as a new round, never a fingerprint confirmation. Every approval moves the issue to
+  naming the refusal's code and what it found. A conflict merge pushed above the approved head
+  with no review round after it brings the base's paths above that head, so READY refuses it the
+  same way; one sent back through `implementing` by the conflict procedure gets its confirmation
+  before READY runs. A READY refusal's return reaches the reviewer as a new round, never a
+  fingerprint confirmation. Every approval moves the issue to
   retro again, so each retro ends with the removal again.
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
