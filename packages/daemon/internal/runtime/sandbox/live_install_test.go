@@ -50,11 +50,29 @@ func (r *liveRig) checkIdentity() error {
 	if user.Username == operator.Status.UserInfo.Username {
 		return fmt.Errorf("the runtime context authenticates as the operator (%s); refusing to start", user.Username)
 	}
-	if !regexp.MustCompile(`:assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/`).MatchString(user.Username) {
-		return fmt.Errorf("the runtime identity %s is not the assumed Legion daemon role", user.Username)
-	}
-	if !slices.Contains(user.Groups, "legion-daemon") {
-		return fmt.Errorf("the runtime identity is not in group legion-daemon: %v", user.Groups)
+	switch r.env.runtimeIdentityKind {
+	case "aws-iam-role":
+		if !regexp.MustCompile(`:assumed-role/[A-Za-z0-9+=,.@_-]*legion-daemon/`).MatchString(user.Username) {
+			return fmt.Errorf("the runtime identity %s is not the assumed Legion daemon role", user.Username)
+		}
+		if !slices.Contains(user.Groups, "legion-daemon") {
+			return fmt.Errorf("the runtime identity is not in group legion-daemon: %v", user.Groups)
+		}
+	case "kubernetes-service-account":
+		// GKE's shape: no IAM role or aws-auth mapping, so the identity is the bare ServiceAccount
+		// Kubernetes itself authenticates, in the groups every ServiceAccount of the namespace
+		// carries (no legion-daemon RBAC group is minted for it).
+		want := "system:serviceaccount:" + r.env.namespace + ":legion-daemon"
+		if user.Username != want {
+			return fmt.Errorf("the runtime identity is %s, not the daemon's ServiceAccount %s", user.Username, want)
+		}
+		for _, group := range []string{"system:serviceaccounts", "system:serviceaccounts:" + r.env.namespace} {
+			if !slices.Contains(user.Groups, group) {
+				return fmt.Errorf("the runtime identity is not in group %s: %v", group, user.Groups)
+			}
+		}
+	default:
+		return fmt.Errorf("LEGION_E2E_RUNTIME_IDENTITY_KIND %q is neither aws-iam-role nor kubernetes-service-account", r.env.runtimeIdentityKind)
 	}
 
 	_, err = r.kube.CoreV1().Secrets(r.env.namespace).List(ctx, metav1.ListOptions{Limit: 1})

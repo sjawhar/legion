@@ -76,7 +76,7 @@ var liveChecks = []liveCheck{
 	{"root-ready", (*liveRig).checkRootReady, nil},
 	{"gvisor", (*liveRig).checkGVisor, nil},
 	{"resources", (*liveRig).checkResources, nil},
-	{"operator-token", (*liveRig).checkOperatorToken, nil},
+	{"operator-token", (*liveRig).checkOperatorToken, operatorTokenBlocked},
 	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
@@ -191,6 +191,10 @@ func overridden(role claim.Role, name corev1.ResourceName) bool {
 const (
 	liveProviderKey        = "STAGE4A_PROVIDER_KEY"
 	liveProvidersSecretKey = "stage4a"
+	// liveAnthropicKeyVariable is both the providers Secret's key and the variable Oh My Pi reads
+	// it as, under LEGION_E2E_MODEL_ROUTE=key-file (runtimeOptions): mirroring the live GKE route's
+	// shape, where provider_keys names ANTHROPIC_API_KEY directly rather than a gateway.
+	liveAnthropicKeyVariable = "ANTHROPIC_API_KEY"
 )
 
 // fixtureConfigMap is the ConfigMap the operator fixture's pod.yml names; each run creates its own
@@ -207,11 +211,30 @@ var stubAgent = []string{"/bin/sh", "-c", `printf '%s:%s/%s\n' "$LEGION_ROLE" "$
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
-	namespace, project, claimProject, image            string
-	repo                                               ghrepo.Repository
-	streamHost, streamPort                             string
-	appID, appKeyName                                  string
-	record, work, from                                 string
+	namespace, project, claimProject, image             string
+	repo                                                 ghrepo.Repository
+	// streamHost is where the harness's own listener binds: the devbox's private address directly
+	// reachable from pods (AWS mode), or loopback behind the reverse-tunnel bridge every pod
+	// instead dials by streamAdvertiseHost (GKE mode, LEGION_E2E_POD_REACHABILITY=bridge). Every
+	// pod's shim is handed streamAdvertiseHost, never streamHost, when the two differ.
+	streamHost, streamAdvertiseHost, streamPort string
+	appID, appKeyName                           string
+	// storageClass is the issue volumes' StorageClass: AWS's gp2, GKE's standard-rwo, or whatever
+	// else the cluster under test defaults issue volumes to. No default of its own: the plan
+	// behind LEGION_E2E_STORAGE_CLASS is the operator's to pick, never this harness's to guess.
+	storageClass string
+	// modelRoute is LEGION_E2E_MODEL_ROUTE: "gateway" (the operator route's pod.yml/models.yml,
+	// a projected ServiceAccount token authenticating to a model gateway) or "key-file" (no
+	// gateway: ANTHROPIC_API_KEY reaches the agent as a provider key the providers Secret holds,
+	// mirroring the live GKE route's shape). readLiveEnv refuses any other value.
+	modelRoute string
+	// runtimeIdentityKind is LEGION_E2E_RUNTIME_IDENTITY_KIND: "aws-iam-role" (an assumed IAM role
+	// mapped to the legion-daemon RBAC group, EKS's shape) or "kubernetes-service-account" (a
+	// plain system:serviceaccount:<namespace>:legion-daemon identity, GKE's shape with no IAM
+	// mapping involved). checkIdentity's assertions branch on it; readLiveEnv refuses any other
+	// value.
+	runtimeIdentityKind string
+	record, work, from  string
 	// operatorPodFile is the run's copy of deploy/kubernetes/operator-route/pod.yml, its token
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
@@ -254,7 +277,11 @@ func readLiveEnv(t *testing.T) liveEnv {
 		project:               get("LEGION_E2E_PROJECT"),
 		image:                 get("LEGION_E2E_IMAGE"),
 		streamHost:            get("LEGION_E2E_STREAM_HOST"),
+		streamAdvertiseHost:   get("LEGION_E2E_STREAM_ADVERTISE_HOST"),
 		streamPort:            get("LEGION_E2E_STREAM_PORT"),
+		storageClass:          get("LEGION_E2E_STORAGE_CLASS"),
+		modelRoute:            get("LEGION_E2E_MODEL_ROUTE"),
+		runtimeIdentityKind:   get("LEGION_E2E_RUNTIME_IDENTITY_KIND"),
 		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
 		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY"),
 		record:                get("LEGION_E2E_RECORD"),
@@ -280,6 +307,14 @@ func readLiveEnv(t *testing.T) liveEnv {
 		t.FailNow()
 	}
 	env.repo = repo
+	if env.modelRoute != "gateway" && env.modelRoute != "key-file" {
+		fmt.Printf("CHECK identity: FAIL: LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not %q\n", env.modelRoute)
+		t.FailNow()
+	}
+	if env.runtimeIdentityKind != "aws-iam-role" && env.runtimeIdentityKind != "kubernetes-service-account" {
+		fmt.Printf("CHECK identity: FAIL: LEGION_E2E_RUNTIME_IDENTITY_KIND must be aws-iam-role or kubernetes-service-account, not %q\n", env.runtimeIdentityKind)
+		t.FailNow()
+	}
 	if !strings.HasPrefix(env.project, "s4a-") {
 		fmt.Printf("CHECK identity: FAIL: the run project %q lacks the reserved prefix s4a-\n", env.project)
 		t.FailNow()
@@ -785,8 +820,15 @@ func sameLocator(a, b runtime.Locator) bool {
 // them: the operator's pod, the run's provider key, the stub agent, and the worker stream at
 // address, through ln.
 func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
+	providerKeys := map[string]string{liveProviderKey: liveProvidersSecretKey}
+	if r.env.modelRoute == "key-file" {
+		// Mirrors the live GKE route's shape: ANTHROPIC_API_KEY is a providers-Secret key of its
+		// own name, which the shim exports into the agent's environment alongside
+		// STAGE4A_PROVIDER_KEY, and the run's key-file models.yml reads it back from there.
+		providerKeys[liveAnthropicKeyVariable] = liveAnthropicKeyVariable
+	}
 	opts := Options{
-		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", IssueVolume: liveIssueVolume,
+		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: r.env.storageClass, IssueVolume: liveIssueVolume,
 		Resources: liveResources(),
 		StreamURL: address,
 		Tools: Tools{
@@ -796,7 +838,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		// Stage4a drives Runtime directly to prove Kubernetes mechanics; the daemon's store is the
 		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
 		Store: r.trees,
-		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
+		Pod:   r.pod, ProviderKeys: providerKeys,
 		Agent: stubAgent, BootTimeout: liveBootTimeout, BusyBackoff: 250 * time.Millisecond,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
@@ -807,13 +849,20 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 	return opts
 }
 
-// streamAddress is the worker stream's address on the devbox's private address: every runtime of
-// the run is built on it, and every pod's shim dials it.
-func (r *liveRig) streamAddress() string { return "tcp://" + r.env.streamHost + ":" + r.env.streamPort }
+// streamBindAddress is where the harness's own listener binds: the devbox's private address
+// directly in AWS mode, or loopback behind the reverse-tunnel bridge in GKE mode
+// (LEGION_E2E_POD_REACHABILITY=bridge), since nothing outside the devbox needs to reach this
+// address directly there — the bridge's pod and Service do that instead.
+func (r *liveRig) streamBindAddress() string { return "tcp://" + r.env.streamHost + ":" + r.env.streamPort }
 
-// startRuntime binds a fresh listener on the devbox's private address, builds a fresh runtime on
-// it and registers the runtime's launcher acceptor, as a daemon boot does (sandboxRuntime), with an
-// Observe feeding the run's observation record.
+// streamAddress is the worker stream's address every pod's shim dials: the devbox's private
+// address directly in AWS mode, or the reverse-tunnel bridge's in-cluster Service in GKE mode.
+// Every runtime of the run is built on it.
+func (r *liveRig) streamAddress() string { return "tcp://" + r.env.streamAdvertiseHost + ":" + r.env.streamPort }
+
+// startRuntime binds a fresh listener on streamBindAddress, builds a fresh runtime whose pods are
+// handed streamAddress to dial, and registers the runtime's launcher acceptor, as a daemon boot
+// does (sandboxRuntime), with an Observe feeding the run's observation record.
 func (r *liveRig) startRuntime() error {
 	if r.tokens.apps == nil {
 		if err := r.resolveApp(); err != nil {
@@ -821,14 +870,14 @@ func (r *liveRig) startRuntime() error {
 		}
 	}
 	ctx, stop := context.WithCancel(r.ctx)
-	address := r.streamAddress()
-	ln, err := stream.Listen(ctx, address, r.reg.resolve, stream.Options{RPCTimeout: 30 * time.Second, Log: r.log})
+	bind := r.streamBindAddress()
+	ln, err := stream.Listen(ctx, bind, r.reg.resolve, stream.Options{RPCTimeout: 30 * time.Second, Log: r.log})
 	if err != nil {
 		stop()
 		holder, _ := exec.Command("ss", "-Hltnp", "sport = :"+r.env.streamPort).CombinedOutput()
-		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
+		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", bind, err, strings.TrimSpace(string(holder)))
 	}
-	opts := r.runtimeOptions(address, ln)
+	opts := r.runtimeOptions(r.streamAddress(), ln)
 	rt, err := New(ctx, r.rc, opts)
 	if err != nil {
 		stop()
@@ -1120,10 +1169,18 @@ func (r *liveRig) awaitHelloAgain(c *liveClaim, since time.Time) (registration, 
 	return reg, nil
 }
 
-// networkPathFailure names what a pod that runs but never says hello points at: the devbox
-// address and port it dials, and the security groups of the node it runs on (from the node's
-// EC2NodeClass, read as the operator).
+// networkPathFailure names what a pod that runs but never says hello points at: the address and
+// port it dials, and, under the AWS identity (aws-iam-role), the security groups of the node it
+// runs on (from the node's EC2NodeClass, read as the operator) — Karpenter's EC2NodeClass CRD
+// exists only there. Under a plain kubernetes-service-account identity (GKE), that diagnostic has
+// nothing to read, so the message instead points at the reverse-tunnel bridge
+// (scripts/e2e/lib/bridge-tunnel.sh), whose chisel client or kubectl port-forward dying is what a
+// network-path failure there actually means.
 func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
+	if r.env.runtimeIdentityKind != "aws-iam-role" {
+		return fmt.Errorf("network path: pod %s (uid %s) runs on node %s but no hello reached tcp://%s:%s within %s; check that the reverse-tunnel bridge is still up (its chisel client and kubectl port-forward processes, and the bridge pod's log, scripts/e2e/lib/bridge-tunnel.sh)",
+			pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamAdvertiseHost, r.env.streamPort, liveBootTimeout)
+	}
 	nodeClass, err := r.kubectl("get", "node", pod.Spec.NodeName, "-o", `jsonpath={.metadata.labels.karpenter\.k8s\.aws/ec2nodeclass}`)
 	groups := "(unknown: " + fmt.Sprint(err) + ")"
 	if err == nil {
@@ -1134,7 +1191,7 @@ func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
 		}
 	}
 	return fmt.Errorf("network path: pod %s (uid %s) runs on node %s but no hello reached tcp://%s:%s within %s; the node's security groups are [%s], and the devbox's security group must admit %s from them",
-		pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamHost, r.env.streamPort, liveBootTimeout, groups, r.env.streamPort)
+		pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamAdvertiseHost, r.env.streamPort, liveBootTimeout, groups, r.env.streamPort)
 }
 
 // suspend is a role-process stop. It leaves the issue pod in place; its launcher reports the
