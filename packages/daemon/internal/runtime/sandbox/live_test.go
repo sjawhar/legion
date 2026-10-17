@@ -211,8 +211,8 @@ var stubAgent = []string{"/bin/sh", "-c", `printf '%s:%s/%s\n' "$LEGION_ROLE" "$
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
-	namespace, project, claimProject, image             string
-	repo                                                 ghrepo.Repository
+	namespace, project, claimProject, image            string
+	repo                                               ghrepo.Repository
 	// streamHost is where the harness's own listener binds: the devbox's private address directly
 	// reachable from pods (AWS mode), or loopback behind the reverse-tunnel bridge every pod
 	// instead dials by streamAdvertiseHost (GKE mode, LEGION_E2E_POD_REACHABILITY=bridge). Every
@@ -858,12 +858,16 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 // directly in AWS mode, or loopback behind the reverse-tunnel bridge in GKE mode
 // (LEGION_E2E_POD_REACHABILITY=bridge), since nothing outside the devbox needs to reach this
 // address directly there — the bridge's pod and Service do that instead.
-func (r *liveRig) streamBindAddress() string { return "tcp://" + r.env.streamHost + ":" + r.env.streamPort }
+func (r *liveRig) streamBindAddress() string {
+	return "tcp://" + r.env.streamHost + ":" + r.env.streamPort
+}
 
 // streamAddress is the worker stream's address every pod's shim dials: the devbox's private
 // address directly in AWS mode, or the reverse-tunnel bridge's in-cluster Service in GKE mode.
 // Every runtime of the run is built on it.
-func (r *liveRig) streamAddress() string { return "tcp://" + r.env.streamAdvertiseHost + ":" + r.env.streamPort }
+func (r *liveRig) streamAddress() string {
+	return "tcp://" + r.env.streamAdvertiseHost + ":" + r.env.streamPort
+}
 
 // startRuntime binds a fresh listener on streamBindAddress, builds a fresh runtime whose pods are
 // handed streamAddress to dial, and registers the runtime's launcher acceptor, as a daemon boot
