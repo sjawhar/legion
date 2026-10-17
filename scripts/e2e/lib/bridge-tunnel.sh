@@ -162,10 +162,16 @@ YAML
 # bridge_stop tears down everything bridge_start may have started, in reverse order, and never
 # fails: a torn-down leg that is already gone is not an error. Safe to call unconditionally from
 # cleanup, bridge mode or not. Issues both deletes without kubectl's own --wait (which returned
-# before the pod was actually gone at least twice, live, 2026-10-17, though a lone chisel pod
-# deleted by hand elsewhere on this cluster took under 6s — the discrepancy is unexplained but
-# repeatable) and instead polls for both objects gone itself, the same way namespace-rig.sh's own
-# teardown does, so the confirmation is this script's own observation, not kubectl's claim.
+# before the pod was actually gone at least three times, live, 2026-10-17, though a lone chisel
+# pod deleted by hand elsewhere on this cluster took under 6s — the discrepancy is unexplained but
+# repeatable) and instead polls for both objects gone itself. The first version of this poll
+# captured `op get pod,service $bridge_name -o name` and treated empty output as gone — but a
+# transient read error (rate limiting, a network blip) also prints nothing to stdout, so that
+# version silently treated "the read failed" the same as "confirmed gone" and returned early,
+# leaving the pod for namespace-clean to catch, live, twice, after apparently succeeding. This
+# version checks each object on its own and requires the literal word NotFound in its own read's
+# output before counting it gone; any other text — the object's own name, or an unrelated error —
+# keeps the loop going.
 bridge_stop() {
   [ -n "$bridge_started" ] || return 0
   bridge_started=
@@ -178,11 +184,14 @@ bridge_stop() {
   [ -n "$bridge_name" ] || return 0
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  local i left
+  local i pod_read svc_read
   for i in $(seq 1 150); do
-    left=$(op get pod,service "$bridge_name" -o name 2>/dev/null) || true
-    [ -n "$left" ] || return 0
+    pod_read=$(op get pod "$bridge_name" -o name 2>&1)
+    svc_read=$(op get service "$bridge_name" -o name 2>&1)
+    case "$pod_read" in *NotFound*)
+      case "$svc_read" in *NotFound*) return 0 ;; esac
+    esac
     sleep 2
   done
-  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 300s: $left; it may remain"
+  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 300s: pod: $pod_read; service: $svc_read; it may remain"
 }
