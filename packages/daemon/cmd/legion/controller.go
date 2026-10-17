@@ -177,7 +177,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// validated before the capability mint: the mint revokes the incumbent controller's
 	// registration and grants (api.controllerSecret), so a repository-mapping failure found here
 	// must never cut a running controller off for a replacement that will not start.
-	repositories, err := controllerRepositories(ctx, cfg.DaemonURL)
+	repositories, refused, err := controllerRepositories(ctx, cfg.DaemonURL)
 	if err != nil {
 		removeDirs(created)
 		return 0, err
@@ -233,7 +233,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// succeeds, before it opens the live wake subscription, so a started or restarted controller
 	// runs its start procedure at once and deterministically, never racing a wake for the one
 	// first-turn slot.
-	addressing := daemon.DesignGateFragment(designGate) + " " + daemon.RepositoriesFragment(repositories)
+	addressing := daemon.DesignGateFragment(designGate) + " " + daemon.RepositoriesAddressing(repositories, refused)
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
 		Addressing:                 addressing,
@@ -360,63 +360,62 @@ func probeAndMint(ctx context.Context, daemonURL string, probe daemon.Controller
 }
 
 // controllerRepositories is the project's whole repository mapping, read from the one
-// unauthenticated route that serves it (GET /legion/v1/state's .repositories.mapped[], the same
-// bytes `legion state --json` prints), for the operator's controller addressing — the list a
-// worker's own addressing names (specs.AddressingFragment, specs.RepositoriesFragment). Read and
-// validated before the capability mint (controllerStart), so a failure here never revokes a
-// running controller for a replacement that will not start. Bounded by requestTimeout, as every
-// other CLI read of the daemon's API is (main.go's get). Refuses, naming why: a body that is not
-// a JSON object, one naming no `repositories` field at all (null or absent — a `{}` or a `null`
-// top level both land here), a `repositories.mapped` that unmarshals to zero entries with nothing
-// refused either (the daemon's own workflow refuses boot on an empty mapping with nothing
-// refused, so that combination means the state read did not reach a configured workflow), a
-// mapped that is empty with every candidate repository refused (named with its reason — a real,
-// fully-booted state a missing GitHub App produces, never conflated with the state read failing
-// to reach a workflow at all), and any mapped entry this daemon did not spell `owner/name` (a
-// daemon bug, never silently dropped: one bad entry refuses the whole list, not just that entry,
-// since an operator reading this sentence must trust it names every mapped repository, never a
-// silently narrowed subset).
-func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Repository, error) {
+// unauthenticated route that serves it (GET /legion/v1/state's .repositories field, the same
+// bytes `legion state --json` prints), for the operator's controller addressing
+// (daemon.RepositoriesAddressing) — the list a worker's own addressing names
+// (specs.AddressingFragment, specs.RepositoriesFragment). Read and validated before the
+// capability mint (controllerStart), so a failure here never revokes a running controller for a
+// replacement that will not start. Bounded by requestTimeout, as every other CLI read of the
+// daemon's API is (main.go's get).
+//
+// An empty `mapped` is never refused here, with or without a `refused` list: the daemon boots and
+// keeps running exactly this way on purpose, serving no repository until an App is installed or a
+// mapping is pushed (repositories.go's own doc), and the controller is what drives that recovery
+// by admitting work (AGENTS.md, "Handover") — refusing its own start in that state would burn its
+// launch budget for nothing and leave the project stuck until a human intervenes. The caller
+// builds the right addressing sentence from the repositories and refused reasons this returns, on
+// both launch paths, via daemon.RepositoriesAddressing.
+//
+// Refuses, naming why, only when the read itself is unusable: a body that is not a JSON object, one
+// naming no `repositories` field at all (null or absent — a `{}` or a `null` top level both land
+// here), and any mapped entry this daemon did not spell `owner/name` (a daemon bug, never silently
+// dropped: one bad entry refuses the whole list, not just that entry, since an operator reading
+// this sentence must trust it names every mapped repository, never a silently narrowed subset).
+func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Repository, []string, error) {
 	timed, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
 	status, body, err := operator{base: daemonURL}.do(timed, http.MethodGet, "/legion/v1/state", nil)
 	if err != nil {
-		return nil, fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
+		return nil, nil, fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
 	if status/100 != 2 {
-		return nil, fmt.Errorf("%s/legion/v1/state: the daemon answered %d: %s", daemonURL, status, strings.TrimSpace(string(body)))
+		return nil, nil, fmt.Errorf("%s/legion/v1/state: the daemon answered %d: %s", daemonURL, status, strings.TrimSpace(string(body)))
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
-		return nil, fmt.Errorf("%s/legion/v1/state answered with a body that is not a JSON object naming repositories", daemonURL)
+		return nil, nil, fmt.Errorf("%s/legion/v1/state answered with a body that is not a JSON object naming repositories", daemonURL)
 	}
 	reposRaw, ok := raw["repositories"]
 	if !ok || string(reposRaw) == "null" {
-		return nil, fmt.Errorf("%s/legion/v1/state names no repositories field: the daemon needs a configured workflow with a repository mapping before the controller can start", daemonURL)
+		return nil, nil, fmt.Errorf("%s/legion/v1/state names no repositories field: the daemon needs a configured workflow with a repository mapping before the controller can start", daemonURL)
 	}
 	var repositoriesView api.RepositoriesView
 	if err := json.Unmarshal(reposRaw, &repositoriesView); err != nil {
-		return nil, fmt.Errorf("%s/legion/v1/state's repositories field is not valid: %w", daemonURL, err)
-	}
-	if len(repositoriesView.Mapped) == 0 {
-		if len(repositoriesView.Refused) > 0 {
-			reasons := make([]string, len(repositoriesView.Refused))
-			for i, refused := range repositoriesView.Refused {
-				reasons[i] = fmt.Sprintf("%s (%s)", refused.Repo, refused.Reason)
-			}
-			return nil, fmt.Errorf("%s/legion/v1/state maps no usable repository to this project: every repository is refused — %s", daemonURL, strings.Join(reasons, "; "))
-		}
-		return nil, fmt.Errorf("%s/legion/v1/state maps no repository to this project and names none refused: the daemon's own workflow refuses boot on an empty mapping, so this combination means the state read did not reach a configured workflow", daemonURL)
+		return nil, nil, fmt.Errorf("%s/legion/v1/state's repositories field is not valid: %w", daemonURL, err)
 	}
 	repositories := make([]ghrepo.Repository, 0, len(repositoriesView.Mapped))
 	for _, mapped := range repositoriesView.Mapped {
 		repository, err := ghrepo.Parse("repositories.mapped", mapped.Repo)
 		if err != nil {
-			return nil, fmt.Errorf("%s/legion/v1/state names an invalid mapped repository %q: %w", daemonURL, mapped.Repo, err)
+			return nil, nil, fmt.Errorf("%s/legion/v1/state names an invalid mapped repository %q: %w", daemonURL, mapped.Repo, err)
 		}
 		repositories = append(repositories, repository)
 	}
-	return repositories, nil
+	refused := make([]string, len(repositoriesView.Refused))
+	for i, r := range repositoriesView.Refused {
+		refused[i] = fmt.Sprintf("%s (%s)", r.Repo, r.Reason)
+	}
+	return repositories, refused, nil
 }
 
 // makeDirs creates dir and its missing parents, 0700, and answers the ones it created, deepest

@@ -770,18 +770,17 @@ func TestControllerStartsAddressingGainsTheProjectsRepositories(t *testing.T) {
 	}
 }
 
-// A daemon with an empty, missing, or invalid repository mapping refuses the controller's start
-// outright, naming why — it never silently omits the repositories clause. An empty `mapped` with a
-// non-empty `refused` is a real, fully-booted state (every mapped repository lacks an App) and is
-// told apart from the state read failing to reach a configured workflow at all (that gives an
-// empty `mapped` with an empty `refused` too, which is the other, unusable case below).
+// A daemon with a missing or invalid repository mapping refuses the controller's start outright,
+// naming why — it never silently omits the repositories clause. An empty `mapped`, with or without
+// a `refused` list, is never refused here (R4/R5 below): the daemon boots and keeps running
+// exactly this way on purpose, and the controller is what drives recovery by admitting work once
+// an App is installed.
 func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		opts controllerDaemonOptions
 		want string
 	}{
-		{"empty mapped, nothing refused either", controllerDaemonOptions{repositories: []string{}}, "names none refused"},
 		{"empty object body", controllerDaemonOptions{rawStateBody: "{}"}, "names no repositories field"},
 		{"null body", controllerDaemonOptions{rawStateBody: "null"}, "not a JSON object"},
 		{"missing repositories field", controllerDaemonOptions{rawStateBody: `{"daemon":{"project":"demo"}}`}, "names no repositories field"},
@@ -790,11 +789,6 @@ func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
 			"one valid, one invalid entry: the whole list is refused, not narrowed",
 			controllerDaemonOptions{repositories: []string{"acme/widgets", "not a valid repo"}},
 			"an invalid mapped repository",
-		},
-		{
-			"empty mapped, every candidate refused: a real state, named with its reason",
-			controllerDaemonOptions{rawStateBody: `{"repositories":{"mapped":[],"refused":[{"repo":"acme/widgets","reason":"the review App is not installed on acme/widgets"}]}}`},
-			"every repository is refused — acme/widgets (the review App is not installed on acme/widgets)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -807,15 +801,39 @@ func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
 	}
 }
 
-// The repository mapping is fetched and validated before the capability mint: a daemon whose
-// GET /legion/v1/state fails transiently (here, 503) must never revoke a running controller's
-// capability for a replacement that will not start — no secret request reaches the daemon at all.
-func TestControllerStartNeverMintsWhenTheRepositoryReadFails(t *testing.T) {
-	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{stateStatus: http.StatusServiceUnavailable})
+// R4: an empty `mapped` with a non-empty `refused` (every candidate repository lacks an App, a
+// real, fully-booted state) launches on both paths, naming the refused repositories and why,
+// rather than refusing and burning a launch budget the App install cannot recover from on its own.
+func TestControllerStartLaunchesWithEveryRepositoryRefused(t *testing.T) {
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{
+		gate:         config.DesignGateOff,
+		rawStateBody: `{"repositories":{"mapped":[],"refused":[{"repo":"acme/widgets","reason":"the review App is not installed on acme/widgets"}]}}`,
+	})
 	c := newControllerStart(t, d, controllerOptions{})
-	c.refused("/legion/v1/state")
-	c.wantNoMintRequest()
-	c.wantNothingLaunchedOrWritten(c.defaultDir)
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	want := "the daemon maps no repository to this project now: acme/widgets (the review App is not installed on acme/widgets).\n\n"
+	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
+	}
+}
+
+// R5: an empty `mapped` with an empty `refused` too (no workflow reached, or every repository
+// unmapped by a refresh) also launches, naming the state for what it is — the same wording and
+// behavior on both launch paths.
+func TestControllerStartLaunchesWithNoRepositoryMappedOrRefused(t *testing.T) {
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateOff, repositories: []string{}})
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	want := "the daemon maps no repository to this project now.\n\n"
+	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
+	}
 }
 
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the

@@ -174,13 +174,11 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	addressing := DesignGateFragment(s.designGate)
 	if s.repositories != nil {
 		repositories := s.repositories()
-		if len(repositories) > 0 {
-			addressing += " " + RepositoriesFragment(repositories)
-		} else if s.repositoriesRefused != nil {
-			if refused := s.repositoriesRefused(); len(refused) > 0 {
-				return runtime.SpawnSpec{}, fmt.Errorf("the project's repository mapping maps no usable repository: every repository is refused — %s", strings.Join(refused, "; "))
-			}
+		var refused []string
+		if s.repositoriesRefused != nil {
+			refused = s.repositoriesRefused()
 		}
+		addressing += " " + RepositoriesAddressing(repositories, refused)
 	}
 	return runtime.SpawnSpec{
 		Env:     map[string]string{},
@@ -245,6 +243,27 @@ func RepositoriesFragment(repositories []ghrepo.Repository) string {
 	}
 	slices.Sort(names)
 	return fmt.Sprintf("the project's repositories are %s.", strings.Join(names, ", "))
+}
+
+// RepositoriesAddressing is the clause a controller's own addressing ends with on both launch
+// paths (controllerSpawnSpec here, cmd/legion/controller.go's controllerStart) and the one a
+// worker's addressing names via AddressingFragment: RepositoriesFragment when the project maps at
+// least one repository. An empty mapping is never a refusal on either path — the daemon boots and
+// keeps running exactly this way on purpose, serving no repository until an App is installed or a
+// mapping is pushed (internal/daemon/repositories.go's own doc) — so its addressing instead names
+// the state for what it is, and, when refused names any candidate repository the project's
+// mapping holds that the daemon currently leaves out, with its reason, sorted the same way the
+// caller already sorted repositories.
+func RepositoriesAddressing(repositories []ghrepo.Repository, refused []string) string {
+	if len(repositories) > 0 {
+		return RepositoriesFragment(repositories)
+	}
+	if len(refused) == 0 {
+		return "the daemon maps no repository to this project now."
+	}
+	sorted := slices.Clone(refused)
+	slices.Sort(sorted)
+	return "the daemon maps no repository to this project now: " + strings.Join(sorted, "; ") + "."
 }
 
 // DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the

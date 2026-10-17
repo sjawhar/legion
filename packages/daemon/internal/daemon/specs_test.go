@@ -227,12 +227,15 @@ func TestTheControllersAddressingGainsTheProjectsRepositories(t *testing.T) {
 	}
 }
 
-// An empty repositories() with a non-empty repositoriesRefused() is a real, fully-booted state
-// (every mapped repository lacks an App), never conflated with no workflow configured at all: the
-// daemon-launched controller refuses its own launch rather than silently dropping the sentence,
-// naming the refused repositories and their reasons, the same distinction
-// cmd/legion/controller.go's controllerRepositories draws for the operator-launched controller.
-func TestTheControllersLaunchRefusesWhenEveryRepositoryIsRefused(t *testing.T) {
+// R4: an empty repositories() with a non-empty repositoriesRefused() is a real, fully-booted state
+// (every mapped repository lacks an App), never conflated with no workflow configured at all —
+// but it is never a refusal either (Main's ruling overturned the prior round's refusal here: it
+// burns the daemon-launched controller's launch budget for a state that heals itself once the App
+// is installed and the controller's own next handover refreshes the mapping). The controller
+// launches, its addressing naming the refused repositories and their reasons, the same
+// distinction cmd/legion/controller.go's controllerRepositories draws for the operator-launched
+// controller.
+func TestTheControllersLaunchNamesEveryRefusedRepositoryInsteadOfRefusing(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
@@ -242,9 +245,38 @@ func TestTheControllersLaunchRefusesWhenEveryRepositoryIsRefused(t *testing.T) {
 		repositories:        func() []ghrepo.Repository { return nil },
 		repositoriesRefused: func() []string { return []string{"acme/widgets (the review App is not installed on acme/widgets)"} },
 	}
-	_, err = s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
-	if err == nil || !strings.Contains(err.Error(), "every repository is refused — acme/widgets (the review App is not installed on acme/widgets)") {
-		t.Fatalf("SpawnSpec error = %v, want it to name the refused repository and its reason", err)
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := DesignGateFragment(config.DesignGateOff) +
+		" the daemon maps no repository to this project now: acme/widgets (the review App is not installed on acme/widgets)."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
+	}
+}
+
+// R5: an empty repositories() with an empty repositoriesRefused() too (no workflow reached yet, or
+// every repository unmapped by a refresh) also launches, naming the state for what it is — the
+// same wording the operator-launched controller's refusal-free path gives after R4/R5, so the two
+// launch paths never diverge on this state.
+func TestTheControllersLaunchNamesNoRepositoryMappedOrRefused(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+		repositories:        func() []ghrepo.Repository { return nil },
+		repositoriesRefused: func() []string { return nil },
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := DesignGateFragment(config.DesignGateOff) + " the daemon maps no repository to this project now."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 	}
 }
 
