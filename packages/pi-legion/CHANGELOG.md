@@ -128,7 +128,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   approved head to retro's: READY reads GitHub's compare of the round's approved head with READY's
   head and refuses `READY_UNREVIEWED_CHANGE` when it shows any path outside `docs/solutions/` and
   `.legion/<issue>/` (a rename's old name included), lists 300 files, the most that compare lists,
-  or shows the approved head is not the head's ancestor, and `READY_NOT_APPROVED` when the round
+  gives no file list, shows the approved head is not the head's ancestor, or does not know it, and `READY_NOT_APPROVED` when the round
   recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
   `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
   The merger's move back to `reviewing` names the refusal's code and what it found in its reason. A
@@ -138,7 +138,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   changes when it finds no approval, a head off that commit's history, a 300-file compare or a
   path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`. Either
   request asks only that the implementer complete so the tester runs the head, and the implementer's
-  prompt says how. The merge-gate reference and the architect and retro skills say the same, and
+  prompt says how; the round after it reviews the refused change in full from the last approval,
+  never continued by the fingerprint rule. The merge-gate reference and the architect and retro skills say the same, and
   the architect's `review_round_cap` judgment does not count those rounds as going in circles.
   A backward move's task no longer tells the role it starts to resume the requester's phase work;
   it names that role's phase, the pull request and the move's reason, with the requester's handoff

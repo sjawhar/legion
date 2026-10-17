@@ -72,7 +72,9 @@ the head voids it.
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
   one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
-  after a rebase (*Retro's commits do not void the reviewer's approval* below).
+  after a rebase, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
+  after it reviews the refused change in full from the last `APPROVE` (*Retro's commits do not
+  void the reviewer's approval* below).
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.

@@ -450,7 +450,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
   anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
   removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
-  is not built on the approved one, or GitHub's compare lists 300 files, the most it lists), or
+  is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
+  gives no file list or lists 300 files, the most it lists), or
   the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
   `reviewing`. It is refused while the head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back

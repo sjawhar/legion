@@ -313,7 +313,7 @@ const unreviewedChangeNamed = 10
 // "behind" is not the approved code plus anything), list its files, and list fewer than
 // compareFilesLimit; every path it lists, a rename's old name included, must be retro's. Anything
 // else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is the
-// same: the reviewer reviews this head, whose approval then compares as identical. An approved head
+// same: the reviewer reviews this head as a new round. An approved head
 // GitHub does not know is refused the same way; any other failure of the read is GitHub's, to
 // retry. The compare asks for one commit a page: the file list and status cover the whole
 // comparison on its first page whatever the page size, and a smaller page reads less.

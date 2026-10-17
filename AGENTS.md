@@ -198,8 +198,8 @@ own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. On
 may sit above the reviewer's approved head, those that change `docs/solutions/` and its removal of
 `.legion/<issue>/`: READY compares the review round's recorded approved head with READY's head on
 GitHub, as the implement App, and refuses anything else above it (`READY_UNREVIEWED_CHANGE`, naming
-the paths; also a compare GitHub may have cut at its 300 files, or a head not built on the approved
-one) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to
+the paths; also a compare GitHub may have cut at its 300 files or that gives no file list, a head
+not built on the approved one, or an approved head GitHub does not know) and a round with no recorded approval (`READY_NOT_APPROVED`), so the change goes back to
 review. The merger sends its
 `READY` packet with its completion; the daemon posts it on the Dispatch issue and, when the project's
 `projects.<KEY>.merge_queue_role` names one, publishes it to that role. A project may configure
