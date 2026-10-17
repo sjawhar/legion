@@ -71,12 +71,14 @@ describe("require_proof_human", () => {
     expect(r.calls[0]).toStartWith("GH_REPO=sjawhar/legion-smoke api graphql ");
   });
 
+  // A Legion pane's gh acts as its role's App, whatever GitHub names that App: the logins below are
+  // stand-ins for the two, and are refused as any account but the proof human is.
   test("refuses every other account in one line naming it", () => {
     for (const login of [
       "sjawhar",
       "sjawhar-agent",
-      "legion-reviewer[bot]",
-      "legion-implementer[bot]",
+      "example-review[bot]",
+      "example-implement[bot]",
     ]) {
       const r = run("require_proof_human\necho unreachable", { login });
       expect(r.status).toBe(1);
@@ -118,7 +120,7 @@ describe("require_proof_human", () => {
   test("every refusal states the one requirement, whatever reached the wrong account", () => {
     const causes = [
       { login: "sjawhar" },
-      { login: "legion-implementer[bot]" },
+      { login: "example-implement[bot]" },
       { login: "sjawhar", stderr: "gh shim: inherited from the environment (a PERSONAL token)" },
       { stderr: "gh: Bad credentials (HTTP 401)", exit: 4 },
     ];

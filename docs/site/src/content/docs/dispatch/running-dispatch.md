@@ -29,6 +29,10 @@ server, is in [Configuration](/legion/dispatch/reference/configuration/).
 When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads the NATS address
 from `envoy.natsUrls` in `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, the file agents use,
 whatever that file's `envoy.enabled` says, so set one of them explicitly.
+A Dispatch that reaches NATS only through a SOCKS5 proxy, such as a tailnet sidecar's, sets
+`ENVOY_NATS_SOCKS5_PROXY` to the proxy's `host:port` (for example `127.0.0.1:1055`) with
+`ENVOY_ALLOW_REMOTE_NATS=1`, and every NATS connection then goes through the proxy, which is
+handed each server's host name unresolved.
 
 People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch
 names each person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
