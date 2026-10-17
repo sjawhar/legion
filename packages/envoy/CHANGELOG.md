@@ -894,6 +894,11 @@
 
 ### Fixed
 
+- A Mermaid sequence, class, ER or xychart diagram in a Dispatch document renders. The editor's
+  Mermaid preview ran its flowchart checks on every diagram, so every type other than a flowchart
+  or state diagram was refused with "Unable to render Mermaid diagram: Invalid mermaid header";
+  those checks now run on flowcharts and state diagrams only, which still refuse a dangling edge.
+
 - A closed issue can give up an external link (a write whose links are a subset of what it already
   holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
   still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
