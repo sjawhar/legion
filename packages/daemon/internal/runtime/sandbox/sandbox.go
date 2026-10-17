@@ -87,6 +87,7 @@ type Runtime struct {
 	bootTimeout                    time.Duration
 	busyBackoff                    time.Duration
 	provisionBound                 time.Duration
+	launchBound                    time.Duration
 	terminationGrace               time.Duration
 	probeInterval                  time.Duration
 	adoptTimeout                   time.Duration
@@ -182,6 +183,7 @@ func checkSupervision(opts Options) error {
 // defaults, touching no cluster. A runtime it builds alone runs the image probe and nothing else
 // (newProber); configure adds supervision's requirements to it.
 func configureProber(opts Options) (*Runtime, error) {
+	provisionBound := workspace.FetchTimeout + workspace.CloneTimeout
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}
@@ -252,7 +254,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionDSNKey: opts.SessionDSNKey,
-		bootTimeout:   opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: workspace.FetchTimeout + workspace.CloneTimeout, terminationGrace: opts.TerminationGrace,
+		bootTimeout:   opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
+		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},

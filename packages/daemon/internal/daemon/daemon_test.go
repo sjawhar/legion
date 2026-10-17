@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
@@ -32,6 +33,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -40,6 +44,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 const testOperatorToken = "operator-bearer-for-daemon-tests"
@@ -421,6 +426,79 @@ func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 	}
 }
 
+// A due lifecycle row held behind its issue's running one is on the state the daemon serves
+// (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
+// phase enqueues the implementer's start while the issue's lifecycle lane is still running an
+// earlier row of the issue — here the planner's suspend, under a live lease — so GET
+// /legion/v1/state lists the start, by kind and id, with the row it waits on; once that row's lease
+// has ended, nothing is held. The retry is applied through the workflow engine the phase/retry
+// route applies it with (intake.ApplyFact): the API-only daemon this harness boots carries no
+// workflow runtime, and so no lane that would run the rows the test seeds.
+func TestTheStateListsTheHeldLifecycleRowBehindItsIssuesRunningOne(t *testing.T) {
+	cfg := testConfig(t)
+	issue := cfg.Project + "-1"
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	records := record.NewStore()
+	held := runningRoot(issue, phase.Held)
+	held.Hold = &record.Hold{From: phase.Implementing}
+	suspend, err := record.NewOutboxRow(issue, record.SuperviseRequest{Op: "suspend", Tree: issue, Role: claim.RolePlanner, Generation: 1}, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
+		if err := records.PutIssue(ctx, tx, held); err != nil {
+			return err
+		}
+		return records.Enqueue(ctx, tx, suspend)
+	}); err != nil {
+		t.Fatalf("record the held issue and its running suspend: %v", err)
+	}
+	var running int64
+	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1", issue).Scan(&running); err != nil {
+		t.Fatalf("read the suspend's row: %v", err)
+	}
+	leaseOutboxRow(t, st.Pool(), running)
+
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: project}, quietLogger())
+	result, err := intake.ApplyFact(ctx, st.Pool(), "api", "retry:"+issue, intake.RetryOrEscalate{Issue: issue, Decision: intake.RetryDecision}, engine)
+	if err != nil || result.Refusal != nil {
+		t.Fatalf("apply the retry = %+v, %v; want it accepted", result.Refusal, err)
+	}
+	var start int64
+	if err := st.Pool().QueryRow(ctx, "select id from outbox where issue = $1 and kind = $2 and payload->>'op' = 'start'", issue, string(record.OutboxKindSupervise)).Scan(&start); err != nil {
+		t.Fatalf("read the retry's start row: %v", err)
+	}
+
+	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+	got := d.state().HeldOutboxRows
+	if len(got) != 1 || got[0].WaitedSeconds < 0 {
+		t.Fatalf("heldOutboxRows = %+v, want the retry's start alone, with a wait of zero or more seconds", got)
+	}
+	got[0].WaitedSeconds = 0
+	if want := (api.HeldOutboxRow{ID: start, Kind: "supervise", Issue: issue, WaitsOn: running}); got[0] != want {
+		t.Fatalf("heldOutboxRows[0] = %+v, want %+v", got[0], want)
+	}
+
+	if _, err := st.Pool().Exec(ctx, "update outbox set lease_until = now() - interval '1 minute' where id = $1", running); err != nil {
+		t.Fatalf("end the suspend's lease: %v", err)
+	}
+	if got := d.state().HeldOutboxRows; got == nil || len(got) != 0 {
+		t.Fatalf("heldOutboxRows once the suspend's lease ended = %+v, want an empty list", got)
+	}
+}
+
 // `legion controller start` against this daemon: the operator's bearer buys a capability, the
 // controller's Oh My Pi registers with it, and the state names the registered session as the
 // external controller record. The record and the registration live in the store, so a restarted
@@ -755,7 +833,7 @@ func (s *shim) prompt() shimwire.Prompt {
 func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	tokens := &workflowTokenRecorder{}
-	var logged bytes.Buffer
+	var logged syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

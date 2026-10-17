@@ -476,6 +476,14 @@ func OnCommit(ctx context.Context, fn func()) {
 	*hooks = append(*hooks, fn)
 }
 
+// CommitScoped reports whether ctx is within a transaction's commit scope (WithCommitHooks): a
+// caller that wants a hook to run once the write it just made has committed can tell a transaction
+// that will commit from a write made outside any scope, which has no commit to wait for.
+func CommitScoped(ctx context.Context) bool {
+	_, ok := ctx.Value(commitHooksKey{}).(*[]func())
+	return ok
+}
+
 // Refusal is a committed API response or JetStream log record, never a transaction failure.
 type Refusal struct {
 	Status  int

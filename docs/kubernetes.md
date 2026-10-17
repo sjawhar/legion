@@ -2124,14 +2124,22 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   timeout. A pod that provisions for twenty minutes is one launch, not a launch failure per boot
   timeout, and a launcher that has not connected the boot timeout after provisioning ended still
   fails the launch. The wait runs inside whatever asked for the launch, and a start row asks from
-  the outbox, which runs one row at a time: the project's later rows wait behind it. During a
-  GitHub outage that is the fetch's five attempts and four waits, about 2 minutes when GitHub
-  refuses at once and about 12½ minutes when every connect times out (127 s each), after which the
-  fetch fails and the launch ends; each relaunch of the claim then holds its machine as long again,
-  and an outbox row that reads that claim waits on it. A transfer that keeps making progress can
-  hold the launch for the whole 30 minutes, and `workspace-init`'s clone of the feed, for a large
-  repository, up to 30 more. Once the launch returns, the boot watchdog
-  re-arms on the claim, bounded by its registration deadline
+  the outbox, on the issue's own lifecycle lane: only that issue's later lifecycle rows — its
+  stops, suspensions and later starts — wait behind it, while other issues' rows and the issue's
+  own board writes and notices run meanwhile. During a GitHub outage that is the fetch's five
+  attempts and four waits, about 2 minutes when GitHub refuses at once and about 12½ minutes when
+  every connect times out (127 s each), after which the fetch fails and the launch ends; each
+  relaunch of the claim then holds the issue's lifecycle lane as long again, and the issue's later
+  lifecycle rows wait on it. A transfer that keeps making progress can hold the launch for the
+  whole 30 minutes, and `workspace-init`'s clone of the feed, for a large repository, up to 30
+  more. Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`,
+  `internal/runtime/sandbox/relaunch.go`) at the sum of the try's waits and bounded calls — three
+  boot timeouts, the launcher wait's backstop of twice the boot timeout plus
+  `sandbox.Runtime.ProvisionBound`, the termination grace, and the try's client calls at their
+  30 s timeout — about 1 h 45 min at the defaults; a try that reaches it is charged a launch
+  failure and the next try runs, while a try the daemon's own stop ends is still charged nothing.
+  Once the launch returns, the boot watchdog re-arms on the claim, bounded by its registration
+  deadline
   (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
   6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
   until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same
