@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -63,12 +64,15 @@ func main() {
 
 	cfg, err := config.Load(os.Getenv)
 	fatal(err)
-	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for Secrets
-	// Manager, {"secrets": [{"name", "kms_key_id", "tags", "value", "deleted_at"}]}: the broker lists
-	// the agent secrets and reads their values from it instead of from AWS, reading the file again
+	// BROKER_FAKE_SECRETS_FILE: for local development only, a JSON file standing in for the secret
+	// store, in Secrets Manager's shape whatever BROKER_SECRETS_STORE says,
+	// {"secrets": [{"name", "kms_key_id", "tags", "value", "deleted_at"}]}: the broker lists
+	// the agent secrets and reads their values from it instead of from the store, reading the file again
 	// on each of those calls, so an edit to it is a write as Secrets Manager would see one. A secret
 	// with no "value" is one created without a value, which the broker refuses as no-current-value;
 	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
+	// Its "kms_key_id" names the agent-secrets key as the selected store configures it:
+	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	// How the broker signs in to its database, logged before anything reaches for AWS or the
@@ -83,9 +87,10 @@ func main() {
 	slog.Info("database sign-in", "method", signIn)
 	// The AWS config, loaded once when anything needs it: an IAM-form BROKER_DATABASE_URL, whose
 	// connections sign in with RDS IAM tokens minted from it (so it is loaded before the database
-	// is opened), and the Secrets Manager and KMS clients, unless the fake secrets file stands in.
+	// is opened), and the Secrets Manager and KMS clients of the AWS store, unless the fake
+	// secrets file stands in. The GCP store needs none.
 	var awsCfg aws.Config
-	if cfg.DatabaseIAM || fakeSecrets == "" {
+	if cfg.DatabaseIAM || (fakeSecrets == "" && cfg.SecretsStore == secrets.StoreAWS) {
 		awsCfg, err = awsconfig.LoadDefaultConfig(ctx)
 		fatal(err)
 	}
@@ -98,16 +103,32 @@ func main() {
 	st, err := store.Open(ctx, cfg.DatabaseURL, storeOpts...)
 	fatal(err)
 	fatal(st.Migrate(ctx))
-	loader := policy.Loader{Prefix: cfg.SecretsPrefix, KeyARN: cfg.SecretsKMSKeyARN, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
-	var reader secrets.Reader
-	if fakeSecrets != "" {
+	// The secret store, logged with how it signs in so an operator reads it from the log: the
+	// fake file (an AWS-shaped store whatever BROKER_SECRETS_STORE says, since the file holds
+	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
+	// Manager under Application Default Credentials.
+	var secretStore secrets.Store
+	var credentials string
+	switch {
+	case fakeSecrets != "":
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
-		loader.Secrets, loader.Describer, loader.Aliases, reader = local, local, local, secrets.AWS{Client: local}
-	} else {
+		// The file's kms_key_id names the agent-secrets key as the selected store configures it.
+		// Under gcp-secret-manager this is still the AWS store over the file, holding the Cloud KMS
+		// key name where it would hold an ARN: names follow Secrets Manager's rules and a source
+		// is a local ARN, which only a local run sees.
+		secretStore, credentials = secrets.AWS{Client: local, KMS: local, KeyARN: cfg.SecretsKMSKey}, "fake secrets file"
+	case cfg.SecretsStore == secrets.StoreGCP:
+		client, err := secrets.NewGCPClient(ctx)
+		fatal(err)
+		defer client.Close()
+		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
+	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
-		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
+		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
+	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
@@ -150,7 +171,7 @@ func main() {
 
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
-	reqMachine := newRequestMachine(cfg, st, current, reader, enr.Replay)
+	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
@@ -178,10 +199,17 @@ func main() {
 	go sweeper.Run(ctx)
 
 	mux := http.NewServeMux()
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken,
+	// Under the GCP store a reread spends Secret Manager's shared metadata quota, so its overall
+	// cap is the GCP one.
+	var rereadOverall *ratelimit.Limit
+	if cfg.SecretsStore == secrets.StoreGCP {
+		rereadOverall = &api.GCPRereadOverallLimit
+	}
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-		Policy: current, SecretsPrefix: cfg.SecretsPrefix, SecretsKMSKeyARN: cfg.SecretsKMSKeyARN,
+		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
+		SecretsKMSKey:      cfg.SecretsKMSKey,
 		TrustedProxyHeader: cfg.TrustedProxyHeader})
 	srv := &http.Server{
 		Handler:           withRequestDeadline(mux, requestDeadline),
@@ -248,9 +276,9 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 // its configuration: the audience and skew every request object is checked against, and the
 // service accounts that prove a pod is a registered service's. A grant lasts the lifetime its
 // request signed, or until its session ends.
-func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, reader secrets.Reader, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
+func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
-		Store: st, Policy: current, Secrets: reader, PendingTTL: agentSecretPendingTTL,
+		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServiceAccounts: cfg.ServiceAccounts,
 	}

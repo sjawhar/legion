@@ -5,31 +5,49 @@ import (
 	"net/http"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
-// settingsResponse is GET /v1/settings's answer.
+// settingsResponse is GET /v1/settings's answer: the store the agent secrets live in and, per
+// store, where.
 type settingsResponse struct {
-	// The Secrets Manager name prefix every agent secret sits under, ending in "/": the secret a
-	// session asks for as DEEL_API_KEY is <prefix>deel-api-key.
+	// Which secret store holds the agent secrets: aws-secrets-manager or gcp-secret-manager. A
+	// broker from before this field answered none, and held them in AWS Secrets Manager.
+	Store string `json:"store"`
+	// The name prefix every agent secret sits under: with aws-secrets-manager a Secrets Manager
+	// name prefix ending in "/", with gcp-secret-manager projects/<project number>/secrets/<secret-id
+	// prefix>-. The secret a session asks for as DEEL_API_KEY is <prefix>deel-api-key.
 	SecretsPrefix string `json:"secrets_prefix"`
-	// The ARN of the agent-secrets KMS key, which every agent secret must be encrypted with.
-	KMSKeyARN string `json:"kms_key_arn"`
-	// The AWS account the agent-secrets key, and so every agent secret, is in.
-	AWSAccountID string `json:"aws_account_id"`
-	// The AWS region the agent-secrets key, and so every agent secret, is in.
-	AWSRegion string `json:"aws_region"`
+	// With aws-secrets-manager, the ARN of the agent-secrets KMS key, which every agent secret
+	// must be encrypted with; absent otherwise.
+	KMSKeyARN string `json:"kms_key_arn,omitempty"`
+	// With aws-secrets-manager, the AWS account the agent-secrets key, and so every agent secret,
+	// is in; absent otherwise.
+	AWSAccountID string `json:"aws_account_id,omitempty"`
+	// With aws-secrets-manager, the AWS region the agent-secrets key, and so every agent secret,
+	// is in; absent otherwise.
+	AWSRegion string `json:"aws_region,omitempty"`
+	// With gcp-secret-manager, the resource name of the agent-secrets Cloud KMS key, which every
+	// agent secret must be encrypted with; absent otherwise.
+	KMSKeyName string `json:"kms_key_name,omitempty"`
+	// With gcp-secret-manager, the number of the project every agent secret is in, the one the
+	// prefix names; absent otherwise.
+	GCPProject string `json:"gcp_project,omitempty"`
 }
 
 // readSettings is GET /v1/settings: public, since it answers only the broker's own configuration,
 // which names no secret.
 func (s *server) readSettings(w http.ResponseWriter, r *http.Request) {
-	region, account := policy.KeyARNParts(s.deps.SecretsKMSKeyARN)
-	writeJSON(w, http.StatusOK, settingsResponse{
-		SecretsPrefix: s.deps.SecretsPrefix,
-		KMSKeyARN:     s.deps.SecretsKMSKeyARN,
-		AWSAccountID:  account,
-		AWSRegion:     region,
-	})
+	resp := settingsResponse{Store: s.deps.SecretsStore, SecretsPrefix: s.deps.SecretsPrefix}
+	switch s.deps.SecretsStore {
+	case secrets.StoreGCP:
+		resp.KMSKeyName = s.deps.SecretsKMSKey
+		resp.GCPProject = secrets.GCPProject(s.deps.SecretsPrefix)
+	default:
+		resp.KMSKeyARN = s.deps.SecretsKMSKey
+		resp.AWSRegion, resp.AWSAccountID = secrets.AWSKeyARNParts(s.deps.SecretsKMSKey)
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // rereadResponse is POST /v1/secrets/{name}/reread's answer.

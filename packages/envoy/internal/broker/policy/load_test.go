@@ -55,11 +55,55 @@ func TestLoadServesEveryWellTaggedSecretOnTheKey(t *testing.T) {
 		t.Fatalf("served %d secrets, want %d: %+v", len(set.Secrets), len(byForm)+1, set.Secrets)
 	}
 	deel := set.Secrets["DEEL_API_KEY"]
-	if deel.Name != "DEEL_API_KEY" || deel.Owner != policy.OwnerShared || deel.Tier != policy.TierHuman || deel.ARN != secrets.LocalARN(policytest.ID("DEEL_API_KEY")) {
+	if deel.Name != "DEEL_API_KEY" || deel.Owner != policy.OwnerShared || deel.Tier != policy.TierHuman || deel.Source != secrets.LocalARN(policytest.ID("DEEL_API_KEY")) {
 		t.Fatalf("DEEL_API_KEY = %+v, want shared, human, read by its ARN", deel)
 	}
 	if logged.String() != "" {
 		t.Fatalf("a load refusing nothing logged:\n%s", logged)
+	}
+}
+
+// failingAliases fails every ListAliases call, counting them.
+type failingAliases struct{ calls int }
+
+func (f *failingAliases) ListAliases(context.Context, *kms.ListAliasesInput, ...func(*kms.Options)) (*kms.ListAliasesOutput, error) {
+	f.calls++
+	return nil, errors.New("AccessDeniedException: not authorized to perform kms:ListAliases")
+}
+
+// TestARefusalForANameOrTagCostsNoAliasLookup pins that the policy asks whether a secret is on
+// the agent-secrets key only after its name and tags pass: a secret that names its key by an alias
+// but is refused for a malformed name or tag, or is scheduled for deletion, is refused (or absent)
+// by itself without a kms:ListAliases call, so a KMS that refuses the lookup fails no load. A
+// well-tagged secret on an alias still asks, and that failure fails the load.
+func TestARefusalForANameOrTagCostsNoAliasLookup(t *testing.T) {
+	onAlias := func(name string, edit func(*secrets.LocalSecret)) secrets.LocalSecret {
+		s := policytest.Secret(name, owner, policy.TierAgent, "v")
+		s.KmsKeyID = "alias/agent-secrets"
+		edit(&s)
+		return s
+	}
+	deleting := onAlias("DELETING", func(s *secrets.LocalSecret) { s.DeletedAt = new(time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)) })
+	store := secrets.NewLocal(
+		onAlias("ADMIN_TIER", func(s *secrets.LocalSecret) { s.Tags[policy.TagTier] = "admin" }),
+		onAlias("NO_OWNER", func(s *secrets.LocalSecret) { delete(s.Tags, policy.TagOwner) }),
+		deleting,
+	)
+	aliases := &failingAliases{}
+	loader := policy.Loader{Store: secrets.AWS{Client: store, KMS: aliases, KeyARN: policytest.KeyARN}, Prefix: policytest.Prefix}
+	policytest.CaptureLog(t)
+	ctx := context.Background()
+	if _, err := loader.Load(ctx); err != nil || aliases.calls != 0 {
+		t.Fatalf("Load = %v after %d ListAliases calls; want the refusals alone, with no lookup", err, aliases.calls)
+	}
+	for name, reason := range map[string]string{"ADMIN_TIER": policy.ReasonTierTagMalformed, "DELETING": policy.ReasonAbsent} {
+		if lk, err := loader.LoadOne(ctx, name); err != nil || lk.Reason != reason || aliases.calls != 0 {
+			t.Fatalf("LoadOne(%s) = %+v, %v after %d ListAliases calls; want %s with no lookup", name, lk, err, aliases.calls, reason)
+		}
+	}
+	store.Put(onAlias("SERVED", func(*secrets.LocalSecret) {}))
+	if _, err := loader.Load(ctx); err == nil || !strings.Contains(err.Error(), "AccessDeniedException") || aliases.calls != 1 {
+		t.Fatalf("Load with a well-tagged secret on an alias = %v after %d ListAliases calls; want the lookup's failure after one", err, aliases.calls)
 	}
 }
 
@@ -142,10 +186,18 @@ func TestLoadRefusesEachUnservableSecretByNameWithTheExactLine(t *testing.T) {
 }
 
 // pagedSecrets answers ListSecrets one secret per page, the shape a namespace bigger than one page
-// comes back in, and counts the filters it was asked for.
+// comes back in, and counts the filters it was asked for. Its other Secrets Manager calls are a
+// Local's, which a Load never makes.
 type pagedSecrets struct {
+	*secrets.Local
 	entries []smtypes.SecretListEntry
 	filters [][]smtypes.Filter
+}
+
+// pagedLoader is the Loader over a pagedSecrets listing entries, with no alias to resolve.
+func pagedLoader(t *testing.T, entries ...smtypes.SecretListEntry) (policy.Loader, *pagedSecrets) {
+	sm := &pagedSecrets{Local: secrets.NewLocal(), entries: entries}
+	return policy.Loader{Store: secrets.AWS{Client: sm, KMS: noAliases{t}, KeyARN: policytest.KeyARN}, Prefix: policytest.Prefix}, sm
 }
 
 func (p *pagedSecrets) ListSecrets(_ context.Context, in *secretsmanager.ListSecretsInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.ListSecretsOutput, error) {
@@ -193,17 +245,16 @@ func listEntry(name, arn string, versionsToStages map[string][]string) smtypes.S
 // nobody used.
 func TestLoadReadsEveryPageOfThePrefixOnly(t *testing.T) {
 	entry := func(name string) smtypes.SecretListEntry { return listEntry(name, "arn:"+name, onlyCurrent) }
-	sm := &pagedSecrets{entries: []smtypes.SecretListEntry{
-		entry(policytest.Prefix + "first"), entry(policytest.Prefix + "second"),
-		entry(strings.ToUpper(policytest.Prefix) + "third"), entry(policytest.Prefix + "fourth"),
-	}}
-	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+	loader, sm := pagedLoader(t,
+		entry(policytest.Prefix+"first"), entry(policytest.Prefix+"second"),
+		entry(strings.ToUpper(policytest.Prefix)+"third"), entry(policytest.Prefix+"fourth"),
+	)
 	logged := policytest.CaptureLog(t)
 	set, err := loader.Load(context.Background())
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if len(set.Secrets) != 3 || set.Secrets["FIRST"].ARN != "arn:"+policytest.Prefix+"first" || set.Secrets["FOURTH"].Name != "FOURTH" {
+	if len(set.Secrets) != 3 || set.Secrets["FIRST"].Source != "arn:"+policytest.Prefix+"first" || set.Secrets["FOURTH"].Name != "FOURTH" {
 		t.Fatalf("served %+v, want FIRST, SECOND and FOURTH", set.Secrets)
 	}
 	if logged.String() != "" {
@@ -227,15 +278,14 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	entry := func(name string, versionsToStages map[string][]string) smtypes.SecretListEntry {
 		return listEntry(policytest.ID(name), "arn:"+name, versionsToStages)
 	}
-	sm := &pagedSecrets{entries: []smtypes.SecretListEntry{
+	loader, _ := pagedLoader(t,
 		entry("CURRENT", onlyCurrent),
 		entry("ROTATING", map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}),
 		entry("NEVER_GIVEN_A_VALUE", nil),
 		entry("NO_STAGES", map[string][]string{}),
 		entry("PENDING_ONLY", map[string][]string{"v1": {"AWSPENDING"}}),
 		entry("PREVIOUS_ONLY", map[string][]string{"v1": {"AWSPREVIOUS"}}),
-	}}
-	loader := policy.Loader{Secrets: sm, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+	)
 	logged := policytest.CaptureLog(t)
 	set, err := loader.Load(context.Background())
 	if err != nil {
@@ -250,27 +300,6 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 		refusedLine("PREVIOUS_ONLY", policy.ReasonNoCurrentValue)
 	if logged.String() != want {
 		t.Fatalf("logged:\n%s\nwant:\n%s", logged, want)
-	}
-}
-
-// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's load and the
-// agent-secrets CLI's VALUE column read: a secret has a value while one of its versions carries
-// AWSCURRENT, and not otherwise.
-func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
-	for _, tc := range []struct {
-		stages map[string][]string
-		want   bool
-	}{
-		{onlyCurrent, true},
-		{map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}, true},
-		{nil, false},
-		{map[string][]string{}, false},
-		{map[string][]string{"v1": {"AWSPENDING"}}, false},
-		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
-	} {
-		if got := policy.HasCurrentVersion(tc.stages); got != tc.want {
-			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
-		}
 	}
 }
 
@@ -322,7 +351,7 @@ func (f *failingSecrets) ListSecrets(ctx context.Context, in *secretsmanager.Lis
 func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
-		loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		loader := policy.Loader{Store: policytest.StoreThrough(store.Local, store), Prefix: policytest.Prefix}
 		logged := policytest.CaptureLog(t)
 		cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
 		if err != nil {
@@ -370,7 +399,7 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 	// Secrets Manager promises no listing order, so these listings come back in the order given.
 	listed := func(entries ...smtypes.SecretListEntry) string {
 		t.Helper()
-		loader := policy.Loader{Secrets: &pagedSecrets{entries: entries}, Aliases: noAliases{t}, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		loader, _ := pagedLoader(t, entries...)
 		set, err := loader.Load(context.Background())
 		if err != nil {
 			t.Fatalf("Load: %v", err)
@@ -467,7 +496,7 @@ func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
 	ctx := context.Background()
 
 	lk, err := loader.LoadOne(ctx, "SERVED")
-	if s := lk.Secret; err != nil || !lk.Served || lk.Reason != "" || s.Name != "SERVED" || s.Owner != owner || s.Tier != policy.TierHuman || s.ARN != secrets.LocalARN(policytest.ID("SERVED")) {
+	if s := lk.Secret; err != nil || !lk.Served || lk.Reason != "" || s.Name != "SERVED" || s.Owner != owner || s.Tier != policy.TierHuman || s.Source != secrets.LocalARN(policytest.ID("SERVED")) {
 		t.Fatalf("LoadOne(SERVED) = %+v, %v; want it served, %s's, human, read by its ARN", lk, err, owner)
 	}
 	for name, reason := range map[string]string{
@@ -498,16 +527,16 @@ func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
 // Manager refuses a longer SecretId as invalid input rather than answering it not found.
 func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 	store := secrets.NewLocal()
-	count := &countingDescriber{DescribeSecretAPIClient: store}
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
 	loader := policytest.Loader(store)
-	loader.Describer = count
+	loader.Store = policytest.StoreThrough(store, count)
 	ctx := context.Background()
 
 	atLimit := "A" + strings.Repeat("B", 512-len(policytest.Prefix)-1)
-	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.calls.Load() != 1 {
-		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.calls.Load())
+	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.Calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.Calls.Load())
 	}
-	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.calls.Load() != 1 {
-		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.calls.Load())
+	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.Calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.Calls.Load())
 	}
 }

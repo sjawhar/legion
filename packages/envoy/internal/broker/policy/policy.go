@@ -1,6 +1,6 @@
-// Package policy decides who may have an agent secret from two tags on the secret itself in AWS
-// Secrets Manager: owner (shared, a person's email, or a registered service) and tier (agent or
-// human). Loader reads every secret under the namespace prefix into a Set, refusing by name each one
+// Package policy decides who may have an agent secret from two tags on the secret itself in the
+// secret store (AWS Secrets Manager's tags, or Google Secret Manager's annotations): owner
+// (shared, a person's email, or a registered service) and tier (agent or human). Loader reads every secret under the namespace prefix into a Set, refusing by name each one
 // whose tags or key the policy cannot serve, or reads one name alone (LoadOne); Current keeps the
 // latest Set, rereads it on a ticker, and merges a single name's reread into it (RefreshOne);
 // Set.Evaluate answers one requester's ask for one name.
@@ -60,13 +60,6 @@ var ErrUnknownSecret = errors.New("no agent secret has this name")
 // RefusedMessage.
 const ReasonAbsent = "absent"
 
-// KeyARNParts answers the region and account of a key ARN ValidKeyARN accepts,
-// arn:aws:kms:<region>:<account>:key/<key id>: the region and account every agent secret lives in.
-func KeyARNParts(arn string) (region, account string) {
-	parts := strings.Split(arn, ":")
-	return parts[3], parts[4]
-}
-
 type ownerKind int
 
 const (
@@ -80,8 +73,9 @@ type Secret struct {
 	// Name is what a session asks for: the secret's name under the prefix, uppercased, each hyphen
 	// an underscore (<prefix>deel-api-key is DEEL_API_KEY).
 	Name string
-	// ARN is the secret's own ARN, which its value is read by.
-	ARN string
+	// Source is what the secret's value is read by: its ARN in Secrets Manager, or its resource
+	// name in Secret Manager.
+	Source string
 	// Owner is OwnerShared, a person's email, or a registered service.
 	Owner string
 	// Tier is TierAgent or TierHuman.
@@ -100,16 +94,16 @@ func (secret Secret) approver() string {
 
 // Set is the policy as one load read it, or as a single name's reread left it (NewSet builds both).
 type Set struct {
-	// Version is the SHA-256 of every served secret's name, owner, tier and ARN: equal versions are
-	// equal policies. A request records the version it was decided under, so a live grant is
+	// Version is the SHA-256 of every served secret's name, owner, tier and source: equal versions
+	// are equal policies. A request records the version it was decided under, so a live grant is
 	// re-evaluated only once the policy changed.
 	Version string
 	Secrets map[string]Secret
 }
 
 // NewSet builds the one Set shape both Load and the single-name merges produce, keeping secrets
-// (keyed by Name) as its Secrets: Version is the SHA-256 over "<Name>\t<Owner>\t<Tier>\t<ARN>\n"
-// per served secret, ascending by the secret's Secrets Manager name (the slug) — the exact order
+// (keyed by Name) as its Secrets: Version is the SHA-256 over "<Name>\t<Owner>\t<Tier>\t<Source>\n"
+// per served secret, ascending by the secret's name in the store (the slug) — the exact order
 // and bytes Load wrote before NewSet existed, so deployed digests do not shift. (Sorting by the
 // uppercased Name would NOT be equivalent: '-' is 0x2D, '_' is 0x5F, so "a-b" < "a0" as slugs but
 // "A0" < "A_B" as Names.)
@@ -125,7 +119,7 @@ func NewSet(secrets map[string]Secret) *Set {
 	slices.SortFunc(served, func(a, b bySlug) int { return strings.Compare(a.slug, b.slug) })
 	digest := sha256.New()
 	for _, s := range served {
-		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.ARN)
+		fmt.Fprintf(digest, "%s\t%s\t%s\t%s\n", s.secret.Name, s.secret.Owner, s.secret.Tier, s.secret.Source)
 	}
 	return &Set{Version: hex.EncodeToString(digest.Sum(nil)), Secrets: secrets}
 }
@@ -152,7 +146,7 @@ type Decision struct {
 	// Approver is who decides an Approval: the owner's email, or record.AnyoneApprover for a
 	// shared secret.
 	Approver string
-	// Source is the secret's ARN.
+	// Source is what the secret's value is read by (Secret.Source).
 	Source string
 }
 
@@ -173,7 +167,7 @@ func (s *Set) Evaluate(name string, r Requester) (Decision, error) {
 		return Decision{}, ErrUnknownSecret
 	}
 	withheld := slices.Contains(r.Withheld, name)
-	d := Decision{Source: secret.ARN}
+	d := Decision{Source: secret.Source}
 	switch {
 	case secret.kind == ownerService:
 		d.Outcome = Deny

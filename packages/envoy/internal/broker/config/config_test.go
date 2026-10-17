@@ -2,6 +2,7 @@
 package config
 
 import (
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"maps"
 	"os"
 	"strconv"
@@ -326,8 +327,67 @@ func TestLoadRequiresTheNamespaceAndItsKey(t *testing.T) {
 		}
 	}
 	cfg, err := Load(env(validEnv()))
-	if err != nil || cfg.SecretsPrefix != "example/agent-secrets/" || cfg.SecretsKMSKeyARN != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
+	if err != nil || cfg.SecretsPrefix != "example/agent-secrets/" || cfg.SecretsKMSKey != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
 		t.Fatalf("Load(valid) = %+v, %v", cfg, err)
+	}
+}
+
+// TestLoadReadsTheSecretStore pins BROKER_SECRETS_STORE: aws-secrets-manager when unset, so
+// every deployment from before the variable is unchanged; gcp-secret-manager with its own prefix
+// form (the project by its number, a secret-id prefix ending in "-") and BROKER_SECRETS_KMS_KEY_NAME
+// in place of the ARN; each store refusing the other store's key variable, so a deployment moved
+// between stores cannot keep the old key set and mean nothing by it; and any other name refused
+// naming both.
+func TestLoadReadsTheSecretStore(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.SecretsStore != secrets.StoreAWS || cfg.SecretsKMSKey != validEnv()["BROKER_SECRETS_KMS_KEY_ARN"] {
+		t.Fatalf("Load(unset store) = %+v, %v; want %s", cfg, err, secrets.StoreAWS)
+	}
+
+	gcp := func() map[string]string {
+		e := validEnv()
+		e["BROKER_SECRETS_STORE"] = secrets.StoreGCP
+		e["BROKER_SECRETS_PREFIX"] = "projects/000000000000/secrets/agent-secrets-"
+		delete(e, "BROKER_SECRETS_KMS_KEY_ARN")
+		e["BROKER_SECRETS_KMS_KEY_NAME"] = "projects/example-project/locations/global/keyRings/agent-secrets/cryptoKeys/agent-secrets"
+		return e
+	}
+	cfg, err = Load(env(gcp()))
+	if err != nil || cfg.SecretsStore != secrets.StoreGCP || cfg.SecretsPrefix != "projects/000000000000/secrets/agent-secrets-" || cfg.SecretsKMSKey != gcp()["BROKER_SECRETS_KMS_KEY_NAME"] {
+		t.Fatalf("Load(gcp) = %+v, %v", cfg, err)
+	}
+
+	for name, tc := range map[string]struct {
+		edit func(map[string]string)
+		want string
+	}{
+		"an unknown store": {func(e map[string]string) { e["BROKER_SECRETS_STORE"] = "vault" }, "BROKER_SECRETS_STORE must be aws-secrets-manager or gcp-secret-manager"},
+		"gcp with the ARN set": {func(e map[string]string) {
+			e["BROKER_SECRETS_KMS_KEY_ARN"] = validEnv()["BROKER_SECRETS_KMS_KEY_ARN"]
+		}, "BROKER_SECRETS_KMS_KEY_ARN is not read with BROKER_SECRETS_STORE=gcp-secret-manager; set BROKER_SECRETS_KMS_KEY_NAME instead"},
+		"gcp with no key name": {func(e map[string]string) { delete(e, "BROKER_SECRETS_KMS_KEY_NAME") }, "BROKER_SECRETS_KMS_KEY_NAME is required"},
+		"gcp with a project id": {func(e map[string]string) {
+			e["BROKER_SECRETS_PREFIX"] = "projects/example-project/secrets/agent-secrets-"
+		}, "BROKER_SECRETS_PREFIX: a Google Secret Manager prefix is projects/<project number>/secrets/"},
+		"gcp with an AWS prefix": {func(e map[string]string) { e["BROKER_SECRETS_PREFIX"] = "example/agent-secrets/" }, "BROKER_SECRETS_PREFIX: a Google Secret Manager prefix is projects/<project number>/secrets/"},
+		"gcp with no trailing dash": {func(e map[string]string) {
+			e["BROKER_SECRETS_PREFIX"] = "projects/000000000000/secrets/agent-secrets"
+		}, "BROKER_SECRETS_PREFIX: a Google Secret Manager prefix is projects/<project number>/secrets/"},
+		"gcp with a regional key": {func(e map[string]string) {
+			e["BROKER_SECRETS_KMS_KEY_NAME"] = "projects/example-project/locations/us-west1/keyRings/r/cryptoKeys/k"
+		}, "BROKER_SECRETS_KMS_KEY_NAME: a Cloud KMS key name is projects/"},
+	} {
+		e := gcp()
+		tc.edit(e)
+		if _, err := Load(env(e)); err == nil || !strings.HasPrefix(err.Error(), tc.want) {
+			t.Fatalf("Load(%s) = %v, want a refusal opening %q", name, err, tc.want)
+		}
+	}
+
+	aws := validEnv()
+	aws["BROKER_SECRETS_KMS_KEY_NAME"] = gcp()["BROKER_SECRETS_KMS_KEY_NAME"]
+	if _, err := Load(env(aws)); err == nil || !strings.HasPrefix(err.Error(), "BROKER_SECRETS_KMS_KEY_NAME is not read with BROKER_SECRETS_STORE=aws-secrets-manager; set BROKER_SECRETS_KMS_KEY_ARN instead") {
+		t.Fatalf("Load(aws with the key name set) = %v, want a refusal naming both", err)
 	}
 }
 
