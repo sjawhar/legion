@@ -173,24 +173,31 @@ cleanup() {
   teardown
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
-  # namespace_clean's snapshot is a LIST by label, not a GET by name; on this cluster a LIST can
-  # still show an object a direct GET has already confirmed NotFound for ten or more minutes
-  # after bridge_stop's own GET-based poll returned success and teardown's own LIST-based wait
-  # gave up still seeing it — confirmed live, 2026-10-17, four separate runs, the object itself
-  # eventually gone each time once checked much later. A fixed delay was not enough (tried 20s);
-  # this polls the exact query namespace_clean's snapshot runs, for up to 10 more minutes, so the
-  # one-shot snapshot it takes is only trusted once this cluster's own LIST view agrees with the
-  # GET-confirmed truth — never a retry loop around namespace_clean itself, shared with Stage 4b.
-  local settle_deadline settle_left
+  # namespace_clean's snapshot is a LIST by label, not a GET by name; on this cluster a single
+  # empty LIST, moments later, has not predicted what namespace_clean's own next LIST of the exact
+  # same query sees — confirmed live, 2026-10-17, five separate runs, the identical query flipping
+  # between empty and still-showing-the-bridge-pod across consecutive calls a few seconds apart,
+  # consistent with a load-balanced API server whose replicas disagree (one's watch cache caught
+  # up, another's has not) rather than a single slow object. No fixed wait fixes that: which
+  # replica answers is luck per call. Instead this requires five consecutive empty reads, 2s
+  # apart, before trusting the object is gone everywhere, not just on whichever replica answered
+  # last; a non-empty read resets the count. Never a retry loop around namespace_clean itself,
+  # shared with Stage 4b.
+  local settle_deadline settle_left settle_streak=0
   settle_deadline=$(($(date +%s) + 600))
   while :; do
     settle_left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>/dev/null) || settle_left=unknown
-    [ -n "$settle_left" ] || break
+    if [ -z "$settle_left" ]; then
+      settle_streak=$((settle_streak + 1))
+      [ "$settle_streak" -lt 5 ] || break
+    else
+      settle_streak=0
+    fi
     [ "$(date +%s)" -lt "$settle_deadline" ] || {
       echo "   [operator] namespace-clean's own listing still shows $settle_left after 10 extra minutes past teardown; proceeding to the snapshot anyway"
       break
     }
-    sleep 5
+    sleep 2
   done
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
