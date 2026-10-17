@@ -78,7 +78,8 @@ Two decisions stay with people:
   version and the gate reopens. The gate is on by default; a deployment can turn it off.
 - **The merge.** The merger sends `READY`. The daemon accepts it only when no check or workflow
   the base branch requires has failed or is missing, posts it on the Dispatch issue, and submits
-  the pull request for merge. The repository's own rules decide when it lands.
+  the pull request for merge. The repository's own rules decide when it lands, so a review a
+  person must give, or a by-hand merge, stays theirs.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.

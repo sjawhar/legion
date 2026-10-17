@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -186,6 +187,7 @@ func TestAPIAuth(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			request.Host = "127.0.0.1:9020"
 			if tc.authorize != "" {
 				request.Header.Set("Authorization", tc.authorize)
 			}
@@ -195,7 +197,7 @@ func TestAPIAuth(t *testing.T) {
 				configured = verifier
 			}
 			var logged bytes.Buffer
-			apiAuth(tc.token, configured, logging.NewWithWriter("test-machine", &logged), next).
+			apiAuth(tc.token, configured, nil, logging.NewWithWriter("test-machine", &logged), next).
 				ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
@@ -275,6 +277,7 @@ func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
 				requestBody = io.NopCloser(requestBody)
 			}
 			request := httptest.NewRequest(http.MethodPost, tc.path, requestBody)
+			request.Host = "127.0.0.1:9020"
 			if tc.unknownLength && request.ContentLength != -1 {
 				t.Fatalf("ContentLength = %d, want -1 for a body of unknown length", request.ContentLength)
 			}
@@ -283,7 +286,7 @@ func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
 			}
 			recorder := httptest.NewRecorder()
 
-			apiAuth("", nil, logging.NewWithWriter("test-machine", io.Discard), next).ServeHTTP(recorder, request)
+			apiAuth("", nil, nil, logging.NewWithWriter("test-machine", io.Discard), next).ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d; body = %s", recorder.Code, tc.wantStatus, recorder.Body.String())
@@ -477,6 +480,77 @@ func TestDescribeListenerAPIAuth(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := describeListenerAPIAuth(tc.token, tc.issuer); got != tc.want {
 				t.Fatalf("describeListenerAPIAuth(token set: %t, %q) = %q, want %q", tc.token != "", tc.issuer, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAPIAuthRefusesHostsAnUnauthenticatedListenerDoesNotServe(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	allowed := []string{"hub.internal.example", "192.0.2.10"}
+	cases := []struct {
+		name       string
+		host       string
+		path       string
+		token      string
+		wantStatus int
+	}{
+		{name: "refuses a rebinding host with its port", host: "rebind.attacker.example:9020", path: "/v1/messages/publish", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses a rebinding host without a port", host: "rebind.attacker.example", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses a host that only ends in an allowed name", host: "evil-hub.internal.example:9020", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses a non-ASCII letter that lower-cases to an allowed one", host: "HUB.\u0130NTERNAL.EXAMPLE", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses an address that only starts like an allowed one", host: "192.0.2.100:9020", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses an empty host", host: "", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses a non-loopback address", host: "192.0.2.7:9020", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "allows 127.0.0.1 with its port", host: "127.0.0.1:9020", path: "/v1/messages/publish", wantStatus: http.StatusNoContent},
+		{name: "allows bracketed ::1 with its port", host: "[::1]:9020", path: "/v1/sessions", wantStatus: http.StatusNoContent},
+		{name: "allows bracketed ::1 without a port", host: "[::1]", path: "/v1/sessions", wantStatus: http.StatusNoContent},
+		{name: "allows localhost in any case", host: "LocalHost:9020", path: "/v1/sessions", wantStatus: http.StatusNoContent},
+		{name: "allows localhost with a trailing dot", host: "localhost.:9020", path: "/v1/sessions", wantStatus: http.StatusNoContent},
+		{name: "allows a configured address", host: "192.0.2.10:9020", path: "/v1/sessions", wantStatus: http.StatusNoContent},
+		{name: "allows a configured host in any case", host: "HUB.Internal.Example:9020", path: "/v1/messages/publish", wantStatus: http.StatusNoContent},
+		{name: "allows a configured host with a trailing dot", host: "hub.internal.example.", path: "/v1/sessions", wantStatus: http.StatusNoContent},
+		{name: "leaves health checks to any host", host: "rebind.attacker.example:9020", path: "/healthz", wantStatus: http.StatusNoContent},
+		{name: "leaves webhooks to any host", host: "rebind.attacker.example:9020", path: "/webhook/github", wantStatus: http.StatusNoContent},
+		{
+			// A bearer a rebinding page cannot hold already guards an authenticated listener, which
+			// clients reach by names it does not list.
+			name: "leaves an authenticated listener to its bearer", host: "listener.internal.example:9020",
+			path: "/v1/sessions", token: "expected-token", wantStatus: http.StatusNoContent,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{}`))
+			request.Header.Set("Content-Type", "application/json")
+			request.Host = tc.host
+			if tc.token != "" {
+				request.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			recorder := httptest.NewRecorder()
+			var logged bytes.Buffer
+
+			apiAuth(tc.token, nil, allowed, logging.NewWithWriter("test-machine", &logged), next).ServeHTTP(recorder, request)
+
+			if recorder.Code != tc.wantStatus {
+				t.Fatalf("Host %q: status = %d, want %d; body = %s", tc.host, recorder.Code, tc.wantStatus, recorder.Body.String())
+			}
+			if tc.wantStatus == http.StatusMisdirectedRequest {
+				if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("Content-Type = %q, want application/json", got)
+				}
+				var body struct{ Error string }
+				if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil || !strings.Contains(body.Error, "ENVOY_ALLOWED_HOSTS") {
+					t.Fatalf("body = %q (%v), want a JSON error naming ENVOY_ALLOWED_HOSTS", recorder.Body.String(), err)
+				}
+				if !strings.Contains(logged.String(), "listener: request for a host it does not serve") {
+					t.Fatalf("log = %q, want the refusal line", logged.String())
+				}
+			} else if strings.Contains(logged.String(), "does not serve") {
+				t.Fatalf("log = %q, want no refusal line for a served request", logged.String())
 			}
 		})
 	}

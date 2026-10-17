@@ -45,13 +45,37 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker` and `legion-architect` skills say how the daemon's submission of an accepted
+  READY's merge ends when someone removes what it armed (LEGION-800). Once the daemon has seen
+  READY's head in the merge queue or armed for auto-merge, it never submits that head again after a
+  removal it did not make: the merge queue taking the pull request out because the merge failed
+  (GitHub's reason `failed_checks`, or an unexplained reason with a check that failed, timed out,
+  failed to start, needed action or went stale on the commit the queue built for its `merge_group`
+  CI, every page of its checks read) sends the issue back to `implementing` with the failing run in
+  the implementer's task and the architect's `checks-red`, and any other removal (a person
+  dequeuing it, whose cancelled runs are no failure, a person or GitHub turning auto-merge off, the
+  queue finding a conflict) ends the submission and reaches the architect as the new
+  `merge-removed` notice, whose row says what to do; GitHub turning auto-merge off on its own reads
+  as GitHub's, though GitHub names the daemon's App. The daemon submits again only after its own
+  disarm that GitHub applied late, which takes that App and the reason its disarm leaves
+  (auto-merge `manually_disabled`, or a `manual` dequeue), and after auto-merge a close turned off,
+  which the reopen at READY's head undid. On a base with a merge queue the daemon enqueues the pull
+  request only once GitHub reports it mergeable, so it never arms auto-merge while a required check
+  still runs.
+  A daemon rolled back to a release before this one refuses two outbox payloads this one writes,
+  a `ready_merge` row's `armed` field and the `merge-removed` notice kind, on every retry (and the
+  notice holds every waiting notice of the project). Before starting the older daemon, run against
+  its database, with `<KEY>` the Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'armed' where kind = 'ready_merge' and payload ? 'armed' and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `update outbox set payload = jsonb_set(payload, '{kind}', '"merge-refused"') where kind = 'notice' and payload->>'kind' = 'merge-removed' and split_part(issue, '-', 1) = '<KEY>';`
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
   allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
   reports it mergeable. An arm or queue entry is not the end: the daemon watches it until GitHub
-  reports the merge at READY's head, and submits again if it disappears while the issue still
-  awaits that READY. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  reports the merge at READY's head (a removal it did not make is the entry above). No role runs
+  `gh pr merge`, a design-gate READY needs nobody to submit it
   once the gate opens, and ordinary READY no longer waits for a required check still running or an
   unfinished disarm. A by-hand READY still waits for its pull request's unfinished disarm, so a
   stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new
@@ -107,7 +131,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or shows the approved head is not the head's ancestor, and `READY_NOT_APPROVED` when the round
   recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
   `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
-  The merger's move back to `reviewing` names the refusal's code and paths in its reason. A
+  The merger's move back to `reviewing` names the refusal's code and what it found in its reason. A
   reviewer whose task's `Reason:` names one of them runs a new round, never a fingerprint
   confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming what the refusal found; for
   `READY_NOT_APPROVED` it compares its last approved commit with the head on GitHub and requests
@@ -117,7 +141,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   prompt says how. The merge-gate reference and the architect and retro skills say the same, and
   the architect's `review_round_cap` judgment does not count those rounds as going in circles.
   A backward move's task no longer tells the role it starts to resume the requester's phase work;
-  it names that role's phase, the pull request and the move's reason.
+  it names that role's phase, the pull request and the move's reason, with the requester's handoff
+  commit when it has one.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the

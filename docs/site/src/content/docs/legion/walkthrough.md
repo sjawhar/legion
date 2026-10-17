@@ -55,7 +55,7 @@ review App. In Dispatch, the issue's header links the pull request.
 
 ![The issue header with the pull request Legion opened, linked as #42.](/legion/media/legion/pull-request.png)
 
-## 6. READY, and your merge
+## 6. READY, and the merge
 
 The merger sends `READY`; the daemon checks the head against the approved one and the required
 checks, posts it on the Dispatch issue, and submits its merge, which lands under the repository's

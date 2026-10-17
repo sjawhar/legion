@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -50,13 +51,17 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // readyMerge submits the merge of an accepted READY's head as the implement App
 // (ghautomerge.Submit), deciding by GitHub and then the record when it runs: only while the issue
 // still awaits that READY head on an open pull request does it ask GitHub to enqueue, merge or arm
-// it, and GitHub's merge state and rules decide which. A repository that allows no auto-merge leaves
-// the row waiting until GitHub reports the pull request mergeable, an arm or a queue entry leaves it
-// waiting until GitHub reports the merge (ghautomerge.Armed), submitted again if it disappears, and
-// a READY the record has left ends the row. A refusal a retry would meet again (ghautomerge.Refused)
-// and a disagreement with the record that has stood on GitHub longer than ghautomerge.LagBound
-// (ghautomerge.Lagging.Stalled) end it too, the architect told (permanentRefusal, finishRefused);
-// every other failure retries.
+// it, and GitHub's merge state and rules decide which. A repository that allows no auto-merge, or a
+// base that requires a merge queue, leaves the row waiting until GitHub reports the pull request
+// mergeable, so a merge-queue base never has auto-merge armed; an arm or a queue entry leaves it
+// waiting until GitHub reports the merge (ghautomerge.Armed), and a READY the record has left ends
+// the row. The first arm or entry the row sees is recorded on the row (rememberArm), so a later run
+// that finds it gone reads the removal from GitHub instead of submitting again: the merge queue
+// failing the merge sends the issue back to implementing (intake.MergeFailed, applied through the
+// workflow), and anyone else's removal ends the row with the architect told (ghautomerge.Removed,
+// merge-removed). A refusal a retry would meet again (ghautomerge.Refused) and a disagreement with
+// the record that has stood on GitHub longer than ghautomerge.LagBound (ghautomerge.Lagging.Stalled)
+// end it too, the architect told (permanentRefusal, finishRefused); every other failure retries.
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
@@ -73,24 +78,66 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 		}
 		return head, err
 	}
-	outcome, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, keep)
-	if err != nil {
+	outcome, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, payload.Armed, keep)
+	var armed *ghautomerge.Armed
+	var failed *ghautomerge.MergeFailed
+	switch {
+	case errors.As(err, &armed) && !payload.Armed:
+		if remembered := r.rememberArm(ctx, row, payload); remembered != nil {
+			return remembered
+		}
+		return err
+	case errors.As(err, &failed):
+		fact := intake.MergeFailed{Issue: row.Issue, Number: payload.Number, Head: payload.Head, Reason: failed.Error()}
+		applied, applyErr := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("merge-failed:%s:%s:%s", row.Issue, payload.Head, failed.Event), fact, r.handlers...)
+		if applyErr != nil {
+			return fmt.Errorf("send %s back to implementing on its failed merge: %w", row.Issue, applyErr)
+		}
+		// The workflow moves only an issue that still awaits that READY (workflow's mergeFailed), and
+		// a fact already applied moves nothing.
+		message := "outbox READY merge failed in the merge queue; the workflow sends the issue back to implementing if it still awaits that READY"
+		if applied.Duplicate {
+			message = "outbox READY merge failed in the merge queue; that failure was already applied, so nothing changed"
+		}
+		r.log.Info(message, "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head, "reason", failed.Error())
+		return nil
+	case err != nil:
 		return err
 	}
 	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head, "outcome", outcome)
 	return nil
 }
 
+// rememberArm records on row that its READY's head has been seen armed or queued on GitHub
+// (record.ReadyMerge.Armed), while row's lease holds it: a reopen's queue that took the row since
+// starts it over unarmed, and its own payload stands.
+func (r *outbox) rememberArm(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
+	payload.Armed = true
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		_, err := r.records.ReplaceOutboxPayload(ctx, tx, row.ID, row.LeaseToken, payload)
+		return err
+	}); err != nil {
+		return fmt.Errorf("record that READY's head is armed on outbox row %d: %w", row.ID, err)
+	}
+	return nil
+}
+
 // readyMergeEnded is the architect's notice of a READY merge row ended without a merge by cause:
-// GitHub's refusal, which a retry would meet again (merge-refused), or GitHub showing the pull
+// GitHub's refusal, which a retry would meet again (merge-refused), GitHub showing the pull
 // request closed or at another head than the record awaits since a change older than
-// ghautomerge.LagBound, a webhook the daemon never received (merge-stalled).
+// ghautomerge.LagBound, a webhook the daemon never received (merge-stalled), or a person, or GitHub
+// on its own, taking it out of the merge queue or turning its auto-merge off at READY's head, not
+// because the merge failed (merge-removed).
 func readyMergeEnded(cause error) record.Notice {
 	var lagging *ghautomerge.Lagging
-	if errors.As(cause, &lagging) {
+	var removed *ghautomerge.Removed
+	switch {
+	case errors.As(cause, &lagging):
 		return record.Notice{Kind: "merge-stalled", Role: claim.RoleArchitect,
 			Reason: fmt.Sprintf("GitHub has shown pull request #%d %s at %s since %s, longer than %s, while the record awaits its merge at READY's head %s: the daemon never received that change's webhook, so it stopped submitting READY's merge",
 				lagging.Number, lagging.State, lagging.GitHubHead, lagging.Since.UTC().Format(time.RFC3339), ghautomerge.LagBound, lagging.Head)}
+	case errors.As(cause, &removed):
+		return record.Notice{Kind: "merge-removed", Role: claim.RoleArchitect, Reason: removed.Error()}
 	}
 	return record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: cause.Error()}
 }

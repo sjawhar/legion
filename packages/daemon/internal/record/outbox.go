@@ -390,10 +390,16 @@ func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisa
 // The workflow queues it when an issue reaches awaiting_merge on a READY nobody marked by hand. Its
 // executor decides by GitHub and then the record when it runs, so a READY withdrawn, moved past or
 // left since submits nothing, and it waits while GitHub reports the pull request not yet mergeable
-// in a repository that allows no auto-merge.
+// in a repository that allows no auto-merge or on a base that requires a merge queue. Armed is the
+// row having seen Head armed for auto-merge or in the merge queue on GitHub, which its executor
+// records on the row (Store.ReplaceOutboxPayload): from then on the arm or entry disappearing
+// without a merge is a removal the row reads from GitHub rather than a cue to submit again
+// (ghautomerge.Submit). A queue of the same issue and head starts the row over unarmed
+// (readyMergeConflict).
 type ReadyMerge struct {
 	Number int    `json:"number"`
 	Head   string `json:"head"`
+	Armed  bool   `json:"armed,omitempty"`
 }
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
@@ -603,7 +609,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "merge-refused", "merge-stalled", "merge-removed", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

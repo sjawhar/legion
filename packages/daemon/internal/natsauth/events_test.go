@@ -88,7 +88,7 @@ func wait(t *testing.T, ch <-chan struct{}, what string, out *lockedBuffer) {
 func TestAPermissionTheServerRefusesIsLoggedAtError(t *testing.T) {
 	seed, public := testnats.User(t)
 	const denied, deniedPublish = "notifications.envoy.exceptions.notifications.role.>", "notifications.role.denied"
-	url := testnats.StartNkeyAuthorizedUsers(t, testnats.NkeyUser{
+	_, url := testnats.StartNkeyAuthorizedUsers(t, testnats.Image, testnats.NkeyUser{
 		Public:      public,
 		Permissions: `{ subscribe: { deny: ["` + denied + `"] }, publish: { deny: ["` + deniedPublish + `"] } }`,
 	})

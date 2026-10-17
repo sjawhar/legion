@@ -81,7 +81,7 @@ comes back, with everything it knew, the next time its role is needed.
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, with no required check or workflow failed or missing, and submits the merge. | implement App |
-| `awaiting_merge` | none | Waits for the merge the daemon submitted to land under the repository's rules. | none |
+| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
 A failed test, red CI on the head in testing, review, retro or merging (a check or workflow the
