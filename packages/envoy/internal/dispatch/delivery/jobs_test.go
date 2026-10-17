@@ -179,7 +179,7 @@ func TestAJobOfATrackedDeployRunRecordsItsJobsWhileItRuns(t *testing.T) {
 	go func() { defer close(done); jobs.Run(runCtx) }()
 	t.Cleanup(func() { cancel(); <-done })
 	waitFor(t, 20*time.Second, func() bool {
-		info, err := natsClient.JS().ConsumerInfo(bus.Stream, jobConsumerName)
+		info, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchJobDurable)
 		return err == nil && info.PushBound
 	}, func() string { return "the job intake never bound its durable" })
 

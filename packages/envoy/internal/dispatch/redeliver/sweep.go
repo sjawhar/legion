@@ -40,10 +40,6 @@ import (
 )
 
 const (
-	// Bucket is the JetStream KV bucket holding the sweep's cursor and one record per delivery
-	// it acted on. Its TTL is GitHub's own horizon: past three days GitHub neither lists nor
-	// redelivers an attempt, so nothing older is worth remembering.
-	Bucket = "envoy_webhook_redelivery"
 	// Interval is how often the running sweep lists failures.
 	Interval = 2 * time.Minute
 	// Lookback is how far back every continuous sweep lists, and all a first sweep lists: a
@@ -55,6 +51,8 @@ const (
 	// redelivery requests GitHub refuses for it.
 	MaxAttempts = 5
 
+	// retention is the bucket's TTL, GitHub's own horizon: past three days GitHub neither lists
+	// nor redelivers an attempt, so nothing older is worth remembering.
 	retention       = 72 * time.Hour
 	cursorOverlap   = 2 * time.Minute
 	firstBackoff    = 2 * time.Minute
@@ -74,9 +72,9 @@ type GitHub interface {
 
 // OpenState opens the sweep's KV bucket, creating it on first use.
 func OpenState(js nats.JetStreamContext) (bus.KeyValue, error) {
-	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: Bucket, TTL: retention, Storage: nats.FileStorage, Replicas: 1})
+	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{Bucket: bus.WebhookRedeliveryBucket, TTL: retention, Storage: nats.FileStorage, Replicas: 1})
 	if err != nil {
-		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", Bucket, err)
+		return bus.KeyValue{}, fmt.Errorf("open %s KV bucket: %w", bus.WebhookRedeliveryBucket, err)
 	}
 	return kv, nil
 }

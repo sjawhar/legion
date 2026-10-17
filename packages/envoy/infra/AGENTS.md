@@ -34,7 +34,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions`, `HostPermissions` and `DaemonPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions`, `HostPermissions`, `DispatchPermissions` and `DaemonPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), the error naming and version paging both share (`errors.go`), and the contract every store's tests run (`store_contract_test.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -164,8 +164,8 @@ versions. Never add the module to the root `go.work`.
   `gcp/tailnet_joined_test.go` and `gcp/data_disk_test.go` run the secret fetcher, the listener's
   seed script, the joined script and the data disk's bootcmd entry as the golden holds them, so a
   change to any of them is tested there.
-- **Permission sets.** `core/permissions.go` builds the listener, session and host sets from names
-  that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
+- **Permission sets.** `core/permissions.go` builds the listener, session, host and Dispatch sets
+  from names that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
   `packages/envoy/daemonpermissions.Grant`, which builds the daemon's shared grant from those same
   names so its real-NATS proof and the hub cannot diverge. The plugin and the command compile only
   `daemonpermissions`, `internal/bus` and `internal/contracts` from Envoy (`go list -deps ./cmd/...`),
@@ -268,8 +268,15 @@ same user receives, and the server refuses nothing the set allows; without the d
 create, the listener never reaches `"status":"healthy"`; and, as a hub with a listener renders its
 users, the listener reaches `"status":"healthy"` as a user holding `ListenerPermissions` while a
 session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
-receives a send and a role message, and is refused a publish to another session's subject). The
-`envoy-infra-go` job in
+receives a send and a role message, and is refused a publish to another session's subject).
+`core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
+`envoy-dispatch` against `DispatchPermissions`, with the test client connected as a second user of
+its own (`testClientPermissions`, the session set plus the exact calls its checks make), and proves
+both delivery durables (each binds and acknowledges a message), the outbox's owner-topic JetStream
+publish, the agent stream relay, Dispatch creating the redelivery bucket, which the test client
+then reads and writes, and that Dispatch's own user is refused a publish to a session's frames; its
+negative control removes the delivery durable's filtered create permission and receives that server
+violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh

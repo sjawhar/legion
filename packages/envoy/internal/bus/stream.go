@@ -25,6 +25,9 @@ const (
 	SessionBucket = "envoy_sessions"
 	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
 	CIStateBucket = "envoy_ci_state"
+	// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
+	// webhook's failed deliveries (internal/dispatch/redeliver).
+	WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 )
 
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
@@ -34,6 +37,14 @@ const NotificationTopicPrefix = "notifications."
 // ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
+// every GitHub notification (internal/dispatch/delivery).
+const DispatchDeliveryDurable = "delivery-events"
+
+// DispatchJobDurable is the stream's durable consumer Dispatch's job intake binds, over a deploy
+// run's job events (internal/dispatch/delivery).
+const DispatchJobDurable = "delivery-jobs"
 
 // ListenerDurable is the durable consumer of the stream that the listener of machine machineID
 // binds. A space in the machine id is a hyphen in the name.

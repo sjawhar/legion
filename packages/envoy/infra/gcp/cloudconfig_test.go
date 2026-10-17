@@ -134,15 +134,16 @@ func TestCloudConfigOpensTheHostFirewallToTheHealthChecksAndTheTailnet(t *testin
 }
 
 // The configuration file is core's rendering of the users: each of users a keyed user with a seed,
-// a machine id giving the host's permission set and explicit permissions taken as they are; then
-// the listener's user, named after the hub, with the listener's set for that machine and a seed;
-// then the session user, with the session's set and no seed, which a client presenting no
-// credential becomes.
+// a machine id giving the host's permission set, a Dispatch machine id giving its set, and explicit
+// permissions taken as they are; then the listener's user, named after the hub, with the listener's
+// set for that machine and a seed; then the session user, with the session's set and no seed, which
+// a client presenting no credential becomes.
 func TestCloudConfigNatsConfigurationIsCoresRenderingOfTheUsers(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
 	host := core.HostPermissions("example-host-a")
+	dispatch := core.DispatchPermissions("example-dispatch")
 	listener := core.ListenerPermissions("example-hub")
 	session := core.SessionPermissions()
 	want, err := core.Authorization{Users: []core.User{
@@ -152,6 +153,7 @@ func TestCloudConfigNatsConfigurationIsCoresRenderingOfTheUsers(t *testing.T) {
 			Publish:   &core.Rules{Allow: []string{">"}},
 			Subscribe: &core.Rules{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 		},
+		{Name: "example-dispatch", NKey: keyC, Publish: &dispatch.Publish, Subscribe: &dispatch.Subscribe, HasSeed: true},
 		{Name: "example-hub", NKey: keyListener, Publish: &listener.Publish, Subscribe: &listener.Subscribe, HasSeed: true},
 		{Name: "example-sessions", NKey: keySessions, Publish: &session.Publish, Subscribe: &session.Subscribe},
 	}, NoAuthUser: "example-sessions"}.Render([]string{"Rendered by envoy-infra. Public keys only."})

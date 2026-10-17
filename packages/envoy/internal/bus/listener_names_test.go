@@ -21,3 +21,15 @@ func TestListenerDurableAndQueueKeepTheListenersNames(t *testing.T) {
 		}
 	}
 }
+
+func TestDispatchNamesKeepDispatchsExistingNames(t *testing.T) {
+	if got := bus.DispatchDeliveryDurable; got != "delivery-events" {
+		t.Errorf("DispatchDeliveryDurable = %q, want %q", got, "delivery-events")
+	}
+	if got := bus.DispatchJobDurable; got != "delivery-jobs" {
+		t.Errorf("DispatchJobDurable = %q, want %q", got, "delivery-jobs")
+	}
+	if got := bus.WebhookRedeliveryBucket; got != "envoy_webhook_redelivery" {
+		t.Errorf("WebhookRedeliveryBucket = %q, want %q", got, "envoy_webhook_redelivery")
+	}
+}

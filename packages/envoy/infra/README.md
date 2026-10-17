@@ -1408,6 +1408,20 @@ user holding `HostPermissions`, and connected as a user holding `ListenerPermiss
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
 2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
 
+`DispatchPermissions(machineID)` is the grant of Dispatch's one NATS user, shared by
+`envoy-dispatch` and the listener beside it. It adds to `ListenerPermissions(machineID)` the info,
+filtered create, delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
+durables; the key-value calls for `envoy_webhook_redelivery`; publication of every session's
+agent-stream control subject; and subscription to every session's agent-stream frames. A
+`gcp:NatsHub` user with `dispatchMachineId` holds it. No session shares the user, so it holds none
+of `SessionPermissions`: a direct publish to a session's agent-stream frames is refused. Whatever
+holds its seed, `envoy-dispatch` or the listener beside it, can still read every session's frames
+and send control to any session, and, since NATS checks no push consumer's deliver subject against
+a grant, it can put any payload on a session's frames through a `delivery-events` consumer it may
+create. So the seed is as sensitive as every session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and
+2.15.1 in `core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is
+refused a publish to a session's frames.
+
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, the info, create and next-message requests of any consumer of
 that stream, and their acknowledgements. It subscribes to the daemon's role-lane delivery

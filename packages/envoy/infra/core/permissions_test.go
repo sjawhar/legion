@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -96,6 +97,41 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	}, core.HostPermissions("example-host-a"))
 }
 
+func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
+	dispatchPublish := append([]string{}, listenerPublish...)
+	for index, subject := range dispatchPublish {
+		dispatchPublish[index] = strings.ReplaceAll(subject, "example-host-a", "example-dispatch")
+	}
+	dispatchPublish = append(dispatchPublish,
+		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
+		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",
+		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-events",
+		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-events.>",
+		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-jobs",
+		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-jobs.>",
+		"$JS.API.CONSUMER.DELETE.ENVOY_NOTIFICATIONS.delivery-jobs",
+		"$JS.ACK.ENVOY_NOTIFICATIONS.delivery-jobs.>",
+		"$JS.API.STREAM.INFO.KV_envoy_webhook_redelivery",
+		"$JS.API.STREAM.CREATE.KV_envoy_webhook_redelivery",
+		"$JS.API.DIRECT.GET.KV_envoy_webhook_redelivery.>",
+		"$JS.API.STREAM.MSG.GET.KV_envoy_webhook_redelivery",
+		"$KV.envoy_webhook_redelivery.>",
+		"$JS.API.CONSUMER.CREATE.KV_envoy_webhook_redelivery.>",
+		"$JS.API.CONSUMER.DELETE.KV_envoy_webhook_redelivery.>",
+		"$JS.FC.KV_envoy_webhook_redelivery.>",
+		"agentstream.*.control",
+	)
+	want := core.Permissions{
+		Publish: core.Rules{Allow: dispatchPublish},
+		Subscribe: core.Rules{Allow: []string{
+			"_INBOX.>", "notifications.role.> envoy-listener-example-dispatch",
+			"agentstream.*.frames",
+		}},
+	}
+	got := core.DispatchPermissions("example-dispatch")
+	require.Equal(t, want, got)
+}
+
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of
 // the sets holds one, the union included.
 func TestNoSetRepeatsAnEntry(t *testing.T) {
@@ -103,6 +139,7 @@ func TestNoSetRepeatsAnEntry(t *testing.T) {
 		"listener": core.ListenerPermissions("example-host-a"),
 		"session":  core.SessionPermissions(),
 		"host":     core.HostPermissions("example-host-a"),
+		"dispatch": core.DispatchPermissions("example-host-a"),
 		"daemon":   core.DaemonPermissions(),
 	}
 	for name, p := range sets {
@@ -128,6 +165,12 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	session := core.SessionPermissions()
 	session.Publish.Allow[0] = "edited"
 	require.Equal(t, "_INBOX.>", core.SessionPermissions().Publish.Allow[0])
+	dispatch := core.DispatchPermissions("example-host-a")
+	dispatch.Publish.Allow[0] = "edited"
+	dispatch.Subscribe.Allow[0] = "edited"
+	again := core.DispatchPermissions("example-host-a")
+	require.Equal(t, "notifications.agent.>", again.Publish.Allow[0])
+	require.Equal(t, "_INBOX.>", again.Subscribe.Allow[0])
 	daemon := core.DaemonPermissions()
 	daemon.Publish.Allow[0] = "edited"
 	daemon.Subscribe.Allow[0] = "edited"
