@@ -44,6 +44,8 @@ const issue: IssueDetails = {
   project: "CORE",
   referenced_by_count: 0,
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "todo",
   priority: null,
   rank: "U",
@@ -91,6 +93,8 @@ function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0)
   api.listIssues = async () => [
     {
       route: null,
+      repo: null,
+      resolved_repo: null,
       route_status: null,
       route_holder: null,
       key: issue.key,

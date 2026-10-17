@@ -67,6 +67,7 @@ import { IssueLabels } from "./IssueLabels";
 import { PriorityEditor } from "./PriorityControl";
 import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
+import { RepoControl } from "./RepoControl";
 import { UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
@@ -598,6 +599,17 @@ export function IssueHeader({
               </button>
             </div>
           )}
+          {/* The repository is where the work goes, like the parent, so it sits in this rail,
+              which scrolls rather than wrapping: a repository name can be long, and the state
+              row above must keep every control on one row at a phone width. An issue whose
+              project maps no repository has no item here. */}
+          <RepoControl
+            disabled={isClosed || updateIssue.isPending}
+            issueKey={issue.key}
+            project={issue.project}
+            repo={issue.repo}
+            resolvedRepo={issue.resolved_repo}
+          />
           <IssueComponentsLine issue={issue} />
           {issue.external_links.map((link) => (
             <div className="flex shrink-0 items-center" key={link.url}>

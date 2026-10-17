@@ -37,6 +37,7 @@ import type {
   MyAnswersResponse,
   MyRepliesResponse,
   Project,
+  RepoProject,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -160,6 +161,21 @@ async function request<T>(
 
 export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
   return request<Project>("/api/v1/projects", "POST", input, { login });
+}
+
+/** Maps `repo` (`owner/name`) to a project, as the Settings page does; `default: true` makes it the
+ *  project's default repository. */
+export function putRepoProject(
+  repo: string,
+  input: { project: string; default?: boolean },
+  login = "alice"
+): Promise<RepoProject> {
+  return request<RepoProject>(`/api/v1/settings/repo-projects/${repo}`, "PUT", input, { login });
+}
+
+/** Removes `repo`'s mapping, as the Settings page's Delete does. */
+export function deleteRepoProject(repo: string, login = "alice"): Promise<void> {
+  return request<void>(`/api/v1/settings/repo-projects/${repo}`, "DELETE", {}, { login });
 }
 
 /** Mints a personal agent token for `login`; the returned bearer acts for that human. */
@@ -303,6 +319,7 @@ export function createIssue(
     external?: string;
     force?: boolean;
     parent?: string;
+    repo?: string;
     spec?: string;
   },
   options: ApiOptions = {}

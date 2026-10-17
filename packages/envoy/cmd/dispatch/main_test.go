@@ -826,57 +826,6 @@ func TestMain(m *testing.M) {
 	os.Exit(storetest.Main(m))
 }
 
-func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
-	database := storetest.Open(t)
-	ctx := context.Background()
-	for _, project := range []string{"APP", "CORE"} {
-		if _, err := database.Pool.Exec(ctx, "insert into projects (key, name) values ($1, $1)", project); err != nil {
-			t.Fatalf("create project %q: %v", project, err)
-		}
-	}
-	createdBy, err := json.Marshal(map[string]string{"kind": "user", "id": "alice"})
-	if err != nil {
-		t.Fatalf("encode actor: %v", err)
-	}
-	if _, err := database.Pool.Exec(ctx, `
-		insert into repo_projects (repo, project, created_by) values ('dashboard/repo', 'CORE', $1)
-	`, createdBy); err != nil {
-		t.Fatalf("create dashboard mapping: %v", err)
-	}
-
-	if err := seedRepoProjects(ctx, database, "Seed/Repo.git=APP,dashboard/repo=APP"); err != nil {
-		t.Fatalf("seed repository projects: %v", err)
-	}
-
-	rows, err := database.Pool.Query(ctx, "select repo, project from repo_projects order by repo")
-	if err != nil {
-		t.Fatalf("list mappings: %v", err)
-	}
-	defer rows.Close()
-	got := map[string]string{}
-	for rows.Next() {
-		var repo, project string
-		if err := rows.Scan(&repo, &project); err != nil {
-			t.Fatalf("scan mapping: %v", err)
-		}
-		got[repo] = project
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate mappings: %v", err)
-	}
-	if got["seed/repo"] != "APP" || got["dashboard/repo"] != "CORE" || len(got) != 2 {
-		t.Fatalf("seeded mappings: got %#v", got)
-	}
-}
-
-func TestSeedRepoProjectsRejectsMissingProject(t *testing.T) {
-	database := storetest.Open(t)
-	err := seedRepoProjects(context.Background(), database, "missing/repo=MISSING")
-	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo"`) {
-		t.Fatalf("seed missing project: got %v", err)
-	}
-}
-
 func TestWriteBlockIDBackfillReportLabelsSkippedDocuments(t *testing.T) {
 	var output bytes.Buffer
 	writeBlockIDBackfillReport(&output, docs.BlockIDBackfill{

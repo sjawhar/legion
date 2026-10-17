@@ -43,6 +43,9 @@
 
 ### Added
 
+- The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
+  `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
+  repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
 - The `slack_post` tool (sjawhar/legion#1998): a reply in a Slack thread as the Legion Slack app,
   with the bot token the secrets broker grants the session (`LEGION_SLACK_BOT_TOKEN`), which only
   the posting process holds. The project's controller answers its Slack channels' mentions with

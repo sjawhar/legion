@@ -114,6 +114,12 @@
 
 ### Added
 
+- `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
+  repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
+  `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the
+  repository fields, the read prints `Repository: unknown (…)` and returns its warning in the new
+  `DispatchToolResult.warnings`, which `runDispatchCli` writes to the new, required
+  `DispatchCliIo.stderr`; a `--repo` write whose answer has no `repo` fails, saying it was not saved.
 - `DISPATCH_PUBLIC_URL`, Dispatch's dashboard as people open it (sjawhar/legion#1998): every link
   the `dispatch` command prints is resolved against it when it is set, so an agent that reaches
   Dispatch at an in-cluster address prints links people can open, and a pasted dashboard link on

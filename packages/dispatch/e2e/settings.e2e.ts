@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject } from "./api";
+import { createIssue, createProject, getIssue, putRepoProject } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -45,6 +45,129 @@ test("a repository mapping added in Settings assigns a new external issue to its
       path: testInfo.outputPath("repository-project-settings.png"),
       fullPage: true,
     });
+  } finally {
+    await context.close();
+  }
+});
+
+test("a project's default repository moves with its Default radio, and a mapping an issue names stays", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  const pinned = await createIssue({ project: "CORE", repo: "acme/widgets", title: "Pinned" });
+  const inheriting = await createIssue({ force: true, project: "CORE", title: "Inheriting" });
+  expect(inheriting.resolved_repo).toBe("acme/widgets");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const radio = (repo: string) =>
+    page.getByRole("radio", { name: `Default repository of CORE: ${repo}` });
+
+  try {
+    await page.goto("/settings");
+    await expect(page.getByRole("columnheader", { name: "Default" })).toBeVisible();
+    await expect(radio("acme/widgets")).toBeChecked();
+    await expect(radio("acme/gadgets")).not.toBeChecked();
+
+    const saved = page.waitForRequest(
+      (request) =>
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === "/api/v1/settings/repo-projects/acme/gadgets"
+    );
+    await radio("acme/gadgets").click();
+    expect((await saved).postDataJSON()).toEqual({ default: true, project: "CORE" });
+    await expect(radio("acme/gadgets")).toBeChecked();
+    await expect(radio("acme/widgets")).not.toBeChecked();
+    // An issue with no repository of its own resolves to the new default; one with its own keeps it.
+    await expect
+      .poll(() => getIssue(inheriting.key))
+      .toMatchObject({ resolved_repo: "acme/gadgets" });
+    expect(await getIssue(pinned.key)).toMatchObject({
+      repo: "acme/widgets",
+      resolved_repo: "acme/widgets",
+    });
+    await page.reload();
+    await expect(radio("acme/gadgets")).toBeChecked();
+
+    // The pinned issue names acme/widgets, so its mapping is not deleted, and the page says why.
+    await page.getByRole("button", { name: "Delete mapping for acme/widgets" }).click();
+    await expect(
+      page.getByText(
+        "1 issue(s) of CORE name acme/widgets as their repository; change their repo first"
+      )
+    ).toBeVisible();
+    await expect(page.getByRole("cell", { exact: true, name: "acme/widgets" })).toBeVisible();
+    const shot = testInfo.outputPath(`repository-default-${testInfo.project.name}.png`);
+    await page.screenshot({ fullPage: true, path: shot });
+    await testInfo.attach(`repository default (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+// A mapping write's answer describes one row, not the project's mappings when it arrives. Here the
+// server saves the pick of acme/gadgets at once, another browser makes acme/widgets the default
+// again (which this page hears and shows), and only then does the first answer reach the page: the
+// page reads the mappings again rather than put acme/gadgets back.
+test("a late answer to a Default pick does not undo a default another browser set since", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const radio = (repo: string) =>
+    page.getByRole("radio", { name: `Default repository of CORE: ${repo}` });
+
+  try {
+    let answer: () => void = () => {};
+    const answerHeld = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    let saved: () => void = () => {};
+    const savedOnServer = new Promise<void>((resolve) => {
+      saved = resolve;
+    });
+    await page.route("**/api/v1/settings/repo-projects/acme/gadgets", async (route) => {
+      if (route.request().method() !== "PUT") {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      saved();
+      await answerHeld;
+      await route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    await expect(radio("acme/widgets")).toBeChecked();
+
+    await radio("acme/gadgets").click();
+    await savedOnServer;
+    await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+    await expect(radio("acme/widgets")).toBeChecked();
+
+    const answered = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/repo-projects/acme/gadgets") &&
+        response.request().method() === "PUT"
+    );
+    const readAgain = answered.then(() =>
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/v1/settings/repo-projects" &&
+          response.request().method() === "GET"
+      )
+    );
+    answer();
+    await answered;
+    await readAgain;
+    await expect(radio("acme/widgets")).toBeChecked();
+    await expect(radio("acme/gadgets")).not.toBeChecked();
   } finally {
     await context.close();
   }

@@ -313,6 +313,12 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       components: componentsArgument(z).optional(),
+      repo: z
+        .string()
+        .describe(
+          "The repository the issue targets, owner/name, mapped to the issue's project in Settings; a child inherits its parent's when unset, and an issue with none on its parent chain takes the project's default."
+        )
+        .optional(),
     }),
   },
   {
@@ -325,8 +331,8 @@ export const dispatchToolSpecs = [
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
-      "route, set or clear its parent, replace the issues it is blocked by, or attach it to " +
-      "architecture components. Status is one of " +
+      "route, set or clear its parent, replace the issues it is blocked by, attach it to " +
+      "architecture components, or set the repository it targets. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. A non-empty external_links is " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
@@ -390,6 +396,12 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       components: componentsArgument(z).optional(),
+      repo: z
+        .string()
+        .describe(
+          "The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again."
+        )
+        .optional(),
     }),
     validation: {
       check: (value) => {
@@ -404,6 +416,7 @@ export const dispatchToolSpecs = [
           readonly parent?: unknown;
           readonly blocked_by?: unknown;
           readonly components?: unknown;
+          readonly repo?: unknown;
         };
         const reasonFits =
           input.status === "done"
@@ -420,11 +433,12 @@ export const dispatchToolSpecs = [
             typeof input.route === "string" ||
             typeof input.parent === "string" ||
             Array.isArray(input.blocked_by) ||
-            (typeof input.components === "object" && input.components !== null))
+            (typeof input.components === "object" && input.components !== null) ||
+            typeof input.repo === "string")
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, or components. " +
+        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo. " +
         "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.",
     },
     strict: true,

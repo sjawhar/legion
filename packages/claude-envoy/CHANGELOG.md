@@ -9,6 +9,9 @@
 
 ### Changed
 
+- The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
+  `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
+  repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

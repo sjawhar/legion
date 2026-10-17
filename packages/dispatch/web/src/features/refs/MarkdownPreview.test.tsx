@@ -42,6 +42,8 @@ const issue: IssueDetails = {
   rank: "U",
   referenced_by_count: 0,
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "in_progress",
   title: "Design decision",
   updated_at: "2026-09-09T00:00:00Z",

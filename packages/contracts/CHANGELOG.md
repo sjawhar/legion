@@ -4,6 +4,10 @@
 
 ### Added
 
+- The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
+  `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
+  (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
+  clears).
 - `SLACK_POST_TEXT_MAX` (4,000), the longest reply in UTF-16 units the `slack_post` tool posts
   (sjawhar/legion#1998).
 - `SLACK_CHANNEL_ID_PATTERN` and `slackMentionTopic(channel)`, a project's Slack channel id and the

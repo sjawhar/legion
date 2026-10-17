@@ -35,6 +35,8 @@ const base: Issue = {
   project: "CORE",
   rank: "U",
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "in_progress",
   title: "Claim the issue before working it",
   updated_at: "2026-09-24T06:00:00Z",
@@ -60,6 +62,9 @@ function header(issue: Issue): { unmount: () => void } {
     referenced_by_count: 0,
   };
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // The header reads the project's repository mappings at once for an issue that resolves to
+  // none, as these do; a project that maps none shows no repository item.
+  const mappings = spyOn(api, "listRepoProjects").mockResolvedValue([]);
   const wrapper = ({ children }: { children: ReactNode }) => (
     <MemoryRouter>
       <QueryClientProvider client={client}>
@@ -67,7 +72,7 @@ function header(issue: Issue): { unmount: () => void } {
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return render(
+  const view = render(
     <IssueHeader
       documentArtifact={undefined}
       isClosed={false}
@@ -77,6 +82,12 @@ function header(issue: Issue): { unmount: () => void } {
     />,
     { wrapper }
   );
+  return {
+    unmount: () => {
+      view.unmount();
+      mappings.mockRestore();
+    },
+  };
 }
 
 /** One live session, as `GET /api/v1/agents` lists it. */

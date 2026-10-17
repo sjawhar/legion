@@ -1,14 +1,47 @@
 import { expect, spyOn, test } from "bun:test";
 import { PROJECT_NAME_MAX } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../api/client";
 import type { ArchitectureSource, Project, RepoProject } from "../api/types";
 import { App } from "../app";
 
-test("human users manage repository project mappings from the settings route", async () => {
+/** The mapping routes' server state as the Settings page reaches it: a read answers what the writes
+ *  have left, and a write follows the server's default rules (the body's default, else the
+ *  mapping's own while its project is unchanged; at most one default per project). */
+function mappingServer(initial: RepoProject[]) {
+  let rows = initial.map((row) => ({ ...row }));
+  const put = (repo: string, input: { project: string; default?: boolean }): RepoProject => {
+    const existing = rows.find((row) => row.repo === repo);
+    const mapping: RepoProject = {
+      created_at: "2026-09-10T00:00:00Z",
+      created_by: { id: "alice", kind: "user" },
+      default: input.default ?? (existing?.project === input.project ? existing.default : false),
+      project: input.project,
+      repo,
+    };
+    rows = [
+      ...rows
+        .filter((row) => row.repo !== repo)
+        .map((row) =>
+          mapping.default && row.project === mapping.project ? { ...row, default: false } : row
+        ),
+      mapping,
+    ];
+    return { ...mapping };
+  };
+  return {
+    list: async (): Promise<RepoProject[]> => rows.map((row) => ({ ...row })),
+    put,
+    remove: async (repo: string): Promise<void> => {
+      rows = rows.filter((row) => row.repo !== repo);
+    },
+  };
+}
+
+function stubMatchMedia(): () => void {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -21,17 +54,27 @@ test("human users manage repository project mappings from the settings route", a
       removeEventListener: () => {},
       removeListener: () => {},
     }) as MediaQueryList) as typeof window.matchMedia;
+  return () => {
+    window.matchMedia = originalMatchMedia;
+  };
+}
+
+test("human users manage repository project mappings from the settings route", async () => {
+  const restoreMatchMedia = stubMatchMedia();
   const mapping: RepoProject = {
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
+    default: false,
     project: "CORE",
     repo: "owner/repo",
   };
+  const other: RepoProject = { ...mapping, default: true, repo: "owner/other" };
+  const server = mappingServer([mapping, other]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([mapping]);
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockImplementation(server.list);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
@@ -39,11 +82,10 @@ test("human users manage repository project mappings from the settings route", a
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
-  const putRepoProject = spyOn(api, "putRepoProject").mockResolvedValue({
-    ...mapping,
-    repo: "owner/repo",
-  });
-  const deleteRepoProject = spyOn(api, "deleteRepoProject").mockResolvedValue();
+  const putRepoProject = spyOn(api, "putRepoProject").mockImplementation(async (repo, input) =>
+    server.put(repo, input)
+  );
+  const deleteRepoProject = spyOn(api, "deleteRepoProject").mockImplementation(server.remove);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
   try {
@@ -58,6 +100,23 @@ test("human users manage repository project mappings from the settings route", a
     expect(await screen.findByRole("heading", { name: "Repositories → Projects" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
     expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
+    expect(screen.getByRole("columnheader", { name: "Default" })).toBeDefined();
+    const radio = (repo: string) =>
+      screen.getByRole("radio", {
+        name: `Default repository of CORE: ${repo}`,
+      }) as HTMLInputElement;
+    expect(radio("owner/other").checked).toBe(true);
+    expect(radio("owner/repo").checked).toBe(false);
+    fireEvent.click(radio("owner/repo"));
+    await waitFor(() =>
+      expect(putRepoProject).toHaveBeenLastCalledWith("owner/repo", {
+        project: "CORE",
+        default: true,
+      })
+    );
+    // The pick moves the project's default at once: one default per project.
+    expect(radio("owner/repo").checked).toBe(true);
+    expect(radio("owner/other").checked).toBe(false);
 
     fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "Owner/Repo.git" } });
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "CORE" } });
@@ -67,6 +126,22 @@ test("human users manage repository project mappings from the settings route", a
     );
     expect(screen.getAllByRole("cell", { name: "owner/repo" })).toHaveLength(1);
     expect(screen.queryByRole("cell", { name: "Owner/Repo.git" })).toBeNull();
+
+    // A mapping issues name is refused by the server, which says how many: the row comes back
+    // and the refusal shows.
+    deleteRepoProject.mockRejectedValueOnce(
+      new ApiError(409, {
+        code: "REPO_PROJECT_IN_USE",
+        error: "1 issue(s) of CORE name owner/repo as their repository; change their repo first",
+      })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete mapping for owner/repo" }));
+    expect(
+      await screen.findByText(
+        "1 issue(s) of CORE name owner/repo as their repository; change their repo first"
+      )
+    ).toBeDefined();
+    expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete mapping for owner/repo" }));
     await waitFor(() => expect(deleteRepoProject).toHaveBeenLastCalledWith("owner/repo"));
@@ -86,7 +161,83 @@ test("human users manage repository project mappings from the settings route", a
     listProjects.mockRestore();
     putRepoProject.mockRestore();
     deleteRepoProject.mockRestore();
-    window.matchMedia = originalMatchMedia;
+    restoreMatchMedia();
+  }
+});
+
+// A mapping write's response describes one row, not the project's mappings as they stand when it
+// arrives: the page reads them again once the write settles, so a response that arrives after the
+// page already read a newer default does not put the older one back.
+test("a delayed mapping response does not undo a newer default the page has read", async () => {
+  const restoreMatchMedia = stubMatchMedia();
+  const row = (repo: string, isDefault: boolean): RepoProject => ({
+    created_at: "2026-09-10T00:00:00Z",
+    created_by: { id: "alice", kind: "user" },
+    default: isDefault,
+    project: "CORE",
+    repo,
+  });
+  const server = mappingServer([row("owner/repo", false), row("owner/other", true)]);
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockImplementation(server.list);
+  const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
+  const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([
+    { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
+  ]);
+  // The server saves the pick at once; its answer reaches the page only when the test says.
+  let answer: (() => void) | undefined;
+  const putRepoProject = spyOn(api, "putRepoProject").mockImplementation((repo, input) => {
+    const saved = server.put(repo, input);
+    return new Promise<RepoProject>((resolve) => {
+      answer = () => resolve(saved);
+    });
+  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const radio = (repo: string) =>
+    screen.getByRole("radio", { name: `Default repository of CORE: ${repo}` }) as HTMLInputElement;
+
+  try {
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <QueryClientProvider client={queryClient}>
+          <App />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+    await screen.findByRole("radio", { name: "Default repository of CORE: owner/repo" });
+    fireEvent.click(radio("owner/repo"));
+    await waitFor(() => expect(putRepoProject).toHaveBeenCalledTimes(1));
+    // Another browser makes owner/other the default again, and this page reads it (as a mapping
+    // event would have it do) while its own write's answer is still on the way.
+    server.put("owner/other", { default: true, project: "CORE" });
+    await act(() => queryClient.invalidateQueries({ queryKey: ["repo-projects"] }));
+    await waitFor(() => expect(radio("owner/other").checked).toBe(true));
+    const reads = listRepoProjects.mock.calls.length;
+    act(() => answer?.());
+    await waitFor(() => expect(listRepoProjects.mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(radio("owner/other").checked).toBe(true));
+    expect(radio("owner/repo").checked).toBe(false);
+  } finally {
+    cleanup();
+    queryClient.clear();
+    whoAmI.mockRestore();
+    listIssues.mockRestore();
+    getMyState.mockRestore();
+    getInbox.mockRestore();
+    listRepoProjects.mockRestore();
+    listAgentTokens.mockRestore();
+    getCredentialPending.mockRestore();
+    listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
+    listProjects.mockRestore();
+    putRepoProject.mockRestore();
+    restoreMatchMedia();
   }
 });
 
