@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -117,6 +118,60 @@ func TestIssueRepoResolvesToNoneWithoutADefault(t *testing.T) {
 	payload := lastIssueEventPayload(t, database, issue.Key)
 	if value, ok := payload["resolved_repo"]; !ok || value != nil {
 		t.Fatalf("issue.created payload resolved_repo=%v (present %t), want null", value, ok)
+	}
+}
+
+// The walk up the parent chain has no depth limit: an issue 33 or 34 links below the one that names
+// a repository still resolves to it, in its detail, every list row and its creation event, never to
+// the project's default.
+func TestIssueRepoResolvesThroughAChainDeeperThanThirtyTwoLinks(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "CORE", "name": "Core"}, "alice")
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE", "default": true}, "alice")
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/gadgets", map[string]any{"project": "CORE"}, "alice")
+	root := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Root", "repo": "acme/gadgets"}, "alice"))
+	keys := []string{root.Key} // keys[d] is the issue d links below the root
+	for depth := 1; depth <= 34; depth++ {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": fmt.Sprintf("Depth %d", depth), "parent": keys[depth-1], "force": true}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create depth %d: status=%d body=%s", depth, response.Code, response.Body.String())
+		}
+		keys = append(keys, decodeBody[model.Issue](t, response).Key)
+	}
+	listed := map[string]model.IssueSummary{}
+	for _, issue := range decodeBody[[]model.IssueSummary](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE", nil, "alice")) {
+		listed[issue.Key] = issue
+	}
+	for _, depth := range []int{32, 33, 34} {
+		key := keys[depth]
+		detail := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice"))
+		if detail.ResolvedRepo == nil || *detail.ResolvedRepo != "acme/gadgets" {
+			t.Errorf("depth %d detail resolved_repo=%v, want the root's acme/gadgets", depth, detail.ResolvedRepo)
+		}
+		if row := listed[key]; row.ResolvedRepo == nil || *row.ResolvedRepo != "acme/gadgets" {
+			t.Errorf("depth %d list row resolved_repo=%v, want acme/gadgets", depth, row.ResolvedRepo)
+		}
+		if created := lastIssueEventPayload(t, database, key); created["resolved_repo"] != "acme/gadgets" {
+			t.Errorf("depth %d issue.created resolved_repo=%v, want acme/gadgets", depth, created["resolved_repo"])
+		}
+	}
+}
+
+// A parent chain that loops (which no API write can make) has no answer: the read fails loudly
+// rather than giving the project's default.
+func TestIssueRepoRefusesToResolveALoopedParentChain(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "CORE", "name": "Core"}, "alice")
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE", "default": true}, "alice")
+	top := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Top"}, "alice"))
+	below := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Below", "parent": top.Key, "force": true}, "alice"))
+	if _, err := database.Pool.Exec(context.Background(), `update issues set parent_key = $1 where key = $2`, below.Key, top.Key); err != nil {
+		t.Fatalf("loop the chain: %v", err)
+	}
+	for _, target := range []string{"/api/v1/issues/" + top.Key, "/api/v1/issues?project=CORE"} {
+		if response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice"); response.Code != http.StatusInternalServerError {
+			t.Errorf("GET %s with a looped chain: status=%d body=%s, want 500", target, response.Code, response.Body.String())
+		}
 	}
 }
 
