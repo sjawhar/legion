@@ -33,23 +33,20 @@ type ListenerConfig struct {
 
 // Check refuses a config the listener cannot run on. Each refusal is an InputError.
 //
-// The listener requires ENVOY_MACHINE_ID and refuses it blank (internal/config/config.go), and
-// reads ENVOY_HOST_BRIDGE untrimmed into every local delivery's URL (internal/session/session.go),
-// so a host bridge with surrounding whitespace is refused. Port is always given, since a health
-// check calls it. No value may hold a control character: a watchdog writes the environment, one
-// variable per line, into a heredoc of a script that runs as root on the host, where a line break
-// would end the heredoc and run what follows it. Nor may one hold an nkey seed (bus.HoldsSeed),
-// which the environment would carry, in the container's inputs and the watchdog's env file; that
-// refusal names the field and never quotes the value, and comes before any refusal that quotes it.
+// CheckMachineID owns the machine-id rule. ENVOY_HOST_BRIDGE is read untrimmed into every local
+// delivery's URL (internal/session/session.go), so a host bridge with surrounding whitespace is
+// refused. Port is always given, since a health check calls it. No value may hold a control
+// character: a watchdog writes the environment, one variable per line, into a heredoc of a script
+// that runs as root on the host, where a line break would end the heredoc and run what follows it.
+// Nor may one hold an nkey seed (bus.HoldsSeed), which the environment would carry, in the
+// container's inputs and the watchdog's env file; that refusal names the field and never quotes
+// the value, and comes before any other refusal of that field.
 func (c ListenerConfig) Check() error {
-	if strings.TrimSpace(c.MachineID) == "" {
-		return InputErrorf("machineId", "machineId is required")
-	}
 	if bus.HoldsSeed(c.MachineID) {
 		return InputErrorf("machineId", "%w", SeedRefusal("machineId"))
 	}
-	if strings.ContainsFunc(c.MachineID, unicode.IsControl) {
-		return InputErrorf("machineId", "machineId contains a control character: %q", c.MachineID)
+	if err := CheckMachineID("machineId", c.MachineID); err != nil {
+		return err
 	}
 	if c.Port < 1 || c.Port > 65535 {
 		return InputErrorf("port", "port %d is outside 1-65535", c.Port)

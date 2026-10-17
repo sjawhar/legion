@@ -321,7 +321,7 @@ The listener's outputs are `containerName` and `port`.
 
 | Input | Default | What it is |
 | --- | --- | --- |
-| `machineId` | required | The listener's name, `ENVOY_MACHINE_ID`. Its durable consumer is `listener-<machineId>`. |
+| `machineId` | required | The listener's name, `ENVOY_MACHINE_ID`. It names the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>`; an interior ordinary space becomes a hyphen in both names. |
 | `natsUrls` | required | The NATS servers to connect to. May come from another resource or stack. |
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy:<tag>`. |
 | `containerName` | `envoy-listener` | The container's name. |
@@ -352,8 +352,11 @@ The listener refuses these before it registers anything, with an error naming wh
   names the input and never the value, as `envoy-infra:host:Listener example-host-a: image holds an
   nkey seed (not echoed)`, since each would reach a resource's inputs, an alias or another refusal.
   `seed` is the one input that is a seed;
-- a blank `machineId`;
-- a `machineId` or `hostBridge` holding a control character, such as a line break;
+- an empty `machineId`, one with leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`,
+  `\`, a control character, or whitespace other than an interior ordinary space: none can make both
+  the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>` the
+  listener uses;
+- a `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
 - a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
@@ -709,7 +712,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 
 | Input | Default | What it is |
 | --- | --- | --- |
-| `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name; its durable consumer is `listener-<machineId>`. |
+| `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name. It names the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>`; an interior ordinary space becomes a hyphen in both names. |
 | `natsUrls` | required | The NATS servers. May come from another resource as an output of the whole list, such as `nats.internal_url.apply(lambda url: [url])`. |
 | `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy@sha256:<digest>`. |
 | `region` | required | The container's `awslogs-region`. |
@@ -756,10 +759,11 @@ the input:
 - `aws:WebhookListener`: a `webhooks` not given at all (give `[]` for a listener with no webhook);
   a webhook's input missing while `webhooks` lists it (a blank `reviewerAppId` or `mentionTrigger`
   counts as missing) or given while it does not, each input checked before the list; then a
-  `webhooks` other than `[]` or exactly `["github", "slack"]`; a blank `machineId`; a `machineId`,
-  `hostBridge` or `listenHost` holding a control character; a `hostBridge` with leading or trailing
-  whitespace; a blank `listenHost`; a `natsReplicas` below 1; an empty `subnetIds`; a `baseTags`
-  holding `service`.
+  `webhooks` other than `[]` or exactly `["github", "slack"]`; an empty `machineId`, one with
+  leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`, `\`, a control character, or
+  whitespace other than an interior ordinary space; a `hostBridge` or `listenHost` holding a
+  control character; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
+  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's

@@ -631,8 +631,8 @@ func DispatchPermissions(machineID string) Permissions
 func bucketPermissions(bucket string) []string
 ```
 
-- [ ] **Step 1: failing test.** `TestDispatchPermissionsForExampleDispatch` writes the whole set
-  for `example-dispatch` by hand: `ListenerPermissions("example-dispatch")`'s publish entries as the
+- [ ] **Step 1: failing test.** `TestDispatchPermissions` writes the whole set
+  for `example-host-a` by hand: `ListenerPermissions("example-host-a")`'s publish entries as the
   existing hand-written test spells them, then exactly these, in order:
 
 ```text
@@ -766,9 +766,10 @@ clause: the hub renders Dispatch's user too).
 - [ ] **Step 1: failing tests.** `NATSUserArgs` (`natshub.go:75-80`) gains
   `DispatchMachineID *string \`pulumi:"dispatchMachineId,optional"\`` with the comment
   `// permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user, named after the listener beside it`.
-  `authorization` (`:185-216`) accepts exactly one of `machineId`, `dispatchMachineId` and
-  `permissions`; two or more set is refused naming the user and the fields set; none is refused with
-  `name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, or permissions`.
+  `authorization` (`:185-216`) accepts exactly one of `machineId`, `dispatchMachineId`, `daemon` and
+  `permissions` (as built, after #1983 added `daemon`); two or more set is refused naming the user
+  and the first two fields set; none is refused with `name machineId, for its host's permission set,
+  dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions`.
   Tests: `exampleArgs` gains a third user `{name: example-dispatch, publicKey: <U key>, dispatchMachineId: example-dispatch}`;
   the rendered configuration's third user block equals `core.DispatchPermissions("example-dispatch")`
   as `core.Authorization.Render` writes it (compare with a render the test builds through `core`
@@ -1173,7 +1174,7 @@ The numbering continues `docs/plans/2026-10-14-envoy-infra-plan.md`'s table.
 | E12. The bus reaches NATS through a SOCKS5 proxy, the host unresolved; unset, no proxy is dialed; a dead proxy fails naming it; a malformed value is refused before any dial; a reconnect goes through the proxy | 5 | infrastructure | in-process SOCKS5 server and `testnats` on the runner's Docker | CI runner | Task 5.1, `envoy-go` |
 | E13. Dispatch reads `ENVOY_NATS_SOCKS5_PROXY` through its table | 5 | infrastructure | `go test ./cmd/dispatch/` | CI runner | Task 5.2 |
 | E14. The real `envoy-dispatch` under `core.DispatchPermissions` refuses nothing on 2.10 and on the hub image; without the delivery durable's create it never binds the durable and the server names the subject | 6 | infrastructure | real nats-server and Postgres containers, this branch's `envoy-dispatch` | CI runner | Task 6.3, `envoy-infra-go` natslive |
-| E15. `gcp:NatsHub` renders a Dispatch user from `dispatchMachineId`; two of the three forms are refused before registration | 6 | infrastructure | `go test ./gcp/` under mocks | CI runner | Task 6.4 |
+| E15. `gcp:NatsHub` renders a Dispatch user from `dispatchMachineId`; two or more of the four kinds (machineId, dispatchMachineId, daemon, permissions) are refused before registration | 6 | infrastructure | `go test ./gcp/` under mocks | CI runner | Task 6.4 |
 | E16. `gcp:Dispatch` registers every child with the listed inputs, secrets only in the Secrets, the goldens, Construct's handling of outputs and unknowns, every refusal | 7 | infrastructure | `go test ./gcp/ ./provider/` | CI runner | Tasks 7.2-7.5 |
 | E17. The first Google Cloud deployment: `pulumi up` creates the cluster, the database and the pod; the pod is `4/4` Ready; both `/healthz` answer from inside the pod; the Tailscale node joins as `tag:example-dispatch`; a member on the tailnet opens `https://<h>.<tailnet>` and signs in with a Workspace account; an account outside the domain is refused; a personal token minted in the UI drives the `dispatch` CLI; an issue's events reach a tailnet client subscribed to `notifications.dispatch.>` on the hub; the SPA's live updates (SSE) and a document's editor (websocket) work through Serve; `kubectl delete pod` recreates the one pod and the site is back inside two minutes; the instance has no public IP and backups and PITR on | 7 | infrastructure | the deployment's own stack, applied from the laptop with the branch's plugin, then from CI with the release | its operator; prerequisites: the hub applied with Dispatch's user, the policy with `tag:example-dispatch`, `roles/cloudsql.client` granted to the pod's principal by the consumer's bootstrap, the Google client, HTTPS enabled on the tailnet, `gke-gcloud-auth-plugin` installed | the deployment's plan (Task 7.7) |
 | E18. Negative controls in the first deployment: a request to `https://<h>.<tailnet>` from a device off the tailnet is refused (no route); the pod's service account cannot read a secret it was not granted (`kubectl exec … -- curl` to Secret Manager for another secret answers 403); the hub refuses a client with no seed (slice 4's E9) | 7 | infrastructure | the deployment, from the laptop | its operator | the deployment's plan |
@@ -1202,7 +1203,10 @@ dotfiles skills (`opening-a-pr`, `landing-a-pr`, `using-docker`, `updating-docs`
 ## Contract change census
 
 New contracts (`ENVOY_NATS_SOCKS5_PROXY`, `core.DispatchPermissions`, `gcp:NatsUser.dispatchMachineId`,
-`gcp:Dispatch`) tighten nothing existing. Changes to existing ones:
+`gcp:Dispatch`) tighten nothing existing, with one exception added as built: every machine id
+(`gcp:NatsUser.machineId` and `dispatchMachineId`, and `core.ListenerConfig.Check`'s `machineId`)
+passes `core.CheckMachineID`, which refuses an id no durable `listener-<id>` can carry and two ids
+naming one durable. Changes to existing ones:
 
 - `bus.connectWithContext` gains a parameter: `git grep -n connectWithContext -- packages/envoy/internal/bus`
   → `nats.go:212,217,662`, `connect_deadline_test.go:22`, `stream_config_test.go:103,132`, all in
@@ -1222,8 +1226,9 @@ New contracts (`ENVOY_NATS_SOCKS5_PROXY`, `core.DispatchPermissions`, `gcp:NatsU
   binds.
 - `core.ListenerConfig` gains a field with a zero-value default; `host:Listener` renders the same
   environment as before (`core/listener_env_test.go`'s existing cases pass verbatim).
-- `gcp:NatsUser` gains an optional property; a user naming `machineId` alone renders as before
-  (the hub's existing tests pass verbatim), so an applied hub previews no change.
+- `gcp:NatsUser` gains an optional property. A user naming a valid `machineId` alone renders as
+  before, so a hub whose ids pass `core.CheckMachineID` previews no change from it (as built: the
+  rule tightens `machineId`, see above).
 
 ## Permission source census
 

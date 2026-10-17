@@ -71,11 +71,17 @@ versions. Never add the module to the root `go.work`.
   `random` providers before registering anything, then builds a Kubernetes provider from its
   cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends
   on the cluster; none falls back to a default Kubernetes provider.
-- **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
-  listener's environment that the resolver can make (`machineId`, `port`, `listenHost`,
-  `hostBridge`), run once before anything registers; `ListenerConfig.Env` runs `Check` again, so no
-  caller renders a config `Check` refuses, then adds `natsUrls`, the one value that may be another
-  resource's output, and checks it, inside the `ApplyT` that computes the container's environment.
+- **Refusals.** Every refusal names the input. `core.CheckMachineID` is the one machine-id rule
+  shared by `core.ListenerConfig.Check` and the hub's users. It refuses an empty id; leading or
+  trailing whitespace; `.`, `*`, `>`, `/` or `\`; control characters; and whitespace other than
+  an ordinary space. An ordinary space is accepted only inside the id and becomes a hyphen in
+  `bus.ListenerDurable`'s `listener-<id>` and `bus.ListenerQueue`'s
+  `envoy-listener-<id>`. A seed check that already precedes this rule stays first.
+  `core.ListenerConfig.Check` also holds the checks of the listener's environment that the
+  resolver can make (`port`, `listenHost`, `hostBridge`), run once before anything registers;
+  `ListenerConfig.Env` runs `Check` again, so no caller renders a config `Check` refuses, then
+  adds `natsUrls`, the one value that may be another resource's output, and checks it, inside the
+  `ApplyT` that computes the container's environment.
   A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
   container's `envs` resolve, after the component and its image have registered, not the
   constructor. The watchdog's create script runs as root on the host

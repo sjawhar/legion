@@ -211,12 +211,12 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		{
 			name: "a user with an empty machine id",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef("") },
-			err:  []string{`users[0]: machineId is empty`},
+			err:  []string{`users[0].machineId is empty`},
 		},
 		{
 			name: "a user with an empty Dispatch machine id",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("") },
-			err:  []string{`users[2]: dispatchMachineId is empty`},
+			err:  []string{`users[2].dispatchMachineId is empty`},
 		},
 		{
 			name: "a user without a public key",
@@ -247,13 +247,11 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 	requireResolverRefusals(t, cases)
 }
 
-// Every machine id of the hub goes through one rule, machineId and dispatchMachineId alike: the id
-// names the durable listener-<id> and the queue group envoy-listener-<id>, so the hub refuses an
-// id blank after trimming whitespace, and one holding a character those names cannot carry: '.',
-// '*', '>', '/', '\', a control character, or any whitespace but the space, which both names turn
-// into a hyphen. Each refusal is a core.InputError naming the id's input and quotes at most the
-// one refused character; the seed check runs first (TestNatsHubRefusesASeedInAnyPlainInput), so no
-// refusal echoes a seed.
+// Every machine id of the hub goes through core's one rule, machineId and dispatchMachineId alike:
+// the id names the durable listener-<id> and the queue group envoy-listener-<id>. The rule refuses
+// an empty id, leading or trailing whitespace, and every character those names cannot carry. A
+// refused printable delimiter is quoted; a control or non-space whitespace character is not. The
+// seed check runs first (TestNatsHubRefusesASeedInAnyPlainInput), so no refusal echoes a seed.
 func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
 	kinds := []struct {
 		field, where string
@@ -265,25 +263,30 @@ func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
 	const carry = ", which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"
 	for _, kind := range kinds {
 		for _, row := range []struct{ name, id, want string }{
-			{"blank", "", kind.field + " is empty"},
-			{"only whitespace", "   ", kind.field + " is only whitespace"},
-			{"a dot", "a.b", kind.field + ` contains '.'` + carry},
-			{"a star", "a*", kind.field + ` contains '*'` + carry},
-			{"a full wildcard", "a>", kind.field + ` contains '>'` + carry},
-			{"a slash", "a/b", kind.field + ` contains '/'` + carry},
-			{"a backslash", `a\b`, kind.field + ` contains '\\'` + carry},
-			{"a tab", "a\tb", kind.field + ` contains '\t'` + carry},
-			{"a newline", "a\nb", kind.field + ` contains '\n'` + carry},
+			{"empty", "", "is empty"},
+			{"only ordinary spaces", "   ", "has leading or trailing whitespace"},
+			{"leading ordinary space", " example-host", "has leading or trailing whitespace"},
+			{"trailing ordinary space", "example-host ", "has leading or trailing whitespace"},
+			{"leading non-breaking space", "\u00a0example-host", "has leading or trailing whitespace"},
+			{"a dot", "a.b", `contains '.'` + carry},
+			{"a star", "a*", `contains '*'` + carry},
+			{"a full wildcard", "a>", `contains '>'` + carry},
+			{"a slash", "a/b", `contains '/'` + carry},
+			{"a backslash", `a\b`, `contains '\\'` + carry},
+			{"an interior tab", "a\tb", "contains a control character" + carry},
+			{"an interior newline", "a\nb", "contains a control character" + carry},
+			{"interior non-breaking space", "a\u00a0b", "contains whitespace other than a space" + carry},
 		} {
 			t.Run(kind.field+" with "+row.name, func(t *testing.T) {
 				args := exampleArgs()
 				kind.set(args, row.id)
-				requireMachineIDRefusal(t, args, kind.where+"."+kind.field, kind.where+": "+row.want)
+				input := kind.where + "." + kind.field
+				requireMachineIDRefusal(t, args, input, input+" "+row.want)
 			})
 		}
 	}
-	// A space itself is accepted: both names turn it into a hyphen.
-	t.Run("an id with a space is accepted", func(t *testing.T) {
+	// An interior ordinary space is accepted: both names turn it into a hyphen.
+	t.Run("an id with an interior ordinary space is accepted", func(t *testing.T) {
 		args := exampleArgs()
 		args.Users[0].MachineID = pulumi.StringRef("example host a")
 		args.Users[2].DispatchMachineID = pulumi.StringRef("example dispatch host")
@@ -296,10 +299,7 @@ func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
 // hyphen hyphenate alike, and against the hub's own listener (machine example-hub). Without the
 // hub's listener the hostname is nobody's durable, so a user may hold it.
 func TestNatsHubRefusesMachineIdsWhoseDurablesCollide(t *testing.T) {
-	user, err := nkeys.CreateUser()
-	require.NoError(t, err)
-	key, err := user.PublicKey()
-	require.NoError(t, err)
+	_, key := testnats.User(t)
 	for _, row := range []struct {
 		name, input, want string
 		edit              func(*gcp.NatsHubArgs)
@@ -467,7 +467,7 @@ func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
 		}, "users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions"},
 		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
 			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
-		}, "users[0]: machineId is empty"},
+		}, "users[0].machineId is empty"},
 		{"a seed as the session user's name", func(a *gcp.NatsHubArgs) { a.SessionUser.Name = lower },
 			"sessionUser: name holds an nkey seed (not echoed)"},
 	} {

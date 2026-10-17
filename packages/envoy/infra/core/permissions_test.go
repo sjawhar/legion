@@ -145,7 +145,7 @@ func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
 	}, core.HostPermissions("example-host-a"))
 }
 
-func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
+func TestDispatchPermissions(t *testing.T) {
 	dispatchPublish := append(append([]string{}, listenerPublish...),
 		"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.delivery-events",
 		"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>",

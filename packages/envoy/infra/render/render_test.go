@@ -599,9 +599,9 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			want: `refused: --mention-trigger: mentionTrigger is required with webhook "github"`,
 		},
 		{
-			name: "a blank --machine-id",
-			args: listenerFlags([]string{"machine-id"}, "--machine-id", " "),
-			want: "refused: --machine-id: machineId is required",
+			name: "a dot in --machine-id",
+			args: listenerFlags([]string{"machine-id"}, "--machine-id", "example.machine"),
+			want: "refused: --machine-id: machineId contains '.', which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>",
 		},
 		{
 			name: "a line break in --host-bridge",
@@ -916,7 +916,7 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 	nearFile := writeFile(t, strings.Replace(authorizationJSON, `"envoy.example.>"`, `"envoy.`+nearSeed+`.>"`, 1))
 	nearPath := filepath.Join(t.TempDir(), nearSeed+".json")
 	require.NoError(t, os.WriteFile(nearPath, []byte(authorizationJSON), 0o600))
-	nearSplit := split(strings.ToLower(nearSeed), ".")
+	nearSplit := split(strings.ToLower(nearSeed), "-")
 	for _, control := range []struct {
 		name, shows string
 		args        []string
