@@ -327,11 +327,20 @@ func (g GCP) Read(ctx context.Context, source string) (string, error) {
 		// secret having no value. Google does not document it as the code's only meaning (an
 		// unusable CMEK key may answer it too), so the version's own state decides: anything but
 		// DISABLED or DESTROYED stays an error the broker logs.
-		version, verr := g.Client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
-		if verr == nil && (version.GetState() == secretmanagerpb.SecretVersion_DISABLED || version.GetState() == secretmanagerpb.SecretVersion_DESTROYED) {
-			return "", ErrNotFound
+		// That check is a metadata read too, so its "no value" verdict is cached under the same
+		// 30 s as Read's other check, keyed on the version: it is consulted only after a fresh
+		// FAILED_PRECONDITION, so a re-enabled or new version is served at once.
+		accessErr := err
+		if err := g.held.verdict(latest, func() error {
+			version, err := g.Client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
+			if err == nil && (version.GetState() == secretmanagerpb.SecretVersion_DISABLED || version.GetState() == secretmanagerpb.SecretVersion_DESTROYED) {
+				return ErrNotFound
+			}
+			return fmt.Errorf("secret manager %s: %w", latest, gcpErr(accessErr))
+		}); err != nil {
+			return "", err
 		}
-		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(err))
+		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(accessErr))
 	default:
 		return "", fmt.Errorf("secret manager %s: %w", latest, gcpErr(err))
 	}

@@ -556,3 +556,20 @@ func TestGCPReadDoesNotCacheAFailedCheck(t *testing.T) {
 		t.Fatalf("second Read = %q, %v; want a fresh check that succeeds", v, err)
 	}
 }
+
+// TestGCPReadCachesADisabledVersionsVerdict pins that a secret whose latest version is disabled
+// costs one GetSecretVersion per window however often it is released, as Read's other check does.
+func TestGCPReadCachesADisabledVersionsVerdict(t *testing.T) {
+	off := servedSecret("v")
+	off.state = secretmanagerpb.SecretVersion_DISABLED
+	f := &fakeSecretManager{secrets: map[string]*fakeSecret{fakePrefix + "off": off}}
+	store := NewGCP(startFake(t, f), fakeKey)
+	for range 5 {
+		if _, err := store.Read(context.Background(), fakePrefix+"off"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Read(off) = %v, want ErrNotFound", err)
+		}
+	}
+	if got := f.calls["GetSecretVersion"]; got != 1 {
+		t.Fatalf("five releases of a disabled secret made %d GetSecretVersion calls, want 1", got)
+	}
+}

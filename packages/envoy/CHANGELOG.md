@@ -2,15 +2,6 @@
 
 ## [Unreleased]
 
-### Changed
-
-- The secrets broker's policy keeps a single-name reread against a lagging listing only when the
-  reread changed the live answer; a reread that confirms what the policy serves costs the next
-  reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret
-  from (a secret deleted and recreated under its name on AWS, or a move between stores) answers
-  `403 GRANT_NOT_LIVE` and is not reused, where it answered `404 SECRET_NOT_IN_STORE`; the session
-  asks again.
-
 ### Added
 
 - The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
@@ -392,6 +383,13 @@
   tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
+
+- The secrets broker's policy keeps a single-name reread against a lagging listing only when the
+  reread changed the live answer; a reread that confirms what the policy serves costs the next
+  reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret
+  from (a secret deleted and recreated under its name on AWS, or a move between stores) answers
+  `403 GRANT_NOT_LIVE` and is not reused, where it answered `404 SECRET_NOT_IN_STORE`; the session
+  asks again.
 
 - **Breaking:** every listener `/v1` request with a body must set `Content-Type: application/json`;
   parameters such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is
