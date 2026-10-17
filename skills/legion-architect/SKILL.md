@@ -279,9 +279,10 @@ back. Park a child first when its work should stop with the root.
 ## 4. Integration verification
 
 Read the integration check's tester evidence (section 3), not merely a child PR's check status.
-The parent test is successful only when every parent acceptance criterion has evidence against
-current main. Route a failed criterion into a corrective child wave; a passing result goes on to
-review and the merge-gate sequence by the daemon's table.
+The parent test is successful only when every parent acceptance criterion has evidence against the
+repository's default branch your addressing line names (never a hard-coded `main`) — the relevant
+repository's, for a criterion that spans more than one. Route a failed criterion into a corrective
+child wave; a passing result goes on to review and the merge-gate sequence by the daemon's table.
 
 ## 5. Retro
 

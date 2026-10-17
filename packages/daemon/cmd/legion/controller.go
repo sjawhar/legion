@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -215,16 +216,26 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	// The daemon's design gate policy is the controller's addressing, the line its take comment
+	// The daemon's design gate policy, then the project's whole repository list (GET
+	// /legion/v1/state, the same unauthenticated route a worker's own addressing reads through,
+	// task 6.1's RepositoriesFragment), is the controller's addressing, the line its take comment
 	// reads before it promises anyone a design approval (skill://legion-controller). The start
 	// message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather than a CLI
 	// word: the pi-legion extension sends it as the session's first turn once its claim
 	// succeeds, before it opens the live wake subscription, so a started or restarted controller
 	// runs its start procedure at once and deterministically, never racing a wake for the one
 	// first-turn slot.
+	repositories, err := controllerRepositories(ctx, cfg.DaemonURL)
+	if err != nil {
+		return 0, err
+	}
+	addressing := daemon.DesignGateFragment(designGate)
+	if len(repositories) > 0 {
+		addressing += " " + daemon.RepositoriesFragment(repositories)
+	}
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
-		Addressing:                 daemon.DesignGateFragment(designGate),
+		Addressing:                 addressing,
 		DeploymentInstructionsPath: instructionsFile,
 	})
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
@@ -345,6 +356,32 @@ func probeAndMint(ctx context.Context, daemonURL string, probe daemon.Controller
 		return "", "", err
 	}
 	return fetchControllerSecret(ctx, daemonURL, operatorToken, probe.Contract)
+}
+
+// controllerRepositories is the project's whole repository mapping, read from the one
+// unauthenticated route that serves it (GET /legion/v1/state's .repositories.mapped[], the same
+// bytes `legion state --json` prints), for the operator's controller addressing — the list a
+// worker's own addressing names (specs.AddressingFragment, specs.RepositoriesFragment). A mapped
+// entry this daemon does not spell as `owner/name` is a daemon bug, not an operator refusal, so it
+// is skipped rather than aborting the controller's start.
+func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Repository, error) {
+	body, err := get(ctx, daemonURL+"/legion/v1/state")
+	if err != nil {
+		return nil, fmt.Errorf("read the project's repositories from %s/legion/v1/state: %w", daemonURL, err)
+	}
+	var state api.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		return nil, fmt.Errorf("%s/legion/v1/state answered with a body that is not JSON", daemonURL)
+	}
+	repositories := make([]ghrepo.Repository, 0, len(state.Repositories.Mapped))
+	for _, mapped := range state.Repositories.Mapped {
+		repository, err := ghrepo.Parse("repositories.mapped", mapped.Repo)
+		if err != nil {
+			continue
+		}
+		repositories = append(repositories, repository)
+	}
+	return repositories, nil
 }
 
 // makeDirs creates dir and its missing parents, 0700, and answers the ones it created, deepest

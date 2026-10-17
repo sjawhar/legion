@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -116,12 +118,58 @@ func newControllerDaemonWithTokens(t *testing.T, tokens appauth.Tokens) *control
 }
 
 // controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate,
-// and, for the tests of the controller's GitHub credential route, a Tokens fake and the owners of
-// the project's repositories its mints need.
+// the project's mapped repositories (for the controller's addressing, Task 6.1), and, for the
+// tests of the controller's GitHub credential route, a Tokens fake and the owners of the
+// project's repositories its mints need.
 type controllerDaemonOptions struct {
-	gate   config.DesignGate
-	tokens appauth.Tokens
-	owners []string
+	gate         config.DesignGate
+	tokens       appauth.Tokens
+	owners       []string
+	repositories []string
+}
+
+// fakeTx is the no-op pgx.Tx the controller test daemon's state route opens: fixedStateSource
+// never reads from it, and the route's own deferred Rollback is the only call it sees.
+type fakeTx struct{}
+
+func (fakeTx) Begin(context.Context) (pgx.Tx, error) { return fakeTx{}, nil }
+func (fakeTx) Commit(context.Context) error           { return nil }
+func (fakeTx) Rollback(context.Context) error         { return nil }
+func (fakeTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	return 0, errors.New("unexpected copy")
+}
+func (fakeTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+func (fakeTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
+func (fakeTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	return nil, errors.New("unexpected prepare")
+}
+func (fakeTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, errors.New("unexpected exec")
+}
+func (fakeTx) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unexpected query")
+}
+func (fakeTx) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
+func (fakeTx) Conn() *pgx.Conn                                  { return nil }
+
+// fixedStateTransactions always opens the same no-op tx.
+type fixedStateTransactions struct{}
+
+func (fixedStateTransactions) BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error) {
+	return fakeTx{}, nil
+}
+
+// fixedStateSource is the controller test daemon's api.StateSource: a state holding only the
+// project's mapped repositories, as `GET /legion/v1/state` serves them for the controller's own
+// addressing (controllerRepositories).
+type fixedStateSource struct{ repositories []string }
+
+func (f fixedStateSource) State(context.Context, pgx.Tx) (api.State, error) {
+	mapped := make([]api.MappedRepositoryView, len(f.repositories))
+	for i, repo := range f.repositories {
+		mapped[i] = api.MappedRepositoryView{Repo: repo}
+	}
+	return api.State{Repositories: api.RepositoriesView{Mapped: mapped}}, nil
 }
 
 // newControllerDaemonWithOptions is the daemon's HTTP surface as `legion controller start` and
@@ -134,6 +182,7 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
 		DesignGate: opts.gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Tokens: opts.tokens, GitHubOwners: func() []string { return opts.owners },
+		State: fixedStateSource{repositories: opts.repositories}, StateTransactions: fixedStateTransactions{},
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -475,8 +524,10 @@ func modeOf(t *testing.T, path string) os.FileMode {
 	return info.Mode().Perm()
 }
 
-// The one daemon call: POST /legion/v1/controller/secret, the operator token as a bearer, and the
-// contract the probe held the plugin to as the body.
+// The one daemon call that mints the capability: POST /legion/v1/controller/secret, the operator
+// token as a bearer, and the contract the probe held the plugin to as the body. The
+// github-credential fetch and the GET /legion/v1/state read for the controller's repositories
+// addressing (Task 6.1) follow it.
 func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -484,14 +535,18 @@ func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	requests := d.requests()
-	if len(requests) != 2 {
-		t.Fatalf("%d requests reached the daemon, want the secret request and the github-credential fetch", len(requests))
+	if len(requests) != 3 {
+		t.Fatalf("%d requests reached the daemon, want the secret request, the github-credential fetch, and the state read", len(requests))
 	}
 	got := requests[0]
 	if got.method != http.MethodPost || got.path != "/legion/v1/controller/secret" ||
 		got.authorization != "Bearer "+controllerOperatorToken || got.contentType != "application/json" ||
 		string(got.body) != fmt.Sprintf(`{"pluginContract":%d}`, api.DaemonAPIVersion) || got.status != http.StatusOK {
 		t.Fatalf("secret request = %s %s auth %q type %q body %q → %d", got.method, got.path, got.authorization, got.contentType, got.body, got.status)
+	}
+	state := requests[2]
+	if state.method != http.MethodGet || state.path != "/legion/v1/state" || state.authorization != "" || state.status != http.StatusOK {
+		t.Fatalf("state request = %s %s auth %q → %d, want an unauthenticated GET", state.method, state.path, state.authorization, state.status)
 	}
 }
 
@@ -661,6 +716,40 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 	}
 }
 
+// The operator-launched controller's addressing gains the project's repositories after its design
+// gate policy, read from the daemon's own GET /legion/v1/state (the unauthenticated route a
+// worker's addressing reads through too, Task 6.1): the same RepositoriesFragment clause, sorted,
+// never the design-gate line alone, once the daemon maps any repository.
+func TestControllerStartsAddressingGainsTheProjectsRepositories(t *testing.T) {
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{
+		gate: config.DesignGateOff, repositories: []string{"sjawhar/legion-smoke", "acme/widgets"},
+	})
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	want := "\n\nDesign gate policy: `gates.design: off`. the project's repositories are acme/widgets, sjawhar/legion-smoke.\n\n"
+	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+		t.Fatalf("Oh My Pi's argv = %q; want it to contain %q", argv, want)
+	}
+}
+
+// A daemon with no repository mapped tells the operator-launched controller its design gate
+// policy alone, as TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy checks: the
+// repositories clause is never appended empty.
+func TestControllerStartsAddressingOmitsTheClauseWithNoMappedRepository(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	if strings.Contains(argv[1], "repositories are") {
+		t.Fatalf("Oh My Pi's argv = %q; want no repositories clause", argv)
+	}
+}
+
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the
 // controller would otherwise promise, or withhold, a design approval on an assumption.
 func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
@@ -718,8 +807,8 @@ func TestControllerStartDaemonURLOverridesTheFile(t *testing.T) {
 	if code, _, errb := c.run("--daemon-url", d.url+"/"); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
-	if n := len(d.requests()); n != 2 {
-		t.Fatalf("%d requests reached the overriding daemon, want the secret request and the github-credential fetch", n)
+	if n := len(d.requests()); n != 3 {
+		t.Fatalf("%d requests reached the overriding daemon, want the secret request, the github-credential fetch, and the state read", n)
 	}
 	if got := c.env()["LEGION_DAEMON_URL"]; got != d.url {
 		t.Fatalf("LEGION_DAEMON_URL = %q, want %q", got, d.url)
