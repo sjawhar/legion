@@ -480,9 +480,16 @@ export default function envoyExtension(pi: PiApi): void {
   // Counts role ends, so a role-bound subscription still opening when its role ended can tell
   // (subscribeUnlessRoleEnds).
   let roleEnds = 0;
-  // The role an envoy_role_set call is moving this session off, while that call waits on the
-  // listener; a subscription for it opened then would close with the move.
-  let toolRoleMove: string | undefined;
+  // Every role move (the model's envoy_role_set, a plugin's claim through the bridge, the reclaim
+  // at session start) runs one at a time, so each reads the role it leaves as it is and no move
+  // ends a role another one just claimed. A role-bound subscribe waits for the moves in flight.
+  let roleMoves: Promise<unknown> = Promise.resolve();
+  const moveRole = <T>(run: () => Promise<T>): Promise<T> => {
+    const next = roleMoves.then(run, run);
+    roleMoves = next.catch(() => undefined);
+    return next;
+  };
+  const isRoleBound = (subject: string): boolean => roleNoticeSubjects.has(subject);
   // The role this session holds, if any.
   const heldRole = (): string | undefined => claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
   let activeSessionContext: SessionContext | undefined;
@@ -1318,7 +1325,7 @@ export default function envoyExtension(pi: PiApi): void {
   // Whether `topic` serves the role this session holds, and how many roles had ended, at one
   // moment: what a role-bound subscribe compares against once its connection is made.
   const roleSnapshot = (topic: string): RoleSnapshot => ({
-    roleBound: expandSubscriptionTopics([topic]).some((subject) => roleNoticeSubjects.has(subject)),
+    roleBound: expandSubscriptionTopics([topic]).some(isRoleBound),
     endsBefore: roleEnds,
   });
 
@@ -1629,7 +1636,7 @@ export default function envoyExtension(pi: PiApi): void {
       endRole();
       return;
     }
-    let role = remembered ?? claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
+    let role = remembered ?? heldRole();
     if (role === undefined) {
       const { client } = requireEnvoy();
       for (const source of roleSources(previousSessionID, carryPreviousSessionRole)) {
@@ -1652,9 +1659,11 @@ export default function envoyExtension(pi: PiApi): void {
       carryPreviousSessionRole && previousSessionID !== "" && previousSessionID !== sessionID
         ? previousSessionID
         : undefined;
-    await setEnvoyRole(role, { soft: true, previousSessionID: continued }).catch((error) => {
-      logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
-    });
+    await moveRole(() => setEnvoyRole(role, { soft: true, previousSessionID: continued })).catch(
+      (error) => {
+        logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
+      }
+    );
   };
 
   let sessionEstablishment = Promise.resolve();
@@ -1727,7 +1736,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    await setEnvoyRole(role);
+    await moveRole(() => setEnvoyRole(role));
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (
@@ -1743,21 +1752,31 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (sessionID !== targetSessionID) await establishSession(context);
+    const marked: string[] = [];
     if (whileHolding !== undefined) {
+      // A role move still in flight could end the role just after the subscription opens, so the
+      // role is read once every move started before this call has landed.
+      await roleMoves;
       if (claimedRoleTopic !== ROLE_TOPIC_PREFIX + whileHolding) {
         throw new Error(
           `Envoy session ${targetSessionID} does not hold role ${whileHolding} for a notice subscription`
         );
       }
-      if (toolRoleMove === whileHolding) {
-        throw new Error(
-          `Envoy session ${targetSessionID} is moving off role ${whileHolding} (envoy_role_set), so it takes no notice subscription for it`
-        );
+      // Marked before the subscription opens, so no registration ever carries it, and a move the
+      // model starts from here on sees it.
+      for (const subject of expandSubscriptionTopics([topic])) {
+        if (isRoleBound(subject)) continue;
+        roleNoticeSubjects.add(subject);
+        marked.push(subject);
       }
-      // Marked before the subscription opens, so no registration ever carries it.
-      for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
     }
-    if (!(await subscribeUnlessRoleEnds(topic, roleSnapshot(topic)))) return;
+    try {
+      if (!(await subscribeUnlessRoleEnds(topic, roleSnapshot(topic)))) return;
+    } catch (error) {
+      // Nothing opened, so nothing may keep the session's role in place on its behalf.
+      for (const subject of marked) roleNoticeSubjects.delete(subject);
+      throw error;
+    }
     await registerSession();
   };
 
@@ -2333,24 +2352,16 @@ export default function envoyExtension(pi: PiApi): void {
           // listener interest represents the independently-held role claim: close
           // the local subscription without unregistering that interest.
           const inbox = agentSubject(sessionID);
-          const named = topicsFor(parameters, []);
-          // A subscription another plugin opened for the role this session holds lasts as long
-          // as the role does: the tool never closes one. Naming one is refused before anything
-          // closes; unsubscribing everything leaves them open and says so.
-          const roleBound = (topic: string) =>
-            expandSubscriptionTopics([topic]).some((subject) => roleNoticeSubjects.has(subject));
-          const namedBound = named.filter(roleBound);
-          if (namedBound.length > 0) {
-            throw new Error(
-              `This session holds role ${heldRole()}, and ${namedBound.join(", ")} lasts only while it does; envoy_unsubscribe does not close it`
-            );
-          }
-          const candidates = (named.length > 0 ? named : [...subscriptions.keys()]).filter(
-            (topic) => topic !== inbox
+          // Concrete subjects, a named `X.>` already expanded to `X.>` and `X`.
+          const candidates = topicsFor(parameters, [...subscriptions.keys()]).filter(
+            (subject) => subject !== inbox
           );
-          const kept = candidates.filter(roleBound);
-          const targets = candidates.filter((topic) => !roleBound(topic));
-          const removed = targets.filter(closeIntentionally);
+          // A subject another plugin opened for the role this session holds lasts as long as the
+          // role does, so the tool keeps it and says so rather than leave the session deaf to it.
+          const kept = candidates.filter(isRoleBound);
+          const removed = candidates
+            .filter((subject) => !isRoleBound(subject))
+            .filter(closeIntentionally);
           const registryRemoved = removed.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX));
           const registrationError =
             registryRemoved.length === 0
@@ -2433,29 +2444,26 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
-          const held = heldRole();
-          const moving = held !== undefined && held !== role;
-          // Moving off a role closes every subscription another plugin opened `whileHolding` it,
-          // so the session would stop taking that role's notices without being told. The model's
-          // tools never do that; a plugin that owns the role moves it through its own claim.
-          if (moving && roleNoticeSubjects.size > 0) {
-            throw new Error(
-              `This session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
-            );
-          }
-          // While the move is in flight, a plugin's subscription for the role being left is
-          // refused (`subscribeNotice`), so none can open and then close with the move unseen.
-          toolRoleMove = moving ? held : undefined;
-          try {
+          // Read and checked inside the move, so a move landing first is the role this one leaves.
+          const released = await moveRole(async () => {
+            const held = heldRole();
+            const moving = held !== undefined && held !== role;
+            // Moving off a role closes every subscription another plugin opened `whileHolding`
+            // it, so the session would stop taking that role's notices without being told. The
+            // model's tool never does that; the plugin that owns the role moves it by its claim.
+            if (moving && roleNoticeSubjects.size > 0) {
+              throw new Error(
+                `This session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
+              );
+            }
             await setEnvoyRole(role);
-          } finally {
-            toolRoleMove = undefined;
-          }
+            return moving ? held : undefined;
+          });
           return toolSuccess(
-            moving
-              ? `Now holding role: ${role} (released role ${held})`
-              : `Now holding role: ${role}`,
-            { role, ...(moving ? { released: held } : {}) }
+            released === undefined
+              ? `Now holding role: ${role}`
+              : `Now holding role: ${role} (released role ${released})`,
+            { role, ...(released === undefined ? {} : { released }) }
           );
         }
         case EnvoyToolOperation.getRole: {

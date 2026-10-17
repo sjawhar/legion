@@ -16,11 +16,12 @@ export type LegionRoleClaim = (
 
 /**
  * `whileHolding` names a role this session holds: the subscription then lasts as long as the
- * session holds that role and closes when it stops holding it (another live session takes it, a
- * `new` or `resume` switch leaves it behind, or a claim through this bridge moves the session to
- * another role). The model's `envoy_role_set` and `envoy_unsubscribe` never close it: each refuses
- * instead. It is never registered with the listener, so a resumed process gets it back only by
- * claiming the role again.
+ * session holds that role and closes when it stops holding it: another live session takes it, a
+ * `new` or `resume` switch leaves it behind, a `/fork` or `/branch` switch reclaims another role,
+ * or a claim through this bridge moves the session to another role. The model's `envoy_role_set`
+ * refuses to move the session off such a role, and its `envoy_unsubscribe` keeps such a
+ * subscription open and reports it kept. It is never registered with the listener, so a resumed
+ * process gets it back only by claiming the role again.
  */
 export type LegionNoticeSubscription = (
   sessionID: string,

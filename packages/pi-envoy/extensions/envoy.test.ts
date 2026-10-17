@@ -150,6 +150,7 @@ const natsState = {
   published: [] as { readonly subject: string; readonly data: Uint8Array | undefined }[],
   onPublish: undefined as ((subject: string) => void) | undefined,
   failPublishes: 0,
+  failSubscribes: 0,
   connectedNames: [] as string[],
   /** What each connect was given: its servers, and whether it carried an nkey authenticator. */
   connects: [] as { readonly servers: readonly string[]; readonly authenticated: boolean }[],
@@ -207,6 +208,10 @@ mock.module("nats", () => ({
         natsState.onPublish?.(subject);
       },
       subscribe: (topic: string) => {
+        if (natsState.failSubscribes > 0) {
+          natsState.failSubscribes -= 1;
+          throw new Error("SUBSCRIBE_FAILED");
+        }
         let active = true;
         const queue: {
           readonly subject: string;
@@ -408,6 +413,7 @@ afterEach(async () => {
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
+  natsState.failSubscribes = 0;
   natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
@@ -4229,7 +4235,9 @@ describe("envoy OMP extension", () => {
   test("the model's role and unsubscribe tools keep a held role's role-bound subscriptions open", async () => {
     const role = "legion-controller";
     const notice = "notifications.legion.ACME.controller";
+    const ordinary = "notifications.github.acme.widgets.pr.7";
     const roleClaims: string[] = [];
+    const unregistered: string[][] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
@@ -4242,6 +4250,10 @@ describe("envoy OMP extension", () => {
           dir: "/tmp/envoy-omp-test",
           topics: [`notifications.role.${claimed}`],
         });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        unregistered.push(Array.isArray(body?.topics) ? body.topics : []);
+        return response({});
       }
       return responseWithRegistration(input, init, {});
     };
@@ -4261,10 +4273,13 @@ describe("envoy OMP extension", () => {
     await subscribeLegionNotice("ses_role_bound", notice, context, role);
     const bound = natsState.controls.get(notice);
     if (bound === undefined) throw new Error("the role-bound subject was not subscribed");
-    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
-    if (roleTool === undefined) throw new Error("role tool was not registered");
+    const tool = (name: string) => {
+      const found = fixture.tools.find((candidate) => candidate.name === name);
+      if (found === undefined) throw new Error(`${name} was not registered`);
+      return found;
+    };
 
-    const refused = await roleTool.execute("", { role: "release-captain" });
+    const refused = await tool("envoy_role_set").execute("", { role: "release-captain" });
     expect(refused.isError).toBe(true);
     const reason = refused.content[0]?.text ?? "";
     expect(reason).toContain(role);
@@ -4288,23 +4303,37 @@ describe("envoy OMP extension", () => {
     expect(fixture.messages.at(-1)).toContain("wake after the refused move");
 
     // Claiming the role it already holds is no move, and leaves the subscription alone.
-    const again = await roleTool.execute("", { role });
+    const again = await tool("envoy_role_set").execute("", { role });
     expect(again.isError).toBeFalsy();
     expect(again.details).toEqual({ role });
     expect(roleClaims).toEqual([role, role]);
     expect(bound.active()).toBe(true);
 
-    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    if (unsubscribeTool === undefined) throw new Error("unsubscribe tool was not registered");
-    // Naming the role-bound subscription is refused, and nothing closes.
-    const named = await unsubscribeTool.execute("", { topics: [notice] });
-    expect(named.isError).toBe(true);
+    // The model's own subscriptions: an ordinary topic, and a wildcard over the bound subject.
+    await tool("envoy_subscribe").execute("", { topics: [ordinary, `${notice}.>`] });
+    const wildcard = natsState.controls.get(`${notice}.>`);
+    expect(wildcard?.active()).toBe(true);
+
+    // An explicit empty list closes nothing.
+    const none = await tool("envoy_unsubscribe").execute("", { topics: [] });
+    expect(none.details).toEqual({ removed: [] });
+    expect(natsState.controls.get(ordinary)?.active()).toBe(true);
+    expect(unregistered).toEqual([]);
+
+    // Naming the bound subject keeps it, and says so.
+    const named = await tool("envoy_unsubscribe").execute("", { topics: [notice] });
+    expect(named.isError).toBeFalsy();
+    expect(named.details).toEqual({ removed: [], kept: [notice] });
     expect(named.content[0]?.text).toContain(notice);
     expect(bound.active()).toBe(true);
-    // Unsubscribing everything leaves it open and reports it kept.
-    const all = await unsubscribeTool.execute("", {});
+
+    // Unsubscribing everything closes the model's own, its wildcard included, and keeps the
+    // bound subject.
+    const all = await tool("envoy_unsubscribe").execute("", {});
     expect(all.isError).toBeFalsy();
     expect(all.details).toMatchObject({ kept: [notice] });
+    expect(all.details.removed).toEqual(expect.arrayContaining([ordinary, `${notice}.>`]));
+    expect(wildcard?.active()).toBe(false);
     expect(bound.active()).toBe(true);
 
     // The plugin that owns the role still moves it through its own claim, which ends the
@@ -4313,22 +4342,26 @@ describe("envoy OMP extension", () => {
     expect(bound.active()).toBe(false);
   });
 
-  test("a plugin's role-bound subscription is refused while envoy_role_set is moving off that role", async () => {
-    const role = "legion-controller";
-    const notice = "notifications.legion.ACME.controller";
-    const moveReachedListener = Promise.withResolvers<void>();
-    const releaseMove = Promise.withResolvers<void>();
+  // A fixture holding `legion-controller`. Once `gate(role)` is called, the listener holds the
+  // next claim of `role` until its `release` resolves. The model's envoy_role_set reaches the move
+  // queue in the call itself, so a second call made after `reached` is queued behind the first.
+  const gatedRoleFixture = async (label: string, sessionID: string) => {
+    const claims: string[] = [];
+    let gated: { role: string; reached: () => void; release: Promise<void> } | undefined;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
         const claimed = typeof body?.role === "string" ? body.role : "";
-        if (claimed === "release-captain") {
-          moveReachedListener.resolve();
-          await releaseMove.promise;
+        claims.push(claimed);
+        if (gated?.role === claimed) {
+          const { reached, release } = gated;
+          gated = undefined;
+          reached();
+          await release;
         }
         return response({
-          session_id: "ses_role_race",
+          session_id: sessionID,
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
           topics: [`notifications.role.${claimed}`],
@@ -4336,25 +4369,93 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import("./envoy.ts?role-set-move-in-flight");
+    const { default: envoyExtension } = await import(`./envoy.ts?${label}`);
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const context = sessionContext("ses_role_race");
+    const context = sessionContext(sessionID);
     await fixture.handlers.get("session_start")?.({}, context);
-    await claimEnvoyRole("ses_role_race", role, context);
+    await claimEnvoyRole(sessionID, "legion-controller", context);
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
     if (roleTool === undefined) throw new Error("role tool was not registered");
+    const gate = (role: string) => {
+      const reached = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      gated = { role, reached: reached.resolve, release: release.promise };
+      return { reached: reached.promise, release: release.resolve };
+    };
+    return { context, roleTool, claims, gate };
+  };
 
-    // No role-bound subscription yet, so the move goes ahead and waits on the listener.
-    const moving = roleTool.execute("", { role: "release-captain" });
-    await moveReachedListener.promise;
-    await expect(subscribeLegionNotice("ses_role_race", notice, context, role)).rejects.toThrow(
-      role
+  test("role moves run one at a time, so a move back and a plugin's subscription after it both stand", async () => {
+    const notice = "notifications.legion.ACME.controller";
+    const { context, roleTool, gate } = await gatedRoleFixture("role-moves-back", "ses_role_back");
+    const held = gate("release-captain");
+    const away = roleTool.execute("", { role: "release-captain" });
+    await held.reached;
+    const back = roleTool.execute("", { role: "legion-controller" });
+    const subscribed = subscribeLegionNotice("ses_role_back", notice, context, "legion-controller");
+    held.release();
+    expect((await away).details).toEqual({
+      role: "release-captain",
+      released: "legion-controller",
+    });
+    expect((await back).details).toEqual({
+      role: "legion-controller",
+      released: "release-captain",
+    });
+    await subscribed;
+    expect(natsState.controls.get(notice)?.active()).toBe(true);
+  });
+
+  test("a second move reads the role the first left it in, and a subscription for that role is refused", async () => {
+    const notice = "notifications.legion.ACME.release";
+    const { context, roleTool, gate } = await gatedRoleFixture(
+      "role-moves-twice",
+      "ses_role_twice"
     );
-    releaseMove.resolve();
-    const moved = await moving;
-    expect(moved.details).toEqual({ role: "release-captain", released: role });
-    expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
+    const held = gate("release-captain");
+    const first = roleTool.execute("", { role: "release-captain" });
+    await held.reached;
+    const second = roleTool.execute("", { role: "reviewer" });
+    const subscribed = subscribeLegionNotice("ses_role_twice", notice, context, "release-captain");
+    held.release();
+    expect((await first).details).toEqual({
+      role: "release-captain",
+      released: "legion-controller",
+    });
+    expect((await second).details).toEqual({ role: "reviewer", released: "release-captain" });
+    await expect(subscribed).rejects.toThrow("does not hold role release-captain");
+    expect(natsState.controls.get(notice)).toBeUndefined();
+  });
+
+  test("the model's role move waits for a plugin's claim in flight and names the role that claim took", async () => {
+    const { context, roleTool, claims, gate } = await gatedRoleFixture(
+      "role-move-after-claim",
+      "ses_role_claim"
+    );
+    const held = gate("release-captain");
+    const claimed = claimEnvoyRole("ses_role_claim", "release-captain", context);
+    await held.reached;
+    const moved = roleTool.execute("", { role: "reviewer" });
+    held.release();
+    await claimed;
+    expect((await moved).details).toEqual({ role: "reviewer", released: "release-captain" });
+    expect(claims).toEqual(["legion-controller", "release-captain", "reviewer"]);
+  });
+
+  test("a plugin's role-bound subscription that fails to open does not keep the role in place", async () => {
+    const notice = "notifications.legion.ACME.controller";
+    const { context, roleTool } = await gatedRoleFixture(
+      "role-bound-subscribe-fails",
+      "ses_role_fail"
+    );
+    natsState.failSubscribes = 1;
+    await expect(
+      subscribeLegionNotice("ses_role_fail", notice, context, "legion-controller")
+    ).rejects.toThrow("SUBSCRIBE_FAILED");
+    const moved = await roleTool.execute("", { role: "reviewer" });
+    expect(moved.isError).toBeFalsy();
+    expect(moved.details).toEqual({ role: "reviewer", released: "legion-controller" });
   });
 
   test("injects a post-takeover forwarded role event into B only", async () => {
