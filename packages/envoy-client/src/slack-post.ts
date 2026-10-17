@@ -191,8 +191,7 @@ const WEB_SCHEME = /^https?:\/\//i;
 /** A host written with no scheme: dotted labels, optionally a trailing dot and a port, not inside
  * a path, an address or another word. A single label counts only before a port (`dispatch:8766`),
  * so a word before a colon (`Dispatch: filed`) is no host. */
-const BARE_HOST =
-  /(?<![\w@./:%-])((?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63})\.?(:\d{1,5})?(?![\w-])/gi;
+const BARE_HOST = /(?<![\w@./:%-])((?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63})\.?(:\d{1,5})?(?![\w-])/gi;
 /** An IPv6 literal written with no scheme: in brackets, optionally with a zone and a port. */
 const BARE_IPV6 = /(?<![\w@./:%-])\[([0-9a-f:.]{2,45})(?:%[\w.-]{1,32})?\](?::\d{1,5})?/gi;
 const TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
