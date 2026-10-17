@@ -101,9 +101,10 @@ func TestListenerEnvCheck(t *testing.T) {
 		},
 		// The rest of the environment.
 		{
-			name:   "a blank machineId, refused by core.ListenerConfig.Check",
-			mutate: func(e *rendering.ListenerEnv) { e.MachineID = " " },
-			input:  "machineId", err: "machineId is required",
+			name:   "a machineId with a dot, refused by core.ListenerConfig.Check",
+			mutate: func(e *rendering.ListenerEnv) { e.MachineID = "example.host" },
+			input:  "machineId",
+			err:    "machineId contains '.', which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>",
 		},
 		{
 			name:   "a blank listenHost",

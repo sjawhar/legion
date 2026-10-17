@@ -139,11 +139,12 @@ more ([The hub's listener](#the-hubs-listener)).
 A user is refused when it names more than one of `machineId`, `dispatchMachineId`, `daemon: true`
 and `permissions`, or none, or when its `nkey` is empty, named by its index alone, as
 `users[1]: nkey is required`, since these come before the authorization has checked the names. A
-`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and the queue group
-`envoy-listener-<id>`, so one is refused, named the same way, when it is empty or only whitespace,
-or holds a character those names cannot carry — `.`, `*`, `>`, `/`, `\`, a control character, or
-any whitespace but the space, which both names turn into a hyphen — as
-`users[1]: dispatchMachineId contains '.', which cannot appear in the durable name listener-<id>
+`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and queue group
+`envoy-listener-<id>`. The shared machine-ID rule refuses an empty id; leading or trailing
+whitespace; `.`, `*`, `>`, `/` or `\`; a control character; and any whitespace other than an
+ordinary space. An ordinary space is accepted only inside the id and becomes a hyphen in both
+names. The refusal names the field itself, as
+`users[1].dispatchMachineId contains '.', which cannot appear in the durable name listener-<id>
 or the queue group envoy-listener-<id>`. Two ids that give one durable name, of either kind
 (`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would put
 two listeners on one durable and queue group, so the later one is refused, as
