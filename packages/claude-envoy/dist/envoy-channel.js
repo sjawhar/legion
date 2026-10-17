@@ -19314,8 +19314,8 @@ var require_utils = __commonJS((exports, module) => {
   var HOST_DELIMS = { "@": "%40", "/": "%2F", "?": "%3F", "#": "%23", ":": "%3A" };
   var HOST_DELIM_RE = /[@/?#:]/g;
   var HOST_DELIM_NO_COLON_RE = /[@/?#]/g;
-  function reescapeHostDelimiters(host, isIP) {
-    const re = isIP ? HOST_DELIM_NO_COLON_RE : HOST_DELIM_RE;
+  function reescapeHostDelimiters(host, isIP2) {
+    const re = isIP2 ? HOST_DELIM_NO_COLON_RE : HOST_DELIM_RE;
     re.lastIndex = 0;
     return host.replace(re, (ch) => HOST_DELIMS[ch]);
   }
@@ -19764,7 +19764,7 @@ var require_fast_uri = __commonJS((exports, module) => {
       fragment: undefined
     };
     let malformedAuthorityOrPort = false;
-    let isIP = false;
+    let isIP2 = false;
     if (options.reference === "suffix") {
       if (options.scheme) {
         uri = options.scheme + ":" + uri;
@@ -19813,9 +19813,9 @@ var require_fast_uri = __commonJS((exports, module) => {
         if (ipv4result === false) {
           const ipv6result = normalizeIPv6(parsed.host);
           parsed.host = ipv6result.host.toLowerCase();
-          isIP = ipv6result.isIPV6;
+          isIP2 = ipv6result.isIPV6;
         } else {
-          isIP = true;
+          isIP2 = true;
         }
       }
       if (parsed.scheme === undefined && parsed.userinfo === undefined && parsed.host === undefined && parsed.port === undefined && parsed.query === undefined && !parsed.path) {
@@ -19832,7 +19832,7 @@ var require_fast_uri = __commonJS((exports, module) => {
       }
       const schemeHandler = getSchemeHandler(options.scheme || parsed.scheme);
       if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
-        if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) {
+        if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP2 === false && nonSimpleDomain(parsed.host)) {
           try {
             parsed.host = new URL("http://" + parsed.host).hostname;
           } catch (e) {
@@ -19846,7 +19846,7 @@ var require_fast_uri = __commonJS((exports, module) => {
             parsed.scheme = unescape(parsed.scheme);
           }
           if (parsed.host !== undefined) {
-            parsed.host = reescapeHostDelimiters(unescape(parsed.host), isIP);
+            parsed.host = reescapeHostDelimiters(unescape(parsed.host), isIP2);
           }
         }
         if (parsed.path) {
@@ -39781,6 +39781,7 @@ function sessionDispatchSettings(file2, env, options) {
 }
 
 // ../envoy-client/src/slack-post.ts
+import { BlockList, isIP } from "net";
 var SLACK_BOT_TOKEN_SECRET = "LEGION_SLACK_BOT_TOKEN";
 var SLACK_POST_API_URL_VARIABLE = "SLACK_POST_API_URL";
 var POST_TIMEOUT_MS = 30000;
@@ -39909,8 +39910,29 @@ try {
 `;
 var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
 var URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
-var BARE_HOST = /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
+var WEB_SCHEME = /^https?:\/\//i;
+var BARE_HOST = /(?<![\w@./:%-])((?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63})\.?(:\d{1,5})?(?![\w-])/gi;
+var BARE_IPV6 = /(?<![\w@./:%-])\[([0-9a-f:.]{2,45})(?:%[\w.-]{1,32})?\](?::\d{1,5})?/gi;
 var TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+var CLUSTER_ADDRESSES = new BlockList;
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.168.0.0", 16]
+]) {
+  CLUSTER_ADDRESSES.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+  ["::", 96],
+  ["fc00::", 7],
+  ["fe80::", 10]
+]) {
+  CLUSTER_ADDRESSES.addSubnet(network, prefix, "ipv6");
+}
 function linkInsideCluster(text, env) {
   const { DISPATCH_URL: apiUrl, DISPATCH_PUBLIC_URL: publicUrl } = env;
   const apiHost = hostOf(apiUrl);
@@ -39918,6 +39940,8 @@ function linkInsideCluster(text, env) {
   const dispatchHost = apiHost !== undefined && publicHost !== undefined && apiHost !== publicHost ? apiHost : undefined;
   const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   for (const match of decoded.matchAll(URL_CANDIDATE)) {
+    if (!WEB_SCHEME.test(match[0]))
+      continue;
     for (const written of new Set([match[0], match[0].replace(TRAILING_PUNCTUATION, "")])) {
       const host = hostOf(written);
       if (host !== undefined && insideCluster(host, dispatchHost, true))
@@ -39925,16 +39949,16 @@ function linkInsideCluster(text, env) {
     }
   }
   const prose = decoded.replace(URL_CANDIDATE, (url2) => " ".repeat(url2.length));
-  for (const match of prose.matchAll(BARE_HOST)) {
-    const host = hostOf(`http://${match[0]}`);
-    if (host !== undefined && insideCluster(host, dispatchHost, false))
+  for (const match of prose.matchAll(BARE_IPV6)) {
+    if (insideCluster(`[${match[1]}]`, dispatchHost, false))
       return match[0];
   }
-  if (dispatchHost !== undefined) {
-    const escaped = dispatchHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const bare = new RegExp(`(?<![\\w@./:%-])${escaped}\\.?(?=[:/])`, "i").exec(prose);
-    if (bare !== null)
-      return bare[0];
+  for (const match of prose.matchAll(BARE_HOST)) {
+    const host = (match[1] ?? "").toLowerCase();
+    if (!host.includes(".") && match[2] === undefined)
+      continue;
+    if (insideCluster(host, dispatchHost, false))
+      return match[0];
   }
   return;
 }
@@ -39952,52 +39976,11 @@ function insideCluster(host, dispatchHost, fromUrl) {
     return true;
   if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
     return true;
-  if (host.startsWith("["))
-    return privateIPv6(host.slice(1, -1));
-  return privateIPv4(host) || fromUrl && !host.includes(".");
-}
-function privateIPv4(host) {
-  const octets = host.split(".");
-  if (octets.length !== 4 || !octets.every((octet) => /^\d{1,3}$/.test(octet)))
-    return false;
-  const [a = 0, b = 0] = octets.map(Number);
-  return a === 0 || a === 10 || a === 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 100 && b >= 64 && b <= 127;
-}
-function privateIPv6(address) {
-  const words = ipv6Words(address);
-  if (words === undefined)
-    return false;
-  const [first = 0] = words;
-  const zeroUntil = (end) => words.slice(0, end).every((word) => word === 0);
-  if (zeroUntil(5) && (words[5] === 65535 || words[5] === 0)) {
-    const [high = 0, low = 0] = words.slice(6);
-    const ipv43 = `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
-    if (words[5] === 65535 || !zeroUntil(7) || low > 1)
-      return privateIPv4(ipv43);
-    return true;
-  }
-  return (first & 65024) === 64512 || (first & 65472) === 65152;
-}
-function ipv6Words(address) {
-  let text = address.toLowerCase();
-  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
-  if (dotted !== null) {
-    const [a, b, c, d] = dotted.slice(1).map(Number);
-    text = `${text.slice(0, dotted.index)}${(a << 8 | b).toString(16)}:${(c << 8 | d).toString(16)}`;
-  }
-  const halves = text.split("::");
-  if (halves.length > 2)
-    return;
-  const parse5 = (part) => part === "" ? [] : part.split(":");
-  const head = parse5(halves[0] ?? "");
-  const tail = halves.length === 2 ? parse5(halves[1] ?? "") : [];
-  const missing = 8 - head.length - tail.length;
-  if (halves.length === 1 ? missing !== 0 : missing < 1)
-    return;
-  const words = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
-  if (!words.every((word) => /^[0-9a-f]{1,4}$/.test(word)))
-    return;
-  return words.map((word) => Number.parseInt(word, 16));
+  const address = host.startsWith("[") ? host.slice(1, -1) : host;
+  const family = isIP(address);
+  if (family !== 0)
+    return CLUSTER_ADDRESSES.check(address, family === 4 ? "ipv4" : "ipv6");
+  return fromUrl && !host.includes(".");
 }
 async function postSlackReply(reply, options = {}) {
   const env = options.env ?? process.env;
