@@ -3,11 +3,13 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"unicode/utf16"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -119,7 +121,29 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 	if err := e.disarm(ctx, tx, issue.Key, pr); err != nil {
 		return err
 	}
-	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
+	return e.tellReadyAudience(ctx, tx, issue, withdrawal(issue.Key, pr.Number, reason))
+}
+
+// withdrawal is the READY's withdrawal for issue's pull request number, for reason, within the one
+// Dispatch message the outbox can post (record.MessagePostLimit, in UTF-16 units as Dispatch counts
+// them): a reason that would carry it past that, a merge group's many failing runs say, is cut, and
+// the withdrawal says so. The implementer's task and the architect's checks-red carry it whole.
+func withdrawal(issue string, number int, reason string) string {
+	text := func(reason string) string {
+		return fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue, number, reason)
+	}
+	body := text(reason)
+	if dispatch.MessageBodyLength(body) <= record.MessagePostLimit {
+		return body
+	}
+	const cut = " … (cut to fit one Dispatch message; the implementer's task and the architect's checks-red carry it whole)"
+	over := dispatch.MessageBodyLength(text(reason+cut)) - record.MessagePostLimit
+	runes := []rune(reason)
+	for over > 0 && len(runes) > 0 {
+		over -= utf16.RuneLen(runes[len(runes)-1])
+		runes = runes[:len(runes)-1]
+	}
+	return text(string(runes) + cut)
 }
 
 // headMoved answers a move of pr's head: a push, or a reopen (reopened), which can carry a head

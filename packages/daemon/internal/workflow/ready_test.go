@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -252,6 +254,33 @@ func TestAMergeTheQueueFailedSendsTheAwaitedREADYBackToImplementing(t *testing.T
 				t.Fatalf("disarms %d (%v), want the withdrawal's one", disarms, err)
 			}
 		})
+	}
+}
+
+// A merge group with many failing runs makes a long reason, and Dispatch refuses a message over its
+// cap on every attempt (LEGION-800 review). The READY's withdrawal posted on the issue is cut to fit
+// one message, saying so, while the implementer's task, which no cap bounds, carries every run.
+func TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
+	var runs []string
+	for i := range 40 {
+		runs = append(runs, fmt.Sprintf("integration-shard-%02d (failure, https://github.com/sjawhar/legion/actions/runs/700000%02d)", i, i))
+	}
+	reason := "the merge queue took pull request #42 out at READY's head head at 2026-10-16T05:10:00Z (failed_checks): its merge_group run on group-sha, the commit the queue built for it, failed: " + strings.Join(runs, "; ")
+	applyRefusingNothing(t, pool, readyEngine(""), intake.MergeFailed{Issue: "LEGION-208", Number: 42, Head: "head", Reason: reason})
+	var body string
+	if err := pool.QueryRow(context.Background(), "select payload->>'body' from outbox where kind = 'dispatch_message'").Scan(&body); err != nil {
+		t.Fatalf("read the withdrawal: %v", err)
+	}
+	if length := dispatch.MessageBodyLength(body); length > record.MessagePostLimit || !strings.HasPrefix(body, "READY withdrawn for LEGION-208") || !strings.Contains(body, "cut to fit") {
+		t.Fatalf("withdrawal of %d characters (limit %d) %q, want it within one message, saying it was cut", length, record.MessagePostLimit, body)
+	}
+	if task := startTask(t, pool, claim.RoleImplementer); !strings.Contains(task, runs[len(runs)-1]) {
+		t.Fatalf("the implementer's task %q, want every failing run in it", task)
 	}
 }
 

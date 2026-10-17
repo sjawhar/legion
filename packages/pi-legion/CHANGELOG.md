@@ -58,10 +58,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   A daemon rolled back to a release before this one refuses two outbox payloads this one writes,
   a `ready_merge` row's `armed` field and the `merge-removed` notice kind, on every retry (and the
   notice holds every waiting notice of the project). Before starting the older daemon, run against
-  its database:
-  `update outbox set payload = payload - 'armed' where kind = 'ready_merge' and payload ? 'armed';`
+  its database, with `<KEY>` the Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'armed' where kind = 'ready_merge' and payload ? 'armed' and split_part(issue, '-', 1) = '<KEY>';`
   and
-  `update outbox set payload = jsonb_set(payload, '{kind}', '"merge-refused"') where kind = 'notice' and payload->>'kind' = 'merge-removed';`
+  `update outbox set payload = jsonb_set(payload, '{kind}', '"merge-refused"') where kind = 'notice' and payload->>'kind' = 'merge-removed' and split_part(issue, '-', 1) = '<KEY>';`
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
