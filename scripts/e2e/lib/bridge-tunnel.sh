@@ -249,16 +249,25 @@ YAML
 # version checks each object on its own and requires the literal word NotFound in its own read's
 # output before counting it gone; any other text — the object's own name, or an unrelated error —
 # keeps the loop going.
+# The real cause of every "every CHECK passed, then silent SIGTERM before teardown_sequence ran"
+# failure (confirmed live, 2026-10-17, by `strace -f -e trace=kill,tkill,tgkill,execve`, after
+# API consistency, this devbox's tool timeout, a watchdog race and a shared process group were
+# each ruled out in turn): `wait PID` for a process this function just killed with SIGTERM returns
+# 143 (128 + signal 15) as bash's own encoding of "killed by that signal" — the normal, correct
+# outcome of killing it — and under this script's `set -e`, a bare `wait` with no `||` treats that
+# 143 as a command failure and ends the whole script right there, skipping everything after it.
+# Confirmed by the trace: no signal ever reached the script itself; it chose `exit 143` on its own,
+# immediately after `wait`ing for the very port-forward process it had just terminated.
 bridge_stop() {
   [ -n "$bridge_started" ] || return 0
   bridge_started=
   : >"$work/bridge-stopping"
   [ -z "$bridge_watchdog_pid" ] || kill "$bridge_watchdog_pid" 2>/dev/null
-  wait "$bridge_watchdog_pid" 2>/dev/null
+  wait "$bridge_watchdog_pid" 2>/dev/null || true
   [ -z "$bridge_client_pid" ] || kill "$bridge_client_pid" 2>/dev/null
-  wait "$bridge_client_pid" 2>/dev/null
+  wait "$bridge_client_pid" 2>/dev/null || true
   [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null
-  wait "$bridge_portforward_pid" 2>/dev/null
+  wait "$bridge_portforward_pid" 2>/dev/null || true
   [ -n "$bridge_name" ] || return 0
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
