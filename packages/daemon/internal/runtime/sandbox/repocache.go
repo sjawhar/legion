@@ -465,14 +465,22 @@ func sandboxNameHash(name string) string {
 }
 
 // cacheServiceRefusal is why the Service named name, as the store holds it, is not the cache
-// Sandbox's with uid — "" when it is — and whether a Service of the name is made at all. It is the
-// Sandbox's only when the Sandbox controls it, by uid, and it selects exactly the pods the
-// controller stamps with the hash of the Sandbox's name (sandboxNameHashLabel), which is how the
-// controller makes and adopts one: anyone who may create a Service in the namespace could make one
-// of the cache's name first, routing elsewhere, and the controller refuses to adopt such a Service
-// and leaves it as it is, so the name alone proves nothing, and an issue pod's fetch presents the
-// cache's token to whatever the name reaches.
+// Sandbox's with uid — "" when it is — and whether a Service of the name is made at all, or its
+// store cannot be trusted. It is the Sandbox's only when the Sandbox controls it, by uid, it
+// selects exactly the pods the controller stamps with the hash of the Sandbox's name
+// (sandboxNameHashLabel), and it is headless with no external name: the shape the controller makes.
+// The name alone proves nothing, and an issue pod's fetch presents the cache's token to whatever
+// the name reaches. Anyone who may create a Service in the namespace could make one of the cache's
+// name first. Without the controller's tracking label the controller refuses to adopt it and leaves
+// it routing elsewhere; with that label the controller adopts it, writing its own controller
+// reference and the exact selector, but keeps its type and external name, so an ExternalName
+// Service whose name resolves to its maker's host passes on owner and selector alone. While the
+// Services list or watch is failing (serviceFeed), the store may hold a Service that has since
+// changed, so nothing in it is trusted.
 func (r *Runtime) cacheServiceRefusal(name string, uid types.UID) (string, bool) {
+	if err := r.serviceFeed.check(); err != nil {
+		return "cannot be checked: " + err.Error(), true
+	}
 	obj, ok, err := r.services.GetStore().GetByKey(r.namespace + "/" + name)
 	if err != nil || !ok {
 		return "", false
@@ -486,6 +494,12 @@ func (r *Runtime) cacheServiceRefusal(name string, uid types.UID) (string, bool)
 		return fmt.Sprintf("is controlled by %s %s (%s), not the cache's Sandbox (%s)", controller.Kind, controller.Name, controller.UID, uid), true
 	case !maps.Equal(service.Spec.Selector, want):
 		return fmt.Sprintf("selects %v, not the cache's pod alone (%v)", service.Spec.Selector, want), true
+	case service.Spec.ClusterIP != corev1.ClusterIPNone || service.Spec.ExternalName != "":
+		kind := service.Spec.Type
+		if kind == "" {
+			kind = corev1.ServiceTypeClusterIP
+		}
+		return fmt.Sprintf("is a %s Service (clusterIP %q, externalName %q), not the headless Service the controller makes", kind, service.Spec.ClusterIP, service.Spec.ExternalName), true
 	}
 	return "", true
 }

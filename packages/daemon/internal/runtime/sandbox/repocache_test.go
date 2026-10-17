@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -1126,13 +1127,15 @@ func TestSandboxNameHashIsTheControllersNameHash(t *testing.T) {
 
 // The issue pods' fetch reaches the cache at its Service with the cache's token, so the daemon
 // hands an issue pod the cache's address only once that Service is the cache Sandbox's: controlled
-// by it, by uid, and selecting exactly its pod by the controller's hash of its name. A Service of
-// the cache's name that is not is refused: one no Sandbox controls and without the controller's
-// tracking label, which anyone who may create a Service could have made first and which the
-// controller refuses to adopt; one another Sandbox controls; one selecting other pods. The launch
-// waits on it, logging why, and fails at the boot timeout naming the Service, with no issue pod
-// made and no token written for one; and legion state shows the cache refused, naming the Service
-// and why.
+// by it, by uid, selecting exactly its pod by the controller's hash of its name, and headless with
+// no external name. A Service of the cache's name that is not is refused: one no Sandbox controls
+// and without the controller's tracking label, which anyone who may create a Service could have
+// made first and which the controller refuses to adopt; one another Sandbox controls; one selecting
+// other pods; and an ExternalName Service planted with the tracking label, as the controller
+// leaves it once it has adopted it — its own controller reference and the exact selector written,
+// its type and external name kept. The launch waits on it, logging why, and fails at the boot
+// timeout naming the Service, with no issue pod made and no token written for one; and legion
+// state shows the cache refused, naming the Service and why.
 func TestAnIssuePodGetsNoCacheAddressFromAServiceThatIsNotTheCaches(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*corev1.Service)
@@ -1143,6 +1146,9 @@ func TestAnIssuePodGetsNoCacheAddressFromAServiceThatIsNotTheCaches(t *testing.T
 			s.OwnerReferences, s.Labels = nil, map[string]string{"app": "elsewhere"}
 		}, "has no controller"},
 		"a Service another Sandbox controls": {func(s *corev1.Service) { s.OwnerReferences[0].UID = "uid-other" }, "(uid-other), not the cache's Sandbox (uid-cache)"},
+		"an ExternalName Service the controller adopted": {func(s *corev1.Service) {
+			s.Spec.Type, s.Spec.ClusterIP, s.Spec.ExternalName = corev1.ServiceTypeExternalName, "", "collector.attacker.example"
+		}, "is a ExternalName Service"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := rootSpec(t)
@@ -1171,5 +1177,40 @@ func TestAnIssuePodGetsNoCacheAddressFromAServiceThatIsNotTheCaches(t *testing.T
 				t.Errorf("RepositoryCache = %+v, %t; want it refused, naming the Service %s and %q", status, found, cache, tc.says)
 			}
 		})
+	}
+}
+
+// While the Services list or watch is failing, the Service store may hold a Service that has since
+// changed, so even the cache's own Service is not trusted: a launch waits, logging why, and fails
+// at the boot timeout naming the Service and the stale store, with nothing written, and legion
+// state shows the cache refused, saying its Service cannot be checked. Once a request succeeds the
+// store is trusted again. The failure recorded here is what the Service informer's list or watch
+// records when the API server refuses it.
+func TestNoServiceIsTrustedWhileTheServiceWatchFails(t *testing.T) {
+	spec := rootSpec(t)
+	cache := CacheSandboxName(testProject, spec.Repository)
+	logs := &logBuffer{}
+	g := newRig(t, []k8sruntime.Object{cacheObject(t, spec.Repository, "uid-cache", modeRunning, ""), cacheService(cache, "uid-cache")}, withLog(logs))
+	g.r.serviceFeed.record(errors.New(`services is forbidden: User "legion-daemon" cannot watch resource "services"`), time.Now())
+	says := "cannot be checked: the Service store may be stale"
+
+	_, err := g.r.Spawn(g.ctx, spec)
+	if err == nil || !strings.Contains(err.Error(), "the repository cache's Service "+cache+" "+says) {
+		t.Fatalf("Spawn = %v, want the launch refused naming the Service %s and %q", err, cache, says)
+	}
+	issue := SandboxName(spec.Claim)
+	if pod, secret := g.pod(issue), g.secret(secretName(issue)); pod != nil || secret != nil {
+		t.Errorf("the refused launch made pod %v and Secret %v, want neither", pod != nil, secret != nil)
+	}
+	if !strings.Contains(logs.String(), "service="+cache) || !strings.Contains(logs.String(), says) {
+		t.Errorf("the launch logged %q, want its wait on the Service %s and why", logs.String(), cache)
+	}
+	if status, _ := g.r.RepositoryCache(spec.Repository); status.State != cacheRefused || status.Address != "" || !strings.Contains(status.Reason, "its Service "+cache+" "+says) {
+		t.Errorf("RepositoryCache = %+v, want it refused, its Service unchecked", status)
+	}
+
+	g.r.serviceFeed.record(nil, time.Now())
+	if refusal, made := g.r.cacheServiceRefusal(cache, "uid-cache"); refusal != "" || !made {
+		t.Errorf("cacheServiceRefusal once the watch is fed again = %q, %t; want the cache's own Service", refusal, made)
 	}
 }

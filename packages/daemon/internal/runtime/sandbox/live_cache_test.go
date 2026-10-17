@@ -31,7 +31,8 @@ var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes 
 
 // repository-cache: the cache the root's launch made (root-ready) is Ready as the runtime's stores
 // show it, at its Service, which the cluster holds as the controller made it — controlled by the
-// cache's Sandbox and selecting the hash of its name, the shape the launch checked before telling
+// cache's Sandbox, selecting the hash of its name, and headless with no external name, the shape
+// the launch checked before telling
 // the root's pod the cache's address. Asked inside the cache's own pod, its /healthz answers with
 // no token, ready at the head GitHub names for the repository's default branch, and its /tar
 // refuses a request without its token, 401 naming nothing, and answers its own token, which
@@ -46,11 +47,11 @@ func (r *liveRig) checkRepositoryCache() error {
 	if want := r.rt.cacheURL(name); status.Address != want {
 		return fmt.Errorf("the repository cache %s is Ready at %q, want its Service %s", name, status.Address, want)
 	}
-	service, err := r.kubectl("get", "service", name, "-o", `jsonpath={.metadata.ownerReferences[?(@.controller==true)].kind}/{.metadata.ownerReferences[?(@.controller==true)].name} {.spec.selector}`)
+	service, err := r.kubectl("get", "service", name, "-o", `jsonpath={.metadata.ownerReferences[?(@.controller==true)].kind}/{.metadata.ownerReferences[?(@.controller==true)].name} {.spec.selector} clusterIP={.spec.clusterIP} externalName={.spec.externalName}`)
 	if err != nil {
 		return err
 	}
-	if want := "Sandbox/" + name + ` {"` + sandboxNameHashLabel + `":"` + sandboxNameHash(name) + `"}`; strings.TrimSpace(service) != want {
+	if want := "Sandbox/" + name + ` {"` + sandboxNameHashLabel + `":"` + sandboxNameHash(name) + `"} clusterIP=None externalName=`; strings.TrimSpace(service) != want {
 		return fmt.Errorf("the cluster holds the cache's Service as %q, want %q", strings.TrimSpace(service), want)
 	}
 	curl := fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d`, repocache.Port)

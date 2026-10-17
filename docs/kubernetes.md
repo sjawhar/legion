@@ -1819,14 +1819,21 @@ The issue pods reach the cache on port 8418 at its Service's name, `<cache>.<nam
 the headless Service the Agent Sandbox controller makes for the cache's Sandbox. Since the fetch
 presents the cache's token to whatever that name reaches, the daemon hands an issue pod the
 cache's address and token only once the Service of that name is the cache's own: controlled by
-the cache's Sandbox, by uid, and selecting exactly the pods the controller stamps with the hash
-of the Sandbox's name (`agents.x-k8s.io/sandbox-name-hash`), as the controller makes and adopts
-one. Anyone who may create a Service in the namespace could make one of the cache's name first,
-routing elsewhere, which the controller refuses to adopt and leaves standing; a launch then waits,
-logging `the repository cache's Service is not the cache's` with the Service and why, and fails at
-the boot timeout naming them, with no pod made and no token written, and `legion state` shows the
-cache `refused` with the same reason. Delete that Service and the controller makes the cache's
-own. The daemon reads each Ready cache's `/healthz` every minute at its pod's address, as the store
+the cache's Sandbox, by uid, selecting exactly the pods the controller stamps with the hash of the
+Sandbox's name (`agents.x-k8s.io/sandbox-name-hash`), and headless (`clusterIP: None`) with no
+`externalName`, the shape the controller makes. Anyone who may create a Service in the namespace
+could make one of the cache's name first. One without the controller's tracking label the
+controller refuses to adopt and leaves standing; one with it the controller adopts, writing its
+own controller reference and the exact selector but keeping the planted `type` and
+`externalName`, so an `ExternalName` Service would send the token to its maker's host. Either
+way the launch waits, logging `the repository cache's Service is not the cache's` with the Service
+and why, and fails at the boot timeout naming them, with no pod made and no token written, and
+`legion state` shows the cache `refused` with the same reason. The controller never resets a
+Service's type: delete such a Service, and the controller makes the cache's own. While the
+daemon's Services list or watch is failing, its store may hold a Service that has since changed,
+so it trusts none: launches wait the same way, and the cache shows `refused` with `its Service …
+cannot be checked: the Service store may be stale: …`. The daemon reads each Ready cache's
+`/healthz` every minute at its pod's address, as the store
 holds it, with no credential, so a daemon outside the cluster that reaches pod addresses but
 resolves no cluster name reads it too; an answer from a pod that took the address once the cache's
 pod was gone names another repository, and is that read's failure. A NetworkPolicy that isolates
