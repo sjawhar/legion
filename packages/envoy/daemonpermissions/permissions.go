@@ -50,10 +50,10 @@ type Permissions struct {
 // Grant returns the NATS grant of project's daemon, refusing a project that is not a Legion
 // project key. Publish: the notification stream's info request, then for each of the project's two
 // durable consumers its info request, its create request, its next-message request, and its
-// acknowledgements. nats.go appends a consumer's filter subject to the create subject when it has
-// exactly one, as the Dispatch consumer does (DispatchFilter), and the server then refuses a
-// request whose filter is another, so that create is granted with its filter and no other; a
-// consumer of several filters, as the GitHub consumer is (one per repository), sends its bare name.
+// acknowledgements. nats.go appends the filter to the create subject when a consumer's config sets
+// the singular FilterSubject, as the Dispatch consumer's does (DispatchFilter), so that create is
+// granted under its filter's prefix; it sends the bare name when the config sets FilterSubjects,
+// as the GitHub consumer's does, however many repositories it names.
 // Subscribe: the role-lane exceptions, then the project's reply inbox.
 //
 // Each call owns its lists so a consumer can narrow a grant without changing another caller's.

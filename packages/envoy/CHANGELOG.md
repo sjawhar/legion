@@ -396,12 +396,20 @@
   `notifications.envoy.exceptions.notifications.role.*`, the subject the daemon subscribes to.
   `core.DaemonPermissions(project)` and `daemonpermissions.Grant(project)` take the project and
   refuse anything but a Legion project key. To migrate a hub whose daemons share one
-  `daemon: true` user: generate a seed per project (`envoy-infra seed generate`), give each a
-  `daemonProject` user, apply the hub, then hand each daemon its own seed
-  (`nats_daemon_nkey_seed_file`) and restart it onto a Legion built from this release, whose
-  daemon takes its own reply inbox: an older daemon still replies on `_INBOX.` and is refused
-  under the new grant, and a new daemon under the old grant is refused its inbox. Remove the
-  shared user once every daemon runs on its own.
+  `daemon: true` user, without cutting any daemon off:
+  1. Generate a seed per project (`envoy-infra seed generate`).
+  2. In the same apply that moves to this release, add a `daemonProject` user for each project,
+     and restate the shared user as an explicit `permissions` user carrying the old grant word
+     for word: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
+     `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
+     `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>`;
+     subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. A user
+     still naming `daemon` is refused by this release.
+  3. Hand each daemon its own seed (`nats_daemon_nkey_seed_file`) and restart it on a Legion
+     built from this release, whose daemon takes its own reply inbox. Pair the two: an older
+     daemon under the new grant still replies on `_INBOX.` and is refused, and a new daemon
+     under the old grant is refused its own inbox.
+  4. Remove the restated shared user once every daemon runs on its own seed.
 
 - An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
   a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,

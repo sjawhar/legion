@@ -2438,8 +2438,8 @@ cut_at_completion_call() {
 
 # ---- teardown ------------------------------------------------------------------------------------
 
-# The daemon's two durable consumers are named by the Dispatch project key (intake's
-# dispatchConsumerName and githubConsumerName): legion-go-LEGSMOKE-dispatch and -github.
+# The daemon's two durable consumers are named by the Dispatch project key
+# (daemonpermissions.DispatchConsumer and GitHubConsumer, packages/envoy/daemonpermissions): legion-go-LEGSMOKE-dispatch and -github.
 consumers_prefix="legion-go-$project-"
 delete_consumers() {
   local name

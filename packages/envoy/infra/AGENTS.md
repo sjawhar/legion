@@ -167,7 +167,7 @@ versions. Never add the module to the root `go.work`.
   change to any of them is tested there.
 - **Permission sets.** `core/permissions.go` builds the listener, session and host sets from names
   that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
-  `packages/envoy/daemonpermissions.Grant`, which builds the daemon's shared grant from those same
+  `packages/envoy/daemonpermissions.Grant`, which builds each project's daemon grant from those same
   names so its real-NATS proof and the hub cannot diverge. The plugin and the command compile only
   `daemonpermissions`, `internal/bus` and `internal/contracts` from Envoy (`go list -deps ./cmd/...`),
   so a change to Envoy's stores cuts no plugin release. A subject Envoy's code sends that has no

@@ -112,18 +112,22 @@ project key:
 | `$JS.ACK.ENVOY_NOTIFICATIONS.legion-go-<p>-github.>` | |
 
 The `$JS.ACK` rows are the subjects a consumer acknowledges a message on. The client library puts
-a consumer's one filter subject on the end of its create request, so the Dispatch consumer's create
-names its filter, and the server refuses a create whose filter is another; the GitHub consumer has
-a filter per repository, so its create names the consumer alone.
+the filter on the end of a create request when the consumer is configured with a single
+`FilterSubject`, as the Dispatch consumer is, so its create is granted under that filter's
+prefix; the GitHub consumer is configured with `FilterSubjects` (one entry per repository, however
+many there are), so its create names the consumer alone.
 
 The grant names one project's two consumers and nothing else of the stream: it reads, creates,
 deletes and drains no other consumer, neither a host's listener consumer nor another project's
-daemon consumers, and its replies reach it alone. What it still reaches through its own two
-consumers:
+daemon consumers. Its reply inbox is its own, so no Envoy-rendered user (a host's, a listener's or
+the session user) receives its replies, nor it theirs; a user given an explicit subscribe `>`
+receives everything, the daemon's replies included. What it still reaches:
 
 - **Every message of the stream.** The GitHub consumer's filters are in its request body, not its
   subject, so the seed can update that consumer to filter any of the stream's subjects and read
   them, and the Dispatch consumer reads every project's Dispatch issue events, as it always does.
+- **Every role's delivery exceptions.** Role topics carry no project, so the exceptions
+  subscription receives every project's role-lane exceptions; the daemon drops the foreign ones.
 - **Delivery to subjects it may not publish to.** The server delivers a pull consumer's messages
   to the reply subject of the next-message request, which the client chooses, so the seed can have
   the stream's messages sent to any subject, such as a role lane or `agentstream.*.control`. While

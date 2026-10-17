@@ -1416,9 +1416,9 @@ info, create and next-message requests and its acknowledgements; the Dispatch co
 names its one filter, `notifications.dispatch.issue.>`, as nats.go sends it. It subscribes to
 the role-lane delivery exceptions, `notifications.envoy.exceptions.notifications.role.*`, and to
 the daemon's own reply inbox, `_INBOX_legion_daemon_<project>.>`. It reaches no other consumer of
-the stream and no other client's replies. Through its own two consumers its seed still reads every
-message of the stream and can have them delivered to subjects it may not publish to
-(`docs/site/src/content/docs/dispatch/envoy.md` in this repository says how). A `gcp:NatsHub` user
+the stream and no reply inbox but its own. Its seed still reads every message of the stream and
+every project's role-lane exceptions, and can have the stream's messages delivered to subjects it
+may not publish to (`docs/site/src/content/docs/dispatch/envoy.md` in this repository says how). A `gcp:NatsHub` user
 with `daemonProject: <project>` receives this set; its seed belongs to that project's daemon, not
 to a host or session, so each project's daemon has a user of its own.
 

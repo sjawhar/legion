@@ -764,6 +764,9 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a lowercase daemon project", "users[1].daemonProject", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Permissions, a.Users[1].DaemonProject = nil, pulumi.StringRef(lower)
 		}},
+		{"a seed as a daemon project, which the project key pattern admits", "users[1].daemonProject", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions, a.Users[1].DaemonProject = nil, pulumi.StringRef(seed)
+		}},
 	})
 }
 
