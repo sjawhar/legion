@@ -189,7 +189,9 @@ async function complete(params: URLSearchParams): Promise<Response> {
     );
   }
   app.converting = true;
-  let saved = false;
+  // Only a code GitHub refused, or a request that never got an answer, gives the file back: once
+  // GitHub has converted the code, whatever went wrong, the file stays for its owner to inspect.
+  let converted = false;
   let body: string;
   try {
     const response = await fetch(
@@ -199,18 +201,23 @@ async function complete(params: URLSearchParams): Promise<Response> {
         headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" },
       }
     );
+    converted = response.status === 201;
     body = await response.text();
-    if (response.status !== 201) {
+    if (!converted) {
       const message = `${app.label}: GitHub refused the code (${response.status}): ${body.slice(0, 300)}`;
       console.error(message);
       return html(page(message), 502);
     }
-    writeSync(fd, body);
-    saved = true;
+    const bytes = Buffer.from(body);
+    for (let written = 0; written < bytes.length; ) {
+      const count = writeSync(fd, bytes, written);
+      if (count === 0) throw new Error(`${file}: the disk took none of GitHub's answer`);
+      written += count;
+    }
   } finally {
-    closeSync(fd);
-    if (!saved) unlinkSync(file);
     app.converting = false;
+    closeSync(fd);
+    if (!converted) unlinkSync(file);
   }
   const parsed = Conversion.safeParse(parseJson(body));
   if (!parsed.success) {
@@ -241,9 +248,9 @@ const server = Bun.serve({
   async fetch(request) {
     const url = new URL(request.url);
     // A page another site reaches through a rebound DNS name sends that name as its Host, and could
-    // read every App's state off this page.
-    const host = request.headers.get("host");
-    if (host !== `127.0.0.1:${server.port}` && host !== `localhost:${server.port}`) {
+    // read every App's state off this page. The port may differ: a forwarded port reaches it too.
+    const hostname = URL.parse(`http://${request.headers.get("host")}`)?.hostname;
+    if (hostname !== "127.0.0.1" && hostname !== "localhost") {
       return new Response("this page answers only on its loopback address", { status: 421 });
     }
     switch (url.pathname) {
