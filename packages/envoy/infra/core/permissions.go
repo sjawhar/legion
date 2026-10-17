@@ -101,9 +101,7 @@ func DispatchPermissions(machineID string) Permissions {
 			jsAck+bus.Stream+"."+durable+".>",
 		)
 	}
-	publish = append(publish,
-		bucketPermissions(bus.WebhookRedeliveryBucket)...,
-	)
+	publish = append(publish, bucketPermissions(bus.WebhookRedeliveryBucket)...)
 	publish = append(publish, contracts.AgentStreamControlSubject("*"))
 	return Permissions{
 		Publish:   Rules{Allow: publish},

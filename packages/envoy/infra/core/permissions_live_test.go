@@ -58,7 +58,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 			t.Parallel()
 			t.Run("the listener reaches healthy and a session as the same user receives", func(t *testing.T) {
 				t.Parallel()
-				seed, server, uri := startHostServer(t, image.Ref, core.HostPermissions(liveMachineID))
+				seed, server, uri := startGrantServer(t, image.Ref, core.HostPermissions(liveMachineID))
 				process, port := startListener(t, listener, uri, seed)
 				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port, liveHealthWindow, listenerHealthy))
 
@@ -103,7 +103,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed })
 				require.Len(t, grant.Publish.Allow, held-1, "the grant does not hold %s", removed)
 
-				seed, server, uri := startHostServer(t, image.Ref, grant)
+				seed, server, uri := startGrantServer(t, image.Ref, grant)
 				process, port := startListener(t, listener, uri, seed)
 				requireNeverHealthy(t, port)
 				// The removed subject is what the server refused, and all it refused: the listener
@@ -172,7 +172,7 @@ func TestSessionPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
-			seed, server, uri := startHostServer(t, image.Ref, core.SessionPermissions())
+			seed, server, uri := startGrantServer(t, image.Ref, core.SessionPermissions())
 			conn, errs := connect(t, uri, seed)
 			_, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
 			require.NoError(t, err)
@@ -218,9 +218,9 @@ func buildEnvoyCommand(t *testing.T, name string) string {
 	return binary
 }
 
-// startHostServer runs image with one nkey user holding grant as the server's whole authorization,
+// startGrantServer runs image with one nkey user holding grant as the server's whole authorization,
 // and returns the user's seed, the server and its client URL.
-func startHostServer(t *testing.T, image string, grant core.Permissions) (string, natsServer, string) {
+func startGrantServer(t *testing.T, image string, grant core.Permissions) (string, natsServer, string) {
 	t.Helper()
 	seed, public := testnats.User(t)
 	config, err := core.Authorization{Users: []core.User{{

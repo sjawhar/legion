@@ -397,6 +397,52 @@ func refuseSeedInSecret(value pulumi.StringInput, hub, input string) pulumi.Stri
 	})).(pulumi.StringOutput)
 }
 
+// userKind is one way a hub user names its grant: whether the user sets it, and the grant it gives.
+type userKind struct {
+	name  string
+	set   bool
+	grant func() (core.Permissions, error)
+}
+
+// userPermissions is the grant of the hub user at where, which names exactly one kind.
+func userPermissions(where string, u NATSUserArgs) (core.Permissions, error) {
+	kinds := []userKind{
+		{"machineId", u.MachineID != nil, func() (core.Permissions, error) {
+			if *u.MachineID == "" {
+				return core.Permissions{}, fmt.Errorf("%s: machineId is empty", where)
+			}
+			return core.HostPermissions(*u.MachineID), nil
+		}},
+		{"dispatchMachineId", u.DispatchMachineID != nil, func() (core.Permissions, error) {
+			if *u.DispatchMachineID == "" {
+				return core.Permissions{}, fmt.Errorf("%s: dispatchMachineId is empty", where)
+			}
+			return core.DispatchPermissions(*u.DispatchMachineID), nil
+		}},
+		{"daemon", u.Daemon, func() (core.Permissions, error) { return core.DaemonPermissions(), nil }},
+		{"permissions", u.Permissions != nil, func() (core.Permissions, error) {
+			return core.Permissions{
+				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
+				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
+			}, nil
+		}},
+	}
+	var set []userKind
+	for _, kind := range kinds {
+		if kind.set {
+			set = append(set, kind)
+		}
+	}
+	switch len(set) {
+	case 0:
+		return core.Permissions{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
+	case 1:
+		return set[0].grant()
+	default:
+		return core.Permissions{}, fmt.Errorf("%s: %s and %s are both set; name one", where, set[0].name, set[1].name)
+	}
+}
+
 // authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
 // permissions are its host's set when it names a machine id, Dispatch's set when it names a
 // Dispatch machine id, the daemon's set when daemon is true, and its own when it names
@@ -416,45 +462,9 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		if u.NKey == "" {
 			return core.Authorization{}, fmt.Errorf("%s: nkey is required", where)
 		}
-		var set []string
-		for _, field := range []struct {
-			name  string
-			named bool
-		}{
-			{"machineId", u.MachineID != nil},
-			{"dispatchMachineId", u.DispatchMachineID != nil},
-			{"daemon", u.Daemon},
-			{"permissions", u.Permissions != nil},
-		} {
-			if field.named {
-				set = append(set, field.name)
-			}
-		}
-		if len(set) == 0 {
-			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
-		}
-		if len(set) > 1 {
-			return core.Authorization{}, fmt.Errorf("%s: %s and %s are both set; name one", where, set[0], set[1])
-		}
-		var perms core.Permissions
-		switch set[0] {
-		case "machineId":
-			if *u.MachineID == "" {
-				return core.Authorization{}, fmt.Errorf("%s: machineId is empty", where)
-			}
-			perms = core.HostPermissions(*u.MachineID)
-		case "dispatchMachineId":
-			if *u.DispatchMachineID == "" {
-				return core.Authorization{}, fmt.Errorf("%s: dispatchMachineId is empty", where)
-			}
-			perms = core.DispatchPermissions(*u.DispatchMachineID)
-		case "daemon":
-			perms = core.DaemonPermissions()
-		default:
-			perms = core.Permissions{
-				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
-				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
-			}
+		perms, err := userPermissions(where, u)
+		if err != nil {
+			return core.Authorization{}, err
 		}
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,

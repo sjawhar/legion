@@ -109,7 +109,7 @@ type liveDispatch struct {
 // answer healthy, and connects the test client as the same NATS user.
 func startLiveDispatch(t *testing.T, dispatch, image string, grant core.Permissions) liveDispatch {
 	t.Helper()
-	seed, server, uri := startHostServer(t, image, grant)
+	seed, server, uri := startGrantServer(t, image, grant)
 	databaseURL := testpg.URL(t)
 	seedDispatchDeliverySettings(t, databaseURL)
 	github := newDispatchGitHub(t)
