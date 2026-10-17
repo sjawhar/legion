@@ -15,6 +15,10 @@
   boot seed included, takes one set of locks in one order, so concurrent writes neither lose an
   event nor fail, and the seed now announces each mapping it adds. Migration `0113` adds
   `repo_projects.is_default` and `issues.repo`.
+- An issue sits at most 32 links below its root: a create under a parent, or a reparent whose
+  subtree's deepest issue would sit deeper, is `409 PARENT_INPUT`. Creating an issue with a parent
+  now takes the project's dependency lock, as a reparent does, so two writes cannot together pass
+  the limit.
 - `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
   `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
   dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the

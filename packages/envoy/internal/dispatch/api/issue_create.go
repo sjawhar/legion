@@ -206,9 +206,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// Only a create with blockers can close a wait cycle: a new issue with none has nothing waiting
-	// on it yet, so its parent edge alone cannot close one and takes no dependency lock.
-	if len(blockers) > 0 {
+	// A create with blockers can close a wait cycle, and a create with a parent adds a link the
+	// depth cap counts (refuseParentTooDeep): both serialize on the project's dependency lock with
+	// every other blocker and parent write. A new issue with neither takes no dependency lock.
+	if len(blockers) > 0 || parentKey != "" {
 		if err := lockProjectIssueDependencies(r.Context(), tx, input.Project); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -228,6 +229,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		if parentProject != input.Project {
 			writeError(w, "PARENT_INPUT", http.StatusBadRequest, "parent must be in the same project")
+			return
+		}
+		if err := refuseParentTooDeep(r.Context(), tx, "", parentKey); err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
 	}

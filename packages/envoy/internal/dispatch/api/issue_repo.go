@@ -50,43 +50,48 @@ func checkIssueRepoMapped(ctx context.Context, tx pgx.Tx, repo, project string) 
 // issueRepoLateral resolves the repository of the issue aliased `i` in the enclosing query: the
 // nearest issue on its parent chain (itself first) whose own `repo` is set, else the project's
 // default mapping, else null. Joined `left join lateral (...) repo on true`, it yields one row per
-// issue. The walk climbs the whole chain, however deep, and stops at the first issue that names a
-// repository. It carries the keys it has passed, so a chain that loops (no API write makes one)
-// ends where it repeats with `looped` set, and repoScan.resolve refuses it rather than answer with
-// the default.
+// issue. The walk climbs one link per step, keeping only a depth counter, and stops at the first
+// issue that names a repository or at parentDepthCap links up, which writes never let a chain pass
+// (refuseParentTooDeep): at most parentDepthCap+1 steps per issue. A walk that reaches the cap with
+// links still above it (a chain only a direct database write made, or one that loops) sets
+// `too_deep`, and repoScan.resolve refuses it rather than answer with the default.
 var issueRepoLateral = `
 	left join lateral (
 		with recursive chain as (
-			select i.key as key, i.parent_key, i.repo, 0 as depth, array[i.key] as path, false as looped
+			select i.parent_key, i.repo, 0 as depth
 			union all
-			select p.key, p.parent_key, p.repo, c.depth + 1, c.path || p.key, p.key = any(c.path)
+			select p.parent_key, p.repo, c.depth + 1
 			from issues p join chain c on p.key = c.parent_key
-			where c.repo is null and not c.looped
+			where c.repo is null and c.depth < ` + parentDepthCapSQL + `
 		)
 		select
 			coalesce(
 				(select c.repo from chain c where c.repo is not null order by c.depth limit 1),
 				(select d.repo from repo_projects d where d.project = i.project_key and d.is_default)
 			) as resolved,
-			exists (select 1 from chain c where c.looped) as looped
+			exists (
+				select 1 from chain c
+				where c.depth = ` + parentDepthCapSQL + ` and c.repo is null and c.parent_key is not null
+			) as too_deep
 	) repo on true`
 
 // issueRepoColumns are the repository columns every issue read scans, in repoScan's order.
-const issueRepoColumns = `i.repo, repo.resolved, repo.looped`
+const issueRepoColumns = `i.repo, repo.resolved, repo.too_deep`
 
 // repoScan receives issueRepoColumns for one issue.
 type repoScan struct {
 	own, resolved *string
-	looped        bool
+	tooDeep       bool
 }
 
-func (r *repoScan) targets() []any { return []any{&r.own, &r.resolved, &r.looped} }
+func (r *repoScan) targets() []any { return []any{&r.own, &r.resolved, &r.tooDeep} }
 
-// resolve answers the issue's own and resolved repository, refusing a parent chain that loops:
-// such a chain names no answer, and the project's default would be a wrong one.
+// resolve answers the issue's own and resolved repository, refusing a parent chain the walk could
+// not finish within parentDepthCap links: such a chain names no answer, and the project's default
+// would be a wrong one.
 func (r *repoScan) resolve(key string) (own, resolved *string, err error) {
-	if r.looped {
-		return nil, nil, fmt.Errorf("resolve the repository of %s: its parent chain loops", key)
+	if r.tooDeep {
+		return nil, nil, fmt.Errorf("resolve the repository of %s: its parent chain is deeper than %d links or loops", key, parentDepthCap)
 	}
 	return r.own, r.resolved, nil
 }
