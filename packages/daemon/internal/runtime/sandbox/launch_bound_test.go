@@ -119,18 +119,18 @@ func TestALaunchTryItsContextEndsIsChargedNothing(t *testing.T) {
 // launchBound is the sum of a replacing try's waits and of its relaunchCalls calls at apiTimeout:
 // three boot timeouts, the launcher backstop, the termination grace, then the calls. At the
 // daemon's production defaults — worker_boot_timeout_seconds 120 and worker_stop_timeout_seconds
-// 10 (config), the fetch's 30-minute bound (workspace.FetchTimeout) — that is 1 h 15 min 41 s with
-// relaunchCalls at 71: well past the 30-minute floor a provisioning pod's rightful wait sets, and
+// 10 (config), and ProvisionBound's 60 minutes (workspace.FetchTimeout + workspace.CloneTimeout) —
+// that is 1 h 45 min 41 s with relaunchCalls at 71: well past the 60-minute floor a provisioning pod's rightful wait sets, and
 // never under the boot timeout, ProvisionBound and the grace together. The rig's runtime answers
 // the same arithmetic over its own options.
 func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
-	boot, provision, grace := 120*time.Second, 30*time.Minute, 10*time.Second
+	boot, provision, grace := 120*time.Second, 60*time.Minute, 10*time.Second
 	if relaunchCalls != 71 {
 		t.Fatalf("relaunchCalls = %d, want 71: %d per try and %d per each of %d roles", relaunchCalls, relaunchPodCalls, relaunchRoleCalls, len(claim.Roles))
 	}
 	waits := 3*boot + (2*boot + provision + 2*recheckInterval) + grace
-	if got, want := launchBound(boot, provision, grace), waits+71*apiTimeout; got != want || want != time.Hour+15*time.Minute+41*time.Second {
-		t.Fatalf("launchBound = %s, want %s (1h15m41s)", got, want)
+	if got, want := launchBound(boot, provision, grace), waits+71*apiTimeout; got != want || want != time.Hour+45*time.Minute+41*time.Second {
+		t.Fatalf("launchBound = %s, want %s (1h45m41s)", got, want)
 	}
 	production := testOptions()
 	production.BootTimeout, production.TerminationGrace = boot, grace
@@ -138,8 +138,8 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 30*time.Minute {
-		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 30m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
+	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 60*time.Minute {
+		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 60m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
 	}
 	g := newRig(t, nil)
 	if got, want := g.r.LaunchBound(), launchBound(g.opts.BootTimeout, g.r.ProvisionBound(), g.opts.TerminationGrace); got != want {
