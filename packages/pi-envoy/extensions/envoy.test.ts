@@ -4226,7 +4226,7 @@ describe("envoy OMP extension", () => {
     expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
   });
 
-  test("envoy_role_set keeps a held role that has role-bound subscriptions, and its subscriptions, instead of moving off it", async () => {
+  test("the model's role and unsubscribe tools keep a held role's role-bound subscriptions open", async () => {
     const role = "legion-controller";
     const notice = "notifications.legion.ACME.controller";
     const roleClaims: string[] = [];
@@ -4290,8 +4290,71 @@ describe("envoy OMP extension", () => {
     // Claiming the role it already holds is no move, and leaves the subscription alone.
     const again = await roleTool.execute("", { role });
     expect(again.isError).toBeFalsy();
+    expect(again.details).toEqual({ role });
     expect(roleClaims).toEqual([role, role]);
     expect(bound.active()).toBe(true);
+
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (unsubscribeTool === undefined) throw new Error("unsubscribe tool was not registered");
+    // Naming the role-bound subscription is refused, and nothing closes.
+    const named = await unsubscribeTool.execute("", { topics: [notice] });
+    expect(named.isError).toBe(true);
+    expect(named.content[0]?.text).toContain(notice);
+    expect(bound.active()).toBe(true);
+    // Unsubscribing everything leaves it open and reports it kept.
+    const all = await unsubscribeTool.execute("", {});
+    expect(all.isError).toBeFalsy();
+    expect(all.details).toMatchObject({ kept: [notice] });
+    expect(bound.active()).toBe(true);
+
+    // The plugin that owns the role still moves it through its own claim, which ends the
+    // role's subscriptions as the bridge documents.
+    await claimEnvoyRole("ses_role_bound", "legion-reviewer", context);
+    expect(bound.active()).toBe(false);
+  });
+
+  test("a plugin's role-bound subscription is refused while envoy_role_set is moving off that role", async () => {
+    const role = "legion-controller";
+    const notice = "notifications.legion.ACME.controller";
+    const moveReachedListener = Promise.withResolvers<void>();
+    const releaseMove = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        const claimed = typeof body?.role === "string" ? body.role : "";
+        if (claimed === "release-captain") {
+          moveReachedListener.resolve();
+          await releaseMove.promise;
+        }
+        return response({
+          session_id: "ses_role_race",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${claimed}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-set-move-in-flight");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const context = sessionContext("ses_role_race");
+    await fixture.handlers.get("session_start")?.({}, context);
+    await claimEnvoyRole("ses_role_race", role, context);
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+
+    // No role-bound subscription yet, so the move goes ahead and waits on the listener.
+    const moving = roleTool.execute("", { role: "release-captain" });
+    await moveReachedListener.promise;
+    await expect(subscribeLegionNotice("ses_role_race", notice, context, role)).rejects.toThrow(
+      role
+    );
+    releaseMove.resolve();
+    const moved = await moving;
+    expect(moved.details).toEqual({ role: "release-captain", released: role });
+    expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
   });
 
   test("injects a post-takeover forwarded role event into B only", async () => {

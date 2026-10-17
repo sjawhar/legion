@@ -4,11 +4,14 @@
 
 ### Changed
 
-- `envoy_role_set` no longer moves a session off a role that another plugin opened subscriptions
-  for while the session holds it: that move closed those subscriptions, so the session stopped
-  receiving the role's notices without being told. It refuses instead, naming the held role and
-  the subscriptions. A move off any other role still works, and its answer names the role it
-  released (`details.released`).
+- The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
+  plugin opened for the role the session holds (`whileHolding`). Before, a role move or an
+  unsubscribe closed it, and the session stopped receiving the role's notices without being
+  told. Now `envoy_role_set` refuses to move off such a role, naming the role and the subscriptions;
+  `envoy_unsubscribe` refuses to close one it is given by name, and leaves them open when it
+  unsubscribes everything, listing them as kept (`details.kept`). A plugin's subscription for a role
+  the tool is moving off is refused while the move waits on the listener. A move off any other role
+  still works, and its answer names the role it released (`details.released`).
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

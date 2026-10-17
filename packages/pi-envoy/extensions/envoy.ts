@@ -480,6 +480,11 @@ export default function envoyExtension(pi: PiApi): void {
   // Counts role ends, so a role-bound subscription still opening when its role ended can tell
   // (subscribeUnlessRoleEnds).
   let roleEnds = 0;
+  // The role an envoy_role_set call is moving this session off, while that call waits on the
+  // listener; a subscription for it opened then would close with the move.
+  let toolRoleMove: string | undefined;
+  // The role this session holds, if any.
+  const heldRole = (): string | undefined => claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
   let activeSessionContext: SessionContext | undefined;
   const inbox: {
     event_id: string;
@@ -1744,6 +1749,11 @@ export default function envoyExtension(pi: PiApi): void {
           `Envoy session ${targetSessionID} does not hold role ${whileHolding} for a notice subscription`
         );
       }
+      if (toolRoleMove === whileHolding) {
+        throw new Error(
+          `Envoy session ${targetSessionID} is moving off role ${whileHolding} (envoy_role_set), so it takes no notice subscription for it`
+        );
+      }
       // Marked before the subscription opens, so no registration ever carries it.
       for (const subject of expandSubscriptionTopics([topic])) roleNoticeSubjects.add(subject);
     }
@@ -2323,9 +2333,23 @@ export default function envoyExtension(pi: PiApi): void {
           // listener interest represents the independently-held role claim: close
           // the local subscription without unregistering that interest.
           const inbox = agentSubject(sessionID);
-          const targets = topicsFor(parameters, [...subscriptions.keys()]).filter(
+          const named = topicsFor(parameters, []);
+          // A subscription another plugin opened for the role this session holds lasts as long
+          // as the role does: the tool never closes one. Naming one is refused before anything
+          // closes; unsubscribing everything leaves them open and says so.
+          const roleBound = (topic: string) =>
+            expandSubscriptionTopics([topic]).some((subject) => roleNoticeSubjects.has(subject));
+          const namedBound = named.filter(roleBound);
+          if (namedBound.length > 0) {
+            throw new Error(
+              `This session holds role ${heldRole()}, and ${namedBound.join(", ")} lasts only while it does; envoy_unsubscribe does not close it`
+            );
+          }
+          const candidates = (named.length > 0 ? named : [...subscriptions.keys()]).filter(
             (topic) => topic !== inbox
           );
+          const kept = candidates.filter(roleBound);
+          const targets = candidates.filter((topic) => !roleBound(topic));
           const removed = targets.filter(closeIntentionally);
           const registryRemoved = removed.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX));
           const registrationError =
@@ -2335,10 +2359,17 @@ export default function envoyExtension(pi: PiApi): void {
                   .unsubscribe({ sessionID, topics: registryRemoved })
                   .then(registerSession)
                   .then(() => undefined, messageFor);
-          return toolSuccess(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
-            removed,
-            ...(registrationError === undefined ? {} : { registrationError }),
-          });
+          const unsubscribed = `Unsubscribed: ${removed.join(", ") || "(none)"}`;
+          return toolSuccess(
+            kept.length === 0
+              ? unsubscribed
+              : `${unsubscribed}\nKept (they last while this session holds role ${heldRole()}): ${kept.join(", ")}`,
+            {
+              removed,
+              ...(kept.length === 0 ? {} : { kept }),
+              ...(registrationError === undefined ? {} : { registrationError }),
+            }
+          );
         }
         case EnvoyToolOperation.listInterests: {
           const registry = await client.getInterest(sessionID);
@@ -2402,25 +2433,30 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
-          const held = claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
+          const held = heldRole();
           const moving = held !== undefined && held !== role;
           // Moving off a role closes every subscription another plugin opened `whileHolding` it,
           // so the session would stop taking that role's notices without being told. The model's
-          // tool never does that; a plugin that owns the role moves it through its own claim.
+          // tools never do that; a plugin that owns the role moves it through its own claim.
           if (moving && roleNoticeSubjects.size > 0) {
             throw new Error(
-              `this session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} ` +
-                `${roleNoticeSubjects.size === 1 ? "lasts" : "last"} only while it does; ` +
-                `envoy_role_set does not move it to ${role}`
+              `This session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
             );
           }
-          await setEnvoyRole(role);
-          return moving
-            ? toolSuccess(`Now holding role: ${role} (released role ${held})`, {
-                role,
-                released: held,
-              })
-            : toolSuccess(`Now holding role: ${role}`, { role });
+          // While the move is in flight, a plugin's subscription for the role being left is
+          // refused (`subscribeNotice`), so none can open and then close with the move unseen.
+          toolRoleMove = moving ? held : undefined;
+          try {
+            await setEnvoyRole(role);
+          } finally {
+            toolRoleMove = undefined;
+          }
+          return toolSuccess(
+            moving
+              ? `Now holding role: ${role} (released role ${held})`
+              : `Now holding role: ${role}`,
+            { role, ...(moving ? { released: held } : {}) }
+          );
         }
         case EnvoyToolOperation.getRole: {
           const role = await client.getRole(stringFor(parameters, "role"));
