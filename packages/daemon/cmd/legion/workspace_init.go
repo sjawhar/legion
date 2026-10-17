@@ -16,6 +16,7 @@ import (
 	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -37,6 +38,19 @@ const (
 type volumeLostError string
 
 func (e volumeLostError) Error() string { return string(e) }
+
+// secretFileFromEnv is the secret file the environment variable name points at, once it reads
+// (config.ReadSecretPointer); an error when name is not set or its file does not read.
+func secretFileFromEnv(name string) (string, error) {
+	file, set := os.LookupEnv(name)
+	if !set {
+		return "", errors.New(name + " is not set")
+	}
+	if _, err := config.ReadSecretPointer(name, file); err != nil {
+		return "", err
+	}
+	return file, nil
+}
 
 // workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
 // prepare a pod's persistent volume before the main container's worker-shim starts, and the

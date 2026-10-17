@@ -61,12 +61,12 @@ func (c RepositoryCache) check() error {
 }
 
 // CacheStatus is a repository's cache as the runtime's stores show it: the repository, exactly as
-// the cache's annotation names it; its Sandbox; its State (starting, cloning, ready or failing),
-// with the kubelet's Reason while it is failing; whether its pod has passed its readiness probe,
-// and its address then, its Service's (cacheURL); once the repository has left the mapping, until
-// when the sweep keeps it; and, from RepositoryCaches alone, the pod's last health read: what its
-// /healthz answered (Health), or why it could not be read (HealthError), both empty when it was
-// not Ready to be read.
+// the cache's annotation names it; its Sandbox; its State (starting, cloning, ready, failing or
+// refused), with the kubelet's Reason while it is failing and its Service's while it is refused;
+// whether its pod has passed its readiness probe behind its own Service, and its address then,
+// that Service's (cacheURL); once the repository has left the mapping, until when the sweep keeps
+// it; and, from RepositoryCaches alone, the pod's last health read: what its /healthz answered
+// (Health), or why it could not be read (HealthError), both empty when it was not Ready to be read.
 type CacheStatus struct {
 	Repo          ghrepo.Repository
 	Sandbox       string
@@ -637,6 +637,7 @@ type cacheHealthRead struct {
 // cache that is not Ready has no read: the store already says it is not serving.
 func (r *Runtime) readCacheHealth(ctx context.Context) {
 	reads := map[string]cacheHealthRead{}
+	client := r.cacheHealthClient()
 	for _, u := range r.storedCaches() {
 		repo, err := cacheRepository(u.GetAnnotations())
 		if err != nil {
@@ -652,7 +653,7 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 		}
 		read := cacheHealthRead{pod: pod.UID}
 		address := "http://" + net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(repocache.Port))
-		health, err := cacheHealthOf(ctx, r.cacheHealthClient(), address, repo)
+		health, err := cacheHealthOf(ctx, client, address, repo)
 		if err != nil {
 			read.err = err.Error()
 		} else {

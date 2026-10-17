@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -45,18 +43,12 @@ func workspaceCache(ctx context.Context, repo, root, listen string, refresh time
 	if refresh <= 0 {
 		return fmt.Errorf("--refresh must be positive (got %s)", refresh)
 	}
-	tokenFile, set := os.LookupEnv(provisionTokenFileEnv)
-	if !set {
-		return errors.New(provisionTokenFileEnv + " is not set")
-	}
-	if _, err := config.ReadSecretPointer(provisionTokenFileEnv, tokenFile); err != nil {
+	tokenFile, err := secretFileFromEnv(provisionTokenFileEnv)
+	if err != nil {
 		return err
 	}
-	bearerFile, set := os.LookupEnv(repocache.CacheTokenFileEnv)
-	if !set {
-		return errors.New(repocache.CacheTokenFileEnv + " is not set")
-	}
-	if _, err := config.ReadSecretPointer(repocache.CacheTokenFileEnv, bearerFile); err != nil {
+	bearerFile, err := secretFileFromEnv(repocache.CacheTokenFileEnv)
+	if err != nil {
 		return err
 	}
 	tools, err := provisioningTools("git")

@@ -58,14 +58,11 @@ func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.
 			return err
 		}
 	}
-	tokenFile, set := os.LookupEnv(provisionTokenFileEnv)
-	if !set {
-		return errors.New(provisionTokenFileEnv + " is not set")
-	}
-	token := func() (string, error) { return config.ReadSecretPointer(provisionTokenFileEnv, tokenFile) }
-	if _, err := token(); err != nil {
+	tokenFile, err := secretFileFromEnv(provisionTokenFileEnv)
+	if err != nil {
 		return err
 	}
+	token := func() (string, error) { return config.ReadSecretPointer(provisionTokenFileEnv, tokenFile) }
 	tools, err := provisioningTools("git")
 	if err != nil {
 		return err
