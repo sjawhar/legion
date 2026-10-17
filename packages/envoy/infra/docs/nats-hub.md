@@ -105,15 +105,18 @@ The hub refuses these before it registers anything, with an error naming the inp
 - `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
   `DispatchPermissions(dispatchMachineId)`. Give it that listener's `machineId`, since the set
   names its durable consumer and queue group.
+- `daemon: true`: the dedicated user of one Legion daemon, granted `DaemonPermissions()` (see
+  [Permission sets](../README.md#permission-sets)). Its seed belongs only to that daemon.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
   `deny` list of subject patterns, for any other client.
 
-`nats:Rules` is the one rules type every NATS component takes, whatever its cloud, and `nkey` is
-named as `aws:NatsService`'s users name it, so a user is written alike for both components.
+`daemon: false` selects no permission set. `nats:Rules` is the one rules type every NATS component
+takes, whatever its cloud, and `nkey` is named as `aws:NatsService`'s users name it, so the two
+components spell a user's key and rules alike.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
-store it wrote (see [NATS seeds](../README.md#nats-seeds)): the host's listener reads it from
-there into its `seed`, and its `natsUrls` is the hub's `natsUrl`. In the authorization `core`
+store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener reads it from there
+into its `seed` with the hub's `natsUrl` as its `natsUrls`, and a Legion daemon reads its own. In the authorization `core`
 renders (see [NATS authorization](../README.md#nats-authorization)), each of `users` is a keyed
 user with `HasSeed` set. The listener's user follows them, named `<h>`, with `listener.nkey` and
 `ListenerPermissions(<h>)` and `HasSeed` set. `sessionUser` comes last, with
@@ -134,11 +137,11 @@ policy is the gate on 4222: which devices it lets reach the hub's 4222 decides w
 A `listener` opens a second door, port 9020, with or without a session user, and it grants far
 more ([The hub's listener](#the-hubs-listener)).
 
-A user is refused when it names two or more of `machineId`, `dispatchMachineId` and `permissions`,
-or none, or when its `machineId`, `dispatchMachineId` or `nkey` is empty, named by its index alone,
-as `users[1]: dispatchMachineId is empty`, since these come before the authorization has checked
-the names. It is refused too for each of the authorization's own refusals under
-[NATS authorization](../README.md#nats-authorization), named as
+A user is refused when it names more than one of `machineId`, `dispatchMachineId`, `daemon: true`
+and `permissions`, or none, or when its `machineId`, `dispatchMachineId` or `nkey` is empty, named
+by its index alone, as `users[1]: dispatchMachineId is empty`, since these come before the
+authorization has checked the names. It is refused too for each of the
+authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
 user's name or a rule entry before any of those, naming the path and not the value, as

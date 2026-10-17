@@ -1418,6 +1418,17 @@ the listener beside it, can read every session's agent-stream frames and send co
 session, so the seed is as sensitive as every session's stream. The real `envoy-dispatch` runs under that
 grant against nats-server 2.10 and 2.15.1 in `core/dispatch_permissions_live_test.go`.
 
+`DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
+notification stream's info request, the info, create and next-message requests of any consumer of
+that stream, and their acknowledgements. It subscribes to the daemon's role-lane delivery
+exceptions and to reply inboxes. The consumer subjects are not narrowed to the daemon's own two,
+so its seed can read, recreate and drain every consumer of the stream, each host's listener
+consumer included, and create a push consumer that delivers the stream's messages to any subject,
+one it may not publish to included. Its `_INBOX.>` subscription receives every reply any client
+on the server gets, key-value reads and watch updates included, such as the listener's
+`envoy_roles` and `envoy_sessions` watchers. A `gcp:NatsHub` user with `daemon: true` receives
+this set; its seed belongs to the daemon, not to a host or session.
+
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
 a later release.
