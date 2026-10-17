@@ -185,13 +185,15 @@ bridge_stop() {
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local i pod_read svc_read
-  # 150 iterations at 2s (5 minutes): generous over the pod's ordinary termination time (a lone
-  # chisel pod deleted by hand elsewhere on this cluster took under 6s). A run that still sees it
-  # after 5 minutes is almost always this devbox's own intermittent connectivity to the cluster
-  # (confirmed live, 2026-10-17: the same run's operator gcloud auth plugin failed mid-test with
-  # "internal_failure", a transient Google-side hiccup, not a slow pod) — worth surfacing, never
-  # worth an unbounded wait, since namespace-clean catches a real leftover either way.
-  for i in $(seq 1 150); do
+  # 300 iterations at 2s (10 minutes): a bare chisel pod deleted by hand elsewhere on this
+  # cluster took under 6s, but this pod — alone on a Node-Auto-Provisioned node, which NAP may
+  # reclaim along with it — took up to 7 minutes to leave both a direct GET and every LIST
+  # variant (the namespace-rig query, the raw API with and without resourceVersion=0, and a
+  # verbose kubectl trace), confirmed live, 2026-10-17, by diagnose_leftover's own capture: every
+  # one agreed NotFound/empty once checked a few minutes later, ruling out an API or cache
+  # inconsistency — the pod is simply slow to finish. 10 minutes gives margin over the observed
+  # worst case; namespace-clean and diagnose_leftover still catch an actual leftover past that.
+  for i in $(seq 1 300); do
     pod_read=$(op get pod "$bridge_name" -o name 2>&1)
     svc_read=$(op get service "$bridge_name" -o name 2>&1)
     case "$pod_read" in *NotFound*)
@@ -199,5 +201,5 @@ bridge_stop() {
     esac
     sleep 2
   done
-  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 300s: pod: $pod_read; service: $svc_read; it may remain"
+  echo "   [operator] could not confirm the bridge pod/Service $bridge_name gone after 600s: pod: $pod_read; service: $svc_read; it may remain"
 }
