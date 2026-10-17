@@ -30,8 +30,8 @@ publishes nothing, so the first publisher wins. The object carries:
   sessions Legion drives, the one `regained` hook slot, and `slackChannels`, the daemon-launched
   controller's Slack channels, which the Legion entry's factory sets from `LEGION_SLACK_CHANNELS`
   in that process alone and the Envoy entry reads when it restores a resumed session's registered
-  interests: it unregisters, and never restores, a Slack topic of any channel the list does not
-  name.
+  interests: while it is set, every registered Slack topic is unregistered and never restored, since
+  only the subscriptions the controller role owns may carry Slack mentions.
 - `injectedUserTurns` — the turns Envoy sent into each session
   (`src/injected-user-turns.ts`). A `sendUserMessage` turn is found by its text; a typed
   `sendUserInput` turn is found by the tag the host kept. Both entries match user messages and

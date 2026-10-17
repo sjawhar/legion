@@ -1503,20 +1503,17 @@ export default function envoyExtension(pi: PiApi): void {
     // entry, and a listener outage must not fail session start.
     // Role topics are not subscriptions (role deliveries arrive on the agent
     // subject); they are re-claimed by reclaimHeldRoles once registered.
-    // In the daemon-launched controller (the bridge's `slackChannels`), a registered Slack topic
-    // whose channel the controller's list does not name was subscribed by hand: it is unsubscribed
-    // from the listener and never restored, so a channel the project no longer names is not heard.
+    // In the daemon-launched controller (the bridge's `slackChannels` is set), every registered
+    // Slack topic is unsubscribed from the listener and never restored: a restored topic would be a
+    // plain subscription, which outlives the controller role, and the controller hears its listed
+    // channels through the subscriptions its role owns (pi-legion's controller-session.ts).
     const { client } = requireEnvoy();
     const registry = await client.getInterest(sessionID).catch(() => undefined);
     if (registry === undefined) return;
-    const slackChannels = publishedInterface?.roleClaim.slackChannels;
     const retired =
-      slackChannels === undefined
+      publishedInterface?.roleClaim.slackChannels === undefined
         ? []
-        : registry.topics.filter((topic) => {
-            const channel = slackTopicChannel(topic);
-            return channel !== undefined && !slackChannels.includes(channel);
-          });
+        : registry.topics.filter((topic) => slackTopicChannel(topic) !== undefined);
     if (retired.length > 0) {
       await client.unsubscribe({ sessionID, topics: retired }).catch((error: unknown) => {
         logger.warn("envoy: could not unregister a resumed controller's retired Slack topics", {

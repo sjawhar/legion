@@ -3152,6 +3152,77 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       ]);
     });
 
+    // A Slack topic the listener restores is a plain subscription, which outlives the controller
+    // role, so a resumed controller drops every one, a listed channel's team-qualified topic
+    // included, and hears its channels only through the subscriptions its role owns: once another
+    // session takes the role, no Slack subscription of the old session stays open.
+    test("a resume drops a listed channel's persisted Slack interest too, so losing the role leaves no Slack subscription", async () => {
+      const persisted = "notifications.slack.T00000000.C00000000.mention";
+      const first = await daemonController("ses_controller_slack_owned", "");
+      await first.handlers.get("session_start")?.({}, first.context("ses_controller_slack_owned"));
+      const subscribe = first.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribe === undefined) throw new Error("envoy_subscribe was not registered");
+      await subscribe.execute(
+        "subscribe-by-hand",
+        { topics: [persisted] },
+        undefined,
+        undefined,
+        first.context("ses_controller_slack_owned")
+      );
+
+      envoyPluginInterface().bootstrappedSession.file = undefined;
+      process.env.LEGION_SLACK_CHANNELS = "C00000000";
+      const requestsBefore = first.requests.length;
+      const before = natsConnections.length;
+      const ticks: (() => void)[] = [];
+      const refused = Promise.withResolvers<void>();
+      const resumed = createPi();
+      legionExtension(resumed.pi);
+      const context = first.context("ses_controller_slack_owned");
+      await resumed.handlers.get("session_start")?.(
+        {},
+        {
+          ...context,
+          setInterval: (callback) => ticks.push(callback),
+          ui: {
+            notify: (message) => {
+              if (message.includes("this session no longer holds it")) refused.resolve();
+            },
+          },
+          sessionManager: {
+            ...context.sessionManager,
+            getBranch: () => [
+              { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+            ],
+          },
+        }
+      );
+      // The resumed process's own connections, not the first process's, which a test keeps open.
+      const owned = natsConnections
+        .slice(before)
+        .filter((connection) => connection.name === "omp-ses_controller_slack_owned");
+      expect(slackSubjects(owned)).toEqual([mention("C00000000")]);
+      expect(
+        first.requests
+          .slice(requestsBefore)
+          .filter((request) => request.path === "/v1/interests/unsubscribe")
+      ).toEqual([
+        {
+          path: "/v1/interests/unsubscribe",
+          body: { session_id: "ses_controller_slack_owned", topics: [persisted] },
+        },
+      ]);
+
+      envoyPluginInterface().bootstrappedSession.file = undefined;
+      const second = createPi();
+      legionExtension(second.pi);
+      await second.handlers.get("session_start")?.({}, first.context("ses_controller_slack_other"));
+      for (const tick of ticks) tick();
+      await refused.promise;
+
+      expect(slackSubjects(owned)).toEqual([]);
+    });
+
     test("an operator's controller hears no Slack channel, whatever LEGION_SLACK_CHANNELS it inherited", async () => {
       process.env.LEGION_SLACK_CHANNELS = "C00000001";
       const before = natsConnections.length;

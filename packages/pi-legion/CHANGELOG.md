@@ -11,8 +11,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   controller is told the project's Slack channels as `LEGION_SLACK_CHANNELS`, always set (empty for
   none), and the plugin subscribes to each channel's mention topic while the session holds the
   controller role, registering none with the listener. A resume first drops, from the listener and
-  from what it restores, any Slack topic an earlier session registered for a channel the list does
-  not name, so it hears the channels its launch names and no others. A daemon restarted with a
+  from what it restores, every Slack topic an earlier session registered, a listed channel's
+  included, since a restored one would outlive the role; it hears the channels its launch names
+  and no others. A daemon restarted with a
   changed `slack_channels` relaunches the controller, resuming its session, since the list is one of
   the addresses its generation records. Any other controller ignores the variable. The controller
   skill answers each mention in its thread with `slack_post`

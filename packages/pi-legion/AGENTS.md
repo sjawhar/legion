@@ -278,9 +278,10 @@ leaves a role already claimed under the new session id alone. None is ever regis
 listener, so a replaced controller resumed later gets them back only by claiming the role, which
 the daemon refuses its replaced capability, and a resumed controller hears the channels its own
 launch names, never a list an earlier launch had. A Slack topic a session registered by hand is
-dropped too: in the daemon's controller the factory sets the interface's `roleClaim.slackChannels`
-from `LEGION_SLACK_CHANNELS`, and the Envoy entry, restoring a resumed session's registered
-interests, unregisters and skips every Slack topic of another channel. The controller topic is a
+dropped too, a listed channel's included: in the daemon's controller the factory sets the
+interface's `roleClaim.slackChannels` from `LEGION_SLACK_CHANNELS`, and the Envoy entry, restoring a
+resumed session's registered interests, unregisters and skips every Slack topic, since a restored
+topic would outlive the role. The controller topic is a
 live wake that changes no request, response or pane variable, and a daemon publishes to the topic
 whether anyone listens. A
 controller on an earlier plugin release never runs against this daemon: contract 7 ships with the

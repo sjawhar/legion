@@ -1776,12 +1776,13 @@ and every role of it is reported at once, from the boot that re-adopts them: the
 relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
 that turn, resume into the new pod, whose six launchers dial the current stream and mount the
 current enrollment. None of them is charged, and none is found gone when the pod is replaced under
-it. The controller's pod, whose one launcher dials a stale stream, is replaced the same way at its
-relaunch, and under `runtime.kubernetes.agent_secrets` it is handed the broker's address as a
-workflow role is, so a changed broker address replaces it as it does an issue pod. A role whose environment
-alone moved starts its next generation in the same pod, handed the current addresses, and the pod
-and its other roles are left as they are. The stale observation is never charged, since the
-process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
+it. The controller's pod, whose one launcher dials a stale stream, or which lacks the broker
+enrollment under `runtime.kubernetes.agent_secrets`, is replaced the same way at its relaunch. A
+role whose environment alone moved, the broker's URL, `LEGION_SLACK_CHANNELS` for the controller
+and the other addresses its agent is told among them, starts its next generation in the same pod,
+handed the current values, and the pod and its other roles are left as they are. The stale
+observation is never charged, since the process did nothing wrong; a relaunch the runtime refuses
+is charged as any launch failure is.
 A turn the stale process was in used the addresses it holds and ends with the relaunch, so the turn
 is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
 recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
@@ -3120,8 +3121,8 @@ agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 Slack channels comma-separated and empty for none (the runtime's, always set, and refused in
 `runtime.kubernetes.pod.env` and `provider_keys`, so no list but the project's reaches it; its plugin
 subscribes to each channel's mention topic while the session holds the controller role, registered
-with no listener, and a resume first drops any Slack topic an earlier session registered for another
-channel, so a resume or relaunch hears the channels the launch names and no others; the list is one
+with no listener, and a resume first drops every Slack topic an earlier session registered (a
+restored one would outlive the role), so a resume or relaunch hears the channels the launch names and no others; the list is one
 of the addresses the runtime records per generation, so a daemon restarted with another
 `slack_channels` re-adopts the controller as an address that moved and relaunches it, resuming its
 session; `legion controller start` drops an inherited value, and any controller but this one ignores

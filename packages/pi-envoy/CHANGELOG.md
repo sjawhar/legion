@@ -7,10 +7,11 @@
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
-- Plugin interface version 3 (sjawhar/legion#1998): a resumed session restores its registered
-  interests after dropping, from the listener and from what it restores, every Slack topic whose
-  channel the daemon-launched controller's list (`roleClaim.slackChannels`) does not name, in that
-  controller's process alone. Install it with the `@sjawhar/pi-legion` released beside it.
+- Plugin interface version 3 (sjawhar/legion#1998): in the daemon-launched controller's process
+  (`roleClaim.slackChannels` set), a resumed session restores its registered interests after
+  dropping every Slack topic among them, from the listener and from what it restores, since a
+  restored one would outlive the controller role. Install it with the `@sjawhar/pi-legion` released
+  beside it.
 - `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
   `machine_id` for a session whose plugin predates the field) rather than the listener that

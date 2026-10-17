@@ -11,8 +11,8 @@ nothing here applies.
 
 Your session hears each listed channel's mentions by itself, on
 `notifications.slack.*.<channel>.mention`, for as long as it holds the controller role: a resumed or
-relaunched session hears the channels its launch names and no others, and drops any Slack topic of
-another channel an earlier session subscribed to. Never `envoy_subscribe` a Slack topic yourself.
+relaunched session hears the channels its launch names and no others, and drops every Slack topic an
+earlier session subscribed to by hand. Never `envoy_subscribe` a Slack topic yourself.
 
 A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it.
 
