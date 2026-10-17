@@ -519,12 +519,15 @@ const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, 
 // readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:
 // the unique partial index 0044 turns the race between a reopen and a retry into one row. A
 // duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included,
-// restarts its attempts, and takes the row from any worker holding it: that worker read the record
-// before the reopen, so its finish and retry, each matched on its lease token, must touch nothing,
-// and the row decides again on the new record once the lease expires. Its target is that partial
-// index, which holds ready_merge rows alone, so no other kind's insert conflicts on it.
+// restarts its attempts, takes the payload it brings, and takes the row from any worker holding it:
+// that worker read the record before the reopen, so its finish, retry and payload replacement, each
+// matched on its lease token, must touch nothing, and the row decides again on the new record once
+// the lease expires. The new payload starts the row over unarmed (ReadyMerge.Armed): a reopen's
+// queue submits READY's merge again, since the close took away whatever was armed. Its target is
+// that partial index, which holds ready_merge rows alone, so no other kind's insert conflicts on
+// it.
 const readyMergeConflict = `
-	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do update set attempts = 0,
+	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do update set attempts = 0, payload = excluded.payload,
 		lease_token = case when outbox.lease_token = '' then '' else gen_random_uuid()::text end`
 
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
@@ -899,6 +902,22 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 		return fmt.Errorf("retry outbox row %d: %w", id, err)
 	}
 	return nil
+}
+
+func (s *Postgres) ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, payload OutboxPayload) (bool, error) {
+	if err := validateOutboxPayload(payload); err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	tag, err := tx.Exec(ctx, "update outbox set payload = $4 where id = $1 and lease_token = $2 and kind = $3",
+		id, leaseToken, string(payload.OutboxKind()), string(encoded))
+	if err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 // RoleRun reads one role's run of an issue generation as the store holds it. RoleRuns owns the

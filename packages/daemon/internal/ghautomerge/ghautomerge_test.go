@@ -23,15 +23,16 @@ import (
 // its read cannot find ("pullRequest", "repository", or empty when it finds the pull request), the
 // pull request's state, head and merge state, whether its base requires a merge queue, whether the
 // repository allows auto-merge, whether its auto-merge is enabled and whether it has a merge-queue
-// entry, and every mutation sent. requeue is GitHub enqueueing again a pull request it dequeues
-// while its auto-merge is still enabled; failDisable answers the disable with an error, stuckArm
-// answers it as done while leaving auto-merge enabled, refuseSubmit answers an enable or merge with
-// GitHub's refusal, refuseType is that GraphQL error's type, movedOnRefuse is the head a push moves
-// the pull request to as GitHub refuses it, and submitStatus answers an enable or merge with that
-// HTTP status instead. updated is the pull request's updatedAt as its JSON value, GitHub's last
-// change to it: updatedAt by default, `null` for an answer that carries none. limitAfterRefusal
-// answers every read after a refused enable or merge with GitHub's RATE_LIMITED and a Retry-After of
-// 180 seconds.
+// entry, its timeline of arms and removals as GraphQL's viewer (viewer, the implement App's bot
+// when empty) reads it, and every mutation sent. requeue is GitHub enqueueing again a pull request
+// it dequeues while its auto-merge is still enabled; failDisable answers the disable with an error,
+// stuckArm answers it as done while leaving auto-merge enabled, refuseSubmit answers an enable or
+// merge with GitHub's refusal, refuseType is that GraphQL error's type, movedOnRefuse is the head a
+// push moves the pull request to as GitHub refuses it, and submitStatus answers an enable or merge
+// with that HTTP status instead. updated is the pull request's updatedAt as its JSON value, GitHub's
+// last change to it: updatedAt by default, `null` for an answer that carries none.
+// limitAfterRefusal answers every read after a refused enable or merge with GitHub's RATE_LIMITED
+// and a Retry-After of 180 seconds. timelineReads counts the timeline's reads.
 type github struct {
 	mu                             sync.Mutex
 	notFound                       string
@@ -46,6 +47,9 @@ type github struct {
 	movedOnRefuse                  string
 	submitStatus                   int
 	limitAfterRefusal, refused     bool
+	viewer                         string
+	timeline                       []string
+	timelineReads                  int
 	mutations                      []string
 }
 
@@ -108,6 +112,16 @@ func (g *github) serve(t *testing.T) string {
 				g.state = "MERGED"
 			}
 			_, _ = w.Write([]byte(`{"data":{}}`))
+		case strings.Contains(request.Query, "timelineItems"):
+			g.timelineReads++
+			if request.Variables["owner"] != "acme" || request.Variables["name"] != "widgets" || request.Variables["number"] != float64(42) {
+				t.Errorf("timeline read of %v, want acme/widgets#42", request.Variables)
+			}
+			viewer := g.viewer
+			if viewer == "" {
+				viewer = "legion-implementer[bot]"
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"viewer":{"login":%q},"repository":{"pullRequest":{"timelineItems":{"nodes":[%s]}}}}}`, viewer, strings.Join(g.timeline, ","))
 		case g.notFound == "pullRequest":
 			// GitHub's own answer for a pull request number the repository does not have.
 			_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 42."}]}`))
@@ -246,14 +260,16 @@ func TestDisarmFailsWhenGitHubCannotFindTheRepository(t *testing.T) {
 }
 
 // Submit asks GitHub to merge the READY head under the repository's own rules, and never another
-// head. A merge queue gets the pull request enqueued and a repository that allows auto-merge gets it
-// armed, each with GitHub's expected-head check; a pull request GitHub reports mergeable now is
-// merged at that head. A repository that allows neither waits, without a mutation, until GitHub
-// reports the pull request mergeable. An arm or a merge-queue entry at READY's head is not the
-// end: Submit waits on it (Armed) until GitHub reports the pull request merged at that head, which
-// alone ends the submission, as does the record leaving READY (Stale). While the record still
-// awaits READY's head, a pull request GitHub shows closed, merged at another head, or at another
-// head waits for the webhook that moves the record (Lagging).
+// head. A merge queue gets the pull request enqueued once GitHub reports it mergeable now, and a
+// repository that allows auto-merge gets it armed, each with GitHub's expected-head check; a pull
+// request GitHub reports mergeable now is merged at that head. A merge-queue base waits, without a
+// mutation, while GitHub reports the pull request anything else (a required check running, BLOCKED;
+// GitHub computing, UNKNOWN), since an enable there would arm auto-merge rather than enqueue it; a
+// repository that allows neither waits the same way. An arm or a merge-queue entry at READY's head
+// is not the end: Submit waits on it (Armed) until GitHub reports the pull request merged at that
+// head, which alone ends the submission, as does the record leaving READY (Stale). While the record
+// still awaits READY's head, a pull request GitHub shows closed, merged at another head, or at
+// another head waits for the webhook that moves the record (Lagging).
 func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string
@@ -264,8 +280,10 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 		outcome                       Outcome
 		wait                          string
 	}{
-		{name: "a merge queue enqueues it and waits for the merge", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true,
+		{name: "a merge queue enqueues a pull request GitHub reports mergeable and waits for the merge", head: "head", keep: "head", mergeState: "CLEAN", queueRequired: true,
 			want: []string{"enable PR_42 head SQUASH"}, wait: "armed"},
+		{name: "a merge queue waits while a required check runs", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true, autoMergeOK: true, wait: "unmergeable"},
+		{name: "a merge queue waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", queueRequired: true, autoMergeOK: true, wait: "unmergeable"},
 		{name: "auto-merge allowed arms it and waits for the merge", head: "head", keep: "head", mergeState: "BLOCKED", autoMergeOK: true,
 			want: []string{"enable PR_42 head SQUASH"}, wait: "armed"},
 		{name: "a clean pull request merges at once", head: "head", keep: "head", mergeState: "CLEAN",
@@ -290,7 +308,7 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 			g := &github{state: tc.state, head: tc.head, mergeState: tc.mergeState, queueRequired: tc.queueRequired,
 				autoMergeOK: tc.autoMergeOK, armed: tc.armed, queued: tc.queued}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-			got, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping(tc.keep))
+			got, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping(tc.keep))
 			var lagging *Lagging
 			var unmergeable *Unmergeable
 			var armed *Armed
@@ -302,8 +320,8 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 			} else if err != nil || got != tc.outcome {
 				t.Fatalf("Submit = %q, %v; want %q", got, err, tc.outcome)
 			}
-			if unmergeable != nil && unmergeable.State != tc.mergeState {
-				t.Fatalf("Unmergeable wait in %s, want %s", unmergeable.State, tc.mergeState)
+			if unmergeable != nil && (unmergeable.State != tc.mergeState || unmergeable.Queue != tc.queueRequired) {
+				t.Fatalf("Unmergeable wait in %s on a merge-queue base %t, want %s and %t", unmergeable.State, unmergeable.Queue, tc.mergeState, tc.queueRequired)
 			}
 			if armed != nil && armed.Head != "head" {
 				t.Fatalf("Armed wait at %s, want READY's head", armed.Head)
@@ -313,42 +331,157 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 			if !slices.Equal(g.mutations, tc.want) {
 				t.Fatalf("mutations %v, want %v", g.mutations, tc.want)
 			}
+			if g.timelineReads != 0 {
+				t.Fatalf("timeline reads %d by a row that never saw READY's head armed, want none", g.timelineReads)
+			}
 		})
 	}
 }
 
-// An arm or merge-queue entry that disappears while the record still awaits READY's head (a disarm
-// sent before READY that GitHub applied late, or a merge queue dropping the pull request) leaves
-// nothing to merge it, so Submit submits again by the same choice: it arms again where auto-merge is
-// allowed, and merges where GitHub reports the pull request mergeable now. A wait on an arm is
-// routine: only GitHub's own rules end it.
-func TestSubmitSubmitsAgainWhenTheArmDisappears(t *testing.T) {
+// Once the row has seen READY's head armed or queued (armed), an open pull request at that head with
+// nothing armed is a removal someone made, which Submit reads from the pull request's timeline and
+// never answers with a second submission (LEGION-800). The merge queue taking it out because the
+// merge failed - GitHub's reason failed_checks, or any reason with a red run on the commit the queue
+// built - is MergeFailed, naming each failing check and its run and not one that passed. Anyone
+// else's removal since the last arm (a person's dequeue, a person turning auto-merge off, the queue
+// finding a conflict) is Removed, naming who, GitHub's reason and whether it was the queue. The
+// queue's removal for the merge itself waits for GitHub to show the merge, routinely, and a timeline
+// with no removal since the arm waits on GitHub too, but not routinely. Only removals that restart
+// the submission submit again: the App submitting's own (GraphQL's viewer: the daemon's disarm
+// landing late), and auto-merge a close turned off, which the reopen at READY's head undid.
+func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
+	const failedRun = "https://github.com/acme/widgets/actions/runs/7"
+	red := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
+		`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
+		`{"__typename":"CheckRun","name":"e2e","status":"IN_PROGRESS","conclusion":null,"detailsUrl":"` + failedRun + `/job/3","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
+		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"TIMED_OUT","detailsUrl":"` + failedRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
+		`{"__typename":"StatusContext","context":"freeze","state":"SUCCESS","targetUrl":"https://example.com/freeze"}]}}}`
+	green := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}}}`
+	enqueued := `{"__typename":"AddedToMergeQueueEvent","createdAt":"2026-10-16T05:00:00Z"}`
+	enabled := `{"__typename":"AutoMergeEnabledEvent","createdAt":"2026-10-16T05:00:00Z"}`
+	dequeued := func(reason, actor, commit string) string {
+		return fmt.Sprintf(`{"__typename":"RemovedFromMergeQueueEvent","id":"RFMQE_9","createdAt":"2026-10-16T05:10:00Z","reason":%q,"actor":{"login":%q},"beforeCommit":%s}`, reason, actor, commit)
+	}
+	disabled := func(reasonCode, actor string) string {
+		login := "null"
+		if actor != "" {
+			login = fmt.Sprintf(`{"login":%q}`, actor)
+		}
+		return fmt.Sprintf(`{"__typename":"AutoMergeDisabledEvent","id":"AMDE_9","createdAt":"2026-10-16T05:10:00Z","reason":"Manually disabled by user","reasonCode":%q,"actor":%s}`, reasonCode, login)
+	}
 	for _, tc := range []struct {
-		name       string
-		mergeState string
-		want       string
+		name     string
+		queue    bool
+		timeline []string
+		// failed names what MergeFailed must name; removed what Removed must; wait the wait, and
+		// whether it is routine; resubmit is a second submission.
+		failed, removed []string
+		wait            string
+		routine         bool
+		resubmit        bool
 	}{
-		{"arms again where auto-merge is allowed", "BLOCKED", "enable PR_42 head SQUASH"},
-		{"merges where GitHub reports it mergeable now", "CLEAN", "merge PR_42 head SQUASH"},
+		{name: "the merge queue removes it for failed_checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", red)},
+			failed: []string{"#42", "head", "failed_checks", "group-sha", "integration (timed_out, " + failedRun + ")"}},
+		{name: "the merge queue removes it on a red merge group whatever its reason", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", red)},
+			failed: []string{"timed_out", "integration (timed_out, " + failedRun + ")"}},
+		{name: "the merge queue removes it for failed_checks naming no commit", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", "null")},
+			failed: []string{"failed_checks", "named no commit"}},
+		{name: "the merge queue removes it for failed_checks with no failing run read", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", green)},
+			failed: []string{"failed_checks", "no failing run", "group-sha"}},
+		{name: "a person dequeues it", queue: true, timeline: []string{enqueued, dequeued("manual", "a-maintainer", "null")},
+			removed: []string{"a-maintainer", "merge queue", "manual", "#42", "head"}},
+		{name: "the merge queue finds a conflict", queue: true, timeline: []string{enqueued, dequeued("merge_conflict", "github-merge-queue", "null")},
+			removed: []string{"github-merge-queue", "merge queue", "merge_conflict"}},
+		{name: "a person turns its auto-merge off", timeline: []string{enabled, disabled("manually_disabled", "a-maintainer")},
+			removed: []string{"a-maintainer", "auto-merge", "manually_disabled", "Manually disabled by user"}},
+		{name: "GitHub turns its auto-merge off", timeline: []string{enabled, disabled("merge_commit_blocked", "")},
+			removed: []string{"someone", "auto-merge", "merge_commit_blocked"}},
+		{name: "the daemon's own disarm lands late", timeline: []string{enabled, disabled("manually_disabled", "legion-implementer")}, resubmit: true},
+		{name: "the daemon's own disarm, then a person's dequeue", queue: true, timeline: []string{enqueued, disabled("manually_disabled", "legion-implementer"), dequeued("manual", "a-maintainer", "null")},
+			removed: []string{"a-maintainer", "merge queue", "manual"}},
+		{name: "a person's removal before the last arm, then the daemon's own", timeline: []string{enabled, disabled("manually_disabled", "a-maintainer"), enabled, disabled("manually_disabled", "legion-implementer")}, resubmit: true},
+		{name: "a close a reopen at READY's head undid", timeline: []string{enabled, disabled("closed", "a-maintainer")}, resubmit: true},
+		{name: "the merge queue takes it out to merge it", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", green)}, wait: "disappeared", routine: true},
+		{name: "the timeline names no removal since the arm", queue: true, timeline: []string{dequeued("failed_checks", "github-merge-queue", red), enqueued}, wait: "disappeared"},
+		{name: "the timeline names no arm or removal at all", wait: "disappeared"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := &github{head: "head", mergeState: "BLOCKED", autoMergeOK: true, armed: true}
-			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
-			var armed *Armed
-			if !errors.As(err, &armed) || !armed.Routine() {
-				t.Fatalf("Submit while armed = %v, want a routine Armed wait", err)
+			// A merge-queue base GitHub reports mergeable, or a repository that allows auto-merge
+			// whose required checks still run: a second submission would be an enable either way.
+			mergeState := "BLOCKED"
+			if tc.queue {
+				mergeState = "CLEAN"
 			}
-			g.mu.Lock()
-			g.armed, g.mergeState = false, tc.mergeState
-			g.mu.Unlock()
-			_, _ = Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+			g := &github{head: "head", mergeState: mergeState, queueRequired: tc.queue, autoMergeOK: true, timeline: tc.timeline}
+			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
+			var failed *MergeFailed
+			var removed *Removed
+			var disappeared *Disappeared
+			var armed *Armed
+			switch {
+			case tc.failed != nil:
+				if !errors.As(err, &failed) || errors.Is(err, wait.ErrWaiting) {
+					t.Fatalf("Submit = %v (%T), want MergeFailed", err, err)
+				}
+				if failed.Event != "RFMQE_9" {
+					t.Fatalf("MergeFailed event %q, want GitHub's id for the removal", failed.Event)
+				}
+				for _, want := range tc.failed {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("MergeFailed %q, want it to name %q", err, want)
+					}
+				}
+				for _, passed := range []string{"lint", "e2e", "freeze"} {
+					if strings.Contains(err.Error(), passed) {
+						t.Fatalf("MergeFailed %q names %s, which did not fail", err, passed)
+					}
+				}
+			case tc.removed != nil:
+				if !errors.As(err, &removed) || errors.Is(err, wait.ErrWaiting) || removed.Queue != tc.queue {
+					t.Fatalf("Submit = %v (%T), want Removed from the merge queue %t", err, err, tc.queue)
+				}
+				for _, want := range tc.removed {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("Removed %q, want it to name %q", err, want)
+					}
+				}
+			case tc.wait != "":
+				if !errors.As(err, &disappeared) || !errors.Is(err, wait.ErrWaiting) || disappeared.Routine() != tc.routine {
+					t.Fatalf("Submit = %v (%T), want a Disappeared wait, routine %t", err, err, tc.routine)
+				}
+			case tc.resubmit:
+				if !errors.As(err, &armed) {
+					t.Fatalf("Submit = %v (%T), want READY's head submitted again and an Armed wait", err, err)
+				}
+			}
 			g.mu.Lock()
 			defer g.mu.Unlock()
-			if !slices.Equal(g.mutations, []string{tc.want}) {
-				t.Fatalf("mutations %v, want only %q once the arm is gone", g.mutations, tc.want)
+			var want []string
+			if tc.resubmit {
+				want = []string{"enable PR_42 head SQUASH"}
+			}
+			if !slices.Equal(g.mutations, want) {
+				t.Fatalf("mutations %v, want %v", g.mutations, want)
 			}
 		})
+	}
+}
+
+// A row that has seen READY's head armed reads no timeline while the arm or entry stands: it waits
+// on it (Armed) as before.
+func TestSubmitWaitsOnAStandingArmWithoutReadingTheTimeline(t *testing.T) {
+	g := &github{head: "head", mergeState: "CLEAN", queueRequired: true, queued: true}
+	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
+	var armed *Armed
+	if !errors.As(err, &armed) || !armed.Routine() {
+		t.Fatalf("Submit while queued = %v, want a routine Armed wait", err)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.timelineReads != 0 || len(g.mutations) != 0 {
+		t.Fatalf("timeline reads %d and mutations %v while READY's head stands queued, want none", g.timelineReads, g.mutations)
 	}
 }
 
@@ -358,7 +491,7 @@ func TestSubmitSubmitsAgainWhenTheArmDisappears(t *testing.T) {
 func TestALaggingSubmissionStallsOnlyOnGitHubsOwnClock(t *testing.T) {
 	g := &github{state: "CLOSED", head: "head", mergeState: "UNKNOWN"}
 	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
 	var lagging *Lagging
 	if !errors.As(err, &lagging) {
 		t.Fatalf("Submit = %v, want Lagging", err)
@@ -377,7 +510,7 @@ func TestALaggingSubmissionStallsOnlyOnGitHubsOwnClock(t *testing.T) {
 func TestSubmitFailsAReadWithoutUpdatedAt(t *testing.T) {
 	g := &github{state: "CLOSED", head: "head", mergeState: "UNKNOWN", updated: "null"}
 	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
 	var lagging *Lagging
 	if err == nil || errors.Is(err, wait.ErrWaiting) || errors.As(err, &lagging) || !strings.Contains(err.Error(), "updatedAt") {
 		t.Fatalf("Submit without updatedAt = %v, want a failure naming updatedAt", err)
@@ -387,15 +520,18 @@ func TestSubmitFailsAReadWithoutUpdatedAt(t *testing.T) {
 // A wait on GitHub's merge state is routine only while the repository's own rules end it without
 // anyone acting for Legion: a required check still running or a required review (BLOCKED), or
 // GitHub still computing the state (UNKNOWN). A branch to update (BEHIND), a draft, or a conflict
-// (DIRTY) waits on someone, so it is not.
+// (DIRTY) waits on someone, so it is not. The same holds in a repository that allows no auto-merge
+// and on a base that requires a merge queue.
 func TestOnlyABlockedOrComputingMergeStateIsARoutineWait(t *testing.T) {
 	for state, routine := range map[string]bool{"BLOCKED": true, "UNKNOWN": true, "BEHIND": false, "DRAFT": false, "DIRTY": false} {
-		g := &github{head: "head", mergeState: state}
-		client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-		_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
-		var unmergeable *Unmergeable
-		if !errors.As(err, &unmergeable) || !errors.Is(err, wait.ErrWaiting) || unmergeable.Routine() != routine {
-			t.Fatalf("Submit while %s = %v; want an Unmergeable wait, routine %t", state, err, routine)
+		for _, queue := range []bool{false, true} {
+			g := &github{head: "head", mergeState: state, queueRequired: queue, autoMergeOK: queue}
+			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
+			var unmergeable *Unmergeable
+			if !errors.As(err, &unmergeable) || !errors.Is(err, wait.ErrWaiting) || unmergeable.Routine() != routine || unmergeable.Queue != queue {
+				t.Fatalf("Submit while %s on a merge-queue base %t = %v; want an Unmergeable wait, routine %t", state, queue, err, routine)
+			}
 		}
 	}
 }
@@ -414,6 +550,7 @@ func TestSubmitTellsAPermanentRefusalFromATransientOne(t *testing.T) {
 	}{
 		{"GitHub refuses the merge and stands where it was", &github{head: "head", mergeState: "CLEAN", refuseSubmit: squash}, true},
 		{"GitHub refuses the arm and stands where it was", &github{head: "head", mergeState: "BLOCKED", autoMergeOK: true, refuseSubmit: squash}, true},
+		{"GitHub refuses the enqueue and stands where it was", &github{head: "head", mergeState: "CLEAN", queueRequired: true, refuseSubmit: squash}, true},
 		{"GitHub rejects the merge as invalid", &github{head: "head", mergeState: "CLEAN", refuseSubmit: squash, refuseType: "VALIDATION_FAILED"}, true},
 		{"GitHub rate limits the merge", &github{head: "head", mergeState: "CLEAN", refuseSubmit: "API rate limit exceeded", refuseType: "RATE_LIMITED"}, false},
 		{"GitHub has an internal merge error", &github{head: "head", mergeState: "CLEAN", refuseSubmit: "Service temporarily unavailable", refuseType: "INTERNAL"}, false},
@@ -422,7 +559,7 @@ func TestSubmitTellsAPermanentRefusalFromATransientOne(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(tc.g.serve(t))}
-			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
 			var refused *Refused
 			if err == nil || errors.Is(err, wait.ErrWaiting) {
 				t.Fatalf("Submit = %v, want GitHub's failure", err)
@@ -444,7 +581,7 @@ func TestSubmitKeepsTheRateLimitOfItsConfirmationRead(t *testing.T) {
 	const squash = "Squash merges are not allowed on this repository."
 	g := &github{head: "head", mergeState: "CLEAN", refuseSubmit: squash, limitAfterRefusal: true}
 	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", false, keeping("head"))
 	var refused *Refused
 	if err == nil || errors.As(err, &refused) || errors.Is(err, wait.ErrWaiting) {
 		t.Fatalf("Submit = %v, want a failure to retry", err)
