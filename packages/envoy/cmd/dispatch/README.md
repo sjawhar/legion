@@ -566,9 +566,10 @@ the issue it changes first (`api/issue_patch.go`), so a parent loop none of whos
 which only direct SQL can write, needs a database repair:
 `update issues set parent_key = null where key = '<a member>'`. The auto-deployer
 (`packages/envoy/deploy/README.md`) keeps both rules. Compose stops and removes the old `dispatch`
-container before it starts the new one. When a failed deploy has moved the schema past the one the
-previous image runs against, the auto-deployer refuses to start that image again: it stops the
-failed one and exits `1` for a forward recovery.
+container before it starts the new one. When a deploy fails, the auto-deployer stops the failed
+image and confirms the stop before it reads the schema, and when the schema has moved past the one
+the previous image runs against, it refuses to start that image again and exits `1` for a forward
+recovery.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

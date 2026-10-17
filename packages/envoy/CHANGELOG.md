@@ -411,11 +411,14 @@
   ancestor that still reads has its parent set to null.
 - The Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) no longer rolls a failed deploy back
   to the previous image once that deploy has moved the database's schema. It records the schema
-  version the deployed tag runs against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys,
-  and reads it again when a deploy fails. If the schema moved past it, or cannot be read, the
-  deployer stops the failed image, logs `refusing to roll back` with both versions, and exits 1,
-  leaving the recovery to an operator, forward. It also stops before a deploy whose schema version
-  it cannot read.
+  version the deployed tag runs against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys.
+  When a deploy fails, it stops the failed image, confirms no `dispatch` container still runs, and
+  reads the version again behind the migration runner's advisory lock. If the stop or the read
+  fails, or the schema moved past the record, it starts nothing, logs `refusing to roll back` with
+  both versions, and exits 1, leaving the recovery to an operator, forward. It also stops before a
+  deploy whose schema version it cannot read, and a failed pull no longer restarts the service.
+  Its `pg_dump` and `psql` take the database password as `PGPASSWORD`, never as an argument, and
+  `psql`'s stderr, which can quote the connection, is dropped.
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret

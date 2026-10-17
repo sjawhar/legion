@@ -65,15 +65,66 @@ set_env_value() {
   fi
 }
 
+# database_url_split reads a postgres:// DATABASE_URL into db_url, the URL without its password,
+# and db_password, that password percent-decoded. The database clients below get db_url as their
+# argument and the password as PGPASSWORD, an environment variable, so no process's arguments
+# carry a credential: a container's processes are the host's, and /proc/<pid>/cmdline is
+# world-readable on a shared host. It prints nothing, and fails on a URL it cannot split so: one
+# not postgres:// or postgresql://, one with a password in its query, or one whose password is not
+# percent-encoded, which psql would quote back in its error.
+database_url_split() {
+  local url="$1"
+  local scheme rest authority tail userinfo password
+  local password_in_query='[?&](ssl)?password='
+  local percent_encoded='^([^%]|%[0-9A-Fa-f]{2})*$'
+  case "$url" in
+    postgres://* | postgresql://*) ;;
+    *) return 1 ;;
+  esac
+  scheme="${url%%://*}"
+  rest="${url#*://}"
+  authority="${rest%%[/?]*}"
+  tail="${rest:${#authority}}"
+  if [[ "$tail" =~ $password_in_query ]]; then
+    return 1
+  fi
+  db_url="$url"
+  db_password=""
+  if [[ "$authority" == *@* ]]; then
+    userinfo="${authority%@*}"
+    db_url="$scheme://${userinfo%%:*}@${authority##*@}$tail"
+    if [[ "$userinfo" == *:* ]]; then
+      password="${userinfo#*:}"
+      if [[ ! "$password" =~ $percent_encoded ]]; then
+        return 1
+      fi
+      password="${password//\\/\\\\}"
+      printf -v db_password '%b' "${password//%/\\x}"
+    fi
+  fi
+}
+
+# pg_client runs shell command $2 in the pg_dump image, bounded at $1 seconds (0: unbounded), with
+# the connection in its environment: DATABASE_URL (db_url) and PGPASSWORD (db_password), each passed
+# to docker by name, so docker reads the value from this process's environment.
+pg_client() {
+  PGPASSWORD="$db_password" DATABASE_URL="$db_url" timeout "$1" \
+    docker run --rm --network host -e PGPASSWORD -e DATABASE_URL "$PG_DUMP_IMAGE" sh -c "$2"
+}
+
 # schema_version prints the highest migration the database has applied, the `schema_version`
-# Dispatch's /healthz reports, read through the image the backup runs and with DATABASE_URL passed
-# by name as the backup passes it.
+# Dispatch's /healthz reports. It first takes the advisory lock Dispatch's migration runner holds
+# for each migration (internal/dispatch/store/store.go, migrationLockKey), in a statement of its
+# own, so a migration transaction still in flight, one a stopped image sent its commit for
+# included, ends before the read takes its snapshot. psql's stderr is dropped, since its
+# diagnostics can quote the connection; a failure prints nothing and returns psql's status, or 1
+# for an answer that is no version.
 schema_version() {
   local version
   # shellcheck disable=SC2016 # $DATABASE_URL expands in the container's shell, from its environment
-  version=$(DATABASE_URL="$1" timeout 60 docker run --rm --network host -e DATABASE_URL "$PG_DUMP_IMAGE" \
-    sh -c 'psql -X -At -v ON_ERROR_STOP=1 -c "select coalesce(max(version), 0) from schema_migrations" "$DATABASE_URL"') ||
-    return 1
+  version=$(pg_client 60 'psql -X -q -At -v ON_ERROR_STOP=1 -c "set lock_timeout = 30000" -c "select pg_advisory_lock(8150001)" -c "select coalesce(max(version), 0) from schema_migrations" "$DATABASE_URL"' 2>/dev/null) ||
+    return
+  version="${version##*$'\n'}"
   [[ "$version" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$version"
 }
@@ -140,22 +191,33 @@ rollback() {
 # roll_back_or_stop answers a deploy of $sha that failed. It restores $previous only while the
 # schema is still the one $previous runs against. A failed image may have migrated before it failed,
 # and an image older than its database's schema can write what the newer release fails to read
-# (packages/envoy/cmd/dispatch/README.md, "Database migrations"), so once the schema has moved, or
-# cannot be read, it stops $sha instead and fails, leaving the recovery to an operator, forward.
+# (packages/envoy/cmd/dispatch/README.md, "Database migrations"). So it stops $sha first and
+# confirms the stop, then reads the schema, so nothing $sha runs can move it after the read. Once the
+# schema has moved, or the stop or the read fails, it starts nothing and fails, for an operator to
+# recover forward.
 roll_back_or_stop() {
   local sha="$1"
   local previous="$2"
   local baseline="$3"
-  local databaseUrl="$4"
-  local dispatchPort="$5"
+  local dispatchPort="$4"
+  local running
   local now
-  if ! now=$(schema_version "$databaseUrl"); then
-    compose 120 stop dispatch || log "could not stop $sha"
-    log "could not read the schema version after $sha failed, so refusing to roll back to $previous, which runs against schema $baseline: $sha is stopped, and forward recovery is required"
+  local status
+  local refusing="so refusing to roll back to $previous, which runs against schema $baseline, and forward recovery is required"
+  if ! compose 120 stop dispatch; then
+    log "could not stop $sha, $refusing"
     return 1
   fi
+  if ! running=$(compose 60 ps --status running -q dispatch) || [[ -n "$running" ]]; then
+    log "could not confirm $sha stopped, $refusing"
+    return 1
+  fi
+  now=$(schema_version) || {
+    status=$?
+    log "could not read the schema version after stopping $sha (status $status), $refusing"
+    return 1
+  }
   if ((now > baseline)); then
-    compose 120 stop dispatch || log "could not stop $sha"
     log "refusing to roll back to $previous: it runs against schema $baseline, and $sha moved the schema to $now before it failed. $sha is stopped, and forward recovery is required: deploy an image that fixes it, or start $sha by hand once its failure is understood. Never start $previous against schema $now"
     return 1
   fi
@@ -167,7 +229,10 @@ deploy() {
   local sha="$1"
   local previous
   local databaseUrl
+  local db_url
+  local db_password
   local dispatchPort
+  local status
   local before
   local recorded
   local baseline
@@ -187,12 +252,17 @@ deploy() {
     log "DATABASE_URL is missing from $COMPOSE_ENV; not deploying $sha"
     return 1
   fi
-  dispatchPort=$(env_value DISPATCH_PORT)
-  dispatchPort="${dispatchPort:-8766}"
-  if ! before=$(schema_version "$databaseUrl"); then
-    log "could not read the schema version from DATABASE_URL; not deploying $sha"
+  if ! database_url_split "$databaseUrl"; then
+    log "DATABASE_URL in $COMPOSE_ENV is not a postgres:// URL whose password is percent-encoded and absent from its query; not deploying $sha"
     return 1
   fi
+  dispatchPort=$(env_value DISPATCH_PORT)
+  dispatchPort="${dispatchPort:-8766}"
+  before=$(schema_version) || {
+    status=$?
+    log "could not read the schema version (status $status); not deploying $sha"
+    return 1
+  }
   # ENVOY_IMAGE_SCHEMA is <tag>:<version>, the schema version the deployed tag was running against
   # when the deployer first tried to replace it. Kept while that tag stays deployed, it is what a
   # rollback to it needs: a retry after a failed deploy that migrated starts from the moved schema.
@@ -211,34 +281,37 @@ deploy() {
     fi
   fi
   dump="$BACKUPS/pre-${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
-  # `-e DATABASE_URL` with no value: docker reads it from this process's environment, so the
-  # password never appears in argv (/proc/<pid>/cmdline is world-readable on a shared host).
-  if ! DATABASE_URL="$databaseUrl" docker run --rm --network host -e DATABASE_URL "$PG_DUMP_IMAGE" sh -c 'pg_dump -Fc "$DATABASE_URL"' >"$dump"; then
+  # shellcheck disable=SC2016 # $DATABASE_URL expands in the container's shell, from its environment
+  if ! pg_client 0 'pg_dump -Fc "$DATABASE_URL"' >"$dump"; then
     log "backup failed; not deploying $sha"
     rm -f "$dump"
     return 1
   fi
   prune_backups
-  if ! compose_with_tag "$sha" 900 pull -q dispatch || ! compose_with_tag "$sha" 300 up -d --no-deps dispatch; then
-    log "compose failed for $sha"
-    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
+  if ! compose_with_tag "$sha" 900 pull -q dispatch; then
+    log "could not pull $sha; $previous still serves"
+    return 1
+  fi
+  if ! compose_with_tag "$sha" 300 up -d --no-deps dispatch; then
+    log "compose up failed for $sha"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$dispatchPort"
     return 1
   fi
   if ! wait_for_health "$dispatchPort"; then
     log "deployed $sha but /healthz did not answer within 90s"
-    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$dispatchPort"
     return 1
   fi
   redirect=$(oauth_redirect_uri "$origin" "$dispatchPort")
   expected="$origin/auth/callback"
   if [[ "$redirect" != "$expected" ]]; then
     log "deployed $sha but the OAuth redirect_uri is '$redirect', expected '$expected' - login would break"
-    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$dispatchPort"
     return 1
   fi
   if ! sed -i -E "s|^ENVOY_IMAGE_TAG=.*|ENVOY_IMAGE_TAG=$sha|" "$COMPOSE_ENV"; then
     log "could not persist deployed tag $sha"
-    roll_back_or_stop "$sha" "$previous" "$baseline" "$databaseUrl" "$dispatchPort"
+    roll_back_or_stop "$sha" "$previous" "$baseline" "$dispatchPort"
     return 1
   fi
   log "deployed $sha ($(jj -R "$REPO" log -r "$sha" --no-graph -T 'description.first_line()' | cut -c1-90)); login origin $origin verified; backup $dump"

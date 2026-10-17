@@ -102,20 +102,32 @@ scripts/autodeploy.sh --once
 After health succeeds, the deployer reads `DISPATCH_SERVER_URL` from
 `compose/.env` and checks that `/auth/start` emits exactly
 `$DISPATCH_SERVER_URL/auth/callback`. It persists the new `ENVOY_IMAGE_TAG`
-only after both checks. A failed deployment restores the previous tag and
-restarts only `dispatch`, unless the failed image moved the database's schema
-before it failed. Before each deploy the deployer reads the schema version
-(`max(version)` from `schema_migrations`, through the `pg_dump` image with
-`DATABASE_URL` passed by name) and records, as `ENVOY_IMAGE_SCHEMA=<tag>:<version>`
-in `compose/.env`, the version the deployed tag runs against. It keeps that record
-until the tag changes, so a retry of a failed image compares against the version the
-previous tag runs against, not the one the failed attempt left. When a deploy fails, it
-reads the version again. If the version moved past that record, or cannot be read,
-it does not restart the previous image. It stops the failed one instead, logs
-`refusing to roll back to <previous>` with both versions, and exits 1. Recovery is
-then forward: deploy an image that fixes the failure, or start the failed one by
-hand once its failure is understood. Never start the previous tag against the newer
-schema.
+only after both checks. A pull that fails changes nothing; the previous image
+keeps serving. A deploy that fails after the new image started restores the
+previous tag and restarts only `dispatch`, unless the failed image moved the
+database's schema. Before each deploy the deployer reads the schema version and
+records, as `ENVOY_IMAGE_SCHEMA=<tag>:<version>` in `compose/.env`, the version
+the deployed tag runs against. It keeps that record until the tag changes, so a
+retry of a failed image compares against the version the previous tag runs
+against, not the one the failed attempt left. When a deploy fails, it first stops
+the failed image and confirms that no `dispatch` container still runs. Then it
+reads the version again, waiting on the advisory lock Dispatch's migration runner
+holds, so a migration the failed image left in flight ends before the read. If
+the stop or the read fails, or the version moved past the record, it starts
+nothing, logs `refusing to roll back to <previous>` with both versions, and exits
+1. Recovery is then forward: deploy an image that fixes the failure, or start the
+failed one by hand once its failure is understood. Never start the previous tag
+against the newer schema.
+
+The deployer's database clients (`pg_dump` for the backup, `psql` for the schema
+version) run in the `pg_dump` image. Each gets `DATABASE_URL` with its password
+removed as its argument, and the password as `PGPASSWORD`; docker reads both
+from the deployer's environment by name. So no process's arguments carry the
+password, the containers' included, which are host processes too. `psql`'s
+stderr is dropped, since its diagnostics can quote the connection, and a failed
+read is reported by its exit status alone. A `DATABASE_URL` that is not
+`postgres://` or `postgresql://`, carries a password in its query, or has a
+password that is not percent-encoded is refused before anything runs.
 
 ## Listener configuration
 
