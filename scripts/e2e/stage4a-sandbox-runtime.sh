@@ -82,17 +82,6 @@
 # `kubectl create token` for the broker's audience, an hour long, and mints again every half hour
 # while the run lasts; no person approves it. See scripts/e2e/README.md's Stage 4a section.
 set -euo pipefail
-# Job control, not just for background-job bookkeeping: with it off (bash's default in a
-# non-interactive script), every `&` job below — kubectl port-forward, the chisel client, the
-# bridge watchdog, docker — shares this script's own process group, so anything that signals that
-# group (the Go test binary's own subprocess cleanup, most plausibly, though this was never
-# pinned down precisely) can take the whole script down with it. Confirmed live, 2026-10-17: five
-# separate full-length runs died identically — every CHECK passed, the harness printed its own
-# PASS, and the script received SIGTERM before `teardown_sequence` printed a single line — with
-# every more specific theory (API consistency, this devbox's own tool timeout, a watchdog race)
-# ruled out in turn by direct evidence. `set -m` gives every background job here its own process
-# group, the standard fix for exactly this class of signal leak.
-set -m
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 namespace=legion
