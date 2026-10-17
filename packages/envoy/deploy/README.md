@@ -120,14 +120,27 @@ failed one by hand once its failure is understood. Never start the previous tag
 against the newer schema.
 
 The deployer's database clients (`pg_dump` for the backup, `psql` for the schema
-version) run in the `pg_dump` image. Each gets `DATABASE_URL` with its password
-removed as its argument, and the password as `PGPASSWORD`; docker reads both
-from the deployer's environment by name. So no process's arguments carry the
-password, the containers' included, which are host processes too. `psql`'s
-stderr is dropped, since its diagnostics can quote the connection, and a failed
-read is reported by its exit status alone. A `DATABASE_URL` that is not
-`postgres://` or `postgresql://`, carries a password in its query, or has a
-password that is not percent-encoded is refused before anything runs.
+version) run in the `pg_dump` image under `docker run --init`, so the bound
+`timeout` puts on the schema read also ends a hung connection. Each gets
+`DATABASE_URL` with its password removed as its argument, and the password as
+`PGPASSWORD`; docker reads both from the deployer's environment by name. So no
+process's arguments carry the password, the containers' included, which are host
+processes too. `psql`'s stderr is dropped, since its diagnostics can quote the
+connection, and a failed read is reported by its exit status alone.
+
+The deployer refuses, before anything runs, a `DATABASE_URL` whose password it
+could not be sure of keeping off those arguments:
+
+- one that is not a `postgres://` or `postgresql://` URL, such as a keyword/value
+  connection string;
+- one with an `@` after the first `/` or `?`: a raw `/` or `?` in the password,
+  where libpq reads the credentials past the point the deployer would stop;
+- one whose query has a `password` or `sslpassword` key, in any case, or any key
+  holding a `%`, which libpq would decode (`pass%77ord` is `password`);
+- one whose password holds a `%` that does not begin a two-digit hex escape.
+
+Percent-encode the password's `/`, `?` and `%` (`%2F`, `%3F`, `%25`); raw `@`,
+`:`, `#` and `&` are accepted.
 
 ## Listener configuration
 
@@ -176,7 +189,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 
 | Var | Required | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database). The compose runs no Postgres of its own. |
+| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database), as `postgres://<user>:<password>@<host>:<port>/<database>?<options>` with the password percent-encoded and none in the options: the auto-deployer refuses any other shape (Auto-deployer, above). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; Dispatch's client at the sign-in issuer (the sign-in pool's app client, or the Google web client) must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |

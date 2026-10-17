@@ -409,16 +409,23 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
-- The Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) no longer rolls a failed deploy back
-  to the previous image once that deploy has moved the database's schema. It records the schema
-  version the deployed tag runs against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys.
-  When a deploy fails, it stops the failed image, confirms no `dispatch` container still runs, and
-  reads the version again behind the migration runner's advisory lock. If the stop or the read
-  fails, or the schema moved past the record, it starts nothing, logs `refusing to roll back` with
-  both versions, and exits 1, leaving the recovery to an operator, forward. It also stops before a
-  deploy whose schema version it cannot read, and a failed pull no longer restarts the service.
-  Its `pg_dump` and `psql` take the database password as `PGPASSWORD`, never as an argument, and
-  `psql`'s stderr, which can quote the connection, is dropped.
+- **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) refuses a
+  `DATABASE_URL` whose password it could not keep off its database clients' process arguments: a
+  keyword/value connection string, an `@` after the first `/` or `?` (a raw `/` or `?` in the
+  password), a `password` or `sslpassword` query key or any query key holding a `%`, or a password
+  with a malformed `%` escape. Percent-encode the password in the userinfo instead. Its `pg_dump`
+  and `psql` take the URL without the password as their argument and the password as
+  `PGPASSWORD`, run under `docker run --init` so a timeout ends them, and `psql`'s stderr, which
+  can quote the connection, is dropped.
+- The Dispatch auto-deployer no longer rolls a failed deploy back to the previous image once that
+  deploy has moved the database's schema. It records the schema version the deployed tag runs
+  against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys. When a deploy fails, it stops
+  the failed image, confirms no `dispatch` container still runs, and reads the version again behind
+  the migration runner's advisory lock. If the stop or the read fails, or the schema moved past the
+  record, it starts nothing, logs `refusing to roll back` with both versions, and exits 1, leaving
+  the recovery to an operator, forward. It also stops before a deploy whose schema version it
+  cannot read, and a failed pull no longer restarts the service. CI runs its test
+  (`deploy/scripts/autodeploy_test.sh`) in the `envoy-go` job.
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret

@@ -69,13 +69,17 @@ set_env_value() {
 # and db_password, that password percent-decoded. The database clients below get db_url as their
 # argument and the password as PGPASSWORD, an environment variable, so no process's arguments
 # carry a credential: a container's processes are the host's, and /proc/<pid>/cmdline is
-# world-readable on a shared host. It prints nothing, and fails on a URL it cannot split so: one
-# not postgres:// or postgresql://, one with a password in its query, or one whose password is not
-# percent-encoded, which psql would quote back in its error.
+# world-readable on a shared host. It prints nothing, and fails on any URL whose password it
+# cannot be sure of keeping off the clients' arguments:
+#   - not postgres:// or postgresql:// (a keyword/value connection string);
+#   - an @ after the first / or ?: libpq reads the credentials up to the first @ before the first
+#     /, a raw ? included, so this split and libpq's would disagree on where the password ends;
+#   - a query key holding a % (libpq decodes one, so `pass%77ord` is `password`), or a query key
+#     `password` or `sslpassword` in any case;
+#   - a password that is not percent-encoded, which psql would quote back in its error.
 database_url_split() {
   local url="$1"
-  local scheme rest authority tail userinfo password
-  local password_in_query='[?&](ssl)?password='
+  local scheme rest authority tail query param key userinfo password
   local percent_encoded='^([^%]|%[0-9A-Fa-f]{2})*$'
   case "$url" in
     postgres://* | postgresql://*) ;;
@@ -85,9 +89,26 @@ database_url_split() {
   rest="${url#*://}"
   authority="${rest%%[/?]*}"
   tail="${rest:${#authority}}"
-  if [[ "$tail" =~ $password_in_query ]]; then
+  if [[ "$tail" == *@* ]]; then
     return 1
   fi
+  query=""
+  if [[ "$tail" == *\?* ]]; then
+    query="${tail#*\?}"
+  fi
+  while [[ -n "$query" ]]; do
+    param="${query%%&*}"
+    if [[ "$query" == *\&* ]]; then
+      query="${query#*&}"
+    else
+      query=""
+    fi
+    key="${param%%=*}"
+    key="${key,,}"
+    if [[ "$key" == *%* || "$key" == password || "$key" == sslpassword ]]; then
+      return 1
+    fi
+  done
   db_url="$url"
   db_password=""
   if [[ "$authority" == *@* ]]; then
@@ -106,10 +127,12 @@ database_url_split() {
 
 # pg_client runs shell command $2 in the pg_dump image, bounded at $1 seconds (0: unbounded), with
 # the connection in its environment: DATABASE_URL (db_url) and PGPASSWORD (db_password), each passed
-# to docker by name, so docker reads the value from this process's environment.
+# to docker by name, so docker reads the value from this process's environment. --init runs the
+# command under an init that passes on the signal docker forwards when `timeout` fires; as PID 1
+# the shell would ignore it, and the container would outlive the bound.
 pg_client() {
   PGPASSWORD="$db_password" DATABASE_URL="$db_url" timeout "$1" \
-    docker run --rm --network host -e PGPASSWORD -e DATABASE_URL "$PG_DUMP_IMAGE" sh -c "$2"
+    docker run --init --rm --network host -e PGPASSWORD -e DATABASE_URL "$PG_DUMP_IMAGE" sh -c "$2"
 }
 
 # schema_version prints the highest migration the database has applied, the `schema_version`
@@ -253,7 +276,7 @@ deploy() {
     return 1
   fi
   if ! database_url_split "$databaseUrl"; then
-    log "DATABASE_URL in $COMPOSE_ENV is not a postgres:// URL whose password is percent-encoded and absent from its query; not deploying $sha"
+    log "DATABASE_URL in $COMPOSE_ENV is not a postgres:// URL with its password percent-encoded in the userinfo and none in the query, so the deployer cannot keep the password off its database clients' process arguments; not deploying $sha"
     return 1
   fi
   dispatchPort=$(env_value DISPATCH_PORT)

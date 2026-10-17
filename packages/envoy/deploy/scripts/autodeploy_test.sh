@@ -59,7 +59,7 @@ case "$1" in
     names=()
     while [[ "$1" == -* ]]; do
       case "$1" in
-        --rm) shift ;;
+        --rm | --init) shift ;;
         --network) shift 2 ;;
         -e) names+=("$2"); shift 2 ;;
         *) printf 'unexpected docker run option: %s\n' "$1" >&2; exit 1 ;;
@@ -124,26 +124,41 @@ case "$*" in
     ;;
 esac
 EOF
-# The fake libpq: the password is PGPASSWORD, else the one in the connection URL (the last
-# argument), which a malformed percent-encoding makes the client quote on stderr, as psql 16 does.
+# The fake libpq, which splits a URL as libpq does rather than as the deployer does: the
+# credentials run to the first @ before the first /, a raw ? included, and a query key or value is
+# percent-decoded, so password= (however its key is spelled) sets the password. The password is
+# PGPASSWORD, else the URL's. A malformed percent-encoding is quoted on stderr, as psql 16 does.
 cat >"$tools/libpq.sh" <<'EOF'
+percent_decode() {
+  local valid='^([^%]|%[0-9A-Fa-f]{2})*$'
+  [[ "$2" =~ $valid ]] || return 1
+  printf -v "$1" '%b' "${2//%/\\x}"
+}
 connection_password() {
   local url="${!#}"
   local rest="${url#*://}"
-  local authority="${rest%%[/?]*}"
-  local userinfo encoded
-  local valid='^([^%]|%[0-9A-Fa-f]{2})*$'
+  local before_path="${rest%%/*}"
+  local after_credentials="$rest"
+  local userinfo query param key value
   libpq_password="${PGPASSWORD-}"
-  if [[ "$authority" == *@* ]]; then
-    userinfo="${authority%@*}"
-    if [[ "$userinfo" == *:* ]]; then
-      encoded="${userinfo#*:}"
-      if [[ ! "$encoded" =~ $valid ]]; then
-        printf '%s: error: invalid percent-encoded token: "%s"\n' "$1" "$encoded" >&2
-        return 2
-      fi
-      printf -v libpq_password '%b' "${encoded//%/\\x}"
+  if [[ "$before_path" == *@* ]]; then
+    userinfo="${before_path%%@*}"
+    after_credentials="${rest#*@}"
+    if [[ "$userinfo" == *:* ]] && ! percent_decode libpq_password "${userinfo#*:}"; then
+      printf '%s: error: invalid percent-encoded token: "%s"\n' "$1" "${userinfo#*:}" >&2
+      return 2
     fi
+  fi
+  if [[ "$after_credentials" == *\?* ]]; then
+    query="${after_credentials#*\?}"
+    while [[ -n "$query" ]]; do
+      param="${query%%&*}"
+      if [[ "$query" == *\&* ]]; then query="${query#*&}"; else query=""; fi
+      percent_decode key "${param%%=*}" && percent_decode value "${param#*=}" || return 2
+      if [[ "$key" == password ]]; then
+        libpq_password="$value"
+      fi
+    done
   fi
   if [[ "$libpq_password" != "$AUTODEPLOY_TEST_PASSWORD" ]]; then
     printf '%s: error: password authentication failed for user "dispatch"\n' "$1" >&2
@@ -178,7 +193,7 @@ chmod +x "$bin/jj" "$bin/docker" "$bin/curl" "$tools/psql" "$tools/pg_dump"
 
 deploy_once() {
   PATH="$bin:$PATH" AUTODEPLOY_TEST_LOG="$log" AUTODEPLOY_TEST_ARGV="$argv" AUTODEPLOY_TEST_SCHEMA="$schema" \
-    AUTODEPLOY_TEST_TOOLS="$tools" AUTODEPLOY_TEST_PASSWORD="$password" REPO="$repo" COMPOSE_DIR="$compose" \
+    AUTODEPLOY_TEST_TOOLS="$tools" AUTODEPLOY_TEST_PASSWORD="${test_password:-$password}" REPO="$repo" COMPOSE_DIR="$compose" \
     BACKUPS="$backups" COMPOSE_PROJECT=dispatch-test IMAGE=example.test/dispatch \
     "$(dirname "$0")/autodeploy.sh" --once 2>&1
 }
@@ -221,6 +236,10 @@ fi
 if [[ $(grep -c "^pg_dump -Fc $url_without_password\$" "$argv") -ne 1 ]] ||
   [[ $(grep -c "^psql .*pg_advisory_lock(8150001).*from schema_migrations.* $url_without_password\$" "$argv") -ne 2 ]]; then
   fail 'deployer did not run pg_dump once and psql twice (before the deploy and after the stop) on the URL without its password, the read after the runner lock'
+fi
+# Each client container runs under an init that passes on a signal, so `timeout` ends it.
+if [[ $(grep -c '^docker run ' "$argv") -ne 3 || $(grep -c '^docker run --init ' "$argv") -ne 3 ]]; then
+  fail 'deployer ran a database client container without --init, which a timeout could not stop'
 fi
 
 # A deploy whose image moved the schema before it failed refuses to start the previous image
@@ -305,6 +324,27 @@ no_secret 'the malformed URL'
 if [[ "$output" != *"DATABASE_URL"*"not deploying new-image"* ]] || [[ -s "$log" || -s "$argv" ]]; then
   fail 'deployer did not refuse the malformed DATABASE_URL before running anything'
 fi
+
+# A URL whose password the deployer cannot keep off the clients' arguments is refused the same
+# way: a raw ? or / in the password, where libpq's credentials run past the point the deployer's
+# would stop, and a password in the query, however its key is spelled. Each is a URL libpq would
+# connect with, the password it would use given to the fake, so a deployer that let one through
+# would put that password on a client's command line.
+for case in \
+  's?cret-canary|postgres://dispatch:s?cret-canary@db.test:5432/dispatch?sslmode=require' \
+  's/cret-canary|postgres://dispatch:s/cret-canary@db.test:5432/dispatch' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require&password=review-secret' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?pass%77ord=review-secret' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?sslpassword=review-secret'; do
+  fresh_env "${case#*|}"
+  if output=$(test_password="${case%%|*}" deploy_once); then
+    fail "deployer deployed with ${case#*|}"
+  fi
+  no_secret "${case#*|}"
+  if [[ "$output" != *"DATABASE_URL"*"not deploying new-image"* ]] || [[ -s "$log" || -s "$argv" ]]; then
+    fail "deployer did not refuse ${case#*|} before running anything"
+  fi
+done
 
 # A failed pull changes nothing: the previous image still serves, so there is nothing to stop or
 # restart, and the next pass tries the pull again.
