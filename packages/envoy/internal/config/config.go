@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -70,9 +71,18 @@ func Load(defaultPort int) (Service, error) {
 	}, nil
 }
 
+// hostEntry is an ENVOY_ALLOWED_HOSTS entry's shape: a name or an IPv4 address, or an IPv6
+// address with or without its brackets, and never a port, a scheme or a path.
+var hostEntry = regexp.MustCompile(`^(\[[0-9A-Fa-f:.]+\]|[0-9A-Fa-f:.]+|[A-Za-z0-9.-]+)$`)
+
+// dnsName is a host name HostName has normalized: dot-separated labels of letters, digits and
+// inner hyphens.
+var dnsName = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
+
 // parseAllowedHosts reads ENVOY_ALLOWED_HOSTS: comma-separated host names or addresses, blank
-// entries skipped. An entry carrying a port, a scheme or a path is refused naming it, since a Host
-// is compared by its name alone.
+// entries skipped. An entry that is not a host name or an IP address (one carrying a port, a
+// scheme, a path or a stray bracket) is refused naming it, since a Host is compared by its name
+// alone.
 func parseAllowedHosts(raw string) ([]string, error) {
 	var hosts []string
 	for _, entry := range strings.Split(raw, ",") {
@@ -80,9 +90,8 @@ func parseAllowedHosts(raw string) ([]string, error) {
 		if entry == "" {
 			continue
 		}
-		bare := strings.TrimSuffix(strings.TrimPrefix(entry, "["), "]")
 		name := HostName(entry)
-		if name == "" || strings.ContainsAny(bare, "/@ \t") || (strings.Contains(bare, ":") && net.ParseIP(bare) == nil) {
+		if !hostEntry.MatchString(entry) || (net.ParseIP(name) == nil && !dnsName.MatchString(name)) {
 			return nil, fmt.Errorf("invalid ENVOY_ALLOWED_HOSTS entry %q: want a host name or address with no port, scheme or path", entry)
 		}
 		hosts = append(hosts, name)

@@ -1859,7 +1859,7 @@ Every `/v1` request with a body must set `Content-Type: application/json`; param
 keep their own signature and content handling.
 
 A listener with no bearer configured (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1`
-only to a request whose `Host` names it: a loopback name or address (`localhost`, `127.0.0.1`,
+only to a request whose `Host` names it: `localhost`, a loopback address (`127.0.0.0/8`,
 `::1`) or one of `ENVOY_ALLOWED_HOSTS`, comma-separated names or addresses with no port. The
 `Host` is compared with its port stripped, its IPv6 brackets off, case folded and one trailing dot
 dropped, and any other `Host`, an empty one included, receives a JSON 421 naming it and

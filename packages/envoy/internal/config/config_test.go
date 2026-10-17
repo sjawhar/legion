@@ -36,7 +36,7 @@ func TestLoadLeavesAllowedHostsEmptyWhenUnset(t *testing.T) {
 }
 
 func TestLoadRefusesAllowedHostsWithAPortSchemeOrPath(t *testing.T) {
-	for _, entry := range []string{"hub.internal.example:9020", "http://hub.internal.example", "hub.internal.example/v1", "[2001:db8::1]:9020", "."} {
+	for _, entry := range []string{"hub.internal.example:9020", "http://hub.internal.example", "hub.internal.example/v1", "[2001:db8::1]:9020", ".", "hub.internal.example]", "::1]", "-hub.internal.example", "hub_name", "*"} {
 		t.Run(entry, func(t *testing.T) {
 			t.Setenv("ENVOY_MACHINE_ID", "test-machine")
 			t.Setenv("NATS_URLS", "nats://127.0.0.1:4222")
