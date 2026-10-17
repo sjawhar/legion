@@ -36,17 +36,19 @@
 #                cluster-DNS host pods would dial is known before bridge_start ever runs)
 # and calls:
 #   bridge_start <stream-port> <session-db-port>
-#     stands the bridge up or fails loudly; on success sets bridge_host (the cluster-DNS name
-#     pods dial, at the same two ports) and bridge_started.
+#     stands the bridge up or fails loudly; on success sets bridge_started. The cluster-DNS name
+#     pods dial (stream_port.sessiondb_port) is deterministic from bridge_name alone — the caller
+#     already computes it the same way, before calling bridge_start — so this file need not hand
+#     it back.
 #   bridge_stop
 #     idempotent and safe to call whether or not bridge_start ever ran: stops the watchdog, the
-#     chisel client and the port-forward, then deletes the bridge's pod and Service by exact name.
+#     chisel client and the port-forward, then deletes the bridge's auth Secret, pod and Service by
+#     exact name.
 
 bridge_chisel_image=mirror.gcr.io/jpillora/chisel@sha256:51d034146bb06e03a493646e63e61d42fd3b5da914c7180c92ba603865768633
 bridge_chisel_version=v1.11.8
 bridge_control_port=8080
 bridge_started=
-bridge_host=
 bridge_local_control_port=
 bridge_portforward_pid=
 bridge_portforward_attempt=0
@@ -90,7 +92,13 @@ bridge_portforward_start() {
 # come up within its own bound. It never retries a failed step itself.
 bridge_start() {
   local stream_port=$1 sessiondb_port=$2
-  bridge_host="$bridge_name.$namespace.svc.cluster.local"
+
+  # Set before any create attempt, not after the pod/Service succeed: confirmed live, 2026-10-17,
+  # a failure partway through (the Secret created, the Pod/Service not, or the reverse) left
+  # bridge_stop skipping cleanup entirely, since it only acts when this is already set. Every
+  # delete bridge_stop issues is by exact name with --ignore-not-found, so running it against
+  # objects that were never actually created is already a no-op.
+  bridge_started=1
   local auth_user=e2e auth_token
   auth_token=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 
@@ -98,6 +106,25 @@ bridge_start() {
   mkdir -p "$work/bin"
   GOBIN="$work/bin" go install "github.com/jpillora/chisel@${bridge_chisel_version}" ||
     fail "building the chisel client ($bridge_chisel_version, the same release the bridge pod's server runs) failed"
+
+  # The auth token never appears in the pod's own spec: a Pod and a Secret are readable under
+  # different RBAC verbs, and a Secret's own data is already expected to need `get secrets`, so
+  # putting the token directly in the pod's `args` (as this once did, confirmed live, 2026-10-17,
+  # readable with nothing but `get pods` RBAC, and duplicated again into kubectl apply's own
+  # last-applied-configuration annotation on the same object) weakened that boundary for no
+  # reason: chisel's server and client both already read `AUTH` from the environment when `--auth`
+  # is omitted (confirmed in chisel's own --help), so a real Secret plus `valueFrom.secretKeyRef`
+  # is the whole fix, no chisel change needed. Labelled and deleted by bridge_stop like every other
+  # object this run creates; `create`, never `apply`, since a Secret's own manifest literally
+  # carries the value apply would otherwise consider safe to also duplicate.
+  op create -f - >/dev/null <<YAML || fail "the operator could not create the bridge auth Secret $bridge_name-auth"
+apiVersion: v1
+kind: Secret
+metadata:
+  name: $bridge_name-auth
+  labels: {legion.dev/project: "$run_label"}
+stringData: {AUTH: "$auth_user:$auth_token"}
+YAML
 
   # Annotated against Cluster Autoscaler/node consolidation, the same pair every Legion issue pod
   # carries (manifest.go's safeToEvictAnnotation and doNotDisruptAnnotation): confirmed live,
@@ -107,8 +134,13 @@ bridge_start() {
   # at 11:31:26), consistent with GKE reclaiming an underutilized node out from under it. The
   # watchdog's bounded port-forward restart (below) is the right answer to a dropped connection,
   # never to the pod itself being gone — every restart attempt correctly failed NotFound once it
-  # was.
-  cat <<YAML | op apply -f - >/dev/null || fail "the operator could not create the bridge pod/Service $bridge_name"
+  # was. The server binds 127.0.0.1, not chisel's own default of 0.0.0.0 (confirmed live,
+  # 2026-10-17: 0.0.0.0 let any pod on the cluster network reach :8080 directly, bypassing the
+  # Service entirely, so a leaked AUTH value would have opened a forward tunnel from any pod, not
+  # just through kubectl port-forward) — `kubectl port-forward` still reaches it, since it tunnels
+  # into the pod's own network namespace and dials 127.0.0.1 there itself, never through the pod's
+  # cluster IP or the Service.
+  op create -f - >/dev/null <<YAML || fail "the operator could not create the bridge pod/Service $bridge_name"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -123,7 +155,10 @@ spec:
   containers:
     - name: chisel
       image: $bridge_chisel_image
-      args: ["server", "--port", "$bridge_control_port", "--reverse", "--auth", "$auth_user:$auth_token"]
+      args: ["server", "--host", "127.0.0.1", "--port", "$bridge_control_port", "--reverse"]
+      env:
+        - name: AUTH
+          valueFrom: {secretKeyRef: {name: "$bridge_name-auth", key: AUTH}}
       ports:
         - {containerPort: $bridge_control_port}
         - {containerPort: $stream_port}
@@ -142,7 +177,6 @@ spec:
     - {name: stream, port: $stream_port, targetPort: $stream_port}
     - {name: sessiondb, port: $sessiondb_port, targetPort: $sessiondb_port}
 YAML
-  bridge_started=1
   # 240s, not 120s: confirmed live, 2026-10-17, this cluster's own autopilot-default-resources-
   # mutator admission webhook adjusts the chisel container's cpu on create, and bringing up the
   # fresh NAP node this lone pod needs took long enough that 120s timed out the wait while the pod
@@ -161,7 +195,10 @@ YAML
   # A bounded retry count and a short max interval, not chisel's default of retrying forever: the
   # client gives up and exits if the port-forward it dials stays down past its own budget, which
   # the watchdog below trusts as "this bridge is really gone" rather than restarting indefinitely.
-  "$chisel_bin" client --max-retry-count 30 --max-retry-interval 2s --auth "$auth_user:$auth_token" "http://127.0.0.1:$bridge_local_control_port" \
+  # AUTH through the environment, never `--auth` on the command line (any local user can read
+  # another process's argv; only its owner or root can read its environment) — chisel reads it
+  # from there natively when `--auth` is omitted, the same env var name the server's Secret uses.
+  AUTH="$auth_user:$auth_token" "$chisel_bin" client --max-retry-count 30 --max-retry-interval 2s "http://127.0.0.1:$bridge_local_control_port" \
     "R:0.0.0.0:$stream_port:127.0.0.1:$stream_port" \
     "R:0.0.0.0:$sessiondb_port:127.0.0.1:$sessiondb_port" \
     >"$work/bridge-chisel-client.log" 2>&1 &
@@ -200,7 +237,11 @@ YAML
   # loop), so the two races. The flag file is checked right before every kill -TERM "$$", not only
   # at loop top, so it still catches a check made moments before bridge_stop writes it.
   (
-    trap 'kill "$pf_pid" 2>/dev/null; exit 0' TERM
+    # Kills both pf_pid (the one this loop is tracking) and bridge_portforward_pid (the global
+    # bridge_portforward_start itself updates the instant it forks a new attempt, before this loop
+    # has assigned pf_pid from it): a TERM arriving mid-restart, after a new port-forward process
+    # exists but before `pf_pid=$bridge_portforward_pid` runs below, would otherwise orphan it.
+    trap 'kill "$pf_pid" "$bridge_portforward_pid" 2>/dev/null; exit 0' TERM
     pf_pid=$bridge_portforward_pid
     down_since=
     while :; do
@@ -219,6 +260,7 @@ YAML
         elif [ $(($(date +%s) - down_since)) -ge 60 ]; then
           [ -f "$work/bridge-stopping" ] && exit 0
           echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name could not be restarted within 60s; terminating the run" >&2
+          kill_harness
           kill -TERM "$$" 2>/dev/null
           exit 1
         fi
@@ -226,6 +268,7 @@ YAML
       if ! kill -0 "$bridge_client_pid" 2>/dev/null; then
         [ -f "$work/bridge-stopping" ] && exit 0
         echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted); terminating the run: $(cat "$work/bridge-chisel-client.log")" >&2
+        kill_harness
         kill -TERM "$$" 2>/dev/null
         exit 1
       fi
@@ -271,6 +314,7 @@ bridge_stop() {
   { [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null; } || true
   wait "$bridge_portforward_pid" 2>/dev/null || true
   [ -n "$bridge_name" ] || return 0
+  op delete secret "$bridge_name-auth" --ignore-not-found >/dev/null 2>&1 || true
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local i pod_read svc_read
