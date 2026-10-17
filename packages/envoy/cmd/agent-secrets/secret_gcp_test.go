@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"strconv"
 	"strings"
@@ -341,6 +342,56 @@ func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "not a person's sign-in") {
 		t.Fatalf("stderr: %q", stderr)
+	}
+}
+
+// TestGCPSecretListSucceedsWithoutUserinfoScope: a read makes no userinfo call, so it succeeds
+// even under a token that lacks the scope that call needs (a machine identity's commonly does).
+func TestGCPSecretListSucceedsWithoutUserinfoScope(t *testing.T) {
+	startFakeSecretManager(t, newFakeSecretManager())
+	restoreCreds, restoreUserinfo := gcpCredentials, gcpUserinfo
+	gcpCredentials = func(context.Context) (*google.Credentials, error) {
+		return &google.Credentials{TokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "fake"})}, nil
+	}
+	gcpUserinfo = func(context.Context, *google.Credentials) (string, error) {
+		return "", errors.New("insufficient authentication scopes")
+	}
+	t.Cleanup(func() { gcpCredentials, gcpUserinfo = restoreCreds, restoreUserinfo })
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
+
+	_, stderr, code := runSecret("list")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}
+
+// TestGCPSecretRetagKeepsUnrelatedAnnotations: retag changes only owner and tier, never an
+// annotation it does not know about (an UpdateSecret whose mask names "annotations" replaces the
+// whole map unless retag reads and merges the current one first).
+func TestGCPSecretRetagKeepsUnrelatedAnnotations(t *testing.T) {
+	fake := newFakeSecretManager()
+	startFakeSecretManager(t, fake)
+	useGCPIdentity(t, "authorized_user", "ada@example.com")
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
+	useStdin(t, "shh")
+	if _, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent"); code != 0 {
+		t.Fatalf("create: exit %d, stderr %q", code, stderr)
+	}
+
+	id := testGCPPrefix + "scratch-test"
+	fake.mu.Lock()
+	fake.secrets[id].secret.Annotations["unrelated-note"] = "do-not-delete"
+	fake.mu.Unlock()
+
+	if _, stderr, code := runSecret("retag", "SCRATCH_TEST", "--tier", "human"); code != 0 {
+		t.Fatalf("retag: exit %d, stderr %q", code, stderr)
+	}
+
+	fake.mu.Lock()
+	got := fake.secrets[id].secret.Annotations["unrelated-note"]
+	fake.mu.Unlock()
+	if got != "do-not-delete" {
+		t.Fatalf("retag dropped an unrelated annotation: got %q", got)
 	}
 }
 

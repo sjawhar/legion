@@ -394,9 +394,9 @@ func orDash(s string) string {
 // method takes the secret's name under the prefix (secretName's slug); the full store-side name
 // (each backend's own id) is each backend's own concern.
 type secretBackend interface {
-	// requireAccount refuses, before any read, a sign-in whose account or project does not hold
-	// the agent secrets: a read there would list another account's secrets as if they were the
-	// agent secrets.
+	// requireAccount refuses, before any read, a sign-in whose account does not hold the agent
+	// secrets: a read there would list another account's secrets as if they were the agent
+	// secrets. AWS only: GCP needs no equivalent (gcpBackend.requireAccount says why).
 	requireAccount(ctx context.Context) error
 	// requireWriteSignIn refuses, before any write, a sign-in that must not write - AWS a
 	// machine's own role, GCP a service-account identity - and answers the signed-in person's
@@ -489,9 +489,9 @@ func openSecretBackend(ctx context.Context, profile string, settings Settings) (
 	}
 }
 
-// connectReader is openSession for a read: it refuses a sign-in in another account or project
-// (backend.requireAccount), whose secrets are not the agent secrets. Any sign-in that can read
-// there reads: IAM decides what it may read.
+// connectReader is openSession for a read: on AWS it refuses a sign-in in another account
+// (backend.requireAccount), whose secrets are not the agent secrets; GCP needs no equivalent. Any
+// sign-in that can read there reads: IAM decides what it may read.
 func connectReader(ctx context.Context, profile string) (*secretSession, error) {
 	s, err := openSession(ctx, profile)
 	if err != nil {

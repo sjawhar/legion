@@ -1,8 +1,9 @@
 // packages/envoy/cmd/agent-secrets/secret_gcp.go
 //
 // The GCP side of the secret forms: the Secret Manager calls they make, under the person's own
-// Application Default Credentials, and the checks that refuse a read or a write under an identity
-// in another project and a write under any identity but a person's own.
+// Application Default Credentials, and the check that refuses a write under any identity but a
+// person's own (GCP, unlike AWS, needs no separate wrong-project read check: every call already
+// names the project explicitly, so the API itself refuses one in another project).
 //
 // GCP Secret Manager has no soft-delete-with-recovery-window the way AWS does. Instead delete sets
 // the secret's own expire_time, which GCP uses as a TTL: the secret (and every version it holds)
@@ -62,15 +63,6 @@ func checkSettingsKMSKeyName(settings Settings) error {
 	return nil
 }
 
-// gcpIdentityInfo is what the GCP backend knows about the signed-in Application Default
-// Credentials: the ADC JSON's own "type" (google.AuthorizedUser for a person's `gcloud auth
-// application-default login`, google.ServiceAccount for a key file, "" when ADC carries no JSON at
-// all, such as a GCE/GKE metadata-server identity or workload identity), and the signed-in email.
-type gcpIdentityInfo struct {
-	Kind  google.CredentialsType
-	Email string
-}
-
 // gcpCredentials loads the person's Application Default Credentials. Tests replace it.
 var gcpCredentials = func(ctx context.Context) (*google.Credentials, error) {
 	return google.FindDefaultCredentials(ctx, secretmanager.DefaultAuthScopes()...)
@@ -107,32 +99,29 @@ var gcpClientDial = func(ctx context.Context, creds *google.Credentials) (*secre
 	return secretmanager.NewClient(ctx, option.WithCredentials(creds), option.WithLogger(slog.New(slog.DiscardHandler)))
 }
 
-// newGCPBackend loads the person's Application Default Credentials, reads their identity
-// (gcpCredentials, gcpUserinfo) and dials the Secret Manager client (gcpClientDial).
+// newGCPBackend loads the person's Application Default Credentials, reads the ADC JSON's own
+// "type" and dials the Secret Manager client (gcpClientDial). It makes no userinfo call: that is
+// only needed for a write's --owner me, so requireWriteSignIn makes it lazily, and a read under an
+// identity whose token lacks userinfo scope (common for a machine's) still succeeds.
 func newGCPBackend(ctx context.Context, settings Settings) (*gcpBackend, error) {
 	creds, err := gcpCredentials(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load your Google Cloud Application Default Credentials (run `gcloud auth application-default login`): %w", err)
 	}
-	var identity gcpIdentityInfo
+	var credsKind google.CredentialsType
 	if len(creds.JSON) > 0 {
 		var parsed struct {
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(creds.JSON, &parsed); err == nil {
-			identity.Kind = google.CredentialsType(parsed.Type)
+			credsKind = google.CredentialsType(parsed.Type)
 		}
 	}
-	email, err := gcpUserinfo(ctx, creds)
-	if err != nil {
-		return nil, err
-	}
-	identity.Email = strings.ToLower(email)
 	client, err := gcpClientDial(ctx, creds)
 	if err != nil {
 		return nil, fmt.Errorf("create the Secret Manager client: %w", err)
 	}
-	return &gcpBackend{settings: settings, client: client, identity: identity}, nil
+	return &gcpBackend{settings: settings, client: client, creds: creds, credsKind: credsKind}, nil
 }
 
 // gcpBackend is the secretBackend for store "gcp-secret-manager": GCP Secret Manager under the
@@ -140,7 +129,11 @@ func newGCPBackend(ctx context.Context, settings Settings) (*gcpBackend, error) 
 type gcpBackend struct {
 	settings Settings
 	client   *secretmanager.Client
-	identity gcpIdentityInfo
+	creds    *google.Credentials
+	// credsKind is the ADC JSON's own "type" (google.AuthorizedUser for a person's `gcloud auth
+	// application-default login`, google.ServiceAccount for a key file, "" when ADC carries no
+	// JSON at all, such as a GCE/GKE metadata-server identity or workload identity).
+	credsKind google.CredentialsType
 }
 
 // id is the Secret Manager resource name of the secret whose name under the prefix is slug.
@@ -169,15 +162,21 @@ func (b *gcpBackend) requireAccount(context.Context) error { return nil }
 // requireWriteSignIn refuses, before any write, Application Default Credentials that are not a
 // person's own `gcloud auth application-default login` (a service account key file, or a GCE/GKE
 // metadata-server or workload identity, whose ADC carries no "authorized_user" JSON); it answers
-// the signed-in person's lowercased email for --owner me.
-func (b *gcpBackend) requireWriteSignIn(context.Context) (string, error) {
-	if b.identity.Kind != google.AuthorizedUser {
+// the signed-in person's lowercased email for --owner me. It calls the userinfo endpoint
+// (gcpUserinfo) only here, after the Kind check, not in newGCPBackend: a read never needs the
+// email, and a machine identity's token commonly lacks the userinfo scope that call needs.
+func (b *gcpBackend) requireWriteSignIn(ctx context.Context) (string, error) {
+	if b.credsKind != google.AuthorizedUser {
 		return "", fmt.Errorf("your Google Cloud Application Default Credentials are not a person's sign-in (run `gcloud auth application-default login` instead of using a service account): a secret is written under your own sign-in, never a machine's")
 	}
-	if b.identity.Email == "" {
+	email, err := gcpUserinfo(ctx, b.creds)
+	if err != nil {
+		return "", err
+	}
+	if email == "" {
 		return "", errors.New("your Google sign-in names no email")
 	}
-	return b.identity.Email, nil
+	return strings.ToLower(email), nil
 }
 
 // hasCurrentVersion reports whether id is served while versions/latest is ENABLED.
@@ -317,11 +316,26 @@ func (b *gcpBackend) currentTags(ctx context.Context, slug string) (owner, tier 
 	return secret.GetAnnotations()[policy.TagOwner], secret.GetAnnotations()[policy.TagTier], nil
 }
 
+// retag changes only the owner and tier annotations, preserving any other annotation the secret
+// holds: an UpdateSecret whose mask names "annotations" replaces the whole map, unlike AWS's
+// TagResource, which touches only the tags it names, so this reads the secret's current
+// annotations first and sends the merged map rather than one holding only owner and tier.
 func (b *gcpBackend) retag(ctx context.Context, slug, owner, tier string) error {
-	_, err := b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
+	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
+	if err != nil {
+		return err
+	}
+	annotations := secret.GetAnnotations()
+	merged := make(map[string]string, len(annotations)+2)
+	for k, v := range annotations {
+		merged[k] = v
+	}
+	merged[policy.TagOwner] = owner
+	merged[policy.TagTier] = tier
+	_, err = b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),
-			Annotations: map[string]string{policy.TagOwner: owner, policy.TagTier: tier},
+			Annotations: merged,
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"annotations"}},
 	})
