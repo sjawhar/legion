@@ -66,7 +66,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	if fact.Reopened {
-		if err := e.headMoved(ctx, tx, *issue, &pr); err != nil {
+		if err := e.headMoved(ctx, tx, *issue, &pr, true); err != nil {
 			return intake.Result{}, err
 		}
 	}
@@ -123,7 +123,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if err := e.headMoved(ctx, tx, *issue, pr); err != nil {
+	if err := e.headMoved(ctx, tx, *issue, pr, false); err != nil {
 		return intake.Result{}, err
 	}
 	if moved {

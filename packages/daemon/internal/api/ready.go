@@ -33,35 +33,35 @@ func githubReadFailed(err error) *refusal {
 	return &refusal{http.StatusBadGateway, "GITHUB_READ_FAILED", fmt.Sprintf("%v; GitHub's failure, not the head's: complete again", err)}
 }
 
-// readyChecks refuses a READY whose head GitHub will not merge for its checks, or whose merge would
-// carry the issue's handoffs onto the base branch. A pull request already merged has nothing left to
-// gate: a person merged it before READY, which the workflow takes on to the production check, and no
-// commit can change its head, so READY is published without reading it. Otherwise the head must not
-// hold .legion/<issue>/ (headCarries), which retro's last commit removes (dispatch://LEGION-605): a
-// squash merge commits the head merged into the base, and nothing on the base branch reads a
-// handoff. A read GitHub fails is refused as GitHub's failure, to retry, not the head's. Then every
-// check the base branch requires - its rulesets' required status checks and its branch
-// protection's - must have succeeded on the pull request's head, and every workflow its rulesets
-// require must have a run for the head that succeeded (requiredchecks.Required,
-// requiredchecks.Workflows), judged by the rule the workflow's checks verdict judges by too
-// (classify.Judge). A head reports none of them when its push skipped CI when it should not have
-// (a `skip-checks: true` trailer on a push that touched more than .legion/), or when the pull
+// readyChecks refuses a READY whose head GitHub will never merge for its checks, or whose merge
+// would carry the issue's handoffs onto the base branch. A pull request already merged has nothing
+// left to gate: a person merged it before READY, which the workflow takes on to the production
+// check, and no commit can change its head, so READY is published without reading it. Otherwise the
+// head must not hold .legion/<issue>/ (headCarries), which retro's last commit removes
+// (dispatch://LEGION-605): a squash merge commits the head merged into the base, and nothing on the
+// base branch reads a handoff. A read GitHub fails is refused as GitHub's failure, to retry, not the
+// head's. Then no check the base branch requires - its rulesets' required status checks and its
+// branch protection's - may have failed on the pull request's head or be missing from it, and every
+// workflow its rulesets require must have a run for the head that has not failed
+// (requiredchecks.Required, requiredchecks.Workflows), judged by the rule the workflow's checks
+// verdict judges by too (classify.Judge). A check or workflow still running is published: the
+// daemon's submission of the merge (record.ReadyMerge) waits on GitHub for it, and a red it settles
+// to withdraws the READY. A head reports none of them when its push skipped CI when it should not
+// have (a `skip-checks: true` trailer on a push that touched more than .legion/), or when the pull
 // request conflicts with its base, since GitHub starts no pull_request run for a pull request it
 // cannot merge; it is refused here, naming the head, the check or workflow, and the conflict once
-// GitHub shows it, rather than left for GitHub to block the human merge. A required workflow
-// another repository defines (an organization ruleset can require one) never matches a run here,
-// since a run is matched in the repository that defines the workflow and belongs to the one it ran
-// for; its refusal names that repository instead.
+// GitHub shows it, rather than left for GitHub to block the merge. A required workflow another
+// repository defines (an organization ruleset can require one) never matches a run here, since a
+// run is matched in the repository that defines the workflow and belongs to the one it ran for; its
+// refusal names that repository instead.
 //
 // A base branch that requires no check has no check to refuse, and READY is published once the head
 // carries no handoffs. The note says so rather than reading like a head whose every required check
-// was read and passed: a private repository on the free plan can define no ruleset, so this is the
-// ordinary state of the smoke sandbox, and a merger there has no check-based gate on the head at
-// all. The note is the completion's answer (HandoffCompleteResponse.Note). The answer's mergeNote
-// is the by-hand note (mergeReadyPolicy), empty unless the pull request is one a person merges: the
-// completion records it for the packet the daemon tells, and it is the note too. The answer also
-// carries the record as the checks read it and GitHub's clock in their read of the pull request,
-// which the workflow holds the READY to (readyAnswer).
+// was read and passed. The note is the completion's answer (HandoffCompleteResponse.Note). The
+// answer's mergeNote is the by-hand note (mergeReadyPolicy), empty unless the pull request is one a
+// person merges: the completion records it for the packet the daemon tells, and it is the note too.
+// The answer also carries the record as the checks read it and GitHub's clock in their read of the
+// pull request, which the workflow holds the READY to (readyAnswer).
 //
 // GitHub can answer a read from a replica that has not seen the newest push, while the record holds
 // it from that push's webhook. Both clocks are the pull request's updated_at, to the second, so a
@@ -103,16 +103,10 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 		return answer, nil
 	}
 	if pull.State == "closed" {
-		return readyAnswer{}, &refusal{http.StatusConflict, "READY_PULL_REQUEST_CLOSED", fmt.Sprintf("pull request #%d is closed without merging, so there is no merge to arm: tell the architect, whose decision it is whether the work is reopened", number)}
-	}
-	// A disarm queued by an earlier withdrawal decides by state when it runs: still unfinished as
-	// this READY is accepted, it would keep a stale arm that stands at this head, or disable the arm
-	// this READY's merger is about to make. READY waits for it.
-	if disarmPending {
-		return readyAnswer{}, &refusal{http.StatusConflict, "READY_DISARM_PENDING", fmt.Sprintf("the daemon has not yet finished disarming pull request #%d, which an earlier withdrawal or head move queued: complete again in a minute, and tell the architect if it keeps refusing", number)}
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_PULL_REQUEST_CLOSED", fmt.Sprintf("pull request #%d is closed without merging, so there is no merge to submit: tell the architect, whose decision it is whether the work is reopened", number)}
 	}
 	if pull.Head.SHA != readyHead {
-		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("pull request #%d now heads at %s, not READY's %s; GitHub will not arm a different head: build a new packet and complete again", number, pull.Head.SHA, readyHead)}
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("pull request #%d now heads at %s, not READY's %s; the daemon submits only the head READY names: build a new packet and complete again", number, pull.Head.SHA, readyHead)}
 	}
 	if pr.HeadSHA != pull.Head.SHA && !pr.HeadUpdatedAt.IsZero() && !pull.UpdatedAt.After(pr.HeadUpdatedAt) {
 		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("the daemon recorded pull request #%d at head %s, at %s, no earlier than GitHub's answer of %s, at %s, which may not have caught up with that push: build a new packet once GitHub shows the new head, and complete again",
@@ -133,10 +127,15 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_CONFLICTS", fmt.Sprintf("head %s of pull request #%d conflicts with its base %s, which GitHub cannot merge and starts no pull_request CI for: the implementer brings %s into the branch with a forward merge; tell the architect", head, number, pull.Base.Ref, pull.Base.Ref)}
 	}
 	// The project's merge policy is read once, before the checks: a by_hand pull request is READY
-	// for a person to merge however its base branch's checks are configured.
+	// for a person to merge however its base branch's checks are configured. Unlike ordinary READY,
+	// a by-hand READY waits for an unfinished disarm: it must not leave an arm from an earlier
+	// ordinary READY standing at this new head.
 	mergeNote, refused := mergeReadyPolicy(ctx, github, rules, number)
 	if refused != nil {
 		return readyAnswer{}, refused
+	}
+	if mergeNote != "" && disarmPending {
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_DISARM_PENDING", fmt.Sprintf("pull request #%d matches a by_hand merge rule, and an earlier auto-merge disarm is unfinished: complete again once it finishes, so no stale arm can merge this head", number)}
 	}
 	answer.note, answer.mergeNote = mergeNote, mergeNote
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
@@ -162,14 +161,12 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 		}
 	}
 	// notGreen is READY's refusal for one required check or workflow's standing on the head, nil
-	// when it succeeded there.
+	// when it succeeded there or is still running.
 	notGreen := func(check classify.Standing, what, missing string) *refusal {
 		var message string
 		switch name := check.Name; {
 		case check.Result == classify.Missing:
 			message = fmt.Sprintf("head %s of pull request #%d has %s the %s %q: its push may have skipped CI when it should not have; tell the architect", head, number, missing, what, name)
-		case check.Result == classify.Pending:
-			message = fmt.Sprintf("the %s %q is still running on head %s of pull request #%d: wait for it to finish", what, name, head, number)
 		case check.Red():
 			message = fmt.Sprintf("the %s %q ended %s on head %s of pull request #%d", what, name, check.Result, head, number)
 		default:
@@ -213,9 +210,9 @@ const pullRequestFilesLimit = 3000
 const byHandNotePrefix = "MANUAL_MERGE_REQUIRED:"
 
 // mergeReadyPolicy is the project's merge policy for pull request number: the by-hand note
-// (byHandNotePrefix) when its change touches a by_hand path, which tells the merger not to arm it,
-// and nothing otherwise. A list GitHub cut at pullRequestFilesLimit leaves a by_hand path unread,
-// so READY is refused rather than armed on it.
+// (byHandNotePrefix) when its change touches a by_hand path, which keeps the daemon from submitting
+// its merge, and nothing otherwise. A list GitHub cut at pullRequestFilesLimit leaves a by_hand path
+// unread, so READY is refused rather than submitted on it.
 func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules config.MergeRules, number int) (string, *refusal) {
 	if len(rules.ByHand) == 0 {
 		return "", nil
