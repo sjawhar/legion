@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/compute"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/secretmanager"
@@ -404,14 +406,38 @@ type userKind struct {
 	grant func() (core.Permissions, error)
 }
 
-// machineKind is a kind named by a machine id, which may not be empty: the grant grant gives it.
+// machineKind is a kind named by a machine id, which checkMachineID must accept: the grant grant
+// gives it.
 func machineKind(where, name string, id *string, grant func(string) core.Permissions) userKind {
 	return userKind{name, id != nil, func() (core.Permissions, error) {
-		if *id == "" {
-			return core.Permissions{}, fmt.Errorf("%s: %s is empty", where, name)
+		if err := checkMachineID(where, name, *id); err != nil {
+			return core.Permissions{}, err
 		}
 		return grant(*id), nil
 	}}
+}
+
+// checkMachineID is the one rule every machine id of the hub passes, machineId and
+// dispatchMachineId alike: the id names the listener durable listener-<id> and the queue group
+// envoy-listener-<id> (bus.ListenerDurable, bus.ListenerQueue), so the hub refuses an id blank
+// after trimming whitespace, and one holding a character those names cannot carry: '.', '*', '>',
+// '/', '\', a control character, or any whitespace but the space, which both names turn into a
+// hyphen. Each refusal is a core.InputError naming where.name and quotes at most the one refused
+// character, which no seed fits (seededInput already refused an id holding one).
+func checkMachineID(where, name, id string) error {
+	input := where + "." + name
+	if id == "" {
+		return core.InputErrorf(input, "%s: %s is empty", where, name)
+	}
+	if strings.TrimSpace(id) == "" {
+		return core.InputErrorf(input, "%s: %s is only whitespace", where, name)
+	}
+	for _, r := range id {
+		if r != ' ' && (strings.ContainsRune(`.*>/\`, r) || unicode.IsControl(r) || unicode.IsSpace(r)) {
+			return core.InputErrorf(input, "%s: %s contains %q, which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>", where, name, r)
+		}
+	}
+	return nil
 }
 
 // userPermissions is the grant of the hub user at where, which names exactly one kind.
@@ -443,15 +469,23 @@ func userPermissions(where string, u NATSUserArgs) (core.Permissions, error) {
 // authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
 // permissions are its host's set when it names a machine id, Dispatch's set when it names a
 // Dispatch machine id, the daemon's set when daemon is true, and its own when it names
-// permissions. The listener's user follows them, named hostname, with the listener's set for that
-// machine and a seed; the session user comes last, with the session's set and no seed, as the
-// authorization's noAuthUser. A hub needs users or a listener: with the session user alone, no
-// client could hold more than a session's grant, and no listener could run. core validates the
-// rest when it renders, a seed in a name or a rule entry first. The hub's own refusals name a user
-// by its index alone: they come before core has read the names, so quoting one could quote a seed.
+// permissions. The listener's user follows them, named hostname, with the listener's set for
+// that machine and a seed; the session user comes last, with the session's set and no seed, as
+// the authorization's noAuthUser. A hub needs users or a listener: with the session user alone,
+// no client could hold more than a session's grant, and no listener could run. core validates the
+// rest when it renders, a seed in a name or a rule entry first. Each machine id, of either kind,
+// also names a listener durable and queue group, which NATS would make two users share, so an id
+// whose durable repeats another user's, of either kind, or the hub's own listener's
+// (bus.ListenerDurable turns a space into a hyphen, so "a b" and "a-b" collide) is refused as a
+// core.InputError naming the later input. The hub's own refusals name a user by its index alone:
+// they come before core has read the names, so quoting one could quote a seed.
 func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, session *SessionUserArgs) (core.Authorization, error) {
 	if len(users) == 0 && l == nil {
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
+	}
+	durables := map[string]string{}
+	if l != nil {
+		durables[bus.ListenerDurable(hostname)] = "the hub's own listener"
 	}
 	auth := core.Authorization{Users: make([]core.User, 0, len(users)+2)}
 	for i, u := range users {
@@ -462,6 +496,20 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		perms, err := userPermissions(where, u)
 		if err != nil {
 			return core.Authorization{}, err
+		}
+		for _, id := range []struct {
+			name  string
+			value *string
+		}{{"machineId", u.MachineID}, {"dispatchMachineId", u.DispatchMachineID}} {
+			if id.value == nil {
+				continue
+			}
+			input := where + "." + id.name
+			durable := bus.ListenerDurable(*id.value)
+			if prior, ok := durables[durable]; ok {
+				return core.Authorization{}, core.InputErrorf(input, "%s: %s gives the same durable name as %s", where, id.name, prior)
+			}
+			durables[durable] = input
 		}
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,

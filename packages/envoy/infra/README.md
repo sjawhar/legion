@@ -1586,13 +1586,16 @@ filtered create, delete and acknowledgements of Dispatch's `delivery-events` and
 durables; the key-value calls for `envoy_webhook_redelivery`; publication of every session's
 agent-stream control subject; and subscription to every session's agent-stream frames. A
 `gcp:NatsHub` user with `dispatchMachineId` holds it. No session shares the user, so it holds none
-of `SessionPermissions`: a direct publish to a session's agent-stream frames is refused. Whatever
-holds its seed, `envoy-dispatch` or the listener beside it, can still read every session's frames
-and send control to any session, and, since NATS checks no push consumer's deliver subject against
-a grant, it can put any payload on a session's frames through a `delivery-events` consumer it may
-create. So the seed is as sensitive as every session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and
-2.15.1 in `core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is
-refused a publish to a session's frames.
+of `SessionPermissions`: it is a direct publish to a session's agent-stream frames that is refused.
+Whatever holds its seed, `envoy-dispatch` or the listener beside it, can still read every session's
+frames and send control to any session; its filtered create on `delivery-events` lets it create
+that durable on any filter, so it can read any retained notification; and, since NATS checks no
+push consumer's deliver subject against a grant, a consumer it creates can deliver any payload onto
+a session's frames. Its `_INBOX.>` subscription, `ListenerPermissions`'s, receives every reply any
+client on the server gets, other listeners' durable push deliveries included. The real
+`envoy-dispatch` runs under that grant against nats-server 2.10 and 2.15.1 in
+`core/dispatch_permissions_live_test.go`, which also checks Dispatch's own user is refused a
+publish to a session's frames.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
@@ -1603,6 +1606,8 @@ stream an older listener created with the role lanes on it is migrated by the li
 (`packages/envoy/internal/bus/stream.go`, `migrateRoleLanesOffStream`), which lists the stream's
 consumers, reads and updates every one, and purges the role lanes. The set grants none of those
 calls, so on such a stream, as on a hub given a backup of one, the server refuses the migration.
+Dispatch's start-up attempts the same migration (`bus.ConnectOwningStream`, which `envoy-dispatch`
+calls too), and its grant adds none of those calls, so the server refuses it the same way.
 
 ## Changing the module
 

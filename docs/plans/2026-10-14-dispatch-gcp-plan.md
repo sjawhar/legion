@@ -87,10 +87,13 @@ The coordinator's decisions inside those rulings, which this plan implements and
    MagicDNS names. Dispatch reads it through its settings table, the listener through the bus's
    environment lookup. Tested against an in-process SOCKS5 server, with the negative controls
    (unset: no proxy is dialed; a dead address: the connect fails naming it).
-3. **`core.DispatchPermissions`**: `core.HostPermissions` plus the subjects Dispatch itself
+3. **`core.DispatchPermissions`**: `core.ListenerPermissions` plus the subjects Dispatch itself
    publishes and consumes, written out by hand in its test, and proven by a `natslive` test that
    runs the real `envoy-dispatch` against a nats-server holding only that set and refuses nothing.
-   The name and shape are the interface the separate `aws:Dispatch` plan also uses.
+   The name and shape are the interface the separate `aws:Dispatch` plan also uses. *As built* the
+   base is `ListenerPermissions`, not `HostPermissions` as first written: no session connects as
+   this user, and the session half's `agentstream.*.frames` publish would have let the seed forge
+   any session's frames directly.
 4. **`envoy-infra:gcp:Dispatch`** declares: an Autopilot cluster of its own (private nodes, Cloud
    NAT), Cloud SQL for PostgreSQL at the smallest dedicated tier (1 vCPU, 3.75 GB) on a private IP,
    reached through the Cloud SQL Auth Proxy as a native sidecar with `--private-ip`; a built-in
@@ -150,7 +153,7 @@ Postgres, `settings.go:43-44`); Dispatch's GitHub App and any webhooks; a monito
   the grant for a user that names `dispatchMachineId` (Task 6.4), so the consumer writes the same
   string in both places; a mismatch leaves the listener's durable `listener-<id>` out of the grant
   and the listener never healthy, the shape slice 4's negative control proves
-  (`core/permissions_live_test.go:95-113`). The set is `HostPermissions(machineID)` plus what
+  (`core/permissions_live_test.go:95-113`). The set is `ListenerPermissions(machineID)` plus what
   Dispatch does on NATS, read from its code: two durable push consumers on the stream
   (`internal/dispatch/delivery/intake.go:227,246,274-281`: `delivery-events` filtered on
   `notifications.github.>`; `delivery/jobs.go:57-58,129-134`: `delivery-jobs` filtered on
@@ -593,10 +596,10 @@ const DispatchJobDurable = "delivery-jobs"
 const WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 ```
 
-  The three definitions move onto them: `const deliveryConsumerName = bus.DispatchDeliveryDurable`
-  (`intake.go:227`), `jobConsumerName = bus.DispatchJobDurable` (`jobs.go:57`), and
-  `Bucket = bus.WebhookRedeliveryBucket` (`sweep.go:46`; `redeliver.Bucket` stays exported for its
-  callers). No test under `internal/dispatch` spells the literals (the gate's `git grep`), so
+  The first two definitions move onto them: `const deliveryConsumerName = bus.DispatchDeliveryDurable`
+  (`intake.go:227`) and `jobConsumerName = bus.DispatchJobDurable` (`jobs.go:57`); `redeliver.Bucket`
+  is removed, its callers using `bus.WebhookRedeliveryBucket` directly (`sweep.go:75-77`). No test
+  under `internal/dispatch` spells the literals (the gate's `git grep`), so
   `bus`'s literal test is the independent check.
 - [ ] **Step 3: pass** `go test ./internal/bus/ ./internal/dispatch/delivery/ ./internal/dispatch/redeliver/`.
   `git grep -n -e '"delivery-events"' -e '"delivery-jobs"' -e '"envoy_webhook_redelivery"' -- packages/envoy`
@@ -611,7 +614,7 @@ const WebhookRedeliveryBucket = "envoy_webhook_redelivery"
 
 ```go
 // DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
-// envoy-listener beside it share: HostPermissions(machineID), the listener's machine id, then what
+// envoy-listener beside it share: ListenerPermissions(machineID), the listener's machine id, then what
 // Dispatch itself needs. Publish, in this order: for each durable Dispatch binds (bus.DispatchDeliveryDurable,
 // bus.DispatchJobDurable) its info, its create on the filtered form nats.go sends for a consumer
 // with one filter subject (CONSUMER.CREATE.<stream>.<durable>.>), its delete (a replacement at its
@@ -629,7 +632,7 @@ func bucketPermissions(bucket string) []string
 ```
 
 - [ ] **Step 1: failing test.** `TestDispatchPermissionsForExampleDispatch` writes the whole set
-  for `example-dispatch` by hand: `HostPermissions("example-dispatch")`'s publish entries as the
+  for `example-dispatch` by hand: `ListenerPermissions("example-dispatch")`'s publish entries as the
   existing hand-written test spells them, then exactly these, in order:
 
 ```text
@@ -652,9 +655,9 @@ $JS.FC.KV_envoy_webhook_redelivery.>
 agentstream.*.control
 ```
 
-  and the subscribe entries: the host's (`_INBOX.>`, `notifications.role.> envoy-listener-example-dispatch`,
-  `notifications.>`, `agentstream.*.control`), then `agentstream.*.frames`. A second check: every
-  entry of `HostPermissions` is in `DispatchPermissions`, in both directions, and the existing
+  and the subscribe entries: the listener's (`_INBOX.>`,
+  `notifications.role.> envoy-listener-example-dispatch`), then `agentstream.*.frames`. A second
+  check: every entry of `ListenerPermissions` is in `DispatchPermissions`, and the existing
   `ListenerPermissions`/`HostPermissions` tests still pass unchanged.
 - [ ] **Step 2: implement** with `bucketPermissions` extracted; pass `go test ./core/`
   (`cd packages/envoy/infra`; `core`'s real-server tests start nats-server through `testnats`).
@@ -736,7 +739,7 @@ that pulls `testnats.Image` and `testnats.HubImage`, for the reason that step gi
      `outside.example` and nothing else (`permissions_live_test.go:83-91`'s reading): the server
      refused nothing Dispatch did.
 
-  The listener is not run here: `DispatchPermissions` contains `HostPermissions`, and slice 4's
+  The listener is not run here: `DispatchPermissions` contains `ListenerPermissions`, and slice 4's
   test proves the listener under that half.
 
   Negative control, in the same test, with the same App and fake: the grant without

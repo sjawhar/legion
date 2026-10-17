@@ -1,6 +1,7 @@
 package gcp_test
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/nats"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -243,6 +245,109 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		},
 	}
 	requireResolverRefusals(t, cases)
+}
+
+// Every machine id of the hub goes through one rule, machineId and dispatchMachineId alike: the id
+// names the durable listener-<id> and the queue group envoy-listener-<id>, so the hub refuses an
+// id blank after trimming whitespace, and one holding a character those names cannot carry: '.',
+// '*', '>', '/', '\', a control character, or any whitespace but the space, which both names turn
+// into a hyphen. Each refusal is a core.InputError naming the id's input and quotes at most the
+// one refused character; the seed check runs first (TestNatsHubRefusesASeedInAnyPlainInput), so no
+// refusal echoes a seed.
+func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
+	kinds := []struct {
+		field, where string
+		set          func(*gcp.NatsHubArgs, string)
+	}{
+		{"machineId", "users[0]", func(a *gcp.NatsHubArgs, id string) { a.Users[0].MachineID = pulumi.StringRef(id) }},
+		{"dispatchMachineId", "users[2]", func(a *gcp.NatsHubArgs, id string) { a.Users[2].DispatchMachineID = pulumi.StringRef(id) }},
+	}
+	const carry = ", which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"
+	for _, kind := range kinds {
+		for _, row := range []struct{ name, id, want string }{
+			{"blank", "", kind.field + " is empty"},
+			{"only whitespace", "   ", kind.field + " is only whitespace"},
+			{"a dot", "a.b", kind.field + ` contains '.'` + carry},
+			{"a star", "a*", kind.field + ` contains '*'` + carry},
+			{"a full wildcard", "a>", kind.field + ` contains '>'` + carry},
+			{"a slash", "a/b", kind.field + ` contains '/'` + carry},
+			{"a backslash", `a\b`, kind.field + ` contains '\\'` + carry},
+			{"a tab", "a\tb", kind.field + ` contains '\t'` + carry},
+			{"a newline", "a\nb", kind.field + ` contains '\n'` + carry},
+		} {
+			t.Run(kind.field+" with "+row.name, func(t *testing.T) {
+				args := exampleArgs()
+				kind.set(args, row.id)
+				requireMachineIDRefusal(t, args, kind.where+"."+kind.field, kind.where+": "+row.want)
+			})
+		}
+	}
+	// A space itself is accepted: both names turn it into a hyphen.
+	t.Run("an id with a space is accepted", func(t *testing.T) {
+		args := exampleArgs()
+		args.Users[0].MachineID = pulumi.StringRef("example host a")
+		args.Users[2].DispatchMachineID = pulumi.StringRef("example dispatch host")
+		require.NoError(t, gcp.ResolveNatsHub(args))
+	})
+}
+
+// Two machine ids whose durable names collide would put two listeners on one durable and queue
+// group, so the later id is refused, within a kind, across the two kinds, when a space and a
+// hyphen hyphenate alike, and against the hub's own listener (machine example-hub). Without the
+// hub's listener the hostname is nobody's durable, so a user may hold it.
+func TestNatsHubRefusesMachineIdsWhoseDurablesCollide(t *testing.T) {
+	user, err := nkeys.CreateUser()
+	require.NoError(t, err)
+	key, err := user.PublicKey()
+	require.NoError(t, err)
+	for _, row := range []struct {
+		name, input, want string
+		edit              func(*gcp.NatsHubArgs)
+	}{
+		{"two machineIds of one durable", "users[3].machineId",
+			"users[3]: machineId gives the same durable name as users[0].machineId",
+			func(a *gcp.NatsHubArgs) {
+				a.Users = append(a.Users, gcp.NATSUserArgs{Name: "example-host-b", NKey: key, MachineID: pulumi.StringRef("example-host-a")})
+			}},
+		{"a dispatchMachineId repeating a machineId", "users[2].dispatchMachineId",
+			"users[2]: dispatchMachineId gives the same durable name as users[0].machineId",
+			func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("example-host-a") }},
+		{"a space and a hyphen that hyphenate alike", "users[2].dispatchMachineId",
+			"users[2]: dispatchMachineId gives the same durable name as users[0].machineId",
+			func(a *gcp.NatsHubArgs) {
+				a.Users[0].MachineID = pulumi.StringRef("a b")
+				a.Users[2].DispatchMachineID = pulumi.StringRef("a-b")
+			}},
+		{"a machineId on the hub's own listener's durable", "users[0].machineId",
+			"users[0]: machineId gives the same durable name as the hub's own listener",
+			func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef("example-hub") }},
+		{"a dispatchMachineId on the hub's own listener's durable", "users[2].dispatchMachineId",
+			"users[2]: dispatchMachineId gives the same durable name as the hub's own listener",
+			func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("example-hub") }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := exampleArgs()
+			row.edit(args)
+			requireMachineIDRefusal(t, args, row.input, row.want)
+		})
+	}
+	t.Run("the hostname is accepted without the hub's listener", func(t *testing.T) {
+		args := exampleArgs()
+		args.Listener = nil
+		args.Users[0].MachineID = pulumi.StringRef("example-hub")
+		require.NoError(t, gcp.ResolveNatsHub(args))
+	})
+}
+
+// requireMachineIDRefusal resolves args, requiring exactly want as the refusal and the
+// core.InputError naming input.
+func requireMachineIDRefusal(t *testing.T, args *gcp.NatsHubArgs, input, want string) {
+	t.Helper()
+	err := gcp.ResolveNatsHub(args)
+	require.EqualError(t, err, want)
+	var refused *core.InputError
+	require.True(t, errors.As(err, &refused), "%v is a core.InputError", err)
+	require.Equal(t, input, refused.Input)
 }
 
 // A refused input stops the constructor, named as the hub and its name, before it registers

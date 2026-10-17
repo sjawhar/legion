@@ -63,11 +63,13 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireAgentStreamRelayed(t, live.conn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
-				// Dispatch's own user holds no session entry: a direct publish to a session's
-				// frames is refused.
+				// Dispatch's own user holds no session entry: it is a direct publish to a session's
+				// frames that is refused. (A delivery-events consumer it creates can still deliver
+				// any payload onto them, and its _INBOX.> subscription receives every reply on the
+				// server, so the refusal narrows nothing of the seed's reach.)
 				frames := contracts.AgentStreamFramesSubject(dispatchSessionID)
-				require.NoError(t, live.dispatch.Publish(frames, []byte(`{"v":1,"kind":"message","seq":2}`)))
-				requireViolation(t, live.dispatch, live.dispatchErrs, `Publish to "`+frames+`"`)
+				require.NoError(t, live.dispatchConn.Publish(frames, []byte(`{"v":1,"kind":"message","seq":2}`)))
+				requireViolation(t, live.dispatchConn, live.dispatchErrs, `Publish to "`+frames+`"`)
 
 				// Every allowed operation came first, so the two expected refusals are the only
 				// violations the server logged: the frames publish above and the test client's canary.
@@ -114,8 +116,8 @@ type liveDispatch struct {
 	conn *natsgo.Conn
 	errs <-chan error
 	js   natsgo.JetStreamContext
-	// dispatch is a connection as Dispatch's own user.
-	dispatch     *natsgo.Conn
+	// dispatchConn is a connection as Dispatch's own user.
+	dispatchConn *natsgo.Conn
 	dispatchErrs <-chan error
 }
 
@@ -123,20 +125,20 @@ type liveDispatch struct {
 // test client's (testClientPermissions), seeds the delivery settings in a fresh Postgres, starts
 // envoy-dispatch against both, waits for it to answer healthy, and connects the test client as its
 // own user and a second connection as Dispatch's.
-func startLiveDispatch(t *testing.T, dispatch, image string, grant core.Permissions) liveDispatch {
+func startLiveDispatch(t *testing.T, binary, image string, grant core.Permissions) liveDispatch {
 	t.Helper()
 	seed, clientSeed, server, uri := startDispatchServer(t, image, grant)
 	databaseURL := testpg.URL(t)
 	seedDispatchDeliverySettings(t, databaseURL)
 	github := newDispatchGitHub(t)
-	process, port := startDispatch(t, dispatch, databaseURL, uri, seed, github.server.URL)
+	process, port := startDispatch(t, binary, databaseURL, uri, seed, github.server.URL)
 	requireHealthy(t, process, port, dispatchHealthWindow, dispatchHealthy)
 	conn, errs := connect(t, uri, clientSeed)
 	js, err := conn.JetStream()
 	require.NoError(t, err)
 	dispatchConn, dispatchErrs := connect(t, uri, seed)
 	return liveDispatch{server: server, github: github, process: process, port: port,
-		conn: conn, errs: errs, js: js, dispatch: dispatchConn, dispatchErrs: dispatchErrs}
+		conn: conn, errs: errs, js: js, dispatchConn: dispatchConn, dispatchErrs: dispatchErrs}
 }
 
 // startDispatchServer runs image with two users: Dispatch's, holding grant with its seed, and the

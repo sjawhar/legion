@@ -137,9 +137,18 @@ A `listener` opens a second door, port 9020, with or without a session user, and
 more ([The hub's listener](#the-hubs-listener)).
 
 A user is refused when it names more than one of `machineId`, `dispatchMachineId`, `daemon: true`
-and `permissions`, or none, or when its `machineId`, `dispatchMachineId` or `nkey` is empty, named
-by its index alone, as `users[1]: nkey is required`, since these come before the authorization has
-checked the names. It is refused too for each of the
+and `permissions`, or none, or when its `nkey` is empty, named by its index alone, as
+`users[1]: nkey is required`, since these come before the authorization has checked the names. A
+`machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and the queue group
+`envoy-listener-<id>`, so one is refused, named the same way, when it is empty or only whitespace,
+or holds a character those names cannot carry — `.`, `*`, `>`, `/`, `\`, a control character, or
+any whitespace but the space, which both names turn into a hyphen — as
+`users[1]: dispatchMachineId contains '.', which cannot appear in the durable name listener-<id>
+or the queue group envoy-listener-<id>`. Two ids that give one durable name, of either kind
+(`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would put
+two listeners on one durable and queue group, so the later one is refused, as
+`users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
+`… as the hub's own listener`. It is refused too for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
