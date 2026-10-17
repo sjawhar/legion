@@ -1712,11 +1712,11 @@ booting on a full pool ([The image is probed before it publishes](#the-image-is-
 ### A pod whose address moved
 
 A role process's addresses are fixed when it is launched, and nothing changes a running process's
-argv or environment. The daemon hands every role process, the daemon-launched controller's included, six from its
-configuration. The
-worker stream listener, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in
-every launcher container's command (item 3 of the anatomy list above), so it is fixed for the pod's
-life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
+argv or environment. The daemon hands every role process, the daemon-launched controller's
+included, six from its configuration. The worker stream listener,
+`tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in every launcher
+container's command (item 3 of the anatomy list above), so it is fixed for the pod's life: a
+launcher dials it and never redials elsewhere. The other five reach a generation's Oh
 My Pi in the start command its launcher receives, never in the pod spec, so they are fixed for that
 generation's life: `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL`
 (`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and, when the runtime enrolls pods,
@@ -3119,19 +3119,19 @@ or replaces for drift the node it runs on, though issue pods can still be schedu
 GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) has what it does not stop), after which
 Autopilot may evict it like any other pod, and it is relaunched and resumes the same session like
-any claim's pod that dies ("The claim", above). Its
-agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
-`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, `LEGION_SLACK_CHANNELS`, the project's
-Slack channels comma-separated and empty for none (the runtime's, always set, and refused in
-`runtime.kubernetes.pod.env` and `provider_keys`, so no list but the project's reaches it; its plugin
-subscribes to each channel's mention topic while the session holds the controller role, registered
-with no listener, and a resume first drops every Slack topic an earlier session registered (a
-restored one would outlive the role), so a resume or relaunch hears the channels the launch names and no others; the list is one
-of the addresses the runtime records per generation, so a daemon restarted with another
-`slack_channels` re-adopts the controller as an address that moved and relaunches it, resuming its
-session; `legion controller start` drops an inherited value, and any controller but this one ignores
-it), the launch secrets' `<NAME>_FILE`
-pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
+any claim's pod that dies ("The claim", above). Its agent is told `LEGION_CONTROLLER=1`,
+`LEGION_ROLE=controller`, `LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch
+settings, `LEGION_SLACK_CHANNELS`, the project's Slack channels comma-separated and empty for none
+(the runtime's, always set, and refused in `runtime.kubernetes.pod.env` and `provider_keys`, so no
+list but the project's reaches it; its plugin subscribes to each channel's mention topic while the
+session holds the controller role, registered with no listener, and a resume first drops every
+Slack topic an earlier session registered (a restored one would outlive the role), so a resume or
+relaunch hears the channels the launch names and no others; the list is one of the addresses the
+runtime records per generation, so a daemon restarted with another `slack_channels` re-adopts the
+controller as an address that moved and relaunches it, resuming its session;
+`legion controller start` drops an inherited value, and any controller but this one ignores it),
+the launch secrets' `<NAME>_FILE` pointers, and the four `GH_*` variables exactly as an issue pod's
+role container is told them
 (`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
 prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, with the

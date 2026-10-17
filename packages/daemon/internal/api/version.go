@@ -205,7 +205,7 @@ package api
 // always set (empty for none), which the plugin requires there and subscribes to while the session
 // holds the controller role and which the controller's generation records with its addresses, so a
 // daemon restarted with another list relaunches it, and as the addressing's `Slack channels:` line,
-// which cites the controller skill's Slack reference. A plugin from before 32 subscribes to no channel and ships
-// neither `slack_post` nor the reference, so the boot gate and `legion probe-image` refuse the
-// mixed pair. The controller secret's answer is unchanged.
+// which cites the controller skill's Slack reference. A plugin from before 32 subscribes to no
+// channel and ships neither `slack_post` nor the reference, so the boot gate and
+// `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
 const DaemonAPIVersion = 32

@@ -487,9 +487,9 @@ Read the mention and its artifact; a Slack mention follows [Slack
 mentions](skill://legion-controller/references/slack-mentions.md). Answer it when it asks the
 controller for triage or human-facing information. A human asking how to let a root proceed past
 its design gate approves the root issue's spec document in Dispatch — the `Approve` control in the
-document's header, or the approval question the architect's request opened in the Inbox. The controller
-never opens a gate and there is no operator command for it; a project that does not want the
-gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the authoritative
-owning architect role and route the verified context with `envoy_publish`. Do not route raw
-event traffic or invent a role token from a partial issue reference.
+document's header, or the approval question the architect's request opened in the Inbox. The
+controller never opens a gate and there is no operator command for it; a project that does not
+want the gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the
+authoritative owning architect role and route the verified context with `envoy_publish`. Do not
+route raw event traffic or invent a role token from a partial issue reference.
 
