@@ -821,8 +821,8 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 // generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
 // variable the runtime itself sets in the generation's environment, an address being a value with a
 // scheme. An address added to a launch and not to handedAddresses is one the daemon could move
-// without any role it re-adopts being relaunched (evaluate). A workflow role and the controller,
-// each enrolled with the secrets broker here, are each held to their own list.
+// without any role it re-adopts being relaunched (evaluate). A workflow role's launch and the
+// controller's, each enrolled with the secrets broker here, are each held to that one list.
 func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
@@ -856,7 +856,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 				}
 			}
 			handed := map[string]string{}
-			for _, a := range r.handedAddresses(spec.Role) {
+			for _, a := range r.handedAddresses() {
 				if a.value != "" {
 					handed[a.name] = a.value
 				}

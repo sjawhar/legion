@@ -193,7 +193,5 @@ package api
 // holds the controller role, and as the addressing's `Slack channels:` line, which cites the
 // controller skill's Slack reference. A plugin from before 31 subscribes to no channel and ships
 // neither `slack_post` nor the reference, so the boot gate and `legion probe-image` refuse the
-// mixed pair. The controller secret's answer
-// is unchanged. (Numbers 26 to 30 were claimed by other open branches when this one took 31;
-// contract numbers increase on main and need not be consecutive.)
+// mixed pair. The controller secret's answer is unchanged.
 const DaemonAPIVersion = 31

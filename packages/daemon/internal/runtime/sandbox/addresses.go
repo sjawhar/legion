@@ -50,10 +50,10 @@ type recordedAddress struct {
 	SHA256   string `json:"sha256"`
 }
 
-// environmentAddresses are handedAddresses carried in a generation of role's environment: every
-// one but the stream its launcher dials.
-func (r *Runtime) environmentAddresses(role claim.Role) []handedAddress {
-	return slices.DeleteFunc(r.handedAddresses(role), func(a handedAddress) bool { return a.name == connectFlag })
+// environmentAddresses are handedAddresses carried in a generation's environment: every one but
+// the stream its launcher dials.
+func (r *Runtime) environmentAddresses() []handedAddress {
+	return slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
 }
 
 // addressName is how an address handed now is named in a record and an observation's detail.
@@ -69,11 +69,11 @@ func addressDigest(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// recordFor is the record of the addresses a generation of role started now is handed, encoded as
-// its annotation holds it.
-func (r *Runtime) recordFor(role claim.Role, generation uint64) (string, error) {
+// recordFor is the record of the addresses a generation started now is handed, encoded as its
+// annotation holds it.
+func (r *Runtime) recordFor(generation uint64) (string, error) {
 	record := addressRecord{Generation: generation}
-	for _, a := range r.environmentAddresses(role) {
+	for _, a := range r.environmentAddresses() {
 		record.Addresses = append(record.Addresses, recordedAddress{Variable: a.name, Name: r.addressName(a), SHA256: addressDigest(a.value)})
 	}
 	encoded, err := json.Marshal(record)
@@ -89,7 +89,7 @@ func (r *Runtime) recordFor(role claim.Role, generation uint64) (string, error) 
 // deleted and recreated in between is never written. It runs before the generation's start command
 // is sent, so a generation that runs has its record.
 func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Role, generation uint64) error {
-	record, err := r.recordFor(role, generation)
+	record, err := r.recordFor(generation)
 	if err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint6
 		return nil, nil
 	}
 	var moved []movedAddress
-	for _, a := range r.environmentAddresses(role) {
+	for _, a := range r.environmentAddresses() {
 		i := slices.IndexFunc(record.Addresses, func(held recordedAddress) bool { return held.Variable == a.name })
 		switch {
 		case i < 0:

@@ -37,8 +37,8 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
-	// slackChannels is the project's slack_channels, whose mention topics the controller is told
-	// after the design gate policy (ControllerAddressing).
+	// slackChannels is the project's slack_channels, which the controller is told after the design
+	// gate policy (SlackChannelsFragment) and as LEGION_SLACK_CHANNELS.
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
@@ -148,13 +148,15 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part, the project's design gate policy and Slack channels as its addressing, the
-// deployment instructions and the launch secrets. The channels also reach it as
-// LEGION_SLACK_CHANNELS, comma-separated, which its plugin subscribes to while the session holds
-// the controller role (pi-legion's controller-session.ts). The variable is always set, empty for a
-// project with none, so the project's own list is the only one the controller can read; the
-// operator's pod may not set it (sandbox.CheckPod). It has no repository and no git identity: the
-// controller works Dispatch, never a checkout, and commits nothing.
+// the headless part, the project's design gate policy and, when it names any, its Slack channels
+// as its addressing, the deployment instructions and the launch secrets. The operator's controller
+// is told the policy alone (`legion controller start`), since only the daemon's may have channels
+// (config.checkSlackChannels). The channels also reach it as LEGION_SLACK_CHANNELS,
+// comma-separated, which its plugin subscribes to while the session holds the controller role
+// (pi-legion's controller-session.ts). The variable is always set, empty for a project with none,
+// so the project's own list is the only one the controller can read; the operator's pod may not set
+// it (sandbox.CheckPod). It has no repository and no git identity: the controller works Dispatch,
+// never a checkout, and commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -163,12 +165,16 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
+	addressing := DesignGateFragment(s.designGate)
+	if len(s.slackChannels) > 0 {
+		addressing += " " + SlackChannelsFragment(s.slackChannels)
+	}
 	return runtime.SpawnSpec{
 		Env:     map[string]string{"LEGION_SLACK_CHANNELS": strings.Join(s.slackChannels, ",")},
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,
-			Addressing:                 ControllerAddressing(s.designGate, s.slackChannels),
+			Addressing:                 addressing,
 			DeploymentInstructionsPath: s.instructions,
 		},
 	}, nil
@@ -214,18 +220,6 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 // (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
-}
-
-// ControllerAddressing is the daemon-launched controller's addressing (controllerSpawnSpec): the
-// design gate policy, then, when the project names Slack channels, SlackChannelsFragment. The
-// operator's controller is told the policy alone (`legion controller start`), since only the
-// daemon's may have channels (config.checkSlackChannels).
-func ControllerAddressing(policy config.DesignGate, slackChannels []string) string {
-	addressing := DesignGateFragment(policy)
-	if len(slackChannels) > 0 {
-		addressing += " " + SlackChannelsFragment(slackChannels)
-	}
-	return addressing
 }
 
 // SlackChannelsFragment names the project's Slack channels, the list the controller answers

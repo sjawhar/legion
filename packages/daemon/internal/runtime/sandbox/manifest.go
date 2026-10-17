@@ -818,16 +818,16 @@ const connectFlag = "--connect"
 // variable the runtime leaves unset.
 type handedAddress struct{ name, value string }
 
-// handedAddresses are every address a process of role launched now carries: the worker stream
-// listener its launcher dials (launcherContainers, fixed when the pod is created), then the
-// daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment names them
-// (mainEnvironment, carried by each generation's start command, launcherCommand), the broker only
-// when the runtime enrolls pods. The stream is fixed for the pod's life, so a pod a daemon
-// created under another stream dials it until the pod is replaced; the other five are fixed for
-// the generation's life, and the Sandbox records them per role (recordAddresses) so a daemon
+// handedAddresses are every address a role process launched now carries, whatever its role: the
+// worker stream listener its launcher dials (launcherContainers, fixed when the pod is created),
+// then the daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment
+// names them (mainEnvironment, carried by each generation's start command, launcherCommand), the
+// broker only when the runtime enrolls pods. The stream is fixed for the pod's life, so a pod a
+// daemon created under another stream dials it until the pod is replaced; the other five are fixed
+// for the generation's life, and the Sandbox records them per role (recordAddresses) so a daemon
 // restarted under other addresses can tell (evaluate).
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
-func (r *Runtime) handedAddresses(role claim.Role) []handedAddress {
+func (r *Runtime) handedAddresses() []handedAddress {
 	brokerURL := ""
 	if broker := r.agentSecrets; broker != nil {
 		brokerURL = broker.URL

@@ -13,7 +13,7 @@ export const SLACK_BOT_TOKEN_SECRET = "LEGION_SLACK_BOT_TOKEN";
 
 /** Moves Slack's Web API (`https://slack.com/api`) for a stand-in; read from the session's
  * environment, held to https or a loopback host, and handed to the poster. */
-export const SLACK_POST_API_URL_VARIABLE = "SLACK_POST_API_URL";
+const SLACK_POST_API_URL_VARIABLE = "SLACK_POST_API_URL";
 
 /** How long the broker request and the post may take together before the tool stops waiting. The
  * poster gives Slack 10 s of its own. */
