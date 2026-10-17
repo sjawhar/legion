@@ -52,7 +52,7 @@ type natsServer interface {
 }
 
 func TestHostPermissionsOnRealServers(t *testing.T) {
-	listener := buildListener(t)
+	listener := buildEnvoyCommand(t, "listener")
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
@@ -125,7 +125,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 // registers through it and receives a send, answers a role message's receipt, and is refused a
 // publish its grant does not hold.
 func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
-	listener := buildListener(t)
+	listener := buildEnvoyCommand(t, "listener")
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
@@ -206,15 +206,15 @@ func startSplitServer(t *testing.T, image string) (string, natsServer, string) {
 	return seed, server, uri
 }
 
-// buildListener builds packages/envoy/cmd/listener from this branch as Envoy's own jobs do, in the
-// workspace of the repository's root go.work, and returns the binary.
-func buildListener(t *testing.T) string {
+// buildEnvoyCommand builds packages/envoy/cmd/<name> from this branch as Envoy's own jobs do, in
+// the workspace of the repository's root go.work, and returns the binary envoy-<name>.
+func buildEnvoyCommand(t *testing.T, name string) string {
 	t.Helper()
-	binary := filepath.Join(t.TempDir(), "envoy-listener")
+	binary := filepath.Join(t.TempDir(), "envoy-"+name)
 	build := exec.Command("go", "build", "-o", binary, ".")
-	build.Dir = filepath.Join("..", "..", "cmd", "listener")
+	build.Dir = filepath.Join("..", "..", "cmd", name)
 	out, err := build.CombinedOutput()
-	require.NoError(t, err, "build the listener: %s", out)
+	require.NoError(t, err, "build envoy-%s: %s", name, out)
 	return binary
 }
 

@@ -180,12 +180,8 @@ func TestDispatchPermissionsForExampleDispatch(t *testing.T) {
 	require.Equal(t, want, got)
 
 	host := core.HostPermissions("example-dispatch")
-	for _, entry := range host.Publish.Allow {
-		require.Contains(t, got.Publish.Allow, entry)
-	}
-	for _, entry := range host.Subscribe.Allow {
-		require.Contains(t, got.Subscribe.Allow, entry)
-	}
+	require.Subset(t, got.Publish.Allow, host.Publish.Allow)
+	require.Subset(t, got.Subscribe.Allow, host.Subscribe.Allow)
 }
 
 // nats-server takes a repeated entry, so a duplicate would be noise in every rendered block; none of

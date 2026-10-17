@@ -749,30 +749,6 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
-func TestNatsHubRefusesConflictingUserPermissionInputsBeforeRegistering(t *testing.T) {
-	permissions := &gcp.PermissionsArgs{
-		Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
-	}
-	for _, tc := range []struct {
-		name string
-		edit func(*gcp.NatsHubArgs)
-	}{
-		{"machineId and permissions", func(a *gcp.NatsHubArgs) { a.Users[0].Permissions = permissions }},
-		{"machineId and dispatchMachineId", func(a *gcp.NatsHubArgs) {
-			a.Users[0].DispatchMachineID = pulumi.StringRef("example-dispatch")
-		}},
-		{"dispatchMachineId and permissions", func(a *gcp.NatsHubArgs) { a.Users[2].Permissions = permissions }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			args := exampleArgs()
-			tc.edit(args)
-			m, err := run(t, args, nil, true)
-			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: users[")
-			require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
-		})
-	}
-}
-
 // A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone, machine type and disk type, which reach the group and

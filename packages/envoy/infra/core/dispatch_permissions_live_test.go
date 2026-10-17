@@ -5,12 +5,8 @@ package core_test
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/base64"
-	"encoding/json"
-	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -33,6 +29,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -46,13 +43,16 @@ const (
 )
 
 func TestDispatchPermissionsOnRealServers(t *testing.T) {
-	dispatch := buildDispatch(t)
+	dispatch := buildEnvoyCommand(t, "dispatch")
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
 			t.Run("envoy-dispatch needs no refused permission", func(t *testing.T) {
+				t.Parallel()
 				runDispatchPermissions(t, dispatch, image.Ref, false)
 			})
 			t.Run("without the delivery consumer create Dispatch leaves only that intake unbound", func(t *testing.T) {
+				t.Parallel()
 				runDispatchPermissions(t, dispatch, image.Ref, true)
 			})
 		})
@@ -96,7 +96,7 @@ func runDispatchPermissions(t *testing.T, dispatch, image string, removeDelivery
 	requireConsumerPushBound(t, js, bus.DispatchDeliveryDurable)
 	requireConsumerPushBound(t, js, bus.DispatchJobDurable)
 	requireDurablesAcknowledge(t, js)
-	requireIssueEventPublished(t, conn, port)
+	requireIssueEventPublished(t, process, conn, port)
 	requireAgentStreamRelayed(t, conn, port)
 	requireWebhookRedeliveryBucket(t, js, process, github)
 
@@ -105,16 +105,6 @@ func runDispatchPermissions(t *testing.T, dispatch, image string, removeDelivery
 	for _, violation := range violationsOnceLogged(t, server, "outside.example") {
 		require.Equal(t, "outside.example", violation[2], "the server refused what Dispatch needs: %s", violation[0])
 	}
-}
-
-func buildDispatch(t *testing.T) string {
-	t.Helper()
-	binary := filepath.Join(t.TempDir(), "envoy-dispatch")
-	build := exec.Command("go", "build", "-o", binary, ".")
-	build.Dir = filepath.Join("..", "..", "cmd", "dispatch")
-	out, err := build.CombinedOutput()
-	require.NoError(t, err, "build Dispatch: %s", out)
-	return binary
 }
 
 func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {
@@ -137,9 +127,7 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 	t.Helper()
 	home := t.TempDir()
 	port := cmdtest.FreeTCPPort(t)
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	pemText := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	_, pemText := githubapptest.Key(t)
 	cmd := exec.Command(binary)
 	cmd.Dir = home
 	cmd.Env = []string{
@@ -149,11 +137,11 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 		"DISPATCH_INSECURE_COOKIE=1",
 		"DISPATCH_LISTEN_HOST=127.0.0.1",
 		"DISPATCH_PORT=" + strconv.Itoa(port),
-		"DISPATCH_SERVER_URL=http://127.0.0.1:" + strconv.Itoa(port),
+		"DISPATCH_SERVER_URL=" + dispatchURL(port, ""),
 		"NATS_URLS=" + natsURL,
-		"NATS_NKEY_SEED=" + seed,
+		core.EnvNATSSeed + "=" + seed,
 		"DISPATCH_APP_CLIENT_ID=Iv1.e2efake",
-		"DISPATCH_APP_PEM_B64=" + base64.StdEncoding.EncodeToString(pemText),
+		"DISPATCH_APP_PEM_B64=" + base64.StdEncoding.EncodeToString([]byte(pemText)),
 		"DISPATCH_GITHUB_API_BASE=" + githubURL,
 		"DISPATCH_WEB_DIST=" + home,
 		"HOME=" + home,
@@ -212,7 +200,7 @@ func requireConsumerMissing(t *testing.T, js natsgo.JetStreamContext, durable st
 		if err == nil {
 			t.Fatalf("consumer %s was created despite its missing permission", durable)
 		}
-		if !strings.Contains(err.Error(), "consumer not found") {
+		if !errors.Is(err, natsgo.ErrConsumerNotFound) {
 			t.Fatalf("read consumer %s: %v", durable, err)
 		}
 		time.Sleep(100 * time.Millisecond)
@@ -243,18 +231,15 @@ func requireDurablesAcknowledge(t *testing.T, js natsgo.JetStreamContext) {
 	}
 }
 
-func requireIssueEventPublished(t *testing.T, conn *natsgo.Conn, port int) {
+func requireIssueEventPublished(t *testing.T, process *cmdtest.Process, conn *natsgo.Conn, port int) {
 	t.Helper()
 	subscription, err := conn.SubscribeSync("notifications.dispatch.issue.>")
 	require.NoError(t, err)
 	require.NoError(t, conn.Flush())
 	client := &http.Client{Timeout: 10 * time.Second}
-	postDispatchJSON(t, client, port, "/api/v1/projects", `{"key":"ACME","name":"Acme","actor":{"kind":"session","id":"`+dispatchSessionID+`"}}`, http.StatusCreated, "Bearer "+dispatchToken)
-	postDispatchJSON(t, client, port, "/api/v1/issues", `{"project":"ACME","title":"example","actor":{"kind":"session","id":"`+dispatchSessionID+`"}}`, http.StatusCreated, "Bearer "+dispatchToken)
-	message, err := subscription.NextMsg(10 * time.Second)
-	require.NoError(t, err)
-	var envelope contracts.Envelope
-	require.NoError(t, json.Unmarshal(message.Data, &envelope))
+	postDispatchJSON(t, client, port, "/api/v1/projects", `{"key":"ACME","name":"Acme","actor":{"kind":"session","id":"`+dispatchSessionID+`"}}`)
+	postDispatchJSON(t, client, port, "/api/v1/issues", `{"project":"ACME","title":"example","actor":{"kind":"session","id":"`+dispatchSessionID+`"}}`)
+	envelope, _ := nextEnvelope(t, process, subscription)
 	require.True(t, strings.HasSuffix(envelope.Topic, ".issue.created"), "event topic %q", envelope.Topic)
 }
 
@@ -335,13 +320,6 @@ func requireWebhookRedeliveryBucket(t *testing.T, js natsgo.JetStreamContext, pr
 	t.Helper()
 	process.WaitForOutput(t, "dispatch: redelivering the GitHub App webhook's failed deliveries")
 	github.requireCalled(t, "GET /app/hook/deliveries")
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := js.KeyValue(bus.WebhookRedeliveryBucket); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
 	kv, err := bus.OpenKeyValue(js, bus.WebhookRedeliveryBucket)
 	require.NoError(t, err)
 	_, err = kv.Put("test", []byte("value"))
@@ -361,18 +339,18 @@ func requireWebhookRedeliveryBucket(t *testing.T, js natsgo.JetStreamContext, pr
 	}
 }
 
-func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body string, want int, authorization string) {
+func postDispatchJSON(t *testing.T, client *http.Client, port int, path, body string) {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodPost, dispatchURL(port, path), strings.NewReader(body))
 	require.NoError(t, err)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", authorization)
+	request.Header.Set("Authorization", "Bearer "+dispatchToken)
 	response, err := client.Do(request)
 	require.NoError(t, err)
 	defer response.Body.Close()
 	answer, err := io.ReadAll(response.Body)
 	require.NoError(t, err)
-	require.Equal(t, want, response.StatusCode, "POST %s: %s", path, answer)
+	require.Equal(t, http.StatusCreated, response.StatusCode, "POST %s: %s", path, answer)
 }
 
 func dispatchURL(port int, path string) string {

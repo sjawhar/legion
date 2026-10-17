@@ -21,11 +21,10 @@ func URL(t testing.TB) string {
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:           Image,
-			ExposedPorts:    []string{"5432/tcp"},
-			Env:             map[string]string{"POSTGRES_PASSWORD": "test"},
-			WaitingFor:      wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
-			AlwaysPullImage: false,
+			Image:        Image,
+			ExposedPorts: []string{"5432/tcp"},
+			Env:          map[string]string{"POSTGRES_PASSWORD": "test"},
+			WaitingFor:   wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 		},
 		Started: true,
 	})
