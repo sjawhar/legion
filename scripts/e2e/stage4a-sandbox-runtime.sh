@@ -225,19 +225,25 @@ cleanup() {
     }
     sleep 2
   done
+  echo "   [operator] DEBUG: entering namespace_clean block, compared=[$compared] snapshotted=[$snapshotted]"
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then
     (namespace_clean) || status=1
+    echo "   [operator] DEBUG: after namespace_clean, status=$status, after-file=$([ -f "$evidence/namespace-after.txt" ] && echo exists || echo missing)"
     # A `while read` fed by `< <(comm ...)` piping two more process substitutions hung forever
     # here, live, 2026-10-17 — nested process substitution, not a cluster quirk, confirmed in
     # isolation the same way (a bare repro of this exact line hung past a 5-minute timeout). comm's
     # own output goes to a plain file first; the loop reads that file directly, no substitution.
     if [ -f "$evidence/namespace-after.txt" ]; then
       comm -13 <(sort "$evidence/namespace-before.txt") <(sort "$evidence/namespace-after.txt") >"$evidence/namespace-leftover-pods.txt"
+      echo "   [operator] DEBUG: namespace-leftover-pods.txt has $(wc -l <"$evidence/namespace-leftover-pods.txt") lines: $(tr '\n' ';' <"$evidence/namespace-leftover-pods.txt")"
       while IFS= read -r leftover_name; do
+        echo "   [operator] DEBUG: loop iteration, leftover_name=[$leftover_name]"
         case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
       done <"$evidence/namespace-leftover-pods.txt"
+      echo "   [operator] DEBUG: loop finished"
     fi
   fi
+  echo "   [operator] DEBUG: reached end of cleanup's namespace_clean block"
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
   echo "evidence: $evidence (transcript.log, runtime.log, the namespace snapshots)"
