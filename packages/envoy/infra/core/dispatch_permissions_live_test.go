@@ -40,6 +40,11 @@ const (
 	dispatchMachineID = "example-dispatch"
 	dispatchSessionID = "00000000-0000-4000-8000-000000000001"
 	dispatchToken     = "example-agent-token"
+	// dispatchHealthWindow is how long Dispatch has to migrate its schema and answer /healthz.
+	dispatchHealthWindow = 120 * time.Second
+	// deliveryCreate is the delivery durable's filtered consumer create, the permission the
+	// negative control removes.
+	deliveryCreate = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>"
 )
 
 func TestDispatchPermissionsOnRealServers(t *testing.T) {
@@ -49,62 +54,71 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 			t.Parallel()
 			t.Run("envoy-dispatch needs no refused permission", func(t *testing.T) {
 				t.Parallel()
-				runDispatchPermissions(t, dispatch, image.Ref, false)
+				live := startLiveDispatch(t, dispatch, image.Ref, core.DispatchPermissions(dispatchMachineID))
+
+				requireConsumerPushBound(t, live.js, bus.DispatchDeliveryDurable)
+				requireConsumerPushBound(t, live.js, bus.DispatchJobDurable)
+				requireDurablesAcknowledge(t, live.js)
+				requireIssueEventPublished(t, live.process, live.conn, live.port)
+				requireAgentStreamRelayed(t, live.conn, live.port)
+				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
+
+				require.NoError(t, live.conn.Publish("outside.example", nil))
+				requireViolation(t, live.conn, live.errs, `Publish to "outside.example"`)
+				for _, violation := range violationsOnceLogged(t, live.server, "outside.example") {
+					require.Equal(t, "outside.example", violation[2], "the server refused what Dispatch needs: %s", violation[0])
+				}
 			})
 			t.Run("without the delivery consumer create Dispatch leaves only that intake unbound", func(t *testing.T) {
 				t.Parallel()
-				runDispatchPermissions(t, dispatch, image.Ref, true)
+				grant := core.DispatchPermissions(dispatchMachineID)
+				before := len(grant.Publish.Allow)
+				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(subject string) bool {
+					return subject == deliveryCreate
+				})
+				require.Len(t, grant.Publish.Allow, before-1, "the grant does not hold %s", deliveryCreate)
+				live := startLiveDispatch(t, dispatch, image.Ref, grant)
+
+				requireConsumerMissing(t, live.js, bus.DispatchDeliveryDurable)
+				requireConsumerPushBound(t, live.js, bus.DispatchJobDurable)
+				want := strings.TrimSuffix(deliveryCreate, ">") + "notifications.github.>"
+				for _, violation := range violationsOnceLogged(t, live.server, want) {
+					require.Equal(t, []string{"Publish", want}, violation[1:], "the server refused something else: %s", violation[0])
+				}
+				require.Contains(t, live.process.Output.String(), "dispatch delivery: create NATS consumer")
 			})
 		})
 	}
 }
 
-func runDispatchPermissions(t *testing.T, dispatch, image string, removeDeliveryCreate bool) {
-	t.Helper()
-	grant := core.DispatchPermissions(dispatchMachineID)
-	const deliveryCreate = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.delivery-events.>"
-	if removeDeliveryCreate {
-		before := len(grant.Publish.Allow)
-		grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(subject string) bool {
-			return subject == deliveryCreate
-		})
-		require.Len(t, grant.Publish.Allow, before-1, "the grant does not hold %s", deliveryCreate)
-	}
+// liveDispatch is one envoy-dispatch process started under a grant: the NATS server holding the
+// grant as its whole authorization, the fake GitHub App API behind Dispatch, and a test client
+// connected as Dispatch's own NATS user.
+type liveDispatch struct {
+	server  natsServer
+	github  *dispatchGitHub
+	process *cmdtest.Process
+	port    int
+	conn    *natsgo.Conn
+	errs    <-chan error
+	js      natsgo.JetStreamContext
+}
 
+// startLiveDispatch starts a NATS server holding grant as its whole authorization, seeds the
+// delivery settings in a fresh Postgres, starts envoy-dispatch against both, waits for it to
+// answer healthy, and connects the test client as the same NATS user.
+func startLiveDispatch(t *testing.T, dispatch, image string, grant core.Permissions) liveDispatch {
+	t.Helper()
 	seed, server, uri := startHostServer(t, image, grant)
 	databaseURL := testpg.URL(t)
 	seedDispatchDeliverySettings(t, databaseURL)
 	github := newDispatchGitHub(t)
 	process, port := startDispatch(t, dispatch, databaseURL, uri, seed, github.server.URL)
-	requireDispatchHealthy(t, process, port)
-
+	requireHealthy(t, process, port, dispatchHealthWindow, dispatchHealthy)
 	conn, errs := connect(t, uri, seed)
 	js, err := conn.JetStream()
 	require.NoError(t, err)
-
-	if removeDeliveryCreate {
-		requireConsumerMissing(t, js, bus.DispatchDeliveryDurable)
-		requireConsumerPushBound(t, js, bus.DispatchJobDurable)
-		want := strings.TrimSuffix(deliveryCreate, ">") + "notifications.github.>"
-		for _, violation := range violationsOnceLogged(t, server, want) {
-			require.Equal(t, []string{"Publish", want}, violation[1:], "the server refused something else: %s", violation[0])
-		}
-		require.Contains(t, process.Output.String(), "dispatch delivery: create NATS consumer")
-		return
-	}
-
-	requireConsumerPushBound(t, js, bus.DispatchDeliveryDurable)
-	requireConsumerPushBound(t, js, bus.DispatchJobDurable)
-	requireDurablesAcknowledge(t, js)
-	requireIssueEventPublished(t, process, conn, port)
-	requireAgentStreamRelayed(t, conn, port)
-	requireWebhookRedeliveryBucket(t, js, process, github)
-
-	require.NoError(t, conn.Publish("outside.example", nil))
-	requireViolation(t, conn, errs, `Publish to "outside.example"`)
-	for _, violation := range violationsOnceLogged(t, server, "outside.example") {
-		require.Equal(t, "outside.example", violation[2], "the server refused what Dispatch needs: %s", violation[0])
-	}
+	return liveDispatch{server: server, github: github, process: process, port: port, conn: conn, errs: errs, js: js}
 }
 
 func seedDispatchDeliverySettings(t *testing.T, databaseURL string) {
@@ -150,61 +164,29 @@ func startDispatch(t *testing.T, binary, databaseURL, natsURL, seed, githubURL s
 	return cmdtest.Start(t, "Dispatch", cmd), port
 }
 
-func requireDispatchHealthy(t *testing.T, process *cmdtest.Process, port int) {
-	t.Helper()
-	deadline := time.Now().Add(120 * time.Second)
-	var body string
-	var err error
-	for time.Now().Before(deadline) {
-		var response *http.Response
-		response, err = http.Get(dispatchURL(port, "/healthz"))
-		if err == nil {
-			bytes, readErr := io.ReadAll(response.Body)
-			_ = response.Body.Close()
-			if readErr == nil {
-				body = string(bytes)
-				if response.StatusCode == http.StatusOK && strings.Contains(body, `"schema_version":`) {
-					return
-				}
-			}
-		}
-		select {
-		case <-process.Exited:
-			t.Fatalf("Dispatch exited before it became healthy:\n%s", process.Output.String())
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-	t.Fatalf("Dispatch did not answer /healthz with schema_version within 120s: last body %q, error %v\n%s", body, err, process.Output.String())
+// dispatchHealthy is the answer Dispatch's /healthz gives once its schema is migrated.
+func dispatchHealthy(status int, body string) bool {
+	return status == http.StatusOK && strings.Contains(body, `"schema_version":`)
 }
 
+// requireConsumerPushBound waits up to 20 s for the durable to exist with a push subscriber bound.
 func requireConsumerPushBound(t *testing.T, js natsgo.JetStreamContext, durable string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	var last error
-	for time.Now().Before(deadline) {
+	require.Eventuallyf(t, func() bool {
 		info, err := js.ConsumerInfo(bus.Stream, durable)
-		if err == nil && info.PushBound {
-			return
-		}
-		last = err
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Fatalf("consumer %s was not push-bound within 20s: %v", durable, last)
+		return err == nil && info.PushBound
+	}, 20*time.Second, 100*time.Millisecond, "consumer %s was not push-bound within 20s", durable)
 }
 
+// requireConsumerMissing watches the durable for 20 s: every read must keep answering that no
+// such consumer exists.
 func requireConsumerMissing(t *testing.T, js natsgo.JetStreamContext, durable string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Neverf(t, func() bool {
 		_, err := js.ConsumerInfo(bus.Stream, durable)
-		if err == nil {
-			t.Fatalf("consumer %s was created despite its missing permission", durable)
-		}
-		if !errors.Is(err, natsgo.ErrConsumerNotFound) {
-			t.Fatalf("read consumer %s: %v", durable, err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+		return !errors.Is(err, natsgo.ErrConsumerNotFound)
+	}, 20*time.Second, 100*time.Millisecond,
+		"consumer %s was created despite its missing permission, or its read failed", durable)
 }
 
 // requireDurablesAcknowledge publishes one message that both Dispatch durables' filters match and
@@ -216,18 +198,11 @@ func requireDurablesAcknowledge(t *testing.T, js natsgo.JetStreamContext) {
 	ack, err := js.Publish("notifications.github.acme.widgets.job.1.completed", []byte("not an envelope"))
 	require.NoError(t, err)
 	for _, durable := range []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable} {
-		deadline := time.Now().Add(20 * time.Second)
-		var info *natsgo.ConsumerInfo
-		for time.Now().Before(deadline) {
-			info, err = js.ConsumerInfo(bus.Stream, durable)
-			if err == nil && info.AckFloor.Stream >= ack.Sequence && info.NumAckPending == 0 {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		require.NoError(t, err)
-		require.GreaterOrEqual(t, info.AckFloor.Stream, ack.Sequence, "consumer %s did not acknowledge stream sequence %d", durable, ack.Sequence)
-		require.Zero(t, info.NumAckPending, "consumer %s holds unacknowledged messages", durable)
+		require.Eventuallyf(t, func() bool {
+			info, err := js.ConsumerInfo(bus.Stream, durable)
+			return err == nil && info.AckFloor.Stream >= ack.Sequence && info.NumAckPending == 0
+		}, 20*time.Second, 100*time.Millisecond,
+			"consumer %s did not acknowledge stream sequence %d", durable, ack.Sequence)
 	}
 }
 
@@ -272,7 +247,11 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 			return http.ErrUseLastResponse
 		},
 	}
-	response, err := human.Get(dispatchURL(port, "/auth/_dev/signin?login=alice@example.com"))
+	signinCtx, cancelSignin := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancelSignin()
+	signin, err := http.NewRequestWithContext(signinCtx, http.MethodGet, dispatchURL(port, "/auth/_dev/signin?login=alice@example.com"), nil)
+	require.NoError(t, err)
+	response, err := human.Do(signin)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusFound, response.StatusCode)
 	_ = response.Body.Close()
@@ -400,17 +379,9 @@ func newDispatchGitHub(t *testing.T) *dispatchGitHub {
 
 func (f *dispatchGitHub) requireCalled(t *testing.T, want string) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
+	require.Eventuallyf(t, func() bool {
 		f.mu.Lock()
-		called := slices.Contains(f.paths, want)
-		f.mu.Unlock()
-		if called {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	t.Fatalf("GitHub fake did not receive %s; got %v", want, f.paths)
+		defer f.mu.Unlock()
+		return slices.Contains(f.paths, want)
+	}, 20*time.Second, 100*time.Millisecond, "GitHub fake did not receive %s", want)
 }

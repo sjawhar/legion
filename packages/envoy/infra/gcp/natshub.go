@@ -416,39 +416,45 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		if u.NKey == "" {
 			return core.Authorization{}, fmt.Errorf("%s: nkey is required", where)
 		}
+		var set []string
+		for _, field := range []struct {
+			name  string
+			named bool
+		}{
+			{"machineId", u.MachineID != nil},
+			{"dispatchMachineId", u.DispatchMachineID != nil},
+			{"daemon", u.Daemon},
+			{"permissions", u.Permissions != nil},
+		} {
+			if field.named {
+				set = append(set, field.name)
+			}
+		}
+		if len(set) == 0 {
+			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
+		}
+		if len(set) > 1 {
+			return core.Authorization{}, fmt.Errorf("%s: %s and %s are both set; name one", where, set[0], set[1])
+		}
 		var perms core.Permissions
-		switch {
-		case u.MachineID != nil && u.Permissions != nil:
-			return core.Authorization{}, fmt.Errorf("%s: machineId and permissions are both set; name one", where)
-		case u.MachineID != nil && u.DispatchMachineID != nil:
-			return core.Authorization{}, fmt.Errorf("%s: machineId and dispatchMachineId are both set; name one", where)
-		case u.MachineID != nil && u.Daemon:
-			return core.Authorization{}, fmt.Errorf("%s: machineId and daemon are both set; name one", where)
-		case u.DispatchMachineID != nil && u.Daemon:
-			return core.Authorization{}, fmt.Errorf("%s: dispatchMachineId and daemon are both set; name one", where)
-		case u.DispatchMachineID != nil && u.Permissions != nil:
-			return core.Authorization{}, fmt.Errorf("%s: dispatchMachineId and permissions are both set; name one", where)
-		case u.Daemon && u.Permissions != nil:
-			return core.Authorization{}, fmt.Errorf("%s: daemon and permissions are both set; name one", where)
-		case u.MachineID != nil:
+		switch set[0] {
+		case "machineId":
 			if *u.MachineID == "" {
 				return core.Authorization{}, fmt.Errorf("%s: machineId is empty", where)
 			}
 			perms = core.HostPermissions(*u.MachineID)
-		case u.DispatchMachineID != nil:
+		case "dispatchMachineId":
 			if *u.DispatchMachineID == "" {
 				return core.Authorization{}, fmt.Errorf("%s: dispatchMachineId is empty", where)
 			}
 			perms = core.DispatchPermissions(*u.DispatchMachineID)
-		case u.Daemon:
+		case "daemon":
 			perms = core.DaemonPermissions()
-		case u.Permissions != nil:
+		default:
 			perms = core.Permissions{
 				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
 				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
 			}
-		default:
-			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, daemon, for the daemon's, or permissions", where)
 		}
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,

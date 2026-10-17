@@ -125,7 +125,7 @@ func awaitAcknowledged(t *testing.T, natsClient *bus.Client) {
 	last := stream.State.LastSeq
 	var info *natsgo.ConsumerInfo
 	waitFor(t, 20*time.Second, func() bool {
-		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && info.AckFloor.Stream >= last && info.NumAckPending == 0
 	}, func() string {
 		return fmt.Sprintf("intake has not acknowledged through stream sequence %d: %+v, %v", last, info, err)
@@ -265,7 +265,7 @@ func awaitBoundDurable(t *testing.T, natsClient *bus.Client) {
 	var err error
 	waitFor(t, 20*time.Second, func() bool {
 		var info *natsgo.ConsumerInfo
-		info, err = natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		info, err = natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable)
 		return err == nil && info.PushBound && info.Config.MaxAckPending == intakeMaxAckPending
 	}, func() string {
 		return fmt.Sprintf("intake never bound its durable: %v", err)
@@ -311,7 +311,7 @@ func intakeStateReport(t *testing.T, natsClient *bus.Client) string {
 	} else {
 		report += fmt.Sprintf("stream: %d messages, by subject %v\n", stream.State.Msgs, stream.State.Subjects)
 	}
-	if info, err := natsClient.JS().ConsumerInfo(bus.Stream, deliveryConsumerName); err != nil {
+	if info, err := natsClient.JS().ConsumerInfo(bus.Stream, bus.DispatchDeliveryDurable); err != nil {
 		report += fmt.Sprintf("consumer: %v", err)
 	} else {
 		report += fmt.Sprintf("consumer: delivered=%d ack_floor=%d ack_pending=%d pending=%d redelivered=%d filter_subjects=%q",
