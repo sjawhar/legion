@@ -119,8 +119,8 @@ func (r *outbox) rememberArm(ctx context.Context, row record.OutboxRow, payload 
 // readyMergeEnded is the architect's notice of a READY merge row ended without a merge by cause:
 // GitHub's refusal, which a retry would meet again (merge-refused), GitHub showing the pull
 // request closed or at another head than the record awaits since a change older than
-// ghautomerge.LagBound, a webhook the daemon never received (merge-stalled), or someone other than
-// the daemon taking it out of the merge queue or turning its auto-merge off at READY's head, not
+// ghautomerge.LagBound, a webhook the daemon never received (merge-stalled), or a person, or GitHub
+// on its own, taking it out of the merge queue or turning its auto-merge off at READY's head, not
 // because the merge failed (merge-removed).
 func readyMergeEnded(cause error) record.Notice {
 	var lagging *ghautomerge.Lagging

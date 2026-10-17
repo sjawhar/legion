@@ -350,30 +350,35 @@ func (f *MergeFailed) Error() string {
 	}
 }
 
-// Removed is someone other than the submitting App taking pull request Number out of the merge
-// queue (Queue), or turning its auto-merge off, at READY's Head without a merge, and not because its
-// merge failed (MergeFailed): Actor, GitHub's Reason (for auto-merge, its reason code and Detail,
-// its sentence), and when (At). The submission is over: the pull request is the remover's, and the
-// row ends rather than undo the removal.
+// Removed is pull request Number taken out of the merge queue (Queue), or its auto-merge turned
+// off, at READY's Head without a merge, not because its merge failed (MergeFailed) and not by the
+// submitting App's own disarm: by a person, Actor, the account GitHub names ("" when it names none),
+// or by GitHub on its own (ByGitHub), which names the App that submitted the merge as Actor of its
+// own disables (a merge method the repository blocks, a base switch). Reason is GitHub's reason
+// (for auto-merge, its reason code, and Detail its sentence), and At when it was made. The
+// submission is over: the removal stands, and the row ends rather than undo it.
 type Removed struct {
 	Number                      int
 	Head, Actor, Reason, Detail string
-	Queue                       bool
+	Queue, ByGitHub             bool
 	At                          time.Time
 }
 
 func (r *Removed) Error() string {
-	actor := r.Actor
-	if actor == "" {
-		actor = "someone"
-	}
 	at := r.At.UTC().Format(time.RFC3339)
+	text := fmt.Sprintf("turned off the auto-merge of pull request #%d at READY's head %s at %s (%s: %s)", r.Number, r.Head, at, r.Reason, r.Detail)
 	if r.Queue {
-		return fmt.Sprintf("%s took pull request #%d out of the merge queue at READY's head %s at %s (%s) without merging it: the daemon submits it no further, and the issue stays in awaiting_merge",
-			actor, r.Number, r.Head, at, r.Reason)
+		text = fmt.Sprintf("took pull request #%d out of the merge queue at READY's head %s at %s (%s)", r.Number, r.Head, at, r.Reason)
 	}
-	return fmt.Sprintf("%s turned off the auto-merge of pull request #%d at READY's head %s at %s (%s: %s) without merging it: the daemon submits it no further, and the issue stays in awaiting_merge",
-		actor, r.Number, r.Head, at, r.Reason, r.Detail)
+	switch {
+	case r.ByGitHub:
+		text = fmt.Sprintf("GitHub %s on its own, naming %s, the App that submitted it,", text, r.Actor)
+	case r.Actor == "":
+		text = "someone " + text
+	default:
+		text = r.Actor + " " + text
+	}
+	return text + " without merging it: the daemon submits it no further, and the issue stays in awaiting_merge"
 }
 
 // Disappeared is pull request Number of Repo open at READY's Head with nothing armed after the row
@@ -561,8 +566,9 @@ const moreChecks = `query MergeGroupContexts($owner: String!, $name: String!, $o
 // MergeFailed. Two removals restart the submission, and removal answers nil when they are all there
 // is, for Submit to submit again (timelineItem.restarts): the daemon's own disarm landing late, and
 // auto-merge a close turned off, which the pull request's reopen at READY's head undid. Any other is
-// Removed, the latest of them. A timeline that shows no removal since the last arm is behind the
-// read of the pull request (Disappeared).
+// Removed, the latest of them: GitHub's own (Removed.ByGitHub) when it names the account the token
+// acts as, whose own disarm leaves no other reason. A timeline that shows no removal since the last
+// arm is behind the read of the pull request (Disappeared).
 func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string) error {
 	var answer struct {
 		Viewer struct {
@@ -624,7 +630,7 @@ func removal(ctx context.Context, github githubrest.Client, repo ghrepo.Reposito
 			Runs: runs, Event: failed.ID, At: failed.CreatedAt}
 	case other != nil:
 		return &Removed{Number: number, Head: head, Actor: other.actor(), Reason: other.removalReason(), Detail: other.Reason,
-			Queue: other.Type == "RemovedFromMergeQueueEvent", At: other.CreatedAt}
+			Queue: other.Type == "RemovedFromMergeQueueEvent", ByGitHub: self != "" && other.actor() == self, At: other.CreatedAt}
 	case since == len(items):
 		return &Disappeared{Number: number, Repo: repo, Head: head}
 	default:

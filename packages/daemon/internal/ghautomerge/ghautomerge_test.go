@@ -440,7 +440,7 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		{name: "the merge queue takes it out to merge a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", paged)},
 			failPages: true, wait: "disappeared", routine: true},
 		{name: "GitHub turns off the auto-merge the daemon enabled, naming it", timeline: []string{enabled, disabled("merge_commit_blocked", "legion-implementer")},
-			removed: []string{"legion-implementer", "auto-merge", "merge_commit_blocked"}},
+			removed: []string{"GitHub turned off the auto-merge", "naming legion-implementer, the App that submitted it", "merge_commit_blocked"}},
 		{name: "the merge queue removes it for failed_checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", red)},
 			failed: []string{"#42", "head", "failed_checks", "group-sha", "integration (timed_out, " + failedRun + ")"}},
 		{name: "the merge queue removes it on a red merge group whatever its reason", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", red)},
