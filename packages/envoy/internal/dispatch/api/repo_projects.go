@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type rowScanner interface {
@@ -96,7 +99,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	previous, err := s.lockRepoProjectWrite(r.Context(), tx, repo, actor, input.Project)
+	previous, err := lockRepoProjectWrite(r.Context(), tx, s.deps.Events, repo, actor, input.Project)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -192,7 +195,7 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	previous, err := s.lockRepoProjectWrite(r.Context(), tx, repo, actor)
+	previous, err := lockRepoProjectWrite(r.Context(), tx, s.deps.Events, repo, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -240,8 +243,9 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 //     refuseRepoProjectInUse reads after it holds until the write commits.
 //
 // An issue create locks its project before the mapping too (createIssue), so the two never wait on
-// each other in a circle.
-func (s *server) lockRepoProjectWrite(ctx context.Context, tx pgx.Tx, repo string, actor model.Actor, projects ...string) (*model.RepoProject, error) {
+// each other in a circle. Every writer of a mapping goes through here: the PUT, the DELETE and the
+// boot seed (SeedRepoProjects).
+func lockRepoProjectWrite(ctx context.Context, tx pgx.Tx, broker *events.Broker, repo string, actor model.Actor, projects ...string) (*model.RepoProject, error) {
 	if _, err := tx.Exec(ctx, `
 		select pg_advisory_xact_lock(hashtext('dispatch-repo-project'), hashtext($1))
 	`, repo); err != nil {
@@ -262,7 +266,7 @@ func (s *server) lockRepoProjectWrite(ctx context.Context, tx pgx.Tx, repo strin
 	for _, project := range projects {
 		owners = append(owners, projectOwner(project).event("", actor, nil))
 	}
-	if err := s.deps.Events.LockOwners(ctx, tx, owners...); err != nil {
+	if err := broker.LockOwners(ctx, tx, owners...); err != nil {
 		return nil, err
 	}
 	mapping, err := scanRepoProject(tx.QueryRow(ctx, `
@@ -275,6 +279,66 @@ func (s *server) lockRepoProjectWrite(ctx context.Context, tx pgx.Tx, repo strin
 		return nil, err
 	}
 	return &mapping, nil
+}
+
+// SeedRepoProjects adds the DISPATCH_REPO_PROJECTS mappings (`owner/repo=KEY,...`) whose
+// repository has no mapping yet, at boot; a mapping already stored, set in the dashboard, wins.
+// Each repository is seeded in its own transaction under a mapping write's locks
+// (lockRepoProjectWrite), so a seed racing a PUT or DELETE of the same repository waits for it and
+// then sees what it left. A mapping the seed adds emits settings.repo_project.updated on its project,
+// deleted:false, as the PUT's does, actor the environment session; a repository already mapped, in
+// the seeded project or another, gets no write and no event.
+func SeedRepoProjects(ctx context.Context, database *store.Store, broker *events.Broker, raw string) error {
+	mappings, err := ParseRepoProjects(raw)
+	if err != nil {
+		return err
+	}
+	repos := make([]string, 0, len(mappings))
+	for repo := range mappings {
+		repos = append(repos, repo)
+	}
+	slices.Sort(repos)
+	for _, repo := range repos {
+		if err := seedRepoProject(ctx, database, broker, repo, mappings[repo]); err != nil {
+			return fmt.Errorf("seed repository project %q: %w", repo, err)
+		}
+	}
+	return nil
+}
+
+func seedRepoProject(ctx context.Context, database *store.Store, broker *events.Broker, repo, project string) error {
+	actor := model.Actor{Kind: "session", ID: "environment"}
+	actorJSON, err := encodeJSON(actor)
+	if err != nil {
+		return err
+	}
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	previous, err := lockRepoProjectWrite(ctx, tx, broker, repo, actor, project)
+	if err != nil || previous != nil {
+		return err
+	}
+	mapping, err := scanRepoProject(tx.QueryRow(ctx, `
+		insert into repo_projects (repo, project, created_by)
+		values ($1, $2, $3)
+		returning `+repoProjectColumns, repo, project, actorJSON))
+	if err != nil {
+		return err
+	}
+	event, err := broker.Append(ctx, tx, projectOwner(project).event(
+		"settings.repo_project.updated", actor, map[string]any{"mapping": mapping, "deleted": false},
+	))
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	broker.Publish(event)
+	return nil
 }
 
 // refuseRepoProjectInUse refuses to delete or move a mapping that issues of its project name as

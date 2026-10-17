@@ -203,7 +203,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := seedRepoProjects(ctx, database, boot.RepoProjects); err != nil {
+	// The seed appends its events through the same broker the router serves.
+	broker := events.NewBroker()
+	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
 		slog.Error("dispatch: seed repository projects", "error", err)
 		os.Exit(1)
 	}
@@ -258,7 +260,6 @@ func main() {
 	}
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
-	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
 		Store:     database,
 		Events:    broker,
@@ -847,25 +848,6 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	}
 	if !exists {
 		return fmt.Errorf("DISPATCH_DEFAULT_PROJECT %q does not exist", project)
-	}
-	return nil
-}
-
-func seedRepoProjects(ctx context.Context, database *store.Store, raw string) error {
-	ctx = store.WithTransactionTracking(ctx)
-	mappings, err := api.ParseRepoProjects(raw)
-	if err != nil {
-		return err
-	}
-	createdBy := []byte(`{"kind":"session","id":"environment"}`)
-	for repo, project := range mappings {
-		if _, err := database.Pool.Exec(ctx, `
-			insert into repo_projects (repo, project, created_by)
-			values ($1, $2, $3)
-			on conflict (repo) do nothing
-		`, repo, project, createdBy); err != nil {
-			return fmt.Errorf("seed repository project %q: %w", repo, err)
-		}
 	}
 	return nil
 }

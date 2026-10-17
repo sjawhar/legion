@@ -71,8 +71,11 @@ between two words (`README.md` "Search"). The issues trigger also writes `issues
 duplicate-title check reads for every stored title and calls for the new one.
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
-with comma-separated `owner/repo=KEY` entries. Stored dashboard mappings are
-authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
+with comma-separated `owner/repo=KEY` entries (`api.SeedRepoProjects`). Stored dashboard mappings are
+authoritative: the seed adds only a repository with no mapping, under the same locks as a mapping
+`PUT`, so a seed racing a `PUT` of that repository on another instance waits for it, and each
+mapping it adds emits `settings.repo_project.updated` on its project, actor the `environment`
+session. External issues fall back to `DISPATCH_DEFAULT_PROJECT` when
 configured. An unmapped repository without a default is rejected; issues that
 use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.

@@ -27,7 +27,8 @@ below add only what a setting's one line cannot say.
 
 `DISPATCH_REPO_PROJECTS` optionally seeds repository-to-project settings at boot
 with comma-separated `owner/repo=KEY` entries. Existing dashboard mappings take
-precedence over this seed. Dispatch resolves every external issue through the
+precedence over this seed: it adds only a repository with no mapping, and announces each one it
+adds with `settings.repo_project.updated`, as a dashboard write does. Dispatch resolves every external issue through the
 stored mapping, then falls back to `DISPATCH_DEFAULT_PROJECT` when configured.
 An unmapped external repository without a default project is rejected. An issue
 created through the default also gets a `repo:owner/name` label.
