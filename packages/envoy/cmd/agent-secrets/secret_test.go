@@ -147,15 +147,16 @@ const testAccount = "111122223333"
 // adaSignIn is ada@example.com's Identity Center sign-in in testAccount.
 const adaSignIn = "arn:aws:sts::111122223333:assumed-role/AWSReservedSSO_User_abc123/ada@example.com"
 
-// secretBroker is a fake broker for the secret forms: GET /v1/settings answers policytest's
-// namespace in testAccount, and each reread is answered by answer and recorded, in order, or
-// refused with the status fail names when it is set.
+// secretBroker is a fake broker for the secret forms: GET /v1/settings answers settings, and each
+// reread is answered by answer and recorded, in order, or refused with the status fail names when
+// it is set.
 type secretBroker struct {
-	mu      sync.Mutex
-	rereads []string
-	answers []Reread
-	answer  func(name string) Reread
-	fail    int
+	mu       sync.Mutex
+	rereads  []string
+	answers  []Reread
+	answer   func(name string) Reread
+	fail     int
+	settings Settings
 }
 
 // failRereads makes the broker refuse every reread from now on with status.
@@ -165,14 +166,22 @@ func (b *secretBroker) failRereads(status int) {
 	b.fail = status
 }
 
-// startSecretBroker serves a secretBroker on AGENT_SECRETS_URL for the rest of t.
+// startSecretBroker serves a secretBroker on AGENT_SECRETS_URL for the rest of t, answering
+// GET /v1/settings with policytest's namespace in testAccount.
 func startSecretBroker(t *testing.T, answer func(name string) Reread) *secretBroker {
 	t.Helper()
-	b := &secretBroker{answer: answer}
+	return startSecretBrokerWith(t, Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: testAccount, AWSRegion: "us-east-1"}, answer)
+}
+
+// startSecretBrokerWith is startSecretBroker with settings of the caller's choosing, so a test for
+// another store (e.g. GCP) can reuse the same fake broker.
+func startSecretBrokerWith(t *testing.T, settings Settings, answer func(name string) Reread) *secretBroker {
+	t.Helper()
+	b := &secretBroker{answer: answer, settings: settings}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/settings":
-			writeJSON(w, Settings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: testAccount, AWSRegion: "us-east-1"})
+			writeJSON(w, b.settings)
 		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/secrets/") && strings.HasSuffix(r.URL.Path, "/reread"):
 			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/secrets/"), "/reread")
 			b.mu.Lock()
@@ -1134,7 +1143,7 @@ func TestSecretWriteExitsOneWhenTheBrokerCannotBeAsked(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "v2")
 	_, stderr, code := runSecret("set", "SET_KEY")
-	if code != 1 || !strings.Contains(stderr, "the write to Secrets Manager stands") || !strings.Contains(stderr, "RATE_LIMITED") {
+	if code != 1 || !strings.Contains(stderr, "the write to the secret store stands") || !strings.Contains(stderr, "RATE_LIMITED") {
 		t.Fatalf("exit %d, stderr %q; want 1 saying the write stands and naming the refusal", code, stderr)
 	}
 	if v := valueOf(t, local, "SET_KEY"); v != "v2" {

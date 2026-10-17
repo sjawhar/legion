@@ -213,7 +213,7 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
   `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
   `agent-secrets secret` sends one reread after each write it makes, from the person's own
-  address. When a limit refuses it, the write stands in Secrets Manager and the CLI exits 1 saying
+  address. When a limit refuses it, the write stands in the secret store and the CLI exits 1 saying
   so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag (or annotate) a
@@ -223,21 +223,19 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 
 The broker writes no secret. A person creates, changes and deletes agent secrets with
 `agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
-Secrets Manager itself under that person's own AWS sign-in, so IAM in the broker's account is what
-decides who may change which secret, and with the tags, who gets it. The CLI asks the broker only
-for its settings (`GET /v1/settings`) and, after each write, for a reread. Before anything else it
-refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
-a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. A
-person's access needs each form's permissions on the namespace's secrets, and the table says what
-each request carries that a policy's conditions can match. Against a broker on Google Secret
-Manager this release's forms refuse to run, naming the store; a person writes such a secret with
-`gcloud secrets create <id prefix><slug> --replication-policy=automatic --kms-key-name=<key>
---set-annotations=owner=<owner>,tier=<tier> --data-file=-`, the value on stdin, and then asks the
-broker to reread it with `POST /v1/secrets/<NAME>/reread`. Secret Manager's IAM conditions can
-match a secret's name but not an annotation's value, so nothing like the AWS conditions below
-exists there: anyone who may update or add a version to a secret under the namespace can rewrite
-its owner and tier, and so take any person's secret or replace its value. On Secret Manager, grant
-write under the namespace to administrators only, and let people ask an administrator to write.
+the store itself under that person's own cloud sign-in - AWS, their own IAM Identity Center
+sign-in; GCP, their own Application Default Credentials, refusing a service account's - so that
+cloud's own IAM is what decides who may change which secret, and with the tags (AWS) or
+annotations (GCP), who gets it. The CLI asks the broker only for its settings (`GET
+/v1/settings`) and, after each write, for a reread. Before anything else it refuses, on AWS, a
+sign-in in another account than the agent-secrets key's (GCP needs no equivalent: every GCP call
+already names the project explicitly, so the API itself refuses one in another project), and for
+a write any sign-in but a person's own; those checks are the CLI's, and the cloud's IAM is the
+boundary. A person's access
+needs each form's permissions on the namespace's secrets, and the tables below say what each
+request carries that a policy's conditions can match.
+
+### AWS Secrets Manager
 
 | Form | Permissions | What a condition can match |
 | --- | --- | --- |
@@ -258,6 +256,26 @@ compares it with a principal tag holding their email matches only where that tag
 No form calls `GetSecretValue` or prints a value. `delete` and `restore` are permissions of their
 own: an access that grants a person every other form on their own secret but not these refuses
 those two with `AccessDeniedException`.
+
+### GCP Secret Manager
+
+| Form | Permissions |
+| --- | --- |
+| `list` | `secretmanager.secrets.list` on the project and `secretmanager.versions.get` on each secret (to tell whether its `versions/latest` is `ENABLED`) |
+| `show` | `secretmanager.secrets.get` and `secretmanager.versions.list`, `secretmanager.versions.get` (for its versions and whether `versions/latest` is `ENABLED`) |
+| `create` | `secretmanager.secrets.create` and `secretmanager.versions.add`. Automatic replication encrypts with the CMEK key through Secret Manager's own service agent, not the person's identity: that service agent (`service-<project number>@gcp-sa-secretmanager.iam.gserviceaccount.com`) needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key, granted once at setup, not per person |
+| `set` | `secretmanager.versions.add` |
+| `retag` | `secretmanager.secrets.get` and `secretmanager.secrets.update` (both owner and tier annotations in one call, the unchanged one re-sent as the secret holds it) |
+| `delete` | `secretmanager.secrets.update` (sets `expire_time` to 30 days out) |
+| `restore` | `secretmanager.secrets.update` (clears `expire_time`) |
+
+Unlike AWS's tags, a GCP IAM condition cannot test an annotation's value, so GCP has no per-secret
+counterpart to AWS's "a person may tag only their own secret" conditions above, and nothing stops
+a write from reaching another person's secret: whoever is granted `secretmanager.secrets.update`
+on the namespace can retag any secret under it to any owner or tier, shared secrets included, and
+whoever is granted `secretmanager.versions.add` can replace any secret's value under it. On
+Secret Manager, grant write under the namespace - `secrets.update` and `versions.add` alike - to
+administrators only, and let people ask an administrator to write on their behalf.
 
 ## Health and logs
 

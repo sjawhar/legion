@@ -1,17 +1,19 @@
 ---
 title: Manage a secret
-description: Create an agent secret, change its value, owner or tier, and delete or restore it with agent-secrets secret, under your own AWS sign-in, and see the broker serve each change at once.
+description: Create an agent secret, change its value, owner or tier, and delete or restore it with agent-secrets secret, under your own cloud sign-in, and see the broker serve each change at once.
 sidebar:
   order: 9
 ---
 
-An agent secret is a secret in AWS Secrets Manager under the broker's namespace, encrypted with
+An agent secret is a secret in the broker's own store - AWS Secrets Manager or GCP Secret
+Manager, whichever the broker's deployment uses - under the broker's namespace, encrypted with
 its key and tagged with its owner and tier
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
-`agent-secrets secret` manages them. It reads and writes Secrets Manager itself, under your own AWS
-sign-in, so IAM decides what you may do; the broker never writes a secret. After every write the
-CLI asks the broker to reread that one secret, so the change is served at once rather than at the
-broker's next read of the namespace.
+`agent-secrets secret` manages them. It reads and writes the store itself, under your own cloud
+sign-in, so that cloud's own IAM decides what you may do; the broker never writes a secret. After
+every write the CLI asks the broker to reread that one secret, so the change is served at once
+rather than at the broker's next read of the namespace. The examples on this page are AWS's; GCP's
+backend differs only where this page calls it out.
 
 ## Before you start
 
@@ -22,16 +24,19 @@ You need three things:
   in `agent-secrets-darwin-amd64.tar.gz` and `agent-secrets-darwin-arm64.tar.gz`, which hold the
   CLI alone. Managing secrets needs no helper, no machine login and no agent session.
 - **`AGENT_SECRETS_URL`, the broker's address.** The CLI asks the broker for the namespace, the
-  agent-secrets key, and that key's AWS account and region (`GET /v1/settings`), so you configure
-  none of them.
-- **An AWS sign-in in the broker's account.** Every form takes it from `--profile`, else
-  `AWS_PROFILE`, else the AWS SDK's default credential chain. A write needs your own IAM Identity
-  Center sign-in.
+  agent-secrets key, and that key's store and account/project (`GET /v1/settings`), so you
+  configure none of them.
+- **A cloud sign-in in the broker's account or project.** AWS: every form takes it from
+  `--profile`, else `AWS_PROFILE`, else the AWS SDK's default credential chain; a write needs your
+  own IAM Identity Center sign-in. GCP: every form uses your Application Default Credentials
+  (`gcloud auth application-default login`); a write needs that to be a person's sign-in, never a
+  service account's.
 
 ```sh
 export AGENT_SECRETS_URL=https://secrets.internal.example
-aws sso login --profile <profile>
+aws sso login --profile <profile>   # AWS
 export AWS_PROFILE=<profile>
+gcloud auth application-default login   # GCP, instead
 ```
 
 ## Create a secret
@@ -46,10 +51,13 @@ broker: serving DEMO_DEPLOY_TOKEN
 - **The name** is the one agents ask for, and the environment variable their command gets it in:
   uppercase letters, digits and single underscores, starting with a letter. In Secrets Manager it
   is `<namespace>demo-deploy-token`. Any other name is refused at once (exit 2).
-- **`--owner me`** writes your sign-in's session name in lowercase. It must be an email the broker
-  accepts, or the command refuses before writing. The broker matches it against the email a
-  person signs in to Dispatch with, so `me` names you where your Identity Center user name is
-  that email. **`--owner shared`** makes the secret everyone's.
+- **`--owner me`** writes your sign-in's email in lowercase: your Identity Center session name
+  (AWS) or your Application Default Credentials' Google account (GCP). It must be an email the
+  broker accepts, or the command refuses before writing. The broker matches it against the email a
+  person signs in to Dispatch with, so `me` names you where that session name or Google account is
+  the same email. **`--owner shared`** makes the secret everyone's. GCP stores owner and tier as
+  the secret's **annotations**, never labels, so they never collide with a label someone else
+  applies.
 - **`--tier agent`** lets the owner's own sessions use it without asking, and **`--tier human`**
   sends every use to a person for approval. Both flags are required.
 - **The value.** At a terminal the CLI reads one hidden line. Enter or Ctrl-D ends it; Backspace,
@@ -146,10 +154,17 @@ $ agent-secrets secret create DEMO_DEPLOY_TOKEN --owner me --tier agent
 agent-secrets secret create: arn:aws:sts::111122223333:assumed-role/example-devbox-instance-role/i-0abc is not a person's Identity Center sign-in: a secret is written under your own sign-in to account 111122223333 (aws sso login, then --profile or AWS_PROFILE), never a machine's role
 ```
 
-A read (`list`, `show`) takes any sign-in in the broker's account, a machine's role included. These
-checks are the CLI's own; what a sign-in may actually read or change is IAM's to decide, and
-[Operating the broker](/legion/broker/operate/#people-who-manage-secrets) lists the calls each form
-makes.
+GCP write checks are the same shape, with one difference: a write refuses Application Default
+Credentials that are not a person's `gcloud auth application-default login` (a service account
+key file, or a GCE/GKE metadata-server or workload identity, writes no secret). GCP has no
+wrong-account read check: every call already names `projects/<project number>/...` explicitly in
+the resource, so IAM on that resource, not this CLI, is what decides whether a read succeeds.
+
+A read (`list`, `show`) takes any sign-in the cloud's own IAM lets read the namespace's secrets, a
+machine's role or service account included. These
+checks are the CLI's own; what a sign-in may actually read or change is each cloud's IAM to decide,
+and [Operating the broker](/legion/broker/operate/#people-who-manage-secrets) lists the calls each
+form makes.
 
 ## See what is there
 
@@ -204,13 +219,20 @@ broker: serving DEMO_DEPLOY_TOKEN
 ```
 
 Name `--owner`, `--tier` or both. `retag` reads the tags the secret holds and sends both in one
-request, the unchanged one as it is, so an IAM condition on the request's tags (one that lets a
-person tag only their own secret, say) sees both. For a secret missing a tag, name that one too.
+request, the unchanged one as it is: on AWS, so an IAM condition on the request's tags (one that
+lets a person tag only their own secret, say) sees both. GCP has no such condition (an IAM
+condition cannot test an annotation's value the way it can an AWS tag), so GCP's access is
+coarser: anyone granted `secretmanager.secrets.update` on the namespace can retag any secret
+under it, shared ones included, and anyone granted `secretmanager.versions.add` (the permission
+`set` needs) can replace any secret's value under it the same way. For a secret missing a tag,
+name that one too.
 
 You can retag your own secret, to `--owner shared` too. Once a secret is shared, its owner and
-tier are an administrator's to change: when AWS refuses a retag of a shared secret, the CLI prints
-AWS's refusal, then `a shared secret's owner and tier are an administrator's to change`, and exits
-1. It prints the same line when AWS refuses a retag to `--owner shared`; for your own secret, that
+tier are an administrator's to change: on AWS, by the IAM condition above; on GCP, because a
+deployment that wants this protection grants `secretmanager.secrets.update` on a shared secret
+only to administrators. When the cloud refuses a retag of a shared secret, the CLI prints that
+refusal, then `a shared secret's owner and tier are an administrator's to change`, and exits 1. It
+prints the same line when the cloud refuses a retag to `--owner shared`; for your own secret, that
 refusal means your access does not include the retag
 ([Troubleshooting](/legion/broker/guides/troubleshooting/#managing-a-secret)).
 
@@ -234,10 +256,14 @@ nothing (`GRANT_NOT_LIVE`). Until you restore it, Secrets Manager keeps the secr
 read its value, to change its value or tags (`set`, `retag`), and to `create` another of the same
 name. `delete` and `restore` are permissions of their own (`secretsmanager:DeleteSecret`,
 `secretsmanager:RestoreSecret`): where your access does not include one, AWS refuses it with
-`AccessDeniedException`, your own secret included.
+`AccessDeniedException`, your own secret included. GCP has no separate recovery window: `delete`
+sets the secret's `expire_time` to 30 days out in one `UpdateSecret` call and prints it; the secret
+and every version stay readable and restorable until that moment, and GCP deletes them for good,
+irreversibly, once it passes. `restore` clears `expire_time` the same way.
 
-`list` and `show` keep showing a deleted secret, with when it was deleted and the **earliest** it
-can be purged:
+`list` and `show` keep showing a deleted secret, with when it was deleted (AWS) or GCP's
+`expire_time`, the future moment it purges for good (GCP - no separate EARLIEST_PURGE there, since
+that moment is both), and the **earliest** it can be purged:
 
 ```console
 $ agent-secrets secret list
@@ -296,7 +322,7 @@ and the command exits 1:
 ```console
 $ agent-secrets secret set DEMO_DEPLOY_TOKEN < token.txt
 set a new value of DEMO_DEPLOY_TOKEN
-agent-secrets secret set: the write to Secrets Manager stands, but the broker could not be asked to reread DEMO_DEPLOY_TOKEN, so it serves the change only from its next reload: too many secret rereads; try again later (RATE_LIMITED)
+agent-secrets secret set: the write to the secret store stands, but the broker could not be asked to reread DEMO_DEPLOY_TOKEN, so it serves the change only from its next reload: too many secret rereads; try again later (RATE_LIMITED)
 ```
 
 Do not repeat the write. A new value is read at the next grant read anyway, and a create, a

@@ -16,8 +16,9 @@
   `gcp_project` for GCP), the other store's omitted. `secrets.Store` is the one interface the
   policy and the value release read through, with `secrets.AWS` and `secrets.GCP` behind it;
   `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
-  `agent-secrets secret` manages AWS Secrets Manager only in this release and refuses a broker on
-  the GCP store by name; a Secret Manager secret is written with `gcloud secrets`.
+  `agent-secrets secret` manages both stores: against a GCP broker it reads and writes Secret
+  Manager itself under the person's own Application Default Credentials, refusing a service
+  account's.
 - `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
   `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
   dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the

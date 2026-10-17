@@ -1,10 +1,11 @@
 // packages/envoy/cmd/agent-secrets/secret.go
 //
-// The secret forms: a person reads and writes agent secrets in AWS Secrets Manager under their own
-// AWS sign-in, then asks the broker to reread each one written, so the change is served at once.
-// The broker is asked only for its settings (GET /v1/settings: the namespace, key, account and
-// region) and for the reread; every read and write is the person's own call to AWS, which IAM
-// decides.
+// The secret forms: a person reads and writes agent secrets in the broker's own secret store -
+// AWS Secrets Manager (secret_aws.go) or GCP Secret Manager (secret_gcp.go), chosen by the
+// broker's `store` setting - under their own cloud sign-in, then asks the broker to reread each
+// one written, so the change is served at once. The broker is asked only for its settings
+// (GET /v1/settings: the namespace, key and which store it uses) and for the reread; every read
+// and write is the person's own call to the store, which its own IAM decides.
 package main
 
 import (
@@ -26,10 +27,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
-	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
-	"github.com/aws/smithy-go"
 	"golang.org/x/term"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -48,19 +45,19 @@ func init() {
 	// Register after variable initialization: the handlers use commands for help.
 	secretForms = []secretForm{
 		{command{"secret list", "agent-secrets secret list [--json] [--profile P]",
-			"List every agent secret under your own AWS sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."}, cmdSecretList},
+			"List every agent secret under your own cloud sign-in: its owner, tier, whether it has a\nvalue, and, while it is scheduled for deletion, when it was deleted and the earliest it\ncan be purged."}, cmdSecretList},
 		{command{"secret show", "agent-secrets secret show NAME [--json] [--profile P]",
 			"Print the agent secret NAME's owner, tier, dates and versions, never its value."}, cmdSecretShow},
 		{command{"secret create", "agent-secrets secret create NAME --owner me|shared --tier agent|human [--profile P]",
-			"Create the agent secret NAME under your own AWS sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."}, cmdSecretCreate},
+			"Create the agent secret NAME under your own cloud sign-in, then ask the broker to serve it at\nonce. Its value is read from standard input, or typed at a prompt with echo off when standard\ninput is a terminal."}, cmdSecretCreate},
 		{command{"secret set", "agent-secrets secret set NAME [--profile P]",
-			"Give the agent secret NAME a new value under your own AWS sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."}, cmdSecretSet},
+			"Give the agent secret NAME a new value under your own cloud sign-in, then ask the broker to\nserve it at once. The value is read from standard input, or typed at a prompt with echo off\nwhen standard input is a terminal."}, cmdSecretSet},
 		{command{"secret retag", "agent-secrets secret retag NAME [--owner me|shared] [--tier agent|human] [--profile P]",
-			"Change the agent secret NAME's owner, tier or both under your own AWS sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."}, cmdSecretRetag},
+			"Change the agent secret NAME's owner, tier or both under your own cloud sign-in, then ask\nthe broker to reread it. A shared secret's owner and tier are an administrator's to\nchange."}, cmdSecretRetag},
 		{command{"secret delete", "agent-secrets secret delete NAME [--profile P]",
-			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own AWS\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
+			"Schedule the agent secret NAME's deletion, restorable for 30 days, under your own cloud\nsign-in, then ask the broker to stop serving it at once."}, cmdSecretDelete},
 		{command{"secret restore", "agent-secrets secret restore NAME [--profile P]",
-			"Cancel the agent secret NAME's scheduled deletion under your own AWS sign-in, then ask\nthe broker to serve it again at once."}, cmdSecretRestore},
+			"Cancel the agent secret NAME's scheduled deletion under your own cloud sign-in, then ask\nthe broker to serve it again at once."}, cmdSecretRestore},
 	}
 	execForm := commands[len(commands)-1]
 	commands = commands[:len(commands)-1]
@@ -163,11 +160,12 @@ func secretFail(stderr io.Writer, form string, err error) int {
 // secretFlagValues are the secret forms' flags that take a value.
 var secretFlagValues = map[string]bool{"owner": true, "tier": true, "profile": true}
 
-// secretFlags is form's flag set with --profile, which every secret form takes since every one
-// calls AWS.
+// secretFlags is form's flag set with --profile, which every secret form takes but only the AWS
+// backend uses (GCP uses your Application Default Credentials instead; a non-empty --profile
+// there is a usage error, openSecretBackend).
 func secretFlags(form string, stderr io.Writer) (*flag.FlagSet, *string) {
 	flags := newFlagSet(form, stderr)
-	return flags, flags.String("profile", "", "the AWS profile to sign in with (default: AWS_PROFILE, else the AWS SDK's default credential chain)")
+	return flags, flags.String("profile", "", "the AWS profile to sign in with (AWS only; default: AWS_PROFILE, else the AWS SDK's default credential chain)")
 }
 
 // secretName is the one NAME a form takes, and its slug: the secret's name under the prefix.
@@ -202,20 +200,11 @@ func checkOwnerTier(owner, tier string) error {
 func ownerTag(owner, email string) (string, error) {
 	if owner == "me" {
 		if !policy.ValidPersonOwner(email) {
-			return "", usageErr{fmt.Errorf("your AWS sign-in's session name %q is not an email the broker accepts as an owner", email)}
+			return "", usageErr{fmt.Errorf("your sign-in's email %q is not an email the broker accepts as an owner", email)}
 		}
 		return email, nil
 	}
 	return owner, nil
-}
-
-// ownerTierTags is the owner and tier tags, which create and retag always send together
-// (cmdSecretRetag says why).
-func ownerTierTags(owner, tier string) []smtypes.Tag {
-	return []smtypes.Tag{
-		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
-		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
-	}
 }
 
 // secretStdin is where create and set read a secret's value from; tests replace it.
@@ -399,26 +388,58 @@ func orDash(s string) string {
 	return s
 }
 
-// isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
-// generic API error: secretsmanager's types declare no type for it.
-func isAccessDenied(err error) bool {
-	var apiErr smithy.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException"
+// secretBackend is the per-store backend the secret forms call: AWS Secrets Manager
+// (secrets.StoreAWS, or "" from a broker that predates the `store` setting) or GCP Secret
+// Manager (secrets.StoreGCP), chosen from the broker's GET /v1/settings `store` field. Every
+// method takes the secret's name under the prefix (secretName's slug); the full store-side name
+// (each backend's own id) is each backend's own concern.
+type secretBackend interface {
+	// requireAccount refuses, before any read, a sign-in whose account does not hold the agent
+	// secrets: a read there would list another account's secrets as if they were the agent
+	// secrets. AWS only: GCP needs no equivalent (gcpBackend.requireAccount says why).
+	requireAccount(ctx context.Context) error
+	// requireWriteSignIn refuses, before any write, a sign-in that must not write - AWS a
+	// machine's own role, GCP a service-account identity - and answers the signed-in person's
+	// lowercased email for --owner me.
+	requireWriteSignIn(ctx context.Context) (email string, err error)
+
+	list(ctx context.Context) ([]secretView, error)
+	show(ctx context.Context, slug string) (secretView, error)
+	create(ctx context.Context, slug, owner, tier, value string) error
+	set(ctx context.Context, slug, value string) error
+	// currentTags answers the secret's current owner and tier, for retag to fill in the tag it
+	// was not given.
+	currentTags(ctx context.Context, slug string) (owner, tier string, err error)
+	retag(ctx context.Context, slug, owner, tier string) error
+	// delete schedules the secret's deletion and answers the moment it happens (AWS:
+	// DeleteSecret's own recovery window end; GCP: the expire_time it sets), nil only on error.
+	delete(ctx context.Context, slug string) (deletion *time.Time, err error)
+	restore(ctx context.Context, slug string) error
+
+	// isAccessDenied reports whether err is the store's own access-denied refusal, used by
+	// retag's shared-secret message.
+	isAccessDenied(err error) bool
+
+	// close releases the backend's own connection (GCP's gRPC client; AWS's HTTP-based SDK
+	// clients need no release). A short CLI process would reclaim it on exit regardless, but a
+	// test building many backends in one process leaks goroutines without it.
+	close() error
 }
 
-// secretSession is one secret form's connection: the broker, its settings, and the person's AWS
-// clients pinned to the broker's region.
+// secretSession is one secret form's connection: the broker and the backend (requireAccount,
+// requireWriteSignIn) opened for it.
 type secretSession struct {
-	ctx      context.Context
-	broker   *client
-	settings Settings
-	sm       secretsAPI
-	st       stsAPI
+	ctx     context.Context
+	broker  *client
+	backend secretBackend
 }
 
-// openSession reads the broker's settings from AGENT_SECRETS_URL and loads the person's AWS
-// sign-in (profile, else AWS_PROFILE, else the default chain) in the broker's region. It checks
-// nothing about the sign-in: connectReader and connectWriter do.
+// Close releases the session's backend connection.
+func (s *secretSession) Close() error { return s.backend.close() }
+
+// openSession reads the broker's settings from AGENT_SECRETS_URL and opens the backend its
+// `store` field names (openSecretBackend). It checks nothing about the sign-in: connectReader
+// and connectWriter do.
 func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	base := strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
 	if base == "" {
@@ -432,76 +453,78 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read the broker's settings: %w", err)
 	}
-	// A broker from before the store field names none and holds the secrets in Secrets Manager.
-	if settings.Store != "" && settings.Store != secrets.StoreAWS {
-		return nil, usageErr{fmt.Errorf("the broker holds its agent secrets in %s; this release's secret forms manage AWS Secrets Manager only", settings.Store)}
-	}
-	if err := checkSettingsKeyARN(settings); err != nil {
-		return nil, err
-	}
-	sm, st, err := awsClients(ctx, profile, settings.AWSRegion)
+	backend, err := openSecretBackend(ctx, profile, settings)
 	if err != nil {
 		return nil, err
 	}
-	return &secretSession{ctx: ctx, broker: broker, settings: settings, sm: sm, st: st}, nil
+	return &secretSession{ctx: ctx, broker: broker, backend: backend}, nil
 }
 
-// checkSettingsKeyARN refuses, before any AWS call, settings whose aws_account_id or aws_region does
-// not match the account and region in kms_key_arn. The broker derives both from the key ARN the same
-// way (internal/broker/api handlers_secrets.go, secrets.AWSKeyARNParts), so the account the sign-in is
-// checked against (requireAccount) and the region the SDK is pinned to are the key ARN's, not a
-// separately-sent field a spoofed or plain-http broker could set on its own to steer a write.
-func checkSettingsKeyARN(settings Settings) error {
-	if !secrets.ValidAWSKeyARN(settings.KMSKeyARN) {
-		return fmt.Errorf("the broker's settings name an invalid KMS key ARN %q (expected arn:aws:kms:<region>:<account>:key/<key id>)", settings.KMSKeyARN)
+// openSecretBackend builds the backend settings.Store names: AWS Secrets Manager, pinned to the
+// key ARN's own account and region (checkSettingsKeyARN), for "" or secrets.StoreAWS - a
+// broker that predates `store` names neither - or GCP Secret Manager, pinned to the project
+// secrets_prefix and kms_key_name's own shape agree on (checkSettingsKMSKeyName), for
+// secrets.StoreGCP. Any other value is refused before any cloud call.
+func openSecretBackend(ctx context.Context, profile string, settings Settings) (secretBackend, error) {
+	switch settings.Store {
+	case "", secrets.StoreAWS:
+		if err := checkSettingsKeyARN(settings); err != nil {
+			return nil, err
+		}
+		sm, st, err := awsClients(ctx, profile, settings.AWSRegion)
+		if err != nil {
+			return nil, err
+		}
+		return &awsBackend{settings: settings, sm: sm, st: st}, nil
+	case secrets.StoreGCP:
+		if profile != "" {
+			return nil, usageErr{fmt.Errorf("--profile names an AWS profile; this broker's store is %s, which uses your Application Default Credentials (gcloud auth application-default login), not --profile", settings.Store)}
+		}
+		if err := checkSettingsKMSKeyName(settings); err != nil {
+			return nil, err
+		}
+		return newGCPBackend(ctx, settings)
+	default:
+		return nil, fmt.Errorf("the broker's settings name an unknown secret store %q", settings.Store)
 	}
-	region, account := secrets.AWSKeyARNParts(settings.KMSKeyARN)
-	if settings.AWSAccountID != account {
-		return fmt.Errorf("the broker's settings name account %s, but its KMS key ARN %s is in account %s: the broker's settings are inconsistent", settings.AWSAccountID, settings.KMSKeyARN, account)
-	}
-	if settings.AWSRegion != region {
-		return fmt.Errorf("the broker's settings name region %s, but its KMS key ARN %s is in region %s: the broker's settings are inconsistent", settings.AWSRegion, settings.KMSKeyARN, region)
-	}
-	return nil
 }
 
-// connectReader is openSession for a read: it refuses a sign-in in another account
-// (requireAccount), whose secrets are not the agent secrets. Any sign-in in the broker's account
-// reads, a machine's role included: IAM decides what it may read.
+// connectReader is openSession for a read: on AWS it refuses a sign-in in another account
+// (backend.requireAccount), whose secrets are not the agent secrets; GCP needs no equivalent. Any
+// sign-in that can read there reads: IAM decides what it may read.
 func connectReader(ctx context.Context, profile string) (*secretSession, error) {
 	s, err := openSession(ctx, profile)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireAccount(ctx, s.st, s.settings); err != nil {
+	if err := s.backend.requireAccount(ctx); err != nil {
+		s.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// connectWriter is openSession for a write: it refuses any sign-in but the person's own in the
-// broker's account (requireWriteSignIn) before anything is written, and answers their email.
+// connectWriter is openSession for a write: it refuses any sign-in that must not write
+// (backend.requireWriteSignIn) before anything is written, and answers their email.
 func connectWriter(ctx context.Context, profile string) (*secretSession, string, error) {
 	s, err := openSession(ctx, profile)
 	if err != nil {
 		return nil, "", err
 	}
-	email, err := requireWriteSignIn(ctx, s.st, s.settings)
+	email, err := s.backend.requireWriteSignIn(ctx)
 	if err != nil {
+		s.Close()
 		return nil, "", err
 	}
 	return s, email, nil
 }
 
-// id is the Secrets Manager name of the secret whose name under the prefix is slug.
-func (s *secretSession) id(slug string) string {
-	return s.settings.SecretsPrefix + slug
-}
-
-// displayName is the NAME a session asks for the secret named id in Secrets Manager, or id itself
-// when its name under the prefix maps to none (the broker refuses such a secret as name-malformed).
-func (s *secretSession) displayName(id string) string {
-	slug := strings.TrimPrefix(id, s.settings.SecretsPrefix)
+// displayName is the NAME a session asks for the secret named id, or id itself when its name
+// under the prefix maps to none (the broker refuses such a secret as name-malformed). Both
+// backends share it (awsBackend.displayName, gcpBackend.displayName): their store-side name
+// differs, but it maps back to NAME the same way, from settings.SecretsPrefix alone.
+func displayName(prefix, id string) string {
+	slug := strings.TrimPrefix(id, prefix)
 	name := policy.SlugToName(slug)
 	if back, err := policy.NameToSlug(name); err != nil || back != slug {
 		return id
@@ -516,7 +539,7 @@ func (s *secretSession) displayName(id string) string {
 func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, wantServed bool, restorable *time.Time) int {
 	r, err := s.broker.RereadSecret(s.ctx, name)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: the write to Secrets Manager stands, but the broker could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, name, err)
+		fmt.Fprintf(stderr, "agent-secrets %s: the write to the secret store stands, but the broker could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, name, err)
 		return 1
 	}
 	switch {
@@ -540,23 +563,27 @@ func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, 
 
 // secretView is what list and show print of one secret: never its value.
 type secretView struct {
-	// Name is the NAME a session asks for it as (or its Secrets Manager name, when it maps to none).
+	// Name is the NAME a session asks for it as (or its name in the secret store, when it maps to none).
 	Name string `json:"name"`
-	// SecretName is its whole Secrets Manager name.
+	// SecretName is its whole name in the secret store.
 	SecretName string `json:"secret_name"`
 	Owner      string `json:"owner"`
 	Tier       string `json:"tier"`
-	// HasValue is whether a version carries AWSCURRENT, so the broker can release a value.
+	// HasValue is whether it holds a current, servable version (AWS: a version carries AWSCURRENT;
+	// GCP: versions/latest is ENABLED), so the broker can release a value.
 	HasValue bool `json:"has_value"`
-	// Created and LastChanged are absent when Secrets Manager answers none.
+	// Created and LastChanged are absent when the secret store answers none.
 	Created     *time.Time `json:"created,omitempty"`
 	LastChanged *time.Time `json:"last_changed,omitempty"`
-	// Deleted is when its deletion was scheduled, set while it is scheduled for deletion.
+	// Deleted is set while the secret is scheduled for deletion: AWS, the moment the delete ran;
+	// GCP, the expire_time it set, the future moment GCP deletes it for good (GCP has no separate
+	// scheduling moment to report, so this is not "when its deletion was scheduled" there).
 	Deleted *time.Time `json:"deleted,omitempty"`
 	// EarliestPurge is the earliest Secrets Manager can purge it, set while it is scheduled for
 	// deletion (earliestPurge): restorable at least until then, perhaps longer.
 	EarliestPurge *time.Time `json:"earliest_purge,omitempty"`
-	// Versions maps each version id to its staging labels; only show answers it.
+	// Versions maps each version id to its AWS staging labels, or each GCP version number to its
+	// one-element state (ENABLED, DISABLED, DESTROYED). Only show answers it.
 	Versions map[string][]string `json:"versions,omitempty"`
 }
 
@@ -586,30 +613,10 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	views := []secretView{}
-	pages := secretsmanager.NewListSecretsPaginator(s.sm, &secretsmanager.ListSecretsInput{
-		Filters:                []smtypes.Filter{{Key: smtypes.FilterNameStringTypeName, Values: []string{s.settings.SecretsPrefix}}},
-		IncludePlannedDeletion: aws.Bool(true),
-	})
-	for pages.HasMorePages() {
-		page, err := pages.NextPage(s.ctx)
-		if err != nil {
-			return secretFail(stderr, form, fmt.Errorf("list the agent secrets: %w", err))
-		}
-		for _, e := range page.SecretList {
-			id := aws.ToString(e.Name)
-			if !strings.HasPrefix(id, s.settings.SecretsPrefix) {
-				continue // the name filter matched more than the namespace
-			}
-			tags := secrets.TagMap(e.Tags)
-			views = append(views, secretView{
-				Name: s.displayName(id), SecretName: id,
-				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
-				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
-				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
-			})
-		}
+	defer s.Close()
+	views, err := s.backend.list(s.ctx)
+	if err != nil {
+		return secretFail(stderr, form, err)
 	}
 	// sort.Slice's less answers a bool: an int-returning comparator would be read by broker-refgen
 	// as an exit code, which every int-returning function in this package is.
@@ -632,8 +639,11 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 	if err := tw.Flush(); err != nil {
 		return secretFail(stderr, form, err)
 	}
-	// The legend goes to stderr, so the table on stdout stays one row per secret for a script.
-	if slices.ContainsFunc(views, func(v secretView) bool { return v.Deleted != nil }) {
+	// The legend goes to stderr, so the table on stdout stays one row per secret for a script. It
+	// names Secrets Manager's own recovery window, so it is printed only for a row that has one
+	// (EarliestPurge, AWS-only: GCP's expire_time is the exact purge moment, with no separate
+	// recovery window to explain).
+	if slices.ContainsFunc(views, func(v secretView) bool { return v.EarliestPurge != nil }) {
 		fmt.Fprintf(stderr, "EARLIEST_PURGE is the deletion plus Secrets Manager's %d-day minimum recovery window: restore works at least until then; the window the delete chose may be longer.\n", minRecoveryWindowDays)
 	}
 	return 0
@@ -659,19 +669,12 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	out, err := s.sm.DescribeSecret(s.ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(s.id(slug))})
+	defer s.Close()
+	view, err := s.backend.show(s.ctx, slug)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	tags := secrets.TagMap(out.Tags)
-	view := secretView{
-		Name: s.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
-		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
-		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
-		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
-		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
-		Versions: out.VersionIdsToStages,
-	}
+
 	if *asJSON {
 		if err := writeIndentedJSON(stdout, view); err != nil {
 			return secretFail(stderr, form, err)
@@ -680,9 +683,12 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "name: %s\nsecret_name: %s\nowner: %s\ntier: %s\ncreated: %s\nlast_changed: %s\n",
 		view.Name, view.SecretName, orDash(view.Owner), orDash(view.Tier), formatTime(view.Created), formatTime(view.LastChanged))
-	if view.Deleted != nil {
+	switch {
+	case view.EarliestPurge != nil:
 		fmt.Fprintf(stdout, "deleted: %s\nearliest_purge: %s (the deletion plus Secrets Manager's %d-day minimum recovery window: restorable at least until then; the window the delete chose may be longer)\n",
 			formatTime(view.Deleted), formatTime(view.EarliestPurge), minRecoveryWindowDays)
+	case view.Deleted != nil:
+		fmt.Fprintf(stdout, "deleted: %s\n", formatTime(view.Deleted))
 	}
 	versions := make([]string, 0, len(view.Versions))
 	for version := range view.Versions {
@@ -706,7 +712,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	const form = "secret create"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
 	flags, profile := secretFlags(form, stderr)
-	owner := flags.String("owner", "", "me (your email, from your AWS sign-in) or shared")
+	owner := flags.String("owner", "", "me (your email, from your AWS or Google sign-in) or shared")
 	tier := flags.String("tier", "", "agent (its owner's agents use it without asking) or human (a person approves each use)")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -725,6 +731,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
+	defer s.Close()
 	ownerValue, err := ownerTag(*owner, email)
 	if err != nil {
 		return secretFail(stderr, form, err)
@@ -733,12 +740,7 @@ func cmdSecretCreate(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	if _, err := s.sm.CreateSecret(s.ctx, &secretsmanager.CreateSecretInput{
-		Name:         aws.String(s.id(slug)),
-		KmsKeyId:     aws.String(s.settings.KMSKeyARN),
-		SecretString: aws.String(value),
-		Tags:         ownerTierTags(ownerValue, *tier),
-	}); err != nil {
+	if err := s.backend.create(s.ctx, slug, ownerValue, *tier, value); err != nil {
 		return secretFail(stderr, form, err)
 	}
 	fmt.Fprintf(stdout, "created %s (owner=%s, tier=%s)\n", name, ownerValue, *tier)
@@ -764,13 +766,12 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
+	defer s.Close()
 	value, err := readSecretValue(name, pipeCommand(*profile, "secret", "set", name), stderr)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	if _, err := s.sm.PutSecretValue(s.ctx, &secretsmanager.PutSecretValueInput{
-		SecretId: aws.String(s.id(slug)), SecretString: aws.String(value),
-	}); err != nil {
+	if err := s.backend.set(s.ctx, slug, value); err != nil {
 		return secretFail(stderr, form, err)
 	}
 	fmt.Fprintf(stdout, "set a new value of %s\n", name)
@@ -782,13 +783,17 @@ func cmdSecretSet(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 // cmdSecretRetag changes a secret's owner, tier or both. It always sends both tags, re-sending the
-// one not named as the secret holds it: the deployment repository's IAM statement that lets a
-// person tag their own secret conditions on both request tags, so a request carrying one fails.
+// one not named as the secret holds it: on AWS, the deployment repository's IAM policy that lets
+// a person tag their own secret conditions on both request tags, so a request carrying one fails.
+// GCP has no equivalent condition (annotations are not IAM-conditionable the way AWS tags are):
+// anyone with secretmanager.secrets.update on the namespace can retag any secret under it,
+// shared ones included; sending both tags there is for API symmetry with AWS, not an enforced
+// shared-secret protection.
 func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	const form = "secret retag"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
 	flags, profile := secretFlags(form, stderr)
-	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS sign-in) or shared")
+	newOwner := flags.String("owner", "", "the new owner: me (your email, from your AWS or Google sign-in) or shared")
 	newTier := flags.String("tier", "", "the new tier: agent or human")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
@@ -807,13 +812,12 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	id := s.id(slug)
-	held, err := s.sm.DescribeSecret(s.ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(id)})
+	defer s.Close()
+	curOwner, curTier, err := s.backend.currentTags(s.ctx, slug)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	tags := secrets.TagMap(held.Tags)
-	owner, tier := tags[policy.TagOwner], tags[policy.TagTier]
+	owner, tier := curOwner, curTier
 	if *newOwner != "" {
 		owner, err = ownerTag(*newOwner, email)
 		if err != nil {
@@ -826,14 +830,13 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if owner == "" || tier == "" {
 		return secretFail(stderr, form, usageErr{fmt.Errorf("%s has no owner tag or no tier tag, and a retag sends both: name the missing one with --owner or --tier", name)})
 	}
-	if _, err := s.sm.TagResource(s.ctx, &secretsmanager.TagResourceInput{
-		SecretId: aws.String(id),
-		Tags:     ownerTierTags(owner, tier),
-	}); err != nil {
+	if err := s.backend.retag(s.ctx, slug, owner, tier); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
-		// IAM leaves a shared secret's owner and tier to administrators: one held shared, or one a
-		// person asked to make shared.
-		if isAccessDenied(err) && (tags[policy.TagOwner] == policy.OwnerShared || owner == policy.OwnerShared) {
+		// AWS: IAM conditioned on the request tags leaves a shared secret's owner and tier to
+		// administrators specifically. GCP has no per-secret condition on secretmanager.secrets.update,
+		// so a deployment instead grants that permission at all only to administrators for the
+		// secrets it protects this way.
+		if s.backend.isAccessDenied(err) && (curOwner == policy.OwnerShared || owner == policy.OwnerShared) {
 			fmt.Fprintf(stderr, "agent-secrets %s: %s\n", form, sharedRetagRefused)
 		}
 		return 1
@@ -846,8 +849,9 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 // delete, restore
 // ---------------------------------------------------------------------------
 
-// cmdSecretDelete schedules a secret's deletion with the longest recovery window, never forcing
-// it, so restore can bring the secret back until the window ends.
+// cmdSecretDelete schedules a secret's deletion with the longest recovery window (AWS) or at
+// recoveryWindowDays from now (GCP's expire_time), never forcing it, so restore can bring the
+// secret back until the window ends.
 func cmdSecretDelete(args []string, stdout, stderr io.Writer) int {
 	const form = "secret delete"
 	flagArgs, positional := splitArgs(args, secretFlagValues)
@@ -863,14 +867,13 @@ func cmdSecretDelete(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	out, err := s.sm.DeleteSecret(s.ctx, &secretsmanager.DeleteSecretInput{
-		SecretId: aws.String(s.id(slug)), RecoveryWindowInDays: aws.Int64(recoveryWindowDays),
-	})
+	defer s.Close()
+	deletion, err := s.backend.delete(s.ctx, slug)
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
 	fmt.Fprintf(stdout, "deleted %s\n", name)
-	return rereadAfter(s, stdout, stderr, form, name, false, out.DeletionDate)
+	return rereadAfter(s, stdout, stderr, form, name, false, deletion)
 }
 
 func cmdSecretRestore(args []string, stdout, stderr io.Writer) int {
@@ -888,7 +891,8 @@ func cmdSecretRestore(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	if _, err := s.sm.RestoreSecret(s.ctx, &secretsmanager.RestoreSecretInput{SecretId: aws.String(s.id(slug))}); err != nil {
+	defer s.Close()
+	if err := s.backend.restore(s.ctx, slug); err != nil {
 		return secretFail(stderr, form, err)
 	}
 	fmt.Fprintf(stdout, "restored %s\n", name)

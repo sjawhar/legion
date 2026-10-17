@@ -2155,8 +2155,8 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
-Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in the
+broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
@@ -2343,18 +2343,30 @@ the key ARN with its region and account (`secrets.AWSKeyARNParts`) or the Cloud 
 project number (`secrets.GCPProject`), the other store's fields omitted.
 
 `agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
-its AWS side in `secret_aws.go`) is the person's side of that reread. Each form reads the broker's
-settings from `AGENT_SECRETS_URL` (refusing, before anything else, a broker whose `store` is not
-AWS Secrets Manager: this release's forms manage that store only, and a Secret Manager secret is
-written with `gcloud secrets`), loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`,
-else the SDK's default chain) pinned to the key's region, and calls Secrets Manager itself, so IAM
-in that account, not the broker, decides what the person may read or write; it needs no session
-identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
-account than the key's, naming both (`requireAccount`, so a read never lists another account's
-secrets as if they were the agent secrets), and a write also refuses any ARN but
-`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
-in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
-before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
+its AWS side in `secret_aws.go`, its GCP side in `secret_gcp.go`) is the person's side of that
+reread. Each form reads the broker's settings from `AGENT_SECRETS_URL`, whose `store` field
+(`aws-secrets-manager` or absent, `gcp-secret-manager`) chooses the backend
+(`openSecretBackend`), both behind one `secretBackend` interface the forms call through. AWS:
+loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`, else the SDK's default chain)
+pinned to the key's region, and calls Secrets Manager itself, so IAM in that account, not the
+broker, decides what the person may read or write; it needs no session identity. `GetCallerIdentity`
+runs before anything else: every form refuses a sign-in in another account than the key's, naming
+both (`requireAccount`, so a read never lists another account's secrets as if they were the agent
+secrets), and a write also refuses any ARN but `assumed-role/AWSReservedSSO_*/<session>` in that
+account (`requireWriteSignIn`, naming the ARN, in any AWS partition). `--owner me` is that session
+name lowercased; create and retag refuse it before writing unless it matches the broker's email
+rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
+(`gcloud auth application-default login`) and calls Secret Manager itself under
+`cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
+write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
+`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
+the API itself rather than silently reading another project's secrets - the hazard AWS's
+`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
+A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
+service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
+JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
+the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
+lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2447,24 +2459,37 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-`create` writes on the settings' key with both tags
+AWS `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
 secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
-recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. Every write is
+recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
+the secret with automatic replication under the broker's `kms_key_name` and both tags as
+annotations (owner and tier are annotations, never labels, so they carry no GCP label naming
+rules), then adds the value as its first version; `set` adds a version to a secret already held;
+`retag` sends both annotations in one `UpdateSecret` (field mask `annotations`), so a partial
+update can never leave one stale; `delete` sets `expire_time` to now plus 30 days in one
+`UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
+way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
+deletes them for good once it passes, with no further restore - and `restore` clears `expire_time`
+(same field mask, no value) to undo it. Every write is
 followed by the broker's reread of that name (`rereadAfter`): exit 0 when it serves the secret, or
 no longer serves it after a delete; 1 when its answer contradicts the write (a refusal names its
 reason); and 1 when the broker cannot be asked (an unreachable broker, `429 RATE_LIMITED`), saying
-the write stands and is served only from the next reload. `list` (`ListSecrets` with
-`IncludePlannedDeletion`) and `show` never print a
-value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
-plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
-and neither call answers the window it chose: a reader told that date never waits past the purge.
-`earliestPurge` is the one place `DeletedDate` is read. The forms' unit tests run in-process
-against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secret_e2e_test.go`
-runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
+the write stands and is served only from the next reload. `list` (AWS `ListSecrets` with
+`IncludePlannedDeletion`, GCP `ListSecrets` filtered in Go to the prefix) and `show` never print a
+value; for a secret scheduled for deletion they print its deletion moment and, AWS only,
+`earliestPurge` - `DeletedDate` plus 7 days, Secrets Manager's shortest recovery window, since
+`DeletedDate` is when the delete ran and neither call answers the window it chose: a reader told
+that date never waits past the purge (`earliestPurge` is the one place `DeletedDate` is read).
+GCP's deletion moment is `expire_time` itself, the exact purge moment, so `show` and `list` print
+only it, with no separate earliest-purge line. The forms' unit tests run in-process against
+`secrets.Local` and a fake STS and broker (`secret_test.go`) for AWS, and against a fake Secret
+Manager gRPC server and fake Application Default Credentials (`secret_gcp_test.go`) for GCP; AWS's
+`secret_e2e_test.go` runs create, delete, restore and retag against `brokertest.NewRig`'s real
+broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
