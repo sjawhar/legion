@@ -246,14 +246,21 @@ func RepositoriesFragment(repositories []ghrepo.Repository) string {
 }
 
 // RepositoriesAddressing is the clause a controller's own addressing ends with on both launch
-// paths (controllerSpawnSpec here, cmd/legion/controller.go's controllerStart) and the one a
-// worker's addressing names via AddressingFragment: RepositoriesFragment when the project maps at
-// least one repository. An empty mapping is never a refusal on either path — the daemon boots and
-// keeps running exactly this way on purpose, serving no repository until an App is installed or a
-// mapping is pushed (internal/daemon/repositories.go's own doc) — so its addressing instead names
-// the state for what it is, and, when refused names any candidate repository the project's
-// mapping holds that the daemon currently leaves out, with its reason, sorted the same way the
-// caller already sorted repositories.
+// paths (controllerSpawnSpec here, cmd/legion/controller.go's controllerStart): RepositoriesFragment
+// when the project maps at least one repository (a worker's own addressing, AddressingFragment,
+// calls RepositoriesFragment directly instead, since a worker's issue always has a repository or
+// carries no repositories sentence at all). An empty mapping is never a refusal on either
+// controller path. A non-empty refused list is unambiguous: every mapped repository lacking an
+// App still boots fine (internal/daemon/repositories.go's own doc), so that shape is always a
+// live, fully booted workflow. An empty refused list too is not: this is the one shape this route
+// cannot tell "no workflow configured at all" apart from "a workflow whose mapping a later refresh
+// emptied" (repositories.go's own doc: a project with nothing mapped and nothing refused refuses
+// the daemon's own boot, so this exact shape is only ever reached live, never at boot, under a
+// workflow) — refusing on either reading would burn a launch for nothing and block the one
+// operator action that could still recover the project (AGENTS.md, "Handover"). Either way its
+// addressing names the state for what it is, and, when refused, names any candidate repository the
+// project's mapping holds that the daemon currently leaves out, with its reason, sorted the same
+// way the caller already sorted repositories.
 func RepositoriesAddressing(repositories []ghrepo.Repository, refused []string) string {
 	if len(repositories) > 0 {
 		return RepositoriesFragment(repositories)

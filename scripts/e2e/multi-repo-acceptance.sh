@@ -56,6 +56,10 @@
 # `second-owner`'s `as_role` scans for the role's own process. Production never sets it — the pod
 # always scans its own real `/proc` — but it lets a hermetic test build a fake proc tree instead of
 # scanning the host's, which a shared devbox's own live Legion panes would otherwise pollute.
+# Refused unless MULTIREPO_TEST_SEAM=1 is set alongside it (an operator shell never sets either),
+# and named in second-owner's own evidence whenever it is set, so an accidental or malicious
+# MULTIREPO_PROC_ROOT in a live run cannot quietly redirect the scan and is never mistaken for a
+# real result.
 set -Eeuo pipefail
 
 self=${0##*/}
@@ -184,14 +188,21 @@ dispatch_curl_config=$(mktemp)
 chmod 600 "$dispatch_curl_config"
 printf 'header = "Authorization: Bearer %s"\n' "$dispatch_token" >"$dispatch_curl_config"
 
-# current_raw_fetch_tmp names raw_fetch's in-flight temporary file, if any, so the cleanup trap
-# below removes it on a signal, not only when raw_fetch's own command fails.
-current_raw_fetch_tmp=""
+# arm_signal_traps installs the script's standing INT/TERM handlers: clean up, then exit with the
+# shell's conventional 128+signal code, so an interrupted run both cleans up and actually stops —
+# a bare `cleanup` with no `exit` let an earlier round's run press on after a SIGTERM into the
+# next, unrelated read, which then failed for the wrong reason instead of the script stopping at
+# 143. raw_fetch below re-arms these once its own local traps are no longer needed.
+arm_signal_traps() {
+  trap 'cleanup; exit 130' INT
+  trap 'cleanup; exit 143' TERM
+}
+
 cleanup() {
-  [ -z "$current_raw_fetch_tmp" ] || rm -f "$current_raw_fetch_tmp"
   rm -f "$dispatch_curl_config"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+arm_signal_traps
 
 # raw_fetch <evidence file> <label> <command...> runs command with its stdout redirected straight
 # to a fresh, uniquely-named temporary file (byte for byte, trailing bytes included — never through
@@ -204,23 +215,44 @@ trap cleanup EXIT INT TERM
 # for a Dispatch read would otherwise print the bearer `-H` carried in earlier rounds; curl's own
 # stderr (a URL and a status, no credential) still reaches the terminal. The caller then reads
 # <evidence file> itself, with jq's own filename argument, never a second `cat`/`$(...)` round trip.
+#
+# Most callers run inside a command-substitution subshell (`file=$(state_raw ...)`): a signal that
+# reaches that subshell directly (a foreground Ctrl-C delivered to the whole process group) would
+# otherwise leave its own temp file behind, since a plain variable the subshell sets never reaches
+# the parent's trap. raw_fetch instead arms its own local INT/TERM traps around the fetch and the
+# rename — whichever shell actually runs it, the main shell or a `$(...)` subshell — naming this
+# call's own temp file literally (baked into the trap string with `printf %q` at set time, not
+# looked up by name at signal time), then restores the script's standing handlers before
+# returning, so a signal after this call behaves exactly as it did before it.
 raw_fetch() {
   local file=$1 label=$2
   shift 2
   local tmp
   tmp=$(mktemp "$file.XXXXXX") || fail "could not create a temporary file for $file"
-  current_raw_fetch_tmp=$tmp
-  if ! "$@" >"$tmp"; then
-    rm -f "$tmp"
-    current_raw_fetch_tmp=""
-    fail "$label: failed"
+  local quoted_tmp
+  quoted_tmp=$(printf '%q' "$tmp")
+  # shellcheck disable=SC2064 # intentional: $quoted_tmp must bake in now, not re-resolve at the
+  # signal, since another raw_fetch call may have changed or unset it by the time one fires.
+  trap "rm -f $quoted_tmp; cleanup; exit 130" INT
+  # shellcheck disable=SC2064
+  trap "rm -f $quoted_tmp; cleanup; exit 143" TERM
+  local status=0
+  "$@" >"$tmp" || status=$?
+  if [ "$status" -eq 0 ] && ! mv -f "$tmp" "$file"; then
+    status=2
   fi
-  if ! mv -f "$tmp" "$file"; then
-    rm -f "$tmp"
-    current_raw_fetch_tmp=""
-    fail "$label: could not write $file"
-  fi
-  current_raw_fetch_tmp=""
+  arm_signal_traps
+  case $status in
+    0) ;;
+    2)
+      rm -f "$tmp"
+      fail "$label: could not write $file"
+      ;;
+    *)
+      rm -f "$tmp"
+      fail "$label: failed"
+      ;;
+  esac
 }
 
 # state_raw <observation> refreshes $MULTIREPO_EVIDENCE_DIR/<observation>-state.raw from
@@ -313,17 +345,22 @@ head: $sha
 }
 
 # children <parent KEY>: one child resolves to T and one to C, structurally, in both Dispatch's own
-# record (.resolved_repo) and the daemon's state (.issues[<key>].repo).
+# record (.resolved_repo) and the daemon's state (.issues[<key>].repo). The daemon's state is read
+# once, before any child's judgment, and that one read is what every child is judged against and
+# what the kept evidence holds — never a fresh read per child, which could judge an early child
+# against one state and a later child against another the daemon moved to meanwhile, while the
+# evidence (one state.raw file per observation) could only ever hold the last of those reads,
+# contradicting whichever earlier judgment it no longer matches.
 children() {
   local parent=$1 parent_file keys key child_file d_repo state_file s_repo saw_t=0 saw_c=0 mismatch=0 out=""
   parent_file=$(dispatch_issue_raw children "$parent")
   keys=$(jq -r '.children[].key' "$parent_file")
   [ -n "$keys" ] || fail "children: $parent has no children on Dispatch"
+  state_file=$(state_raw children)
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     child_file=$(dispatch_issue_raw children "$key")
     d_repo=$(jq -r '.resolved_repo // "none"' "$child_file")
-    state_file=$(state_raw children)
     s_repo=$(jq -r --arg k "$key" '.issues[$k].repo // "none"' "$state_file")
     out+="$key: dispatch=$d_repo state=$s_repo
 "
@@ -422,32 +459,69 @@ require_pod_for_issue() {
 # (found via a bare exec's PATH) refuses with exit 2 when LEGION_GH_PATH is unset
 # (cmd/legion/gh.go), so a read run as the bare pod can never pass. Stage 4a's own live proof reads
 # that environment from /proc/<pid>/environ and re-executes under exactly that environment with
-# `env -i` (internal/runtime/sandbox/live_lifecycle_test.go:1096-1105, asAgent); its pid comes from
-# `shimPid`/`agentPid` (live_operator_test.go:300-339), which requires exactly one process whose
-# own parent's cmdline is literally `worker-shim`, itself PID 1's child — never the first match a
-# lexically-sorted scan happens to find, which in a role container also carries every descendant of
-# the role's own process (bash tool children, subagent processes, any long-running child), any of
-# which a lexical-first pick could just as well select.
+# `env -i` (internal/runtime/sandbox/live_lifecycle_test.go:1096-1105, asAgent).
+#
+# The agent is not simply "the one process whose parent's cmdline is worker-shim": a pod enrolled
+# with the secrets broker (runtime.kubernetes.agent_secrets) has the shim also parenting an
+# `agent-secrets renew` process for its whole life (internal/shim/agentsecrets.go), and briefly a
+# `codegraph` warm-up or a `jj metaedit` during an adoption — any of which a mere
+# parent-is-worker-shim test would also match, refusing by ambiguity every enrolled pod. The agent
+# is instead the one child of the shim whose own argv equals the shim's own argv after its first
+# `--` (legion worker-shim ... -- <omp argv>): the shim starts the agent with exactly that argv
+# (shim.go, launcher.go), and none of its other children share it. The shim itself is the one
+# process whose own cmdline carries the element `worker-shim` and whose own parent is PID 1, never
+# the first lexical match a scan happens to find.
 
 # as_role_find_and_run is the POSIX-sh fragment a single `kubectl exec ... -- sh -c` sends into the
-# pod: resolve the role's pid exactly once — the one process whose parent's cmdline is the literal
-# line `worker-shim` and whose grandparent is PID 1 — refusing by name when that is not exactly one
-# process, record it (PID, cmdline) into the output, then re-exec the given script under exactly
-# that one process's environment with `env -i`, exactly as asAgent's xargs/env -i pattern does.
+# pod: resolve the shim (above), resolve its one agent child by argv, record the agent's pid and a
+# redacted form of its cmdline into the output — never the raw value, which carries
+# `--append-system-prompt <the role prompts, the addressing, then the deployment's own
+# instructions>`, inlined, and may name the deployment's own private hosts (the same value follows
+# the shim's own `--`, so this redaction covers both) — then re-exec the given script under exactly
+# the agent's own environment with `env -i`, exactly as asAgent's xargs/env -i pattern does.
 # Single-quoted deliberately: every $-expansion inside runs in the pod's own remote shell, never
 # this one.
 # shellcheck disable=SC2016
 as_role_find_and_run='
 proc_root=$1
 script=$2
+
+shim_candidates=""
+for d in "$proc_root"/[0-9]*; do
+  pid=${d##*/}
+  [ -r "$d/cmdline" ] || continue
+  tr "\0" "\n" <"$d/cmdline" 2>/dev/null | grep -qx worker-shim || continue
+  [ -r "$d/status" ] || continue
+  ppid=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
+  [ "$ppid" = "1" ] || continue
+  shim_candidates="$shim_candidates $pid"
+done
+shim_candidates=$(printf "%s" "$shim_candidates" | sed "s/^ *//;s/ *$//")
+shim_count=0
+for c in $shim_candidates; do shim_count=$((shim_count + 1)); done
+if [ "$shim_count" -ne 1 ]; then
+  echo "as_role: expected exactly one worker-shim process whose own parent is PID 1, found $shim_count ($shim_candidates)" >&2
+  exit 1
+fi
+shim_pid=$shim_candidates
+
+shim_cmdfile="$proc_root/$shim_pid/cmdline"
+agent_argv=$(tr "\0" "\n" <"$shim_cmdfile" 2>/dev/null | sed -n "/^--\$/,\$p" | sed "1d")
+if [ -z "$agent_argv" ]; then
+  echo "as_role: worker-shim $shim_pid own cmdline carries no -- separator, so its agent argv is unknown" >&2
+  exit 1
+fi
+
 candidates=""
 for d in "$proc_root"/[0-9]*; do
   pid=${d##*/}
+  [ "$pid" = "$shim_pid" ] && continue
   [ -r "$d/status" ] || continue
   ppid=$(sed -n "s/^PPid:[[:space:]]*//p" "$d/status" 2>/dev/null)
-  [ -n "$ppid" ] || continue
-  [ -r "$proc_root/$ppid/cmdline" ] || continue
-  if tr "\0" "\n" <"$proc_root/$ppid/cmdline" 2>/dev/null | grep -qx worker-shim; then
+  [ "$ppid" = "$shim_pid" ] || continue
+  [ -r "$d/cmdline" ] || continue
+  this_argv=$(tr "\0" "\n" <"$d/cmdline" 2>/dev/null)
+  if [ "$this_argv" = "$agent_argv" ]; then
     candidates="$candidates $pid"
   fi
 done
@@ -455,25 +529,65 @@ candidates=$(printf "%s" "$candidates" | sed "s/^ *//;s/ *$//")
 count=0
 for c in $candidates; do count=$((count + 1)); done
 if [ "$count" -ne 1 ]; then
-  echo "as_role: expected exactly one process whose parent is worker-shim, found $count ($candidates)" >&2
+  echo "as_role: expected exactly one child of worker-shim $shim_pid matching its own argv, found $count ($candidates)" >&2
   exit 1
 fi
 pid=$candidates
-cmdline=$(tr "\0" " " <"$proc_root/$pid/cmdline" 2>/dev/null)
+
+cmdline_summary=$(xargs -0 sh -c '"'"'
+before=""
+redacted=""
+found=0
+for a in "$@"; do
+  if [ "$found" = 1 ]; then
+    bytes=$(printf "%s" "$a" | wc -c)
+    sha=$(printf "%s" "$a" | sha256sum | cut -d" " -f1)
+    redacted="--append-system-prompt <redacted: $bytes bytes, sha256 $sha>"
+    found=2
+    continue
+  fi
+  if [ "$found" = 0 ] && [ "$a" = "--append-system-prompt" ]; then
+    found=1
+    continue
+  fi
+  if [ "$found" = 0 ]; then
+    before="${before:+$before }$a"
+  fi
+done
+if [ "$found" = 0 ]; then
+  printf "%s" "$before"
+else
+  printf "%s %s" "$before" "$redacted"
+fi
+'"'"' agent-argv0 <"$proc_root/$pid/cmdline")
 echo "@@@PID@@@"
 echo "$pid"
 echo "@@@CMDLINE@@@"
-echo "$cmdline"
+echo "$cmdline_summary"
 xargs -0 sh -c '"'"'inner=$1; shift; exec env -i "$@" sh -c "$inner"'"'"' agent-env "$script" <"$proc_root/$pid/environ"
 '
 
-# as_role <pod> <container> <script> resolves the role's pid once and runs script under its own
-# environment with sh -c, as the role's own bash tool would run it — never the bare pod shell's.
-# proc_root defaults to /proc (the pod's own) and is overridable only for tests
-# (MULTIREPO_PROC_ROOT).
+# resolve_proc_root prints the /proc root as_role should scan: the pod's own real /proc, except in
+# a test, which must set MULTIREPO_TEST_SEAM=1 to redirect it to MULTIREPO_PROC_ROOT (L1);
+# MULTIREPO_PROC_ROOT alone, without that marker, is refused outright, so a stray or malicious
+# variable in a live run can never quietly redirect the scan. A plain function, not as_role itself,
+# so the caller can keep its own answer: as_role runs inside a `$(...)` subshell to capture its
+# stdout, where a variable it merely assigns never reaches the caller back out.
+resolve_proc_root() {
+  if [ -n "${MULTIREPO_PROC_ROOT:-}" ]; then
+    [ "${MULTIREPO_TEST_SEAM:-}" = 1 ] ||
+      fail "MULTIREPO_PROC_ROOT is set without MULTIREPO_TEST_SEAM=1: this is a test-only seam, never a production input"
+    printf '%s' "$MULTIREPO_PROC_ROOT"
+    return
+  fi
+  printf '%s' /proc
+}
+
+# as_role <pod> <container> <proc root> <script> resolves the role's agent process once under
+# <proc root> and runs script under its own environment with sh -c, as the role's own bash tool
+# would run it — never the bare pod shell's.
 as_role() {
-  local pod=$1 container=$2 script=$3
-  local proc_root=${MULTIREPO_PROC_ROOT:-/proc}
+  local pod=$1 container=$2 proc_root=$3 script=$4
   kubectl exec "$pod" -c "$container" -- sh -c "$as_role_find_and_run" as-role "$proc_root" "$script"
 }
 
@@ -551,8 +665,10 @@ echo '@@@PUSH_T_STATUS@@@'
 echo \"\$push_t_status\"
 echo '@@@END@@@'
 "
+  local proc_root
+  proc_root=$(resolve_proc_root)
   local combined_out
-  combined_out=$(as_role "$pod" "$container" "$combined") ||
+  combined_out=$(as_role "$pod" "$container" "$proc_root" "$combined") ||
     fail "second-owner: could not identify or run as the role's own process in $pod ($container)"
 
   local pid cmdline env_check owners_dir config_dir want_config_dir
@@ -595,6 +711,7 @@ echo '@@@END@@@'
 pullRequest.number: $pr_number
 phase: $phase
 merged (GitHub, repos/$LEGION_E2E_REPO_O/pulls/$pr_number): $merged
+proc root: $proc_root
 role pid: $pid
 role cmdline: $cmdline
 role env: LEGION_GH_OWNERS_DIR=$owners_dir GH_CONFIG_DIR=$config_dir (want $want_config_dir)
@@ -751,9 +868,9 @@ negative_pr_in_x() {
   if [ "$phase" = before ]; then
     local child=$2
     local repo
-    repo=$(negative_issue_repo_of negative-pr-in-x pr-in-x "$child")
+    repo=$(negative_issue_repo_of negative-pr-in-x-before pr-in-x "$child")
     local state_file
-    state_file=$(state_raw negative-pr-in-x)
+    state_file=$(state_raw negative-pr-in-x-before)
     local record generation
     record=$(jq --arg k "$child" '.issues[$k] // null' "$state_file")
     generation=$(jq -r --arg k "$child" '.issues[$k].generation // -1' "$state_file")
@@ -768,18 +885,18 @@ negative_pr_in_x() {
   fi
   local run_id=$2 child=$3
   local baseline b_highest b_record_repo
-  baseline=$(baseline_verify negative-pr-in-x pr-in-x "$child" "$run_id")
+  baseline=$(baseline_verify negative-pr-in-x-after pr-in-x "$child" "$run_id")
   b_highest=$(jq -r '.highest_pr' <<<"$baseline")
   b_record_repo=$(jq -r '.record.repo // "none"' <<<"$baseline")
 
   local prs_file found_number
-  prs_file="$MULTIREPO_EVIDENCE_DIR/negative-pr-in-x-$child-$run_id-pulls.raw"
+  prs_file="$MULTIREPO_EVIDENCE_DIR/negative-pr-in-x-after-$child-$run_id-pulls.raw"
   raw_fetch "$prs_file" "GET repos/$LEGION_E2E_REPO_X/pulls" gh api "repos/$LEGION_E2E_REPO_X/pulls?state=all&per_page=100"
   found_number=$(jq --arg ref "legion/$child" --argjson since "$b_highest" \
     '[.[] | select(.head.ref == $ref and .state == "closed" and .number > $since)] | length' "$prs_file")
 
   local state_file now_repo now_pr_repo ok=1
-  state_file=$(state_raw negative-pr-in-x)
+  state_file=$(state_raw negative-pr-in-x-after)
   now_repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' "$state_file")
   now_pr_repo=$(jq -r --arg k "$child" '.issues[$k].pullRequest.repo // "none"' "$state_file")
   { [ -n "${found_number:-}" ] && [ "$found_number" -gt 0 ]; } 2>/dev/null || ok=0
@@ -858,16 +975,16 @@ negative_repo_edit() {
   if [ "$phase" = before ]; then
     local child=$2
     local repo
-    repo=$(negative_issue_repo_of negative-repo-edit repo-edit "$child")
+    repo=$(negative_issue_repo_of negative-repo-edit-before repo-edit "$child")
     local detail_file resolved_repo
-    detail_file=$(dispatch_issue_raw negative-repo-edit "$child")
+    detail_file=$(dispatch_issue_raw negative-repo-edit-before "$child")
     resolved_repo=$(jq -r '.resolved_repo // "none"' "$detail_file")
     [ "$(lower "$resolved_repo")" != "$repo_x" ] || fail "negative repo-edit: $child already resolves to X ($resolved_repo) before any baseline; capture before only when the issue still resolves to T or C"
     local state_file generation
-    state_file=$(state_raw negative-repo-edit)
+    state_file=$(state_raw negative-repo-edit-before)
     generation=$(jq -r --arg k "$child" '.issues[$k].generation // -1' "$state_file")
     local events_file last_seq
-    events_file=$(dispatch_events_raw negative-repo-edit "$child")
+    events_file=$(dispatch_events_raw negative-repo-edit-before "$child")
     last_seq=$(jq '[.[].seq] | max // 0' "$events_file")
     local extra
     extra=$(jq -n --arg repo "$repo" --argjson generation "$generation" --argjson last_seq "$last_seq" \
@@ -877,22 +994,22 @@ negative_repo_edit() {
   fi
   local run_id=$2 child=$3
   local baseline b_repo b_last_seq
-  baseline=$(baseline_verify negative-repo-edit repo-edit "$child" "$run_id")
+  baseline=$(baseline_verify negative-repo-edit-after repo-edit "$child" "$run_id")
   b_repo=$(jq -r '.daemon_repo' <<<"$baseline")
   b_last_seq=$(jq -r '.last_seq' <<<"$baseline")
 
   local state_file now_repo ok=1
-  state_file=$(state_raw negative-repo-edit)
+  state_file=$(state_raw negative-repo-edit-after)
   now_repo=$(jq -r --arg k "$child" '.issues[$k].repo // "none"' "$state_file")
   [ "$(lower "$now_repo")" = "$(lower "$b_repo")" ] || ok=0
 
   local detail_file dispatch_repo_now
-  detail_file=$(dispatch_issue_raw negative-repo-edit "$child")
+  detail_file=$(dispatch_issue_raw negative-repo-edit-after "$child")
   dispatch_repo_now=$(jq -r '.repo // "none"' "$detail_file")
   [ "$(lower "$dispatch_repo_now")" = "$repo_x" ] || ok=0
 
   local events_file edit_after
-  events_file=$(dispatch_events_raw negative-repo-edit "$child")
+  events_file=$(dispatch_events_raw negative-repo-edit-after "$child")
   edit_after=$(jq --argjson since "$b_last_seq" --arg x "$repo_x" \
     '[.[] | select(.type=="issue.updated" and .seq > $since and ((.payload.repo // "") | ascii_downcase) == $x)] | length' "$events_file")
   { [ -n "${edit_after:-}" ] && [ "$edit_after" -gt 0 ]; } 2>/dev/null || ok=0
@@ -917,6 +1034,7 @@ daemon's exact kept-repository message present: $has_note
 " >/dev/null
   check "negative-repo-edit-$child" "$ok"
 }
+
 
 case "$1" in
   record-head) record_head "$2" ;;

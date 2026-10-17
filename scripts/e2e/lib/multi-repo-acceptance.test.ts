@@ -1,5 +1,14 @@
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
-import { accessSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  accessSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -130,33 +139,62 @@ function writeProcEntry(
   }
 }
 
-// fakeProcTree builds a minimal pod process tree under a fresh directory: pid 1 (the launcher,
-// no role markers), pid 7 (worker-shim, child of 1), pid 9 (the agent, child of 7 — the one
-// as_role must select), pid 10 (a descendant of the agent, e.g. a bash tool child, also carrying
-// the role's own environment since it inherited it — must NOT be selected, since its parent (9) is
-// not worker-shim), and pid 15 (a zombie, child of 9, empty environ — skipped). `roleEnviron` is
-// pid 7 and 9's environment (the shim and the agent it execs share one, per Stage 4a's own
-// reproduction); omit entries from `extraPids` to build other shapes (zero or two worker-shim
-// children, for the refusal tests).
+// fakeProcTree builds a minimal pod process tree under a fresh directory: pid 1 (the launcher, no
+// role markers), one worker-shim per `shimPids` (default ["7"], parented by `shimParent` —
+// default "1" — carrying `-- ` then `agentArgv` (default ["omp","--mode","rpc"]) in its own
+// cmdline), and, unless `skipAgent`, one agent child per shim at `shimPid+2` whose own cmdline
+// equals exactly that trailing argv — the one as_role must select by argv equality, never by mere
+// parentage (M2): with `extraShimChildren`, each shim also gets an `agent-secrets renew` child at
+// `shimPid+1` and a `codegraph` child at `shimPid+4`, both real children of the shim carrying its
+// own environment but a different argv, exactly as a broker-enrolled pod's shim does for its whole
+// life — present to prove the agent is still picked out from among them. `duplicateAgent` adds a
+// second child whose argv also matches, for the two-candidates refusal. pid 10 (a descendant of
+// the first agent, e.g. a bash tool child, also carrying the role's own environment since it
+// inherited it — must NOT be selected, since its parent is the agent, not the shim) and pid 15 (a
+// zombie, child of the first agent, empty environ — skipped) are always present. `roleEnviron` is
+// every shim and agent's environment (they share one, per Stage 4a's own reproduction).
 function fakeProcTree(
   roleEnviron: Record<string, string>,
-  opts: { shimPids?: string[]; skipAgent?: boolean } = {}
+  opts: {
+    shimPids?: string[];
+    skipAgent?: boolean;
+    agentArgv?: string[];
+    extraShimChildren?: boolean;
+    duplicateAgent?: boolean;
+    shimParent?: string;
+  } = {}
 ): string {
   const root = join(dir, `proc-${++runs}`);
   mkdirSync(root, { recursive: true });
   writeProcEntry(root, "1", { ppid: "0", cmdline: ["launcher"], environ: { PATH: "/usr/bin" } });
   const shimPids = opts.shimPids ?? ["7"];
+  const agentArgv = opts.agentArgv ?? ["omp", "--mode", "rpc"];
+  const shimParent = opts.shimParent ?? "1";
   for (const shimPid of shimPids) {
     writeProcEntry(root, shimPid, {
-      ppid: "1",
-      cmdline: ["legion", "worker-shim", "--connect", "tcp://x:1"],
+      ppid: shimParent,
+      cmdline: ["legion", "worker-shim", "--connect", "tcp://x:1", "--", ...agentArgv],
       environ: roleEnviron,
     });
-    if (!opts.skipAgent) {
-      const agentPid = String(Number(shimPid) + 2);
-      writeProcEntry(root, agentPid, {
+    if (opts.skipAgent) continue;
+    const agentPid = String(Number(shimPid) + 2);
+    writeProcEntry(root, agentPid, { ppid: shimPid, cmdline: agentArgv, environ: roleEnviron });
+    if (opts.extraShimChildren) {
+      writeProcEntry(root, String(Number(shimPid) + 1), {
         ppid: shimPid,
-        cmdline: ["omp", "--mode", "rpc"],
+        cmdline: ["agent-secrets", "renew", "--pod-token-file", "/x"],
+        environ: roleEnviron,
+      });
+      writeProcEntry(root, String(Number(shimPid) + 4), {
+        ppid: shimPid,
+        cmdline: ["codegraph"],
+        environ: roleEnviron,
+      });
+    }
+    if (opts.duplicateAgent) {
+      writeProcEntry(root, String(Number(shimPid) + 5), {
+        ppid: shimPid,
+        cmdline: agentArgv,
         environ: roleEnviron,
       });
     }
@@ -521,6 +559,87 @@ describe("R2: a failed Dispatch read never prints the bearer", () => {
   });
 });
 
+// L2's own reproduction: a SIGTERM to the observer's own pid, outside any process group signal,
+// must stop the script immediately with the shell's conventional 143 — not clean up and press on
+// into a later, unrelated read that then fails for the wrong reason — and a group signal (every
+// process in the pipeline, curl included) must not leave a raw_fetch temp file behind even though
+// most raw_fetch calls run inside a `$(...)` subshell, where a plain variable a signal handler
+// reads in the parent is never set.
+//
+// Both tests send a real OS signal to a real bash subprocess mid-fetch and then wait on its real
+// exit: there is no in-process JS timer to fake here (the clock being driven is the kernel's, not
+// Bun's), so a real `Bun.sleep` window for the signal to land mid-request, and a real slow HTTP
+// response to hold that window open, are the only way to exercise this.
+describe("L2: an interrupted run cleans up and actually stops", () => {
+  test("a SIGTERM to the observer's own pid stops it immediately with exit 143, not a later failure", async () => {
+    daemonServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+        if (url.pathname === "/legion/v1/state") {
+          await Bun.sleep(3000);
+          return new Response(stateBody, { headers: { "content-type": "application/json" } });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }] }),
+      "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const proc = Bun.spawn([bashPath, script, "children", "ACME-1"], {
+      env: { PATH: isolatedPath(bin), MULTIREPO_EVIDENCE_DIR: evidence, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await Bun.sleep(300); // real wait: lets the real subprocess reach its real slow fetch
+    process.kill(proc.pid, "SIGTERM");
+    const status = await proc.exited;
+    expect(status).toBe(143);
+  });
+
+  test("a group SIGINT removes a raw_fetch temp file created inside a $(...) subshell", async () => {
+    daemonServer = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+        if (url.pathname === "/legion/v1/state") {
+          await Bun.sleep(3000);
+          return new Response(stateBody, { headers: { "content-type": "application/json" } });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }] }),
+      "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { bin, evidence } = newFakeDir();
+    const proc = Bun.spawn(["setsid", "--", bashPath, script, "children", "ACME-1"], {
+      env: { PATH: isolatedPath(bin), MULTIREPO_EVIDENCE_DIR: evidence, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    await Bun.sleep(300); // real wait: lets the real subprocess reach its real slow fetch
+    process.kill(-proc.pid, "SIGINT");
+    const status = await proc.exited;
+    expect(status).toBe(130);
+    const stray = readdirSync(evidence).filter((f) => /\.raw\.[^.]{6}$/.test(f));
+    expect(stray).toEqual([]);
+  });
+});
+
 describe("R6: raw evidence is named per observation, never overwritten by a later one", () => {
   test("children's state.raw survives a later, different observation's own state read", async () => {
     const { server, setBody } = mutableDaemonStub(
@@ -588,6 +707,55 @@ describe("R6: raw evidence is named per observation, never overwritten by a late
     expect(readFileSync(join(evidence, "negative-no-repo-state.raw"), "utf8")).not.toBe(
       childrenStateBefore
     );
+  });
+
+  // R6's own reproduction: a state read made fresh per child could judge an early child against
+  // one read and a later child against a different one the daemon moved to meanwhile, while the
+  // kept evidence could only ever hold the last — contradicting an earlier child's own judgment.
+  // children now reads state exactly once, before any child's judgment.
+  test("children reads state exactly once for a multi-child parent, never once per child", async () => {
+    let stateRequests = 0;
+    daemonServer = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+        if (url.pathname === "/legion/v1/state") {
+          stateRequests += 1;
+          return new Response(
+            makeStateBody({
+              issues: {
+                "ACME-2": { key: "ACME-2", repo: "acme/widgets" },
+                "ACME-3": { key: "ACME-3", repo: "acme/gadgets" },
+              },
+            }),
+            { headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    dispatchServer = dispatchStub({
+      "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
+      "ACME-2": JSON.stringify({
+        key: "ACME-2",
+        repo: "acme/widgets",
+        resolved_repo: "acme/widgets",
+      }),
+      "ACME-3": JSON.stringify({
+        key: "ACME-3",
+        repo: "acme/gadgets",
+        resolved_repo: "acme/gadgets",
+      }),
+    });
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const { status, stdout } = await run(["children", "ACME-1"], env);
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK children: PASS");
+    expect(stateRequests).toBe(1);
   });
 });
 
@@ -764,8 +932,9 @@ case "$*" in
     ;;
 esac`;
 
-  // runSecondOwner runs second-owner with procRoot wired as MULTIREPO_PROC_ROOT (R1: the fake
-  // tree, never the host's real /proc).
+  // runSecondOwner runs second-owner with procRoot wired as MULTIREPO_PROC_ROOT, alongside the
+  // test-seam marker as_role requires with it (L1: MULTIREPO_PROC_ROOT alone is refused) — the
+  // fake tree, never the host's real /proc.
   async function runSecondOwner(
     env: Record<string, string>,
     procRoot: string,
@@ -773,7 +942,7 @@ esac`;
   ) {
     return run(
       ["second-owner", "ACME-2", "the-pod"],
-      { ...env, MULTIREPO_PROC_ROOT: procRoot },
+      { ...env, MULTIREPO_PROC_ROOT: procRoot, MULTIREPO_TEST_SEAM: "1" },
       fakes
     );
   }
@@ -816,10 +985,9 @@ esac`;
     expect(stderr).toContain("could not identify or run as the role's own process");
   });
 
-  // R3's own reproduction: two processes both carrying the role's markers (e.g. a second
-  // worker-shim-parented child) must refuse, naming both candidates, never pick the lexically
-  // first one.
-  test("two processes whose parent is worker-shim: refused, naming both candidates", async () => {
+  // R3's own reproduction: two processes both carrying the shim's own markers must refuse, naming
+  // both shim candidates, never pick the lexically first one.
+  test("two worker-shim processes: refused, naming both candidates", async () => {
     daemonServer = daemonStub(stateWithPR("production_check"));
     dispatchServer = dispatchStub({});
     const env = fullInputs(
@@ -832,9 +1000,81 @@ esac`;
       kubectl: podLabelKubectl,
     });
     expect(status).not.toBe(0);
-    expect(stderr).toContain("expected exactly one process whose parent is worker-shim, found 2");
+    expect(stderr).toContain(
+      "expected exactly one worker-shim process whose own parent is PID 1, found 2"
+    );
+    expect(stderr).toContain("7");
+    expect(stderr).toContain("20");
+  });
+
+  // L3: a process whose cmdline carries worker-shim, but whose own parent is not PID 1 (e.g. the
+  // host's own bash parenting it), is never the shim: the grandparent check the comments always
+  // described but the code never ran.
+  test("a worker-shim-cmdline process whose own parent is not PID 1 is never the shim: FAIL", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const procRoot = fakeProcTree(fixtureEnv(roleBin()), { shimParent: "5" });
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).not.toBe(0);
+    expect(stderr).toContain(
+      "expected exactly one worker-shim process whose own parent is PID 1, found 0"
+    );
+  });
+
+  // M2's own reproduction: a broker-enrolled pod's shim also parents an agent-secrets renew
+  // process for its whole life, and a codegraph warm-up — "exactly one child of worker-shim" used
+  // to refuse every such pod (found 2: the agent and the renewer). Matching the shim's own argv
+  // after its "--" picks the agent out from among them.
+  test("a shim with an agent-secrets renew and a codegraph child still resolves its one agent: PASS", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const bin = roleBin();
+    fakeRoleGh(bin);
+    fakeRoleGit(
+      bin,
+      `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
+    );
+    const procRoot = fakeProcTree(fixtureEnv(bin), { extraShimChildren: true });
+    const { status, stdout } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK second-owner: PASS");
+  });
+
+  // M2's own reproduction, the refusal half: two children of the shim whose own argv both equal
+  // its post-"--" argv (e.g. a stale incarnation briefly overlapping a fresh one) refuses by name,
+  // never picking either arbitrarily.
+  test("two children of worker-shim matching its own argv: refused, naming both", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const procRoot = fakeProcTree(fixtureEnv(roleBin()), { duplicateAgent: true });
+    const { status, stderr } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).not.toBe(0);
+    expect(stderr).toContain(
+      "expected exactly one child of worker-shim 7 matching its own argv, found 2"
+    );
     expect(stderr).toContain("9");
-    expect(stderr).toContain("22");
+    expect(stderr).toContain("12");
   });
 
   test("production_check, merged, read succeeds, O's own push succeeds, but T's push also succeeds (no refusal): FAIL", async () => {
@@ -940,9 +1180,70 @@ esac`;
     expect(stdout).toContain("CHECK second-owner: PASS");
     const written = readFileSync(join(evidence, "second-owner.txt"), "utf8");
     expect(written).toContain("403");
+    // L1: the proc root this run actually scanned is in the evidence, so a live run's reader can
+    // see it was really /proc (or, in a test, the fake tree it was told to scan).
+    expect(written).toContain(`proc root: ${procRoot}`);
     // R3: the resolved pid (9, the agent — worker-shim's own child) and its cmdline are recorded.
     expect(written).toContain("role pid: 9");
     expect(written).toContain("role cmdline: omp --mode rpc");
+  });
+
+  // M3's own reproduction: a pod agent's real cmdline carries
+  // --append-system-prompt <the whole composed prompt, deployment instructions included>. The
+  // evidence must never hold that text — only the pid, the arguments before the flag, and the
+  // value's byte count and sha256.
+  test("the agent's --append-system-prompt value is never in evidence, only its byte count and sha256: PASS", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const bin = roleBin();
+    fakeRoleGh(bin);
+    fakeRoleGit(
+      bin,
+      `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
+    );
+    const marker = "DEPLOYMENT-INSTRUCTIONS-MARKER-do-not-leak-this-host.internal.example";
+    const prompt = `# Role prompt\n\nAddressing fragment.\n\n${marker}\n`;
+    const agentArgv = ["omp", "--mode", "rpc", "--append-system-prompt", prompt];
+    const procRoot = fakeProcTree(fixtureEnv(bin), { agentArgv });
+    const { status, stdout, evidence } = await runSecondOwner(env, procRoot, {
+      gh: goodGh,
+      kubectl: podLabelKubectl,
+    });
+    expect(status).toBe(0);
+    expect(stdout).toContain("CHECK second-owner: PASS");
+    const written = readFileSync(join(evidence, "second-owner.txt"), "utf8");
+    const bytes = Buffer.byteLength(prompt, "utf8");
+    const sha256 = createHash("sha256").update(prompt, "utf8").digest("hex");
+    expect(written).not.toContain(marker);
+    expect(written).not.toContain(prompt);
+    expect(written).toContain(
+      `role cmdline: omp --mode rpc --append-system-prompt <redacted: ${bytes} bytes, sha256 ${sha256}>`
+    );
+  });
+
+  // L1's own reproduction: MULTIREPO_PROC_ROOT set without the test suite's own marker is refused
+  // outright, never silently accepted or silently defaulted to /proc.
+  test("MULTIREPO_PROC_ROOT without MULTIREPO_TEST_SEAM=1 is refused", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const procRoot = fakeProcTree(fixtureEnv(roleBin()));
+    const { status, stderr } = await run(
+      ["second-owner", "ACME-2", "the-pod"],
+      { ...env, MULTIREPO_PROC_ROOT: procRoot },
+      { gh: goodGh, kubectl: podLabelKubectl }
+    );
+    expect(status).not.toBe(0);
+    expect(stderr).toContain(
+      "MULTIREPO_PROC_ROOT is set without MULTIREPO_TEST_SEAM=1: this is a test-only seam, never a production input"
+    );
   });
 
   test("an unrelated pod (legion.dev/issue mismatch) is refused before any exec as a role", async () => {

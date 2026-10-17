@@ -836,6 +836,19 @@ func TestControllerStartLaunchesWithNoRepositoryMappedOrRefused(t *testing.T) {
 	}
 }
 
+// A transient read failure (a non-2xx GET /legion/v1/state) is a refusal, never a launch on an
+// assumed empty mapping: the caller distinguishes "read failed" from "read succeeded with an
+// empty mapping" (controllerRepositories's own two kinds of refusal), and only the former refuses
+// here. This is what keeps a running controller from being revoked for a replacement that never
+// starts (controllerRepositories's own doc).
+func TestControllerStartNeverMintsWhenTheRepositoryReadFails(t *testing.T) {
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{stateStatus: http.StatusServiceUnavailable})
+	c := newControllerStart(t, d, controllerOptions{})
+	c.refused("/legion/v1/state")
+	c.wantNoMintRequest()
+	c.wantNothingLaunchedOrWritten(c.defaultDir)
+}
+
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the
 // controller would otherwise promise, or withhold, a design approval on an assumption.
 func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {

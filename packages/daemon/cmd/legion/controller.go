@@ -368,19 +368,27 @@ func probeAndMint(ctx context.Context, daemonURL string, probe daemon.Controller
 // replacement that will not start. Bounded by requestTimeout, as every other CLI read of the
 // daemon's API is (main.go's get).
 //
-// An empty `mapped` is never refused here, with or without a `refused` list: the daemon boots and
-// keeps running exactly this way on purpose, serving no repository until an App is installed or a
-// mapping is pushed (repositories.go's own doc), and the controller is what drives that recovery
-// by admitting work (AGENTS.md, "Handover") — refusing its own start in that state would burn its
-// launch budget for nothing and leave the project stuck until a human intervenes. The caller
-// builds the right addressing sentence from the repositories and refused reasons this returns, on
-// both launch paths, via daemon.RepositoriesAddressing.
+// An empty `mapped` is never refused here, with or without a `refused` list. This route cannot
+// tell "no workflow is configured at all" (an API-only daemon, which always serves this same
+// empty shape) apart from "a workflow booted with a mapping, and a later refresh removed every
+// repository from it": a project with zero mapped and zero refused repositories refuses the
+// daemon's own boot outright (repositories.go's own doc), so that exact shape is only ever
+// reached live, through this route, never at boot — M1's own finding, which the coordinator's
+// ruling accepts rather than adding a wire field to disambiguate it in this PR. Refusing the
+// controller's own start on either reading would wrongly block the one operator action that drives
+// a live project's recovery (admitting work, AGENTS.md "Handover") for nothing. A non-empty
+// `refused` list, by contrast, is unambiguous: every mapped repository lacking an App still boots
+// fine (repositories.go's own doc), so that shape is always a live, fully booted workflow, never
+// the no-workflow case. The caller builds the right addressing sentence from the repositories and
+// refused reasons this returns, on both launch paths, via daemon.RepositoriesAddressing.
 //
 // Refuses, naming why, only when the read itself is unusable: a body that is not a JSON object, one
 // naming no `repositories` field at all (null or absent — a `{}` or a `null` top level both land
-// here), and any mapped entry this daemon did not spell `owner/name` (a daemon bug, never silently
-// dropped: one bad entry refuses the whole list, not just that entry, since an operator reading
-// this sentence must trust it names every mapped repository, never a silently narrowed subset).
+// here, a shape no conforming daemon ever actually serves, since state.Repositories never
+// marshals to null or omits the field), and any mapped entry this daemon did not spell
+// `owner/name` (a daemon bug, never silently dropped: one bad entry refuses the whole list, not
+// just that entry, since an operator reading this sentence must trust it names every mapped
+// repository, never a silently narrowed subset).
 func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Repository, []string, error) {
 	timed, cancel := context.WithTimeout(ctx, requestTimeout)
 	defer cancel()
@@ -397,7 +405,7 @@ func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Rep
 	}
 	reposRaw, ok := raw["repositories"]
 	if !ok || string(reposRaw) == "null" {
-		return nil, nil, fmt.Errorf("%s/legion/v1/state names no repositories field: the daemon needs a configured workflow with a repository mapping before the controller can start", daemonURL)
+		return nil, nil, fmt.Errorf("%s/legion/v1/state's body names no repositories field (null or absent): not a shape a conforming daemon ever serves", daemonURL)
 	}
 	var repositoriesView api.RepositoriesView
 	if err := json.Unmarshal(reposRaw, &repositoriesView); err != nil {

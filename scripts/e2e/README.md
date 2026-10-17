@@ -1314,18 +1314,28 @@ two), and refuses a `LEGION_E2E_DAEMON_URL` whose `GET /healthz` does not answer
 `dispatch` CLI dependency at all: Dispatch reads go straight to its own JSON API with the bearer
 `DISPATCH_TOKEN_FILE` holds. That bearer never appears in any process's argv (`/proc/<pid>/cmdline`
 is world-readable): it reaches `curl` through a `-K` config file (`mktemp`, `chmod 600`, one
-`header = "Authorization: Bearer <token>"` line), removed by an `EXIT`/`INT`/`TERM` trap alongside
-any raw-fetch temp file a signal catches mid-write. The script never touches a shared
-session-state root.
+`header = "Authorization: Bearer <token>"` line). An `INT`/`TERM` on the whole process group (a
+terminal's Ctrl-C) or on the script's own pid alone both remove that file and a raw-fetch temp file
+mid-write and stop the script with the shell's conventional 130/143, never a bare cleanup that lets
+the script press on into a later, unrelated failure: `raw_fetch` arms its own local traps around
+each fetch — most calls run inside a `$(…)` subshell, where a plain variable a signal handler reads
+in the parent is never set, so the trap that removes a call's own temp file is armed in whichever
+shell actually runs it — and restores the script's standing handlers before returning. The script
+never touches a shared session-state root.
 
 State and Dispatch reads go through `state_raw`/`dispatch_issue_raw`/`dispatch_events_raw`, each
 taking the calling observation's own name: every evidence file is `<observation>-state.raw`,
 `<observation>-dispatch-issue-<key>.raw` or `<observation>-dispatch-events-<key>.raw`, never a
-source-only name two observations in one run could share and overwrite. Each writes the external
-response straight to its own file (never through `$(…)`, which strips trailing bytes — the reason
-an earlier round's `pin` evidence came up two bytes short, and the temp-file-then-`mv` write is
-itself checked for a failed rename), and every jq path below reads that file directly, so the
-evidence a PR body quotes is exactly the bytes the observation judged.
+source-only name two observations in one run could share and overwrite. `before` and `after` are
+themselves two different observation names (`negative-pr-in-x-before`/`-after`,
+`negative-repo-edit-before`/`-after`), so they never share raw evidence either, and `children`
+reads state exactly once, before any child's judgment, reusing that one read (and its one raw
+file) for every child, rather than a fresh read per child that an evidence file naming only the
+observation could hold at most one of. Each writes the external response straight to its own file
+(never through `$(…)`, which strips trailing bytes — the reason an earlier round's `pin` evidence
+came up two bytes short, and the temp-file-then-`mv` write is itself checked for a failed rename),
+and every jq path below reads that file directly, so the evidence a PR body quotes is exactly the
+bytes the observation judged.
 
 Each observation prints `CHECK <name>: PASS` or `CHECK <name>: FAIL` (a FAIL exits non-zero) and
 writes its own summary file (`<name>.txt`) beside the raw reads it judged — keep
@@ -1334,11 +1344,11 @@ writes its own summary file (`<name>.txt`) beside the raw reads it judged — ke
 | observation | judges |
 | :--- | :--- |
 | `record-head <T>` | T's default-branch head now (both nonempty, the head a full commit id), for `branch-base` to compare the first child commit's parent against; refuses a repository argument that is not T |
-| `children <parent>` | Dispatch's own `GET /api/v1/issues/<parent>` for `.children[].key`, then each child's `.resolved_repo` against `state_raw`'s `.issues[<key>].repo`: one child resolves to T and one to C, in both, case-insensitively; a non-2xx Dispatch answer for any child fails the whole observation |
+| `children <parent>` | Dispatch's own `GET /api/v1/issues/<parent>` for `.children[].key`, then each child's `.resolved_repo` against one `state_raw` read (made once, before any child's judgment, and reused for every child) against `.issues[<key>].repo`: one child resolves to T and one to C, in both, case-insensitively; a non-2xx Dispatch answer for any child fails the whole observation |
 | `branch-base <T child>` | `legion/<child>`'s first commit's first parent on GitHub equals the stored `record-head`, both required to be full commit ids |
 | `pin <C> <T merge sha>` | `LEGION_E2E_PIN_FILE` on C's default branch names the sha; refuses an empty or non-full-length sha argument and a repository argument that is not C; the file's own base64-decoded bytes go straight to `evidence/pin.txt` by redirection |
 | `done <KEY>...` | Dispatch's own `.status` field for every named issue reads `done`; a non-2xx Dispatch answer fails the observation |
-| `second-owner <O child> <pod> [container]` | `.issues[<child>].pullRequest.repo` is O and its phase is `production_check` or `done`; `gh api repos/<O>/pulls/<n> --jq .merged` is `true` (the daemon's `done` phase alone is never merge proof); the pod's `legion.dev/issue` label matches the issue. The credential evidence then runs live, as the role itself (`as_role`: scans `MULTIREPO_PROC_ROOT` (`/proc` in production, a test seam otherwise), requires exactly one process whose *parent's* `cmdline` is the literal line `worker-shim` — Stage 4a's own `shimPid`/`agentPid` pattern — refusing by name when there are zero or several, resolves that one pid once, then re-execs all four probes below in a single combined exec under exactly its `/proc/<pid>/environ` with `env -i`, so they share one environment snapshot and the scan never runs twice): its own `LEGION_GH_OWNERS_DIR` and `GH_CONFIG_DIR` (the issue's own owner) are read and checked first; `gh api repos/<T> --jq .full_name` must equal T exactly; a dry-run push to O's own repository (`git --git-dir=$LEGION_WORKSPACE/.git -c core.hooksPath=/dev/null push --no-verify --dry-run`) must succeed (the positive control, ruling out network/helper/ref problems before trusting the next one); and the same dry-run push to T must fail with a refusal anchored to T itself — `remote: Permission to <T>.git denied`, or a `403` on a line also naming T's own `github.com/<T>` URL — never merely any nonzero exit (a bad ref, an unreachable network, an unanswered credential helper) and never a `403` against some other repository the output happens to mention |
+| `second-owner <O child> <pod> [container]` | `.issues[<child>].pullRequest.repo` is O and its phase is `production_check` or `done`; `gh api repos/<O>/pulls/<n> --jq .merged` is `true` (the daemon's `done` phase alone is never merge proof); the pod's `legion.dev/issue` label matches the issue. The credential evidence then runs live, as the role itself (`as_role`: `/proc` in production — `MULTIREPO_PROC_ROOT` is refused unless `MULTIREPO_TEST_SEAM=1` is also set, which only this suite's own tests do, and the proc root used is always named in the evidence — resolves the one `worker-shim` process whose own parent is PID 1, then the one child of that shim whose own argv equals the shim's own argv after its `--`: a broker-enrolled pod's shim also parents an `agent-secrets renew` process for its whole life, and briefly a `codegraph` warm-up or a `jj metaedit` during an adoption, none of which share the agent's own argv, so matching on argv rather than mere parentage is what tells the agent apart from them; refuses by name, naming every candidate, on zero or several shims or zero or several argv-matching children. Resolved once, then re-execs all four probes below in a single combined exec under exactly its `/proc/<pid>/environ` with `env -i`, so they share one environment snapshot and the scan never runs twice): its own `LEGION_GH_OWNERS_DIR` and `GH_CONFIG_DIR` (the issue's own owner) are read and checked first; `gh api repos/<T> --jq .full_name` must equal T exactly; a dry-run push to O's own repository (`git --git-dir=$LEGION_WORKSPACE/.git -c core.hooksPath=/dev/null push --no-verify --dry-run`) must succeed (the positive control, ruling out network/helper/ref problems before trusting the next one); and the same dry-run push to T must fail with a refusal anchored to T itself — `remote: Permission to <T>.git denied`, or a `403` on a line also naming T's own `github.com/<T>` URL — never merely any nonzero exit (a bad ref, an unreachable network, an unanswered credential helper) and never a `403` against some other repository the output happens to mention. The evidence never holds the agent's real cmdline: a pod's agent runs with `--append-system-prompt <the whole composed prompt, the deployment's own instructions included>`, which may name the deployment's own private hosts, so the recorded cmdline is only the pid, the arguments before that flag, and the prompt value's byte count and sha256 — never the value itself, and the same redaction applies wherever the shim's own cmdline would otherwise carry the identical value after its `--` |
 | `cache <issue> <pod> [container]` | the named pod's `legion.dev/issue` label matches the issue (refusing an unrelated pod outright), its fetch container's log (`kubectl logs`, default container `workspace-fetch`) carries the producer's exact, anchored cache-stream-with-delta success line (`packages/daemon/cmd/legion/workspace_fetch.go:83`, the form `workspace_fetch_test.go:572` pins — a whole-line match, not a loose substring), and `.repositories.mapped[] | select(.repo==<repo>) | .cache.ready` is `true` |
 | `negative pr-in-x before\|after <run id>? <T child>` | a two-call baseline protocol (below). `before` requires the child already recorded on T or C, and captures GitHub's own highest pull-request number in X at that moment — the cursor `after` compares against, never a wall-clock timestamp, which skew between the operator and GitHub could fool. `after` PASSes only when GitHub shows a closed pull request on `legion/<child>` in X numbered above that cursor, **and** the daemon's own side is unaffected: the child is still recorded on the baseline's repository, and its pull request never names X |
 | `negative no-repo <KEY>` | `.issues \| has(<KEY>)` is `false` (refusing outright, never vacuously passing, when `.issues` is not even an object), Dispatch's own `.resolved_repo` is still `null`, and the **latest** repository note among the daemon's own messages (actor `{kind:"session", id:"legion-daemon:<PROJECT>"}` only) is the exact no-repository admission refusal, word for word, bound to the daemon's own outbox marker — `"Legion did not admit this issue: its repository resolves to none. Set its repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name) and move it to todo again.\n\n<!-- legion-outbox:<id> -->"` (`packages/daemon/internal/workflow/repository.go:76`, `packages/daemon/internal/record/outbox.go:71-73,104-106`) |
@@ -1359,27 +1369,36 @@ baseline's, or a generation that moved since — a hand-over or re-admission mid
 against two `Bun.serve` stubs (the daemon's `/legion/v1/state` and Dispatch's own
 `/api/v1/issues/*` JSON API), fake `gh`/`kubectl` on an isolated `PATH`, and, for `second-owner`, a
 fully fake, deterministic `/proc`-shaped directory tree built per test (`fakeProcTree`, wired in
-through `MULTIREPO_PROC_ROOT`) rather than a real background process scanned against the host's own
-`/proc` — a shared devbox's live Legion panes made that flaky, picking a sibling session's process
-instead of the test's own. `as_role`'s scan and `env -i` re-exec run unmodified against the fake
-tree, which can also build the refusal shapes a real process tree cannot reliably reproduce on
-demand: zero worker-shim children, or two. 56 tests, including a dedicated regression for every
-vacuous-PASS case four rounds of review found: a failed Dispatch read whose text contains `token`,
-a `widgets-other`-shaped repository that must never match a word-bounded check meant for `widgets`,
-a merged-PR claim the daemon's phase alone can't prove, a dry-run push refused for a non-permission
-reason (network, bad ref, not-a-repo, an unanswered credential helper, or a `403` naming some other
-repository — none of these satisfy the anchored credential probe), a bare pod shell with no role
-process to find, two processes both parented by worker-shim (refused by name, naming both
-candidates, never the lexically first), a closed pull request in X whose daemon-side record also
-changed, a daemon `issue.updated` that is a routine status write rather than the edit itself, a
-human message quoting the daemon's own sentence, a stale repository note, a `{}`/`null` state body,
-an immediate `after` with no baseline, a run id shaped like a path traversal, a generation that
-moved mid-control, two overlapping `before` calls that must never share a baseline file, a failed
-Dispatch read that never prints the bearer, two observations in one run whose raw evidence must
-never collide, a cache fetch slower than a minute (Go's `1m2.345s` duration form), and the
-operator's own case for X disagreeing with Dispatch's resolved spelling, which the kept-repository
-message must still match. Task 6.4, the live run against the deployment's own repositories, is the
-operator's and has not run in this suite.
+through `MULTIREPO_PROC_ROOT` plus the `MULTIREPO_TEST_SEAM` marker it requires) rather than a real
+background process scanned against the host's own `/proc` — a shared devbox's live Legion panes
+made that flaky, picking a sibling session's process instead of the test's own. `as_role`'s scan
+and `env -i` re-exec run unmodified against the fake tree, which can also build the refusal shapes
+and the broker-enrolled shapes a real process tree cannot reliably reproduce on demand: zero
+worker-shim processes, two, a shim whose own parent is not PID 1, two children whose own argv both
+match the shim's, or an `agent-secrets renew` and a `codegraph` child beside the real agent. 64
+tests, including a dedicated regression for every vacuous-PASS case five rounds of review found: a
+failed Dispatch read whose text contains `token`, a `widgets-other`-shaped repository that must
+never match a word-bounded check meant for `widgets`, a merged-PR claim the daemon's phase alone
+can't prove, a dry-run push refused for a non-permission reason (network, bad ref, not-a-repo, an
+unanswered credential helper, or a `403` naming some other repository — none of these satisfy the
+anchored credential probe), a bare pod shell with no role process to find, two worker-shim
+processes (refused by name, naming both), a worker-shim-cmdline process whose own parent is not PID
+1, a broker-enrolled pod's renewer and codegraph children (never mistaken for the agent), two
+children of one shim both matching its own argv, the agent's `--append-system-prompt` value never
+reaching evidence (only its byte count and sha256), `MULTIREPO_PROC_ROOT` set without
+`MULTIREPO_TEST_SEAM=1`, a closed pull request in X whose daemon-side record also changed, a daemon
+`issue.updated` that is a routine status write rather than the edit itself, a human message quoting
+the daemon's own sentence, a stale repository note, a `{}`/`null` state body, an immediate `after`
+with no baseline, a run id shaped like a path traversal, a generation that moved mid-control, two
+overlapping `before` calls that must never share a baseline file, a failed Dispatch read that never
+prints the bearer, `children` reading state exactly once for a multi-child parent rather than once
+per child, two observations (and a baseline protocol's own `before`/`after`) in one run whose raw
+evidence must never collide, a SIGTERM to the observer's own pid stopping it immediately rather than
+pressing on into an unrelated failure, a group SIGINT never leaving a raw-fetch temp file behind
+even from inside a `$(…)` subshell, a cache fetch slower than a minute (Go's `1m2.345s` duration
+form), and the operator's own case for X disagreeing with Dispatch's resolved spelling, which the
+kept-repository message must still match. Task 6.4, the live run against the deployment's own
+repositories, is the operator's and has not run in this suite.
 
 ## lib/free-port.sh
 
