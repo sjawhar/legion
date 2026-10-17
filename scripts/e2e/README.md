@@ -632,9 +632,13 @@ that reachability with a reverse tunnel, entirely of the run's own:
    `bridge-<project>` and labelled `legion.dev/project=<project>`, running
    `mirror.gcr.io/jpillora/chisel` (pinned by digest) as a reverse-tunnel server — non-root,
    read-only root filesystem, every capability dropped, tolerating the `legion` pool's taint
-   without requiring it. Only the chisel server's two *data* ports (the worker stream's and the
-   session database's) are on the Service; its control port is never exposed by the Service or the
-   cluster network, reachable only through `kubectl port-forward` under the operator context.
+   without requiring it, and carrying the same eviction-protection annotation pair every Legion
+   issue pod does (`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`,
+   `karpenter.sh/do-not-disrupt: "true"`) — without them the bridge pod, alone on its own node, is
+   fair game for GKE's node consolidation mid-run. Only the chisel server's two *data* ports (the
+   worker stream's and the session database's) are on the Service; its control port is never
+   exposed by the Service or the cluster network, reachable only through `kubectl port-forward`
+   under the operator context.
 2. The devbox holds a `kubectl port-forward` to the bridge pod's control port, and a `chisel`
    client — built from pinned source (`go install github.com/jpillora/chisel@v1.11.8`) into the
    run's scratch directory, never installed system-wide — asks the server, over that port-forward,
@@ -845,6 +849,15 @@ production issue pod as well as this run's own:
   let it recover and the run continue), only failing the run if a restart can't land within 60s,
   or the chisel client's own bounded reconnect (`--max-retry-count 30 --max-retry-interval 2s`,
   not chisel's default of forever) gives up first.
+- **A lone pod on its own node is fair game for node consolidation.** A bridge pod without the
+  eviction-protection annotations every issue pod carries ran fine for ten minutes, then vanished
+  outright mid-run (not a graceful shutdown: its chisel client's log shows the connection refused,
+  not closed) — consistent with GKE reclaiming the underutilized Node-Auto-Provisioned node it was
+  alone on. The watchdog's port-forward recovery is the right answer to a dropped connection, never
+  to the pod itself being gone (every restart attempt correctly failed `NotFound` once it was); the
+  actual fix is the same `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` and
+  `karpenter.sh/do-not-disrupt: "true"` pair every issue pod already carries, now on the bridge pod
+  too.
 
 ## stage4b-sandbox-tree.sh
 

@@ -99,12 +99,22 @@ bridge_start() {
   GOBIN="$work/bin" go install "github.com/jpillora/chisel@${bridge_chisel_version}" ||
     fail "building the chisel client ($bridge_chisel_version, the same release the bridge pod's server runs) failed"
 
+  # Annotated against Cluster Autoscaler/node consolidation, the same pair every Legion issue pod
+  # carries (manifest.go's safeToEvictAnnotation and doNotDisruptAnnotation): confirmed live,
+  # 2026-10-17, a bridge pod without them ran fine for ten minutes, alone on its own
+  # Node-Auto-Provisioned node, then vanished mid-run (its chisel client's own log: connected at
+  # 11:21:07, disconnected with the underlying TCP connection refused — not a graceful shutdown —
+  # at 11:31:26), consistent with GKE reclaiming an underutilized node out from under it. The
+  # watchdog's bounded port-forward restart (below) is the right answer to a dropped connection,
+  # never to the pod itself being gone — every restart attempt correctly failed NotFound once it
+  # was.
   cat <<YAML | op apply -f - >/dev/null || fail "the operator could not create the bridge pod/Service $bridge_name"
 apiVersion: v1
 kind: Pod
 metadata:
   name: $bridge_name
   labels: {legion.dev/project: "$run_label", legion.dev/bridge: "$bridge_name"}
+  annotations: {cluster-autoscaler.kubernetes.io/safe-to-evict: "false", karpenter.sh/do-not-disrupt: "true"}
 spec:
   restartPolicy: Never
   automountServiceAccountToken: false
