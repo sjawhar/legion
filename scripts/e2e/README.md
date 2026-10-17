@@ -786,8 +786,8 @@ What the run had to learn about production (AWS, `LEGION_E2E_RUNTIME_IDENTITY_KI
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
 
 What the run had to learn about GKE (`LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account`,
-Theorem's production cluster), each confirmed against a real, already-running production issue
-pod as well as this run's own:
+a production GKE cluster the daemon deploys into), each confirmed against a real, already-running
+production issue pod as well as this run's own:
 
 - **gVisor floors a lone small Sandbox's cpu to 500m.** A single-container Sandbox (the image
   probe, 250m configured) is admitted with its container's cpu request and limit both raised to
