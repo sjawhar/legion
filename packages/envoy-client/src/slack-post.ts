@@ -8,6 +8,8 @@
  * travels on the poster's stdin, and the poster prints one line of JSON saying what Slack answered.
  */
 
+import { BlockList, isIP } from "node:net";
+
 /** The broker's agent secret holding the Legion Slack app's bot token (`xoxb-…`). */
 export const SLACK_BOT_TOKEN_SECRET = "LEGION_SLACK_BOT_TOKEN";
 
@@ -184,20 +186,51 @@ const MAY_HAVE_POSTED =
  * delimiter of Slack's `<url|text>` form. Trailing punctuation is trimmed before it is parsed. The
  * scheme and each host label are bounded, so a long reply is scanned in linear time. */
 const URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
-/** A host written with no scheme: two or more dotted labels, optionally a port, not inside a
- * path, an address or another word. Only a host insideCluster names is refused, so dotted prose
- * (`README.md`, `e.g.`) passes. */
-const BARE_HOST = /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
+/** The schemes Slack opens as a link; any other (`dispatch://ACME-12`) is a reference, not one. */
+const WEB_SCHEME = /^https?:\/\//i;
+/** A host written with no scheme: dotted labels, optionally a trailing dot and a port, not inside
+ * a path, an address or another word. A single label counts only before a port (`dispatch:8766`),
+ * so a word before a colon (`Dispatch: filed`) is no host. */
+const BARE_HOST =
+  /(?<![\w@./:%-])((?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63})\.?(:\d{1,5})?(?![\w-])/gi;
+/** An IPv6 literal written with no scheme: in brackets, optionally with a zone and a port. */
+const BARE_IPV6 = /(?<![\w@./:%-])\[([0-9a-f:.]{2,45})(?:%[\w.-]{1,32})?\](?::\d{1,5})?/gi;
 const TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+
+/** The addresses only the cluster reaches: unspecified, loopback, private, shared (carrier-grade
+ * NAT) and link-local IPv4; and IPv6's unspecified, loopback and IPv4-compatible block (`::/96`),
+ * unique-local and link-local. An IPv4-mapped IPv6 address (`::ffff:10.96.12.34`, which the URL
+ * parser writes `::ffff:a60:c22`) is checked against the IPv4 ranges. */
+const CLUSTER_ADDRESSES = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.168.0.0", 16],
+] as const) {
+  CLUSTER_ADDRESSES.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+  ["::", 96],
+  ["fc00::", 7],
+  ["fe80::", 10],
+] as const) {
+  CLUSTER_ADDRESSES.addSubnet(network, prefix, "ipv6");
+}
 
 /**
  * The first link in text that points inside the cluster, as the reply wrote it, or undefined. Each
- * URL, Slack's `<url|text>` and its HTML-escaped form included, is parsed as written and with its
- * trailing punctuation trimmed, and refused when either host is inside (insideCluster); each
- * scheme-less host likewise. The URL parser also decodes a percent-encoded host and writes an
- * IPv4-mapped address in hex, which privateIPv6 reads. While DISPATCH_PUBLIC_URL names another
+ * http(s) URL, Slack's `<url|text>` and its HTML-escaped form included, is parsed as written and
+ * with its trailing punctuation trimmed, and refused when either host is inside (insideCluster):
+ * the URL parser reads the host as a browser would, so a percent-encoded name and IPv4 shorthand
+ * (`127.1`, `0x7f000001`) are the address they open. Text with no scheme is judged as written,
+ * never re-parsed: an address there is only a four-octet dotted quad or a bracketed IPv6 literal,
+ * so a decimal or a version (`10.5`, `0.31.0`) is prose. While DISPATCH_PUBLIC_URL names another
  * host, DISPATCH_URL's host is inside too, whatever form the deployment gave it, and is refused
- * with or without a scheme, a single label included.
+ * with or without a scheme, a single label before a port included.
  */
 function linkInsideCluster(
   text: string,
@@ -212,20 +245,20 @@ function linkInsideCluster(
       : undefined;
   const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   for (const match of decoded.matchAll(URL_CANDIDATE)) {
+    if (!WEB_SCHEME.test(match[0])) continue;
     for (const written of new Set([match[0], match[0].replace(TRAILING_PUNCTUATION, "")])) {
       const host = hostOf(written);
       if (host !== undefined && insideCluster(host, dispatchHost, true)) return written;
     }
   }
   const prose = decoded.replace(URL_CANDIDATE, (url) => " ".repeat(url.length));
-  for (const match of prose.matchAll(BARE_HOST)) {
-    const host = hostOf(`http://${match[0]}`);
-    if (host !== undefined && insideCluster(host, dispatchHost, false)) return match[0];
+  for (const match of prose.matchAll(BARE_IPV6)) {
+    if (insideCluster(`[${match[1]}]`, dispatchHost, false)) return match[0];
   }
-  if (dispatchHost !== undefined) {
-    const escaped = dispatchHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const bare = new RegExp(`(?<![\\w@./:%-])${escaped}\\.?(?=[:/])`, "i").exec(prose);
-    if (bare !== null) return bare[0];
+  for (const match of prose.matchAll(BARE_HOST)) {
+    const host = (match[1] ?? "").toLowerCase();
+    if (!host.includes(".") && match[2] === undefined) continue;
+    if (insideCluster(host, dispatchHost, false)) return match[0];
   }
   return undefined;
 }
@@ -242,71 +275,20 @@ function hostOf(value: string | undefined): string | undefined {
 }
 
 /**
- * Whether host is one only the cluster reaches: a Kubernetes Service name (ending `.svc`, a custom
- * cluster domain after `.svc.`, or `.cluster.local`), Dispatch's own in-cluster host (dispatchHost),
- * a private or loopback IP literal (a ClusterIP among them, an IPv4-mapped one included), and, for
- * a host a URL names, a single label (`dispatch`, `localhost`).
+ * Whether host is one only the cluster reaches: Dispatch's own in-cluster host (dispatchHost), a
+ * Kubernetes Service name (ending `.svc`, a custom cluster domain after `.svc.`, or
+ * `.cluster.local`), an IP literal in CLUSTER_ADDRESSES (a ClusterIP among them), and, for a host a
+ * URL names, a single label (`dispatch`, `localhost`). A scheme-less single label reaches here only
+ * before a port, and is inside only as dispatchHost.
  */
 function insideCluster(host: string, dispatchHost: string | undefined, fromUrl: boolean): boolean {
   if (host === dispatchHost) return true;
   if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
     return true;
-  if (host.startsWith("[")) return privateIPv6(host.slice(1, -1));
-  return privateIPv4(host) || (fromUrl && !host.includes("."));
-}
-
-/** A loopback, link-local, private or shared (carrier-grade NAT) IPv4 address, or the unspecified
- * one. */
-function privateIPv4(host: string): boolean {
-  const octets = host.split(".");
-  if (octets.length !== 4 || !octets.every((octet) => /^\d{1,3}$/.test(octet))) return false;
-  const [a = 0, b = 0] = octets.map(Number);
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127)
-  );
-}
-
-/** A loopback, unspecified, link-local or unique-local IPv6 address, or one that maps or embeds
- * (`::ffff:a.b.c.d`, `::a.b.c.d`) an IPv4 address privateIPv4 names. */
-function privateIPv6(address: string): boolean {
-  const words = ipv6Words(address);
-  if (words === undefined) return false;
-  const [first = 0] = words;
-  const zeroUntil = (end: number) => words.slice(0, end).every((word) => word === 0);
-  if (zeroUntil(5) && (words[5] === 0xffff || words[5] === 0)) {
-    const [high = 0, low = 0] = words.slice(6);
-    const ipv4 = `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
-    if (words[5] === 0xffff || !zeroUntil(7) || low > 1) return privateIPv4(ipv4);
-    return true; // `::` and `::1`
-  }
-  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
-}
-
-/** The eight 16-bit words of an IPv6 address, a trailing dotted IPv4 part included; undefined for
- * a string that is not one. */
-function ipv6Words(address: string): number[] | undefined {
-  let text = address.toLowerCase();
-  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
-  if (dotted !== null) {
-    const [a, b, c, d] = dotted.slice(1).map(Number) as [number, number, number, number];
-    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
-  }
-  const halves = text.split("::");
-  if (halves.length > 2) return undefined;
-  const parse = (part: string) => (part === "" ? [] : part.split(":"));
-  const head = parse(halves[0] ?? "");
-  const tail = halves.length === 2 ? parse(halves[1] ?? "") : [];
-  const missing = 8 - head.length - tail.length;
-  if (halves.length === 1 ? missing !== 0 : missing < 1) return undefined;
-  const words = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
-  if (!words.every((word) => /^[0-9a-f]{1,4}$/.test(word))) return undefined;
-  return words.map((word) => Number.parseInt(word, 16));
+  const address = host.startsWith("[") ? host.slice(1, -1) : host;
+  const family = isIP(address);
+  if (family !== 0) return CLUSTER_ADDRESSES.check(address, family === 4 ? "ipv4" : "ipv6");
+  return fromUrl && !host.includes(".");
 }
 
 /**

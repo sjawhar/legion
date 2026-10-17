@@ -6,11 +6,14 @@
 
 - `dispatch read`'s issue summary names the issue's page (`Link:`), on `DISPATCH_PUBLIC_URL` when
   it is set, so an agent asked about an issue repeats a link rather than building one.
-- `slack_post` parses every link in a reply, Slack's `<url|text>` form and scheme-less hosts
-  included, and refuses one inside the cluster before it asks the broker anything, naming it: a
-  Service name (`.svc`, a custom cluster domain after `.svc.`, `.cluster.local`, a single label), a
-  private or loopback IP literal, or, while `DISPATCH_PUBLIC_URL` names another host,
-  `DISPATCH_URL`'s host.
+- `slack_post` refuses a reply linking an address inside the cluster before it asks the broker
+  anything, naming it: a Service name (`.svc`, a custom cluster domain after `.svc.`,
+  `.cluster.local`, a single label in a URL), a private, loopback or link-local IP address (an
+  IPv4-mapped one included), or, while `DISPATCH_PUBLIC_URL` names another host,
+  `DISPATCH_URL`'s host. An http(s) URL, Slack's `<url|text>` form included, is read as a browser
+  reads it; text with no scheme is judged as written, where an address is only a four-octet dotted
+  quad or a bracketed IPv6 literal and a single label only `DISPATCH_URL`'s before a port, so a
+  decimal, a version, `dispatch://ACME-12` and the word "Dispatch" are prose.
 - `dispatch issue`'s `Created` line names the assignee Dispatch answered (`; assigned to <email>`
   or `; unassigned`): Dispatch picks one when the call names none, so an agent reports it rather
   than assuming.

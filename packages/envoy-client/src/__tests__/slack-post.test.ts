@@ -183,12 +183,13 @@ describe("postSlackReply", () => {
     expect(slack.calls).toEqual([]);
   });
 
-  // A reply goes to people in Slack, who cannot open an address inside the cluster: every URL in the
-  // reply, Slack's <url|text> form included, is parsed and its host checked, and a reply linking
-  // one is refused before the broker is asked or Slack is called, naming the link. Inside means a
-  // Service name (.svc, a custom cluster domain after .svc, .cluster.local, a single label), a
-  // private or loopback IP literal, or, while DISPATCH_PUBLIC_URL names another host, the host of
-  // DISPATCH_URL itself, whatever form the deployment gave it.
+  // A reply goes to people in Slack, who cannot open an address inside the cluster: every http(s)
+  // URL in the reply, Slack's <url|text> form included, is parsed and its host checked, and a reply
+  // linking one is refused before the broker is asked or Slack is called, naming the link. Inside
+  // means a Service name (.svc, a custom cluster domain after .svc, .cluster.local, a single label
+  // in a URL), a private or loopback IP address, or, while DISPATCH_PUBLIC_URL names another host,
+  // the host of DISPATCH_URL itself, whatever form the deployment gave it. Text with no scheme is
+  // judged as written, so decimals, versions and the word "Dispatch" post.
   describe("refuses a reply linking an address inside the cluster, asking nothing of the broker", () => {
     const internal = "dispatch.example-ns.svc.cluster.local";
     const rows: [string, string, Record<string, string>?][] = [
@@ -255,6 +256,12 @@ describe("postSlackReply", () => {
           DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
         },
       ],
+      ["a ClusterIP with no scheme", "See 10.96.12.34:8766/issues/ACME-12"],
+      ["a bracketed IPv6 literal with no scheme", "See [fd00:10:96::1234]:8766/issues/ACME-12"],
+      ["a mapped IPv6 literal with no scheme", "See [::ffff:10.96.12.34]:8766/issues/ACME-12"],
+      ["loopback in IPv4 shorthand", "See http://127.1:8766/issues/ACME-12"],
+      ["loopback as one hex number", "See http://0x7f000001:8766/issues/ACME-12"],
+      ["the unspecified IPv6 address", "See http://[::]:8766/issues/ACME-12"],
     ];
     for (const [name, text, extra] of rows) {
       test(name, async () => {
@@ -279,6 +286,34 @@ describe("postSlackReply", () => {
         "See https://dispatch.example.org/issues/ACME-12",
         { DISPATCH_URL: "https://dispatch.example.org" },
       ],
+      ["a fraction of a CPU", "Each pod asks for 0.5 CPU."],
+      ["a duration in minutes", "CI ran for 10.5 minutes on ACME-12."],
+      ["a latency", "Median wait was 127.3 ms."],
+      ["a price", "It costs $0.42 a run."],
+      ["a p-value", "The difference holds, p < 0.05."],
+      ["a package version", "pi-envoy 0.31.0 is installed."],
+      ["Legion's own version", "This deployment runs Legion 10.4.0."],
+      ["a tagged version", "Released as v10.4.1."],
+      ["two dotted numbers", "The prefix 192.168 is private."],
+      ["a dispatch:// reference", "Tracked in dispatch://ACME-12."],
+      [
+        "the word Dispatch before a colon while DISPATCH_URL is one label",
+        "Dispatch: filed ACME-12, https://dispatch.example.org/issues/ACME-12",
+        {
+          DISPATCH_URL: "http://dispatch:8766",
+          DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
+        },
+      ],
+      [
+        "the word Dispatch before a slash while DISPATCH_URL is one label",
+        "Dispatch/Legion tracks it as ACME-12.",
+        {
+          DISPATCH_URL: "http://dispatch:8766",
+          DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
+        },
+      ],
+      ["a public IPv4-mapped address", "See http://[::ffff:8.8.8.8]/"],
+      ["a public IPv6 address", "See http://[2001:db8::1]/"],
     ];
     for (const [name, text, extra] of allowed) {
       test(`posts ${name}`, async () => {
