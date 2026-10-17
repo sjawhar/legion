@@ -9,51 +9,25 @@ watch for as long as your session stays live.
 ## Watching a channel
 
 The channel is its Slack id (e.g. `C01234567`), which the person names or you resolve yourself.
-Two different Legion controllers — different projects, maybe different Slack teams — could be
-asked to watch the same channel id, so a watch request needs a lock before it subscribes:
+Subscribe yourself: `envoy_subscribe(["notifications.slack.*.<channel>.mention"])` — the team
+segment is a wildcard, matching the deleted daemon helper's own convention, so a mention from any
+Slack team on that channel id reaches you. Confirm to the requester that you are now watching the
+channel.
 
-1. Search for an existing lock: `dispatch search --query "Slack channel lock <channel>"`.
-2. **Found:** `dispatch read --issue <KEY>`. A `Claimed by:` line naming a session that does not
-   end `· not running` is a live holder: tell the requester this channel is already watched by
-   that session (name it, and its project if the issue says) and stop. Otherwise (unclaimed, or
-   `· not running`) claim it: `dispatch claim --issue <KEY>`. A `409 ISSUE_CLAIMED` here means
-   another controller's request won the race a moment ago: read the issue again and refuse the
-   same way.
-3. **Not found:** file it first, in your own project, with a body that says plainly that the issue
-   exists only to coordinate exclusive Slack-channel watching among controllers and is never real
-   work:
+A channel is watched by the controller of the project whose people asked for it — there is no
+lock and no registry of who watches what. If a person reports two Legion replies in one channel,
+the controller that should not be watching it unsubscribes (below); a collision is visible the
+moment it happens, never silent.
 
-   ```text
-   dispatch issue --project <PROJECT> --title 'Slack channel lock <channel>' --spec-file - <<'EOF'
-   ## Summary
-
-   Coordination lock for Slack channel <channel>: whichever Legion controller holds the claim on
-   this issue is the one watching the channel for mentions. Not a work item.
-   EOF
-   ```
-
-   Then claim it exactly as in step 2 (the same `409 ISSUE_CLAIMED` race handling applies: someone
-   else may have filed and claimed one in between).
-4. Once claimed, subscribe yourself: `envoy_subscribe(["notifications.slack.*.<channel>.mention"])`
-   — the team segment is a wildcard, matching the deleted daemon helper's own convention, so a
-   mention from any Slack team on that channel id reaches you. Confirm to the requester that you
-   are now watching the channel.
-
-Never call `envoy_role_set` for this. It is the one Envoy tool your session must never use for
-anything but your own `legion-<project>-controller` role: your session holds exactly one Envoy
-role at a time, so claiming a second one ends the first — not just its local bookkeeping, but the
-underlying claim itself, releasing `legion-<project>-controller` outright and leaving you deaf to
-every wake the daemon sends on your controller topic until a human re-registers you. A `task`
-subagent cannot do it for you either: a subagent registers no Envoy session of its own, so
-`envoy_role_set` run inside one fails outright (`session_id is required`) before it claims
-anything. The Dispatch lock above is the whole mechanism; it needs no Envoy role.
+`envoy_role_set` is never the mechanism for this: it refuses outright when your session already
+holds a different role (yours is `legion-<project>-controller`), naming it, rather than silently
+giving it up.
 
 ## Stopping a channel
 
-`envoy_unsubscribe(["notifications.slack.*.<channel>.mention"])` directly — this is always safe:
-unlike roles, an ordinary subscription is not a one-per-session singleton, and dropping one never
-touches your controller role or its topic. Then release the lock so the next controller is not
-blocked by a channel nobody watches any more: `dispatch claim --issue <KEY> --release`.
+`envoy_unsubscribe(["notifications.slack.*.<channel>.mention"])` — this is always safe: unlike a
+role, an ordinary subscription is not a one-per-session singleton, and dropping one never touches
+your controller role or its topic.
 
 ## What happened before you started
 
