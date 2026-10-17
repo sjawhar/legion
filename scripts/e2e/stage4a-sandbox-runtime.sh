@@ -7,7 +7,15 @@
 # namespace list) use the admin context. Each check prints what it observed, naming the identity,
 # then `CHECK <name>: PASS`; the first that fails ends the run non-zero, naming it.
 #
-# Two clusters, two explicit inputs, never auto-detected from one another:
+# Three explicit inputs, never auto-detected from one another:
+#
+# LEGION_E2E_PLATFORM names the cluster's own platform (`gke-autopilot` or `eks`), independent of
+# identity and reachability below: a cluster could in principle combine any of these differently,
+# even though every cluster this harness has run against so far happens to pair gke-autopilot with
+# kubernetes-service-account and bridge, and eks with aws-iam-role and aws-private-ip. Every
+# platform-specific relaxation the Go harness makes (a gVisor cpu floor, ephemeral-storage
+# equalization, the extended-duration-pods NodeAffinity, cgroup-quota-over-nproc) keys off this
+# input alone.
 #
 # LEGION_E2E_POD_REACHABILITY picks how the run's pods reach the devbox's worker stream and
 # scratch session Postgres:
@@ -18,9 +26,10 @@
 #     run's own in the namespace (operator context, labelled for teardown like everything else)
 #     running a chisel reverse-tunnel server, and a reverse tunnel from the devbox through
 #     `kubectl port-forward` plus a chisel client built from pinned source; pods dial the Service,
-#     which proxies back to the devbox's loopback. Neither leg retries its own drop: a dead
-#     port-forward or chisel client fails the whole run loudly (lib/bridge-tunnel.sh's watchdog),
-#     never a silent reconnect mid-run.
+#     which proxies back to the devbox's loopback. A dropped port-forward is recovered, not fatal
+#     (lib/bridge-tunnel.sh's watchdog restarts it on the same local port, up to 60s); only a
+#     restart that cannot land in time, or the chisel client exhausting its own bounded reconnect
+#     budget, fails the whole run loudly.
 #
 # LEGION_E2E_MODEL_ROUTE picks how the operator's pod reaches a model, independently of
 # reachability — a cluster can have a model gateway or not regardless of which one it is:
@@ -103,6 +112,7 @@ operator=${LEGION_E2E_OPERATOR_CONTEXT:-production}
 runtime_kubeconfig=${LEGION_E2E_RUNTIME_KUBECONFIG:-$HOME/.kube/legion-daemon-production}
 runtime_context=${LEGION_E2E_RUNTIME_CONTEXT:-}
 runtime_identity_kind=${LEGION_E2E_RUNTIME_IDENTITY_KIND:-}
+platform=${LEGION_E2E_PLATFORM:-}
 image=${LEGION_E2E_IMAGE:-}
 pod_reachability=${LEGION_E2E_POD_REACHABILITY:-}
 model_route=${LEGION_E2E_MODEL_ROUTE:-}
@@ -157,45 +167,9 @@ fail() {
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/bridge-tunnel.sh
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/teardown.sh
+. "$root/scripts/e2e/lib/teardown.sh"
 
-# teardown_sequence runs every step that must happen once, in order, whether the run passed or
-# failed partway: bridge_stop (the reverse tunnel's pod/Service, by exact name), teardown (the
-# issue pods, PVCs, Secrets and ConfigMaps this run's own Sandboxes own, by label), the scratch
-# session database container, the agent-secrets re-minter if one is running, and finally
-# namespace_clean's own before/after comparison. A root cause this lane first misdiagnosed as a
-# GKE API-consistency quirk (confirmed live, 2026-10-17, three separate full passes, each with a
-# dedicated diagnostic: a direct GET and every kind of LIST query all agreeing the bridge pod was
-# gone within seconds of namespace_clean reporting it present) was actually this ordering bug: the
-# main flow's own passing path called `teardown; namespace_clean` directly, never `bridge_stop` —
-# that only ran from cleanup()'s EXIT trap, which fires AFTER the main flow's own calls on a
-# passing run, so namespace_clean's snapshot was always taken with the bridge pod still live. One
-# function, called from both places, fixes it: `teardown_sequence_done` makes a second call from
-# cleanup() (after the main flow's own, on a passing run) a no-op, so the sequence still runs
-# exactly once either way.
-teardown_sequence_done=
-teardown_sequence() {
-  [ -z "$teardown_sequence_done" ] || return 0
-  teardown_sequence_done=1
-  bridge_stop
-  teardown
-  [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
-  [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
-  [ -z "$compared" ] && [ -n "$snapshotted" ] || return 0
-  namespace_clean
-}
-
-cleanup() {
-  local status=$?
-  # A second signal must not cut the teardown short, and a closed output must not end it.
-  trap '' HUP INT TERM PIPE
-  exec >&7 2>&7
-  set +e
-  (teardown_sequence) || status=1
-  rm -rf "$work"
-  [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
-  echo "evidence: $evidence (transcript.log, runtime.log, the namespace snapshots)"
-  exit "$status"
-}
 trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
@@ -206,8 +180,15 @@ for tool in go kubectl curl ss secrets diff docker jq bun; do command -v "$tool"
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$runtime_identity_kind" in
-aws-iam-role | kubernetes-service-account) ;;
+aws-iam-role)
+  command -v aws >/dev/null || fail "aws is required: LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role authenticates the runtime kubeconfig through 'aws eks get-token'"
+  ;;
+kubernetes-service-account) ;;
 *) fail "LEGION_E2E_RUNTIME_IDENTITY_KIND must be aws-iam-role or kubernetes-service-account, not '$runtime_identity_kind'" ;;
+esac
+case "$platform" in
+gke-autopilot | eks) ;;
+*) fail "LEGION_E2E_PLATFORM must be gke-autopilot or eks, not '$platform'" ;;
 esac
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
 [ -n "$storage_class" ] || fail "LEGION_E2E_STORAGE_CLASS is unset: name the issue volumes' StorageClass (the cluster has no default to fall back on)"
@@ -226,7 +207,6 @@ key-file)
 esac
 case "$pod_reachability" in
 aws-private-ip)
-  command -v aws >/dev/null || fail "aws is required: LEGION_E2E_POD_REACHABILITY=aws-private-ip authenticates the runtime kubeconfig through 'aws eks get-token'"
   imds=$(curl -sf -m 5 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60') ||
     fail "instance metadata is unreachable; the harness binds the devbox's private address, read from it"
   bind_host=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $imds" http://169.254.169.254/latest/meta-data/local-ipv4) ||
@@ -426,7 +406,7 @@ go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
 
 harness_ok=
-if env \
+env \
   LEGION_E2E_RUNTIME_KUBECONFIG="$runtime_kubeconfig" \
   LEGION_E2E_RUNTIME_CONTEXT="$runtime_context" \
   LEGION_E2E_OPERATOR_CONTEXT="$operator" \
@@ -440,6 +420,8 @@ if env \
   LEGION_E2E_STORAGE_CLASS="$storage_class" \
   LEGION_E2E_MODEL_ROUTE="$model_route" \
   LEGION_E2E_RUNTIME_IDENTITY_KIND="$runtime_identity_kind" \
+  LEGION_E2E_PLATFORM="$platform" \
+  LEGION_E2E_POD_REACHABILITY="$pod_reachability" \
   LEGION_E2E_IMPLEMENT_APP_ID="$app_id" \
   LEGION_E2E_IMPLEMENT_APP_KEY="$app_key" \
   LEGION_E2E_RECORD="$record" \
@@ -459,7 +441,16 @@ if env \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
   LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
   LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
-  "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
+  "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m &
+# Backgrounded and waited on, not run as env's own foreground child: a foreign command's shell
+# blocks delivering a trapped signal until that command itself exits, so a bare `if env ... cmd
+# ...; then` made the watchdog's own 60s give-up bound (lib/bridge-tunnel.sh) meaningless — its
+# SIGTERM would queue for up to the Go test's own 150-minute timeout before this script ever saw
+# it. `wait` is interruptible by a trapped signal immediately; harness.pid lets the watchdog and
+# cleanup kill the harness itself too, not just stop waiting on it.
+harness_pid=$!
+echo "$harness_pid" >"$work/harness.pid"
+if wait "$harness_pid"; then
   harness_ok=1
 fi
 check=harness

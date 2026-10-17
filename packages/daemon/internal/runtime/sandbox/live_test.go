@@ -213,10 +213,13 @@ type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
 	namespace, project, claimProject, image            string
 	repo                                               ghrepo.Repository
-	// streamHost is where the harness's own listener binds: the devbox's private address directly
-	// reachable from pods (AWS mode), or loopback behind the reverse-tunnel bridge every pod
-	// instead dials by streamAdvertiseHost (GKE mode, LEGION_E2E_POD_REACHABILITY=bridge). Every
-	// pod's shim is handed streamAdvertiseHost, never streamHost, when the two differ.
+	// podReachability is LEGION_E2E_POD_REACHABILITY: "aws-private-ip" or "bridge" — how pods reach
+	// the devbox, which networkPathFailure's diagnostic branches on. streamHost is where the
+	// harness's own listener binds: the devbox's private address directly reachable from pods
+	// (aws-private-ip), or loopback behind the reverse-tunnel bridge every pod instead dials by
+	// streamAdvertiseHost (bridge). Every pod's shim is handed streamAdvertiseHost, never
+	// streamHost, when the two differ.
+	podReachability                             string
 	streamHost, streamAdvertiseHost, streamPort string
 	appID, appKeyName                           string
 	// storageClass is the issue volumes' StorageClass: AWS's gp2, GKE's standard-rwo, or whatever
@@ -228,6 +231,15 @@ type liveEnv struct {
 	// gateway: ANTHROPIC_API_KEY reaches the agent as a provider key the providers Secret holds,
 	// mirroring the live GKE route's shape). readLiveEnv refuses any other value.
 	modelRoute string
+	// platform is LEGION_E2E_PLATFORM: "gke-autopilot" or "eks", the cluster's own platform,
+	// independent of runtimeIdentityKind (how the runtime authenticates) and podReachability (how
+	// pods reach the devbox) — a cluster could in principle combine any of these differently. Every
+	// platform-specific relaxation in this file (gke(), the cpu floor, the ephemeral-storage
+	// equalization, the extended-duration-pods affinity, the cgroup-quota-over-nproc choice) keys
+	// off this field alone, never off identity or reachability, which happened to coincide with it
+	// on every cluster this harness has run against so far but are not the same fact. readLiveEnv
+	// refuses any other value.
+	platform string
 	// runtimeIdentityKind is LEGION_E2E_RUNTIME_IDENTITY_KIND: "aws-iam-role" (an assumed IAM role
 	// mapped to the legion-daemon RBAC group, EKS's shape) or "kubernetes-service-account" (a
 	// plain system:serviceaccount:<namespace>:legion-daemon identity, GKE's shape with no IAM
@@ -280,11 +292,13 @@ func readLiveEnv(t *testing.T) liveEnv {
 		namespace:             get("LEGION_E2E_NAMESPACE"),
 		project:               get("LEGION_E2E_PROJECT"),
 		image:                 get("LEGION_E2E_IMAGE"),
+		podReachability:       get("LEGION_E2E_POD_REACHABILITY"),
 		streamHost:            get("LEGION_E2E_STREAM_HOST"),
 		streamAdvertiseHost:   get("LEGION_E2E_STREAM_ADVERTISE_HOST"),
 		streamPort:            get("LEGION_E2E_STREAM_PORT"),
 		storageClass:          get("LEGION_E2E_STORAGE_CLASS"),
 		modelRoute:            get("LEGION_E2E_MODEL_ROUTE"),
+		platform:              get("LEGION_E2E_PLATFORM"),
 		runtimeIdentityKind:   get("LEGION_E2E_RUNTIME_IDENTITY_KIND"),
 		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
 		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY"),
@@ -318,6 +332,14 @@ func readLiveEnv(t *testing.T) liveEnv {
 	}
 	if env.runtimeIdentityKind != "aws-iam-role" && env.runtimeIdentityKind != "kubernetes-service-account" {
 		fmt.Printf("CHECK identity: FAIL: LEGION_E2E_RUNTIME_IDENTITY_KIND must be aws-iam-role or kubernetes-service-account, not %q\n", env.runtimeIdentityKind)
+		t.FailNow()
+	}
+	if env.platform != "gke-autopilot" && env.platform != "eks" {
+		fmt.Printf("CHECK identity: FAIL: LEGION_E2E_PLATFORM must be gke-autopilot or eks, not %q\n", env.platform)
+		t.FailNow()
+	}
+	if env.podReachability != "aws-private-ip" && env.podReachability != "bridge" {
+		fmt.Printf("CHECK identity: FAIL: LEGION_E2E_POD_REACHABILITY must be aws-private-ip or bridge, not %q\n", env.podReachability)
 		t.FailNow()
 	}
 	if !strings.HasPrefix(env.project, "s4a-") {
@@ -1192,14 +1214,17 @@ func (r *liveRig) awaitHelloAgain(c *liveClaim, since time.Time) (registration, 
 }
 
 // networkPathFailure names what a pod that runs but never says hello points at: the address and
-// port it dials, and, under the AWS identity (aws-iam-role), the security groups of the node it
-// runs on (from the node's EC2NodeClass, read as the operator) — Karpenter's EC2NodeClass CRD
-// exists only there. Under a plain kubernetes-service-account identity (GKE), that diagnostic has
-// nothing to read, so the message instead points at the reverse-tunnel bridge
-// (scripts/e2e/lib/bridge-tunnel.sh), whose chisel client or kubectl port-forward dying is what a
-// network-path failure there actually means.
+// port it dials, and, under LEGION_E2E_POD_REACHABILITY=aws-private-ip, the security groups of the
+// node it runs on (from the node's EC2NodeClass, read as the operator) — Karpenter's EC2NodeClass
+// CRD is an AWS concept, meaningless off it. Under bridge, there is no node-level diagnostic to
+// read (the pod reaches a Service, not the devbox's own address), so the message instead points at
+// the reverse-tunnel bridge (scripts/e2e/lib/bridge-tunnel.sh), whose chisel client or kubectl
+// port-forward dying is what a network-path failure there actually means. This keys off
+// podReachability, not runtimeIdentityKind or platform: the diagnostic is about how the pod was
+// told to reach the devbox, which is independent of how the runtime authenticates or which
+// platform the cluster runs.
 func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
-	if r.env.runtimeIdentityKind != "aws-iam-role" {
+	if r.env.podReachability != "aws-private-ip" {
 		return fmt.Errorf("network path: pod %s (uid %s) runs on node %s but no hello reached tcp://%s:%s within %s; check that the reverse-tunnel bridge is still up (its chisel client and kubectl port-forward processes, and the bridge pod's log, scripts/e2e/lib/bridge-tunnel.sh)",
 			pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamAdvertiseHost, r.env.streamPort, liveBootTimeout)
 	}

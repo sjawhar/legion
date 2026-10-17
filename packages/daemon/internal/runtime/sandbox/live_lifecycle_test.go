@@ -287,12 +287,15 @@ func (r *liveRig) gvisorCPUFloor() resource.Quantity {
 	return resource.Quantity{}
 }
 
-// gke reports whether this run's cluster is GKE (LEGION_E2E_RUNTIME_IDENTITY_KIND=
-// kubernetes-service-account), the identity gkeEphemeralStorageClamped's and
-// isGKEExtendedDurationAffinity's doc comments give the live evidence for. False means AWS, which
-// neither clamps ephemeral storage nor adds a NodeAffinity to any pod here.
+// gke reports whether this run's cluster is GKE Autopilot (LEGION_E2E_PLATFORM=gke-autopilot, an
+// explicit input independent of runtimeIdentityKind and podReachability: a cluster authenticating
+// with a ServiceAccount, or unreachable from pods directly, is not necessarily GKE — a
+// self-managed cluster or an EKS cluster with IRSA could do either), the platform
+// gkeEphemeralStorageClamped's and isGKEExtendedDurationAffinity's doc comments give the live
+// evidence for. False means eks, which neither clamps ephemeral storage nor adds a NodeAffinity to
+// any pod here.
 func (r *liveRig) gke() bool {
-	return r.env.runtimeIdentityKind == "kubernetes-service-account"
+	return r.env.platform == "gke-autopilot"
 }
 
 // gkeEphemeralStorageClamped reports whether this run's cluster admits a container's ephemeral-
