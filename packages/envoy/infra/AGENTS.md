@@ -265,15 +265,15 @@ on a real server: its users connect, a client with no credential is refused, the
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
 root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as the
 same user receives, and the server refuses nothing the set allows; without the durable's consumer
-create, the listener never reaches `"status":"healthy"`). `core/dispatch_permissions_live_test.go`
-also starts `testpg.Image`, builds and runs the real `envoy-dispatch` against `DispatchPermissions`,
-and proves both delivery durables (each binds and acknowledges a message), the outbox, the agent
-stream relay and the redelivery bucket;
-its negative control removes the delivery durable's filtered create permission and receives that
-server violation alone; and, as a hub with a listener renders its users, the listener reaches
-`"status":"healthy"` as a user holding `ListenerPermissions` while a session with no credential,
-the server's `no_auth_user` holding `SessionPermissions`, registers, receives a send and a role
-message, and is refused a publish to another session's subject). The `envoy-infra-go` job in
+create, the listener never reaches `"status":"healthy"`; and, as a hub with a listener renders its
+users, the listener reaches `"status":"healthy"` as a user holding `ListenerPermissions` while a
+session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
+receives a send and a role message, and is refused a publish to another session's subject).
+`core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
+`envoy-dispatch` against `DispatchPermissions`, and proves both delivery durables (each binds and
+acknowledges a message), the outbox, the agent stream relay and the redelivery bucket; its negative
+control removes the delivery durable's filtered create permission and receives that server
+violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
