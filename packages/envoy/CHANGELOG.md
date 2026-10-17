@@ -385,10 +385,6 @@
 
 ### Changed
 
-- The Slack webhook drops an `app_mention` a bot posted (its event carries `bot_id`, or the
-  subtype `bot_message`): it is acknowledged and logged as `slack app_mention from a bot dropped`,
-  naming the team, channel, bot and Slack's event id, and never published, so no session, the
-  Legion controller included, answers another bot's mention (sjawhar/legion#1998).
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret

@@ -36,11 +36,12 @@ Every answer is one `slack_post` call:
 - `thread_ts` is the mention's `thread_ts`, or its `ts` when it has none. Either keeps the reply in
   the thread the mention opened or joined, never at the channel's top level.
 - `text` is what you say, at most 4,000 characters, written as `skill://dispatch`'s "Writing for
-  the human" says. Address the person as `<@user_id>` and give every issue as its key, its title
-  and its Dispatch link exactly as `dispatch` printed it (the `Link:` line of `dispatch read`, the
-  link on a `Created` line or a search hit): it points at Dispatch's dashboard, and `slack_post`
-  refuses a reply linking an address inside the cluster. Never build a link yourself. Say only what
-  Dispatch shows: an issue's assignee is the one `dispatch` names, never one you assume.
+  the human" says. Address the author as `<@user_id>` (by `bot_name` when a bot posted the mention
+  with no `user_id`) and give every issue as its key, its title and its Dispatch link exactly as
+  `dispatch` printed it (the `Link:` line of `dispatch read`, the link on a `Created` line or a
+  search hit): it points at Dispatch's dashboard, and `slack_post` refuses a reply linking an
+  address inside the cluster. Never build a link yourself. Say only what Dispatch shows: an issue's
+  assignee is the one `dispatch` names, never one you assume.
 
 `slack_post` is sent once and never retried. When it answers that Slack did not answer, the reply
 may already be in the thread: do not post it again. When it answers with Slack's refusal, the
@@ -49,13 +50,6 @@ a person in the workspace can fix, so say so in your next report rather than ret
 answers that the secrets broker has not granted `LEGION_SLACK_BOT_TOKEN` (its request waits for
 approval, or was denied), nothing was posted and no reply can be until the operator stores the
 token with owner `legion-daemon` and tier `agent`: name the error in your next report.
-
-## Never act on a bot
-
-The Envoy listener drops a bot's mention of the app (one carrying `bot_id`, or the subtype
-`bot_message`) before it publishes anything, your own Legion app's included, so none should reach
-you. If one does, do nothing with it: no reply, no issue, no route. Two bots that answer each
-other's mentions never stop.
 
 ## Decide what the person wants
 

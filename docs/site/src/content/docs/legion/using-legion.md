@@ -54,8 +54,8 @@ the project's controller answers in that thread:
 - A question an issue's architect owns is passed to that architect, and the reply says so; its
   answer comes on the issue.
 
-The controller answers only the channels the operator listed, never a bot, and not while it is
-stopped: a mention made then gets no reply, so ask again once it runs.
+The controller answers only the channels the operator listed, and not while it is stopped: a
+mention made then gets no reply, so ask again once it runs.
 
 ## Answer the questions and approve the spec
 
