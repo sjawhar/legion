@@ -167,41 +167,104 @@ func (r *liveRig) checkResources() error {
 
 	wantCPUs := max(2, int(math.Ceil(cpuSum.AsApproximateFloat64())))
 	wantMemory := memorySum.AsApproximateFloat64()
-	var cpus int
+
+	// The pod's own node, as the operator sees it: a scheduling fact distinct from the
+	// reservation check below, and never a reason to relax it. If Node Auto-Provisioning ever
+	// sizes a new node under what it just scheduled this pod's own summed cpu onto, that is a
+	// platform shortfall worth failing loudly on its own terms, not something the reservation
+	// assertion should quietly absorb.
+	allocatable, err := r.kubectl("get", "node", pod.Spec.NodeName, "-o", "jsonpath={.status.allocatable.cpu}")
+	if err != nil {
+		return fmt.Errorf("reading pod %s's node %s: %w", name, pod.Spec.NodeName, err)
+	}
+	nodeCPU, err := resource.ParseQuantity(strings.TrimSpace(allocatable))
+	if err != nil {
+		return fmt.Errorf("node %s's allocatable cpu %q does not parse: %w", pod.Spec.NodeName, allocatable, err)
+	}
+	if nodeCPU.Cmp(cpuSum) < 0 {
+		return fmt.Errorf("node %s's allocatable cpu %s is under the pod's own summed reservation %s: Node Auto-Provisioning sized the node below what it just scheduled onto it", pod.Spec.NodeName, nodeCPU.String(), cpuSum.String())
+	}
+	note("operator", "node %s: allocatable cpu %s, at or above the pod's own summed reservation %s", pod.Spec.NodeName, nodeCPU.String(), cpuSum.String())
+
 	var memTotalKB int64
-	// A freshly node-auto-provisioned node (NAP; confirmed live, 2026-10-17, against the
-	// production GKE cluster: root-ready itself took 3m39s on one, pulling the worker image to a
-	// brand-new node) can leave gVisor's view of the pod's cgroup lagging the full six-container
-	// reservation for a few seconds right after root-ready returns, so nproc and MemTotal are
-	// polled rather than read once. AWS's nodes, already warm, settle immediately either way.
-	if err := r.poll(time.Minute, "the pod's gVisor sandbox to size nproc and MemTotal to the summed reservation", func() (bool, error) {
-		nproc, err := r.exec(root, "nproc")
-		if err != nil {
-			return false, err
-		}
-		cpus, err = strconv.Atoi(strings.TrimSpace(nproc))
-		if err != nil {
-			return false, fmt.Errorf("nproc in the pod printed %q, not a number", nproc)
-		}
-		if cpus != wantCPUs {
-			return false, nil
-		}
+	checkMemory := func() error {
 		meminfo, err := r.exec(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")
 		if err != nil {
-			return false, err
+			return err
 		}
 		fields := strings.Fields(meminfo)
 		if len(fields) != 3 || fields[2] != "kB" {
-			return false, fmt.Errorf("/proc/meminfo's MemTotal line is %q, want `MemTotal: <n> kB`", meminfo)
+			return fmt.Errorf("/proc/meminfo's MemTotal line is %q, want `MemTotal: <n> kB`", meminfo)
 		}
 		memTotalKB, err = strconv.ParseInt(fields[1], 10, 64)
 		if err != nil {
-			return false, fmt.Errorf("/proc/meminfo's MemTotal %q is not a number", fields[1])
+			return fmt.Errorf("/proc/meminfo's MemTotal %q is not a number", fields[1])
 		}
-		return math.Abs(float64(memTotalKB)*1024-wantMemory) <= 0.03*wantMemory, nil
-	}); err != nil {
-		return fmt.Errorf("nproc in the pod is %d, want max(2, ceil(%s cpu)) = %d; MemTotal %d kB (%.2f GiB), want within 3%% of the containers' summed memory limits %s, the pod cgroup's quota and limit as gVisor sizes the sandbox: %w",
-			cpus, cpuSum.String(), wantCPUs, memTotalKB, float64(memTotalKB)*1024/(1<<30), memorySum.String(), err)
+		if memTotal := float64(memTotalKB) * 1024; math.Abs(memTotal-wantMemory) > 0.03*wantMemory {
+			return fmt.Errorf("MemTotal in the pod is %d kB (%.2f GiB), not within 3%% of the containers' summed memory limits %s, the pod cgroup's limit as gVisor sizes the sandbox", memTotalKB, memTotal/(1<<30), memorySum.String())
+		}
+		return nil
+	}
+
+	if r.gke() {
+		// gVisor on GKE: nproc inside the sandbox is the guest's own host-vCPU presentation, not
+		// a function of the pod's cgroup quota — confirmed live, 2026-10-17, against the
+		// production GKE cluster: two debug pods summing to 2.5 and to exactly 3.0 cores (one
+		// container each at 1 and 2 cores) both reported nproc=2 on an 8-vCPU node with 7.91
+		// allocatable, far more than either sum, ruling out node capacity as the cause; this
+		// matches a documented gVisor/GKE gap (kubernetes/kubernetes#91665, "Actual CPU capacity
+		// is lower than assigned CPU capacity when gVisor sandbox is enabled"). The pod's cgroup
+		// cpu quota, read from `/sys/fs/cgroup/cpu/cpu.cfs_quota_us` and `cpu.cfs_period_us` —
+		// identically presented by every container in the pod, since one gVisor sandbox covers
+		// the whole pod — tracked the configured sum exactly in both debug pods (300000/100000 =
+		// 3.0 cores; 250000/100000 = 2.5 cores) and is the direct observable of what the runtime
+		// actually reserved, which is the check's real intent. AWS keeps nproc below; it is
+		// proven reliable there.
+		quotaOut, err := r.exec(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+		if err != nil {
+			return err
+		}
+		periodOut, err := r.exec(root, "cat", "/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+		if err != nil {
+			return err
+		}
+		quota, err := strconv.ParseFloat(strings.TrimSpace(quotaOut), 64)
+		if err != nil {
+			return fmt.Errorf("cpu.cfs_quota_us printed %q, not a number", quotaOut)
+		}
+		period, err := strconv.ParseFloat(strings.TrimSpace(periodOut), 64)
+		if err != nil || period <= 0 {
+			return fmt.Errorf("cpu.cfs_period_us printed %q, not a positive number", periodOut)
+		}
+		gotCPUs, wantCPUFloat := quota/period, cpuSum.AsApproximateFloat64()
+		if math.Abs(gotCPUs-wantCPUFloat) > 0.01 {
+			return fmt.Errorf("the pod's cgroup cpu quota is %.3f cores (cfs_quota_us=%s, cfs_period_us=%s), not the containers' summed cpu limits %s", gotCPUs, strings.TrimSpace(quotaOut), strings.TrimSpace(periodOut), cpuSum.String())
+		}
+		if err := checkMemory(); err != nil {
+			return err
+		}
+		nprocOut, nprocErr := r.exec(root, "nproc")
+		if nprocErr != nil {
+			nprocOut = fmt.Sprintf("(exec failed: %v)", nprocErr)
+		}
+		note("operator", "pod cgroup cpu quota %.3f cores (cfs_quota_us=%s/cfs_period_us=%s) matches the containers' summed cpu limits %s; nproc reports %s, gVisor's own host-vCPU presentation, not asserted (kubernetes/kubernetes#91665); MemTotal %d kB, within 3%% of the summed memory limits %s",
+			gotCPUs, strings.TrimSpace(quotaOut), strings.TrimSpace(periodOut), cpuSum.String(), strings.TrimSpace(nprocOut), memTotalKB, memorySum.String())
+		return nil
+	}
+
+	nprocOut, err := r.exec(root, "nproc")
+	if err != nil {
+		return err
+	}
+	cpus, err := strconv.Atoi(strings.TrimSpace(nprocOut))
+	if err != nil {
+		return fmt.Errorf("nproc in the pod printed %q, not a number", nprocOut)
+	}
+	if cpus != wantCPUs {
+		return fmt.Errorf("nproc in the pod is %d, want max(2, ceil(%s cpu)) = %d, the pod cgroup's quota as gVisor sizes the sandbox", cpus, cpuSum.String(), wantCPUs)
+	}
+	if err := checkMemory(); err != nil {
+		return err
 	}
 	note("operator", "exec %s -- nproc: %d = max(2, ceil(%s)); MemTotal %d kB, within 3%% of the summed memory limits %s", name, cpus, cpuSum.String(), memTotalKB, memorySum.String())
 	return nil
