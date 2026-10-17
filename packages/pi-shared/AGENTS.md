@@ -27,11 +27,11 @@ otherwise. A second Envoy entry at the same version joins; one at another versio
 publishes nothing, so the first publisher wins. The object carries:
 
 - `roleClaim` — the role-claim bridge (`src/role-claim-bridge.ts`): Envoy's bound instances, the
-  sessions Legion drives, the one `regained` hook slot, and `slackChannels`, the daemon-launched
-  controller's Slack channels, which the Legion entry's factory sets from `LEGION_SLACK_CHANNELS`
-  in that process alone and the Envoy entry reads when it restores a resumed session's registered
-  interests: while it is set, every registered Slack topic is unregistered and never restored, since
-  only the subscriptions the controller role owns may carry Slack mentions.
+  sessions Legion drives, the one `regained` hook slot, and `slackRoleOwned`, which the Legion
+  entry's factory sets to true in the daemon-launched controller's process alone and the Envoy
+  entry reads when it restores a resumed session's registered interests: while it is true, every
+  registered Slack topic is unregistered and never restored, since only the subscriptions the
+  controller role owns may carry Slack mentions.
 - `injectedUserTurns` — the turns Envoy sent into each session
   (`src/injected-user-turns.ts`). A `sendUserMessage` turn is found by its text; a typed
   `sendUserInput` turn is found by the tag the host kept. Both entries match user messages and
@@ -57,7 +57,7 @@ daemon's gate refuses a pair whose versions differ.
 
 **The current version, 3.** Version 2 told the two separately bundled plugins that typed turns are
 tag-matched rather than text-matched and that a tagged `skill-prompt` is the person's turn;
-version 3 adds `roleClaim.slackChannels`. The real readers are the Legion load marker
+version 3 adds `roleClaim.slackRoleOwned`. The real readers are the Legion load marker
 (`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's mismatch refusal and
 the daemon probe (`packages/daemon/probe.mjs`), which take `ENVOY_PLUGIN_INTERFACE_VERSION`, and
 the real-plugin OMP test (`packages/daemon/internal/daemon/promptreferences_omp_test.go`), which

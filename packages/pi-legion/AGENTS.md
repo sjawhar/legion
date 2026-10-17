@@ -263,11 +263,11 @@ controller grant and posts `POST /legion/v1/issues/status` with it. The claim: `
 controller session with a boot token), one to each Slack channel `LEGION_SLACK_CHANNELS` names, on
 its mention topic (`slackMentionTopic`; the daemon always sets the variable for that controller,
 from the project's `slack_channels`, empty for none, and the claim refuses it unset or with an entry
-that is not a channel id; any other controller ignores it); each
-`set_status` then mints from the `/grants` controller-session form with the secret the
-registration was issued. What the daemon publishes
-on the controller topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
-subscriptions last while the session holds the controller role (`subscribeLegionNotice`'s
+that is not a channel id; any other controller ignores it); each `set_status` then mints from the
+`/grants` controller-session form with the secret the registration was issued. What the daemon
+publishes on the controller topic is listed at `notify.ControllerTopic`
+(`packages/daemon/internal/notify`). The subscriptions last while the session holds the controller
+role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
 them, so a replaced controller stops taking wakes and mentions within one heartbeat, and a dropped
 connection's retries, each compared with the role's state when the connection dropped, do not
@@ -279,11 +279,10 @@ listener, so a replaced controller resumed later gets them back only by claiming
 the daemon refuses its replaced capability, and a resumed controller hears the channels its own
 launch names, never a list an earlier launch had. A Slack topic a session registered by hand is
 dropped too, a listed channel's included: in the daemon's controller the factory sets the
-interface's `roleClaim.slackChannels` from `LEGION_SLACK_CHANNELS`, and the Envoy entry, restoring a
-resumed session's registered interests, unregisters and skips every Slack topic, since a restored
-topic would outlive the role. The controller topic is a
-live wake that changes no request, response or pane variable, and a daemon publishes to the topic
-whether anyone listens. A
+interface's `roleClaim.slackRoleOwned`, and the Envoy entry, restoring a resumed session's
+registered interests, unregisters and skips every Slack topic, since a restored topic would
+outlive the role. The controller topic is a live wake that changes no request, response or pane
+variable, and a daemon publishes to the topic whether anyone listens. A
 controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
 subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
 contract, and the daemon refuses its registration with 409. A later

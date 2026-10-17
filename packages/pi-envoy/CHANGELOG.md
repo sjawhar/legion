@@ -8,7 +8,7 @@
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
 - Plugin interface version 3 (sjawhar/legion#1998): in the daemon-launched controller's process
-  (`roleClaim.slackChannels` set), a resumed session restores its registered interests after
+  (`roleClaim.slackRoleOwned`), a resumed session restores its registered interests after
   dropping every Slack topic among them, from the listener and from what it restores, since a
   restored one would outlive the controller role. Install it with the `@sjawhar/pi-legion` released
   beside it.
