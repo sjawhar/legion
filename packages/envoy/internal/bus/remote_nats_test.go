@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
 // A deployment of the stream still creates it and reconciles what it finds on the NATS it names.
@@ -177,6 +178,67 @@ func TestAHandedEnvironmentReplacesTheProcessEnvironment(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "NATS_NKEY_SEED does not hold a valid nkey seed") {
 			t.Errorf("%s with the opt-in and a seed handed: %v, want the handed seed refused", name, err)
 		}
+	}
+}
+
+// A proxy chooses the server a connection reaches, so with one set a loopback URL no longer names
+// this machine's NATS: Connect, ConnectOwningStream and Dial refuse it unless the run says it means
+// another machine's, naming both variables, and nothing dials while they refuse. Said, the same
+// connect goes through the proxy.
+func TestASetProxyIsRemoteReach(t *testing.T) {
+	uri := testnats.URL(t)
+	if !bus.LocalNATSURL(uri) {
+		t.Fatalf("the test server's URL %s is not a loopback URL", uri)
+	}
+	fake := testsocks5.Start(t, hostOf(t, uri))
+	connects := map[string]func(func(string) (string, bool)) error{
+		"Connect": func(environment func(string) (string, bool)) error {
+			client, err := bus.Connect([]string{uri}, bus.WithEnvironment(environment))
+			if err == nil {
+				client.Close()
+			}
+			return err
+		},
+		"ConnectOwningStream": func(environment func(string) (string, bool)) error {
+			client, err := bus.ConnectOwningStream([]string{uri}, bus.WithEnvironment(environment))
+			if err == nil {
+				client.Close()
+			}
+			return err
+		},
+		"Dial": func(environment func(string) (string, bool)) error {
+			conn, err := bus.Dial("proxied", []string{uri}, environment)
+			if err == nil {
+				conn.Close()
+			}
+			return err
+		},
+	}
+	for name, connect := range connects {
+		err := connect(lookupOf(map[string]string{bus.SOCKS5ProxyEnvVar: fake.Addr}))
+		if !errors.Is(err, bus.ErrRemoteNATS) {
+			t.Fatalf("%s to %s through a proxy, no opt-in: %v, want a %v", name, uri, err, bus.ErrRemoteNATS)
+		}
+		if !strings.Contains(err.Error(), bus.SOCKS5ProxyEnvVar) || !strings.Contains(err.Error(), bus.AllowRemoteEnvVar) {
+			t.Fatalf("%s refusal %q does not name both %s and %s", name, err, bus.SOCKS5ProxyEnvVar, bus.AllowRemoteEnvVar)
+		}
+	}
+	if accepted := fake.Accepted(); accepted != 0 {
+		t.Fatalf("the proxy accepted %d connections while every connect was refused, want none", accepted)
+	}
+
+	for name, connect := range connects {
+		if err := connect(proxied(fake.Addr)); err != nil {
+			t.Fatalf("%s to %s through a proxy with %s=1: %v", name, uri, bus.AllowRemoteEnvVar, err)
+		}
+	}
+	if got := len(fake.Requests()); got != len(connects) {
+		t.Fatalf("the proxy received %d requests, want one for each of the %d connects", got, len(connects))
+	}
+	// The count the refusals above read as zero counts these connects, so a refusal that dialled the
+	// proxy first would have shown there.
+	if accepted := fake.Accepted(); accepted < int64(len(connects)) {
+		t.Fatalf("the proxy accepted %d connections after %d connects through it, want at least %d", accepted, len(connects), len(connects))
 	}
 }
 
