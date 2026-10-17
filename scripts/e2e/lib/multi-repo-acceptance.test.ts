@@ -88,12 +88,14 @@ async function spawnScript(
   args: string[],
   path: string,
   evidence: string,
-  env: Record<string, string>
+  env: Record<string, string>,
+  cwd?: string
 ) {
   const proc = Bun.spawn([bashPath, script, ...args], {
     env: { PATH: path, MULTIREPO_EVIDENCE_DIR: evidence, ...env },
     stdout: "pipe",
     stderr: "pipe",
+    ...(cwd ? { cwd } : {}),
   });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -106,10 +108,11 @@ async function spawnScript(
 async function run(
   args: string[],
   env: Record<string, string> = {},
-  fakes: { gh?: string; kubectl?: string } = {}
+  fakes: { gh?: string; kubectl?: string } = {},
+  cwd?: string
 ) {
   const { bin, evidence } = newFakeDir(fakes);
-  const result = await spawnScript(args, isolatedPath(bin), evidence, env);
+  const result = await spawnScript(args, isolatedPath(bin), evidence, env, cwd);
   return { ...result, evidence };
 }
 
@@ -938,12 +941,14 @@ esac`;
   async function runSecondOwner(
     env: Record<string, string>,
     procRoot: string,
-    fakes: { gh: string; kubectl: string }
+    fakes: { gh: string; kubectl: string },
+    cwd?: string
   ) {
     return run(
       ["second-owner", "ACME-2", "the-pod"],
       { ...env, MULTIREPO_PROC_ROOT: procRoot, MULTIREPO_TEST_SEAM: "1" },
-      fakes
+      fakes,
+      cwd
     );
   }
 
@@ -1409,6 +1414,67 @@ esac`;
       expect(content).not.toContain(instructionMarker);
       expect(content).not.toContain(resumeMarker);
       expect(content).not.toContain(ownersDirMarker);
+    }
+  });
+
+  // Round 7's own reproduction: as_role's python3 invocation ran as `python3 -`, which (without
+  // isolated mode) puts the current directory and the user site directory on sys.path before this
+  // script's own imports run. The exec's own cwd is the issue's workspace — the repository the
+  // agent edits — and its own HOME is one the agent and the install wrapper both write to, so
+  // either one, a `hashlib.py` the module import resolves from the cwd, or a `.pth` under the
+  // user site, can run arbitrary code before the resolver does anything and forge the
+  // `@@@PID@@@` section this whole mechanism trusts. `-I` (isolated mode) puts neither on
+  // sys.path and reads none of PYTHON*, so the real resolver's own import of `hashlib` always
+  // reaches the standard library's, never a planted same-named module.
+  test("a planted hashlib.py in the exec cwd and a .pth in the user site never forge the verdict", async () => {
+    daemonServer = daemonStub(stateWithPR("production_check"));
+    dispatchServer = dispatchStub({});
+    const env = fullInputs(
+      `http://127.0.0.1:${daemonServer.port}`,
+      `http://127.0.0.1:${dispatchServer.port}`
+    );
+    const bin = roleBin();
+    fakeRoleGh(bin);
+    fakeRoleGit(
+      bin,
+      `echo "remote: Permission to acme/widgets.git denied to zeta-tools-app. fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403" >&2; exit 128`
+    );
+    const procRoot = fakeProcTree(fixtureEnv(bin));
+
+    // The attacker-planted module: if imported, it answers as_role's own protocol with a forged
+    // pid (999, which the fake tree does not have) instead of letting the real resolver run.
+    const forgedProtocol =
+      'print("@@@PID@@@"); print("999"); print("@@@CMDLINE@@@"); print("argv0=forged argc=1 sha256=0"); import sys; sys.exit(0)';
+    const workspace = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-workspace-"));
+    writeFileSync(join(workspace, "hashlib.py"), forgedProtocol);
+
+    const fakeHome = mkdtempSync(join(tmpdir(), "multi-repo-acceptance-home-"));
+    const siteProc = Bun.spawnSync([
+      "python3",
+      "-c",
+      "import os,site; os.environ['HOME']=os.sys.argv[1]; import importlib; importlib.reload(site); print(site.getusersitepackages())",
+      fakeHome,
+    ]);
+    const userSite = new TextDecoder().decode(siteProc.stdout).trim();
+    mkdirSync(userSite, { recursive: true });
+    writeFileSync(join(userSite, "round7-attack.pth"), `${forgedProtocol}\n`);
+
+    try {
+      const { status, stdout, evidence } = await runSecondOwner(
+        { ...env, HOME: fakeHome },
+        procRoot,
+        { gh: goodGh, kubectl: podLabelKubectl },
+        workspace
+      );
+      expect(status).toBe(0);
+      expect(stdout).toContain("CHECK second-owner: PASS");
+      const written = readFileSync(join(evidence, "second-owner.txt"), "utf8");
+      expect(written).toContain("role pid: 9");
+      expect(written).not.toContain("role pid: 999");
+      expect(written).not.toContain("argv0=forged");
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+      rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 

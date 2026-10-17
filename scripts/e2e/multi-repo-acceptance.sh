@@ -488,6 +488,15 @@ require_pod_for_issue() {
 # own argv past that limit. One Python process reads the whole file once and never restarts
 # mid-parse. It is a guaranteed pod dependency: every role container's own image is checked for it
 # at boot (internal/capabilities/image.go, the Dockerfile's own `python3 --version` build check).
+# Run with `-I` (isolated mode, implying `-E -s -P`): the role container's own working directory is
+# the issue's workspace, the repository the agent edits (manifest.go's WorkingDir), and its own
+# HOME is one the agent and the install wrapper both write to — without `-I`, Python puts the
+# current directory and the user site directory on sys.path before this script's own imports run,
+# so a `hashlib.py` planted at the workspace root (by the agent, or by a file simply committed at
+# the repository's root) or a `.pth` under the role's own user site both run before the resolver
+# does anything, and can forge the `@@@PID@@@` section this whole mechanism trusts, naming any pid
+# they like. `-I` puts neither the current directory nor the user site on sys.path and reads none
+# of PYTHON*, closing both.
 #
 # The agent's full cmdline never crosses back out of the pod: Python resolves the pid, then emits
 # only `argv0=<program> argc=<count> sha256=<of the whole /proc/<pid>/cmdline bytes>` — never an
@@ -501,7 +510,7 @@ as_role_find_and_run='
 proc_root=$1
 script=$2
 
-resolved=$(python3 - "$proc_root" <<"PYEOF"
+resolved=$(python3 -I - "$proc_root" <<"PYEOF"
 import hashlib
 import os
 import sys
