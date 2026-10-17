@@ -166,15 +166,16 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 
 // The controller's agent runs the way every role's does — its launcher starts the shim on the pod
 // baseline, and the shim Oh My Pi in RPC mode with its prompt — and is told it is the controller,
-// where its gh reads its own credential and how it reaches the secrets broker, like a workflow
-// role's, and nothing of a tree, an issue or a workspace: of the variables the runtime owns
-// (runtimeOwned), it is told exactly those every agent is told, its own marker, its gh files and
-// the broker's, so a variable the runtime comes to tell any agent fails here until it is decided for
-// the controller.
+// where its gh reads its own credential, how it reaches the secrets broker, like a workflow role's,
+// and the project's Slack channels, and nothing of a tree, an issue or a workspace: of the variables
+// the runtime owns (runtimeOwned), it is told exactly those every agent is told, its own marker, its
+// gh files, the broker's and its channels, so a variable the runtime comes to tell any agent fails
+// here until it is decided for the controller.
 func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
+	opts.ControllerSlackChannels = []string{"C00000000", "G00000001"}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -190,6 +191,7 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 		"ENVOY_TOKEN_FILE": generationDir(2) + "/ENVOY_TOKEN", "LEGION_GENERATION": "2",
 		"GH_CONFIG_DIR": GHConfigDir, "GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_HOST": "",
 		"AGENT_SECRETS_URL": opts.AgentSecrets.URL, "AGENT_SECRETS_KEY_DIR": AgentSecretsKeyDir,
+		"LEGION_SLACK_CHANNELS": "C00000000,G00000001",
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)
@@ -205,7 +207,7 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	if want := []string{
 		"AGENT_SECRETS_KEY_DIR", "AGENT_SECRETS_URL", "DISPATCH_TOKEN_FILE", "DISPATCH_URL", "ENVOY_NATS_URL", "ENVOY_URL", "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN",
 		"GITHUB_TOKEN", "GIT_TERMINAL_PROMPT", "LEGION_BOOT_TOKEN_FILE", "LEGION_CONTROLLER", "LEGION_DAEMON_URL",
-		"LEGION_GENERATION", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID",
+		"LEGION_GENERATION", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_SLACK_CHANNELS", "LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID",
 		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
 	}; !slices.Equal(told, want) {
 		t.Errorf("the controller is told the runtime's variables %v, want exactly %v", told, want)
@@ -325,6 +327,38 @@ func TestAControllerPodIsNotStaleWhileTheBrokersAddressHolds(t *testing.T) {
 	})
 	if obs := readopt(t, g.ctx, r2, loc)[0]; obs.Kind != runtime.Alive || obs.Locator != loc {
 		t.Fatalf("a daemon restarted at the same addresses re-adopts the controller as %s (%s), want Alive", obs.Kind, obs.Detail)
+	}
+}
+
+// The project's Slack channels are one of the controller's handed addresses: a daemon restarted with
+// another list re-adopts the controller as StaleAddress, naming LEGION_SLACK_CHANNELS with the list
+// it was launched with and the one it would be handed now, so the supervisor relaunches it, resuming
+// its session, as it does a role whose envoy_url moved. The list is the controller's alone: an issue
+// pod's role under the same two daemons moved nothing, and is re-adopted as it is.
+func TestAChangedSlackChannelListMakesOnlyTheControllerStale(t *testing.T) {
+	channels := func(list ...string) func(*Options) {
+		return func(o *Options) { o.ControllerSlackChannels = list }
+	}
+	g := newRig(t, nil, withOptions(channels()))
+	loc := g.spawn(controllerSpec(t))
+	issue := g.spawn(workerSpec(t))
+	r2 := secondRuntime(t, g, channels("C00000000"))()
+	g.connectRunning(controllerToken, loc.Sandbox.Generation)
+	g.connectRunning(workerToken, issue.Sandbox.Generation)
+	g.eventually("both launchers to report their children to the restarted daemon", func() bool {
+		controller, connected := r2.launchers.state(controllerToken, loc.Sandbox.PodUID)
+		worker, workerConnected := r2.launchers.state(workerToken, issue.Sandbox.PodUID)
+		return connected && controller.Child != nil && workerConnected && worker.Child != nil
+	})
+	observed := map[runtime.Locator]runtime.Observation{}
+	for _, obs := range readopt(t, g.ctx, r2, loc, issue) {
+		observed[obs.Locator] = obs
+	}
+	if obs, want := observed[loc], "LEGION_SLACK_CHANNELS (none), now C00000000"; obs.Kind != runtime.StaleAddress || !strings.Contains(obs.Detail, want) {
+		t.Fatalf("a daemon restarted with another channel list re-adopts the controller as %s (%s), want StaleAddress naming %q", obs.Kind, obs.Detail, want)
+	}
+	if worker := observed[issue]; worker.Kind != runtime.Alive {
+		t.Fatalf("the issue pod's role, whose addresses did not move, is re-adopted as %s (%s), want Alive", worker.Kind, worker.Detail)
 	}
 }
 

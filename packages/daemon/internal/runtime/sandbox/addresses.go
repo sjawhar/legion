@@ -50,16 +50,35 @@ type recordedAddress struct {
 	SHA256   string `json:"sha256"`
 }
 
-// environmentAddresses are handedAddresses carried in a generation's environment: every one but
-// the stream its launcher dials.
-func (r *Runtime) environmentAddresses() []handedAddress {
-	return slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
+// environmentAddresses are what a generation of role carries in its environment that a daemon
+// restarted under another configuration would hand otherwise: handedAddresses but the stream its
+// launcher dials, and, for the controller, the project's Slack channels (slackChannelsVariable),
+// so a changed list relaunches it, resuming its session, as a moved address does.
+func (r *Runtime) environmentAddresses(role claim.Role) []handedAddress {
+	addresses := slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
+	if role == claim.RoleController {
+		addresses = append(addresses, handedAddress{slackChannelsVariable, r.slackChannelsValue()})
+	}
+	return addresses
 }
 
-// addressName is how an address handed now is named in a record and an observation's detail.
+// slackChannelsValue is LEGION_SLACK_CHANNELS as the controller is told it: the project's channels,
+// comma-joined, "" for none.
+func (r *Runtime) slackChannelsValue() string {
+	return strings.Join(r.controllerSlackChannels, ",")
+}
+
+// addressName is how an address handed now is named in a record and an observation's detail. The
+// channel list is no URL and no credential, so it is named as it is, "(none)" when empty.
 func (r *Runtime) addressName(a handedAddress) string {
-	if a.name == "ENVOY_NATS_URL" {
+	switch a.name {
+	case "ENVOY_NATS_URL":
 		return namedNATSURLs(r.natsURLs)
+	case slackChannelsVariable:
+		if a.value == "" {
+			return "(none)"
+		}
+		return a.value
 	}
 	return namedURL(a.value)
 }
@@ -69,11 +88,11 @@ func addressDigest(value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// recordFor is the record of the addresses a generation started now is handed, encoded as its
-// annotation holds it.
-func (r *Runtime) recordFor(generation uint64) (string, error) {
+// recordFor is the record of the addresses a generation of role started now is handed, encoded as
+// its annotation holds it.
+func (r *Runtime) recordFor(role claim.Role, generation uint64) (string, error) {
 	record := addressRecord{Generation: generation}
-	for _, a := range r.environmentAddresses() {
+	for _, a := range r.environmentAddresses(role) {
 		record.Addresses = append(record.Addresses, recordedAddress{Variable: a.name, Name: r.addressName(a), SHA256: addressDigest(a.value)})
 	}
 	encoded, err := json.Marshal(record)
@@ -89,7 +108,7 @@ func (r *Runtime) recordFor(generation uint64) (string, error) {
 // deleted and recreated in between is never written. It runs before the generation's start command
 // is sent, so a generation that runs has its record.
 func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Role, generation uint64) error {
-	record, err := r.recordFor(generation)
+	record, err := r.recordFor(role, generation)
 	if err != nil {
 		return err
 	}
@@ -144,7 +163,7 @@ func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint6
 		return nil, nil
 	}
 	var moved []movedAddress
-	for _, a := range r.environmentAddresses() {
+	for _, a := range r.environmentAddresses(role) {
 		i := slices.IndexFunc(record.Addresses, func(held recordedAddress) bool { return held.Variable == a.name })
 		switch {
 		case i < 0:

@@ -17,8 +17,9 @@ another channel an earlier session subscribed to. Never `envoy_subscribe` a Slac
 A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it.
 
 A mention published while no controller ran never arrives: Envoy hands a session no copy of an
-event from before it subscribed. Nothing tells you about one, so there is nothing to catch up. A
-change to the project's `slack_channels` reaches you at your next launch.
+event from before it subscribed. Nothing tells you about one, so there is nothing to catch up. When
+the project's `slack_channels` change, the daemon relaunches you into this session with the new
+line.
 
 ## What a mention carries
 

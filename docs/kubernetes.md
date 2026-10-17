@@ -1719,8 +1719,10 @@ every launcher container's command (item 3 of the anatomy list above), so it is 
 life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
 My Pi in the start command its launcher receives, never in the pod spec, so they are fixed for that
 generation's life: `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL`
-(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and, for a workflow role, `AGENT_SECRETS_URL`
-(`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts with its key changed,
+(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and, when the runtime enrolls pods,
+`AGENT_SECRETS_URL` (`runtime.kubernetes.agent_secrets.url`); the daemon-launched controller's
+generation also carries `LEGION_SLACK_CHANNELS` (the project's `slack_channels`), recorded and
+compared like these. Each moves when the daemon restarts with its key changed,
 and with no `advertise_host` set the stream also moves when the daemon restarts on another host. A
 daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
 re-adoption alone would leave the role holding the old addresses: a launcher dialling a stale
@@ -3095,13 +3097,14 @@ Autopilot may evict it like any other pod, and it is relaunched and resumes the 
 any claim's pod that dies ("The claim", above). Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, `LEGION_SLACK_CHANNELS`, the project's
-Slack channels comma-separated and empty for none (always set, and refused in
+Slack channels comma-separated and empty for none (the runtime's, always set, and refused in
 `runtime.kubernetes.pod.env` and `provider_keys`, so no list but the project's reaches it; its plugin
 subscribes to each channel's mention topic while the session holds the controller role, registered
 with no listener, and a resume first drops any Slack topic an earlier session registered for another
-channel, so a resume or relaunch hears the channels the launch names and no others; a changed
-`slack_channels` reaches it at its next launch, which `legion claims stop` of the controller brings
-at once; `legion controller start` drops an inherited value, and any controller but this one ignores
+channel, so a resume or relaunch hears the channels the launch names and no others; the list is one
+of the addresses the runtime records per generation, so a daemon restarted with another
+`slack_channels` re-adopts the controller as an address that moved and relaunches it, resuming its
+session; `legion controller start` drops an inherited value, and any controller but this one ignores
 it), the launch secrets' `<NAME>_FILE`
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
 (`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of

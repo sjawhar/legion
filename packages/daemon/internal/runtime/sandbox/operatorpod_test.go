@@ -54,7 +54,6 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		byStore    = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
 		byBaseline = "the pod baseline sets (internal/podsafety)"
 		byOperator = "runtime.kubernetes.pod.env sets"
-		bySlack    = "the daemon sets for the controller it launches, from the project's slack_channels alone"
 	)
 	// The operator route with its token audience filled in, as an operator and each live harness run
 	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
@@ -90,9 +89,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		// The daemon names its controller's Slack channels from the project's slack_channels alone: an
 		// operator's value would have the controller hear another project's mentions.
-		{name: "the controller's Slack channels", pod: env("LEGION_SLACK_CHANNELS", "C00000001"), want: envSets("LEGION_SLACK_CHANNELS", bySlack)},
+		{name: "the controller's Slack channels", pod: env("LEGION_SLACK_CHANNELS", "C00000001"), want: envSets("LEGION_SLACK_CHANNELS", byRuntime)},
 		{name: "a provider key for the controller's Slack channels", keys: map[string]string{"LEGION_SLACK_CHANNELS": "channels"},
-			want: keyNames("LEGION_SLACK_CHANNELS", bySlack)},
+			want: keyNames("LEGION_SLACK_CHANNELS", byRuntime)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}},
 			{Name: "launcher-tester", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},

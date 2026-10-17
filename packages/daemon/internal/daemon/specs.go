@@ -151,12 +151,11 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 // the headless part, the project's design gate policy and, when it names any, its Slack channels
 // as its addressing, the deployment instructions and the launch secrets. The operator's controller
 // is told the policy alone (`legion controller start`), since only the daemon's may have channels
-// (config.checkSlackChannels). The channels also reach it as LEGION_SLACK_CHANNELS,
-// comma-separated, which its plugin subscribes to while the session holds the controller role
-// (pi-legion's controller-session.ts). The variable is always set, empty for a project with none,
-// so the project's own list is the only one the controller can read; the operator's pod may not set
-// it (sandbox.CheckPod). It has no repository and no git identity: the controller works Dispatch,
-// never a checkout, and commits nothing.
+// (config.checkSlackChannels). The channels reach its environment as LEGION_SLACK_CHANNELS from the
+// runtime (sandbox.Options.ControllerSlackChannels), which compares them with the list a running
+// controller was launched under and relaunches it when they change; a spec cannot set that variable.
+// It has no repository and no git identity: the controller works Dispatch, never a checkout, and
+// commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -170,7 +169,7 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 		addressing += " " + SlackChannelsFragment(s.slackChannels)
 	}
 	return runtime.SpawnSpec{
-		Env:     map[string]string{"LEGION_SLACK_CHANNELS": strings.Join(s.slackChannels, ",")},
+		Env:     map[string]string{},
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,

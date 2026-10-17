@@ -19,10 +19,6 @@ import (
 // TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
 var imageEnv = []string{"COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
 
-// slackChannelsVariable is the daemon-launched controller's Slack channels, comma-separated, which
-// its spec's Env carries (daemon.controllerSpawnSpec) and its plugin subscribes to.
-const slackChannelsVariable = "LEGION_SLACK_CHANNELS"
-
 // setter is who sets a variable a worker's Oh My Pi starts with, and whether the operator's pod
 // env may set it too: the pod baseline yields to the operator's own value, and the operator's
 // variables are its own.
@@ -36,8 +32,8 @@ type setter struct {
 // store's two variables named apart, since they are Legion's under either store, and the name the
 // providers volume mounts the session database's URL under, sessionDSNFile), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
-// `<NAME>_FILE` pointer), the controller's launch (its Slack channels, slackChannelsVariable), the
-// pod baseline, and the operator's own pod env. The first setter of a name is the one named.
+// `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
+// name is the one named.
 func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	set := map[string]setter{}
 	add := func(name, who string, operatorMay bool) {
@@ -61,10 +57,6 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 	for _, name := range launchSecrets {
 		add(name+"_FILE", "every launch sets (the pointer to the launch secret "+name+")", false)
 	}
-	// The daemon names its controller's Slack channels from the project's slack_channels alone (its
-	// spec's Env), so no operator's value may stand in for them in any pod: the controller would
-	// hear another project's mentions.
-	add(slackChannelsVariable, "the daemon sets for the controller it launches, from the project's slack_channels alone", false)
 	for _, v := range podsafety.Variables() {
 		if v.Reserved != "" {
 			add(v.Name, "the pod baseline sets, and "+v.Reserved, false)

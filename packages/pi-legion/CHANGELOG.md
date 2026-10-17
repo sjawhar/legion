@@ -12,8 +12,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   none), and the plugin subscribes to each channel's mention topic while the session holds the
   controller role, registering none with the listener. A resume first drops, from the listener and
   from what it restores, any Slack topic an earlier session registered for a channel the list does
-  not name, so it hears the channels its launch names and no others. Any other controller ignores
-  the variable. The controller skill answers each mention in its thread with `slack_post`
+  not name, so it hears the channels its launch names and no others. A daemon restarted with a
+  changed `slack_channels` relaunches the controller, resuming its session, since the list is one of
+  the addresses its generation records. Any other controller ignores the variable. The controller
+  skill answers each mention in its thread with `slack_post`
   (`references/slack-mentions.md`). Under `runtime.kubernetes.agent_secrets` the controller's pod is
   enrolled with the secrets broker. Install this release's pair with a daemon at 32.
 - The `dispatch-envoy-tools` capability row expects `slack_post` among the Envoy tools, eleven in

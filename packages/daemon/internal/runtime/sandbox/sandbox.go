@@ -83,6 +83,7 @@ type Runtime struct {
 	natsUser                       string
 	sessionDSNKey                  string
 	agentSecrets                   *AgentSecrets
+	controllerSlackChannels        []string
 	agent                          []string
 	bootTimeout                    time.Duration
 	busyBackoff                    time.Duration
@@ -252,8 +253,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		sessionDSNKey: opts.SessionDSNKey,
-		bootTimeout:   opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: workspace.FetchTimeout, terminationGrace: opts.TerminationGrace,
+		sessionDSNKey: opts.SessionDSNKey, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
+		bootTimeout: opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: workspace.FetchTimeout, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, workspace.FetchTimeout, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
