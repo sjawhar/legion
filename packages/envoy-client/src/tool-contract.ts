@@ -2,6 +2,7 @@ import {
   EnvelopeSchema,
   type SchemaApi,
   type SchemaNode,
+  SLACK_POST_TEXT_MAX,
   type ToolArgumentsShape,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -97,6 +98,7 @@ export const EnvoyToolOperation = {
   getRole: "getRole",
   whoami: "whoami",
   listSessions: "listSessions",
+  slackPost: "slackPost",
 } as const;
 
 export type EnvoyToolOperation = (typeof EnvoyToolOperation)[keyof typeof EnvoyToolOperation];
@@ -123,6 +125,11 @@ export interface ToolArgumentsByOperation {
     readonly machine?: string;
     readonly dir?: string;
     readonly title?: string;
+  };
+  readonly slackPost: {
+    readonly channel: string;
+    readonly thread_ts: string;
+    readonly text: string;
   };
 }
 
@@ -211,6 +218,21 @@ export const envoyToolSpecs = [
       title: schema.string().optional(),
     }),
     operation: EnvoyToolOperation.listSessions,
+  },
+  {
+    name: "slack_post",
+    description:
+      "Reply in a Slack thread as the Legion Slack app, with the bot token the secrets broker grants this session (LEGION_SLACK_BOT_TOKEN); the session never holds it. channel is the Slack channel id (a mention's channel_id); thread_ts is the thread's root ts: the mention's thread_ts, or its own ts when it has none. Answers the new message's ts. A refusal carries Slack's own error code (not_in_channel: the app is not in that channel) or the broker's state (waiting for approval, denied). Sent once and never retried: after 'Slack did not answer' the reply may already be in the thread, so do not post it again.",
+    arguments: (schema) => ({
+      channel: schema.string({ min: 1 }).describe("Slack channel id, such as C0123ABCD."),
+      thread_ts: schema
+        .string({ min: 1 })
+        .describe("The thread's root ts, which keeps the reply in the mention's thread."),
+      text: schema
+        .string({ min: 1, max: SLACK_POST_TEXT_MAX })
+        .describe(`The reply, in Slack mrkdwn, at most ${SLACK_POST_TEXT_MAX} characters.`),
+    }),
+    operation: EnvoyToolOperation.slackPost,
   },
 ] as const satisfies readonly ToolSpec[];
 

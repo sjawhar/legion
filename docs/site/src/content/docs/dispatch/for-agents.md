@@ -45,11 +45,15 @@ goes through a `dispatch` command.
    The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
    but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to
    the server written beside it, so a `DISPATCH_URL` naming another server needs `DISPATCH_TOKEN`
-   as well.
+   as well. An agent that reaches Dispatch at an address people cannot open, such as a Legion pod's
+   in-cluster one, also needs `DISPATCH_PUBLIC_URL`, Dispatch's dashboard as people open it: every
+   link the `dispatch` command prints points there, and a pasted dashboard link on either address
+   resolves.
 
 Everything the agent writes is attributed to the person who made the token: Dispatch shows the
-agent's name followed by `(for <login>)`. `dispatch whoami` tells the agent who Dispatch takes it
-for.
+agent's name followed by `(for <login>)`, and an issue the agent creates without naming an
+assignee goes to that person. `dispatch issue` names the assignee Dispatch chose. `dispatch whoami`
+tells the agent who Dispatch takes it for.
 
 ## The commands
 

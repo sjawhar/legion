@@ -80,8 +80,8 @@ comes back, with everything it knew, the next time its role is needed.
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
-| `merging` | merger | Checks the approved head and the required checks and workflows, then sends `READY`. | implement App |
-| `awaiting_merge` | none | Waits for a person to merge the pull request. | none |
+| `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, with no required check or workflow failed or missing, and submits the merge. | implement App |
+| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
 A failed test, red CI on the head in testing, review, retro or merging (a check or workflow the
@@ -148,7 +148,10 @@ branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` f
 merges, and the merger's `READY` is refused while that head still carries it. The merge
 therefore brings no handoff onto the default branch, and no later branch starts with one. The
 removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
-round; the handoffs stay on the issue branch below it, where a worker still reads them.
+round; the handoffs stay on the issue branch below it, where a worker still reads them. Those two
+are all that may sit there: the daemon compares the approved head with the head `READY` names, on
+GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything else changed since the
+approval, so that change goes back to review.
 
 ## Review signalling
 
@@ -215,11 +218,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
 
 ## READY and the merge
 
-When the reviewer has approved and retro is done, the merger checks that the pull request's head is
-the approved one (plus only retro's notes), that no check the base branch requires has failed or is
-missing on it, and that no workflow its rulesets require has failed or has no run on the head; a
-required check or workflow still running is no reason to wait.
-It then sends **READY**, which the daemon posts on the Dispatch issue as one message:
+When the reviewer has approved and retro is done, the merger sends **READY**. The daemon accepts
+it only when the pull request's head is the approved one plus only retro's notes, no check the base
+branch requires has failed or is missing on it, and no workflow its rulesets require has failed or
+has no run on the head; a required check or workflow still running is no reason to wait. It posts
+the READY on the Dispatch issue as one message:
 
 ```text
 READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pull request url>)

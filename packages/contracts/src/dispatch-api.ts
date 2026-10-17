@@ -128,6 +128,9 @@ export interface Project {
 export interface RepoProject {
   readonly repo: string;
   readonly project: string;
+  /** The project's default repository: an issue with no repository of its own and none on its
+   *  parent chain resolves to it. At most one mapping of a project is its default. */
+  readonly default: boolean;
   readonly created_by: Actor;
   readonly created_at: string;
 }
@@ -271,6 +274,11 @@ export interface Issue {
   readonly components: IssueComponents;
   readonly external_links: ExternalLink[];
   readonly route: string | null;
+  /** The issue's own repository, owner/name, a mapping of its project; null when it inherits. */
+  readonly repo: string | null;
+  /** The repository Dispatch resolves for the issue: its own, else its nearest ancestor's, else the
+   *  project's default mapping, else null. Legion records it when it first records the issue. */
+  readonly resolved_repo: string | null;
   /** Null for issues created before Dispatch recorded their creator. */
   readonly created_by: Actor | null;
   readonly created_at: string;
@@ -313,6 +321,8 @@ export interface IssueSummary
       | "claim"
       | "components"
       | "route"
+      | "repo"
+      | "resolved_repo"
       | "updated_at"
       | "last_seq"
       | "primary_artifact_id"
@@ -1686,6 +1696,9 @@ export interface UserThreadStateUpdatedEventPayload {
 export interface IssueClaimEventPayload {
   readonly key: string;
   readonly status: string;
+  /** The issue's `repo` and `resolved_repo`, as on every issue event. */
+  readonly repo: string | null;
+  readonly resolved_repo: string | null;
   readonly claim: IssueClaim | null;
   readonly previous_claim?: IssueClaim;
   readonly reason: "claimed" | "takeover" | "forced" | "released" | "closed";
@@ -1965,6 +1978,9 @@ export interface CreateIssueInput {
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;
+  /** The repository the issue targets, owner/name, mapped to its project; omitted, it inherits its
+   *  parent's, else the project's default. */
+  readonly repo?: string;
 
   readonly actor?: Actor;
 }
@@ -1992,6 +2008,9 @@ export interface UpdateIssueInput {
   /** The issue's own component attachment; null (or mode `inherit`) deletes it so the issue
    *  inherits again; omitted leaves it alone. Allowed on a closed issue. */
   readonly components?: IssueComponentsInput | null;
+  /** The issue's own repository, owner/name, mapped to its project, or null to clear it so the
+   *  issue inherits again; omitted leaves it alone. Refused on a closed issue. */
+  readonly repo?: string | null;
   readonly actor?: Actor;
 }
 

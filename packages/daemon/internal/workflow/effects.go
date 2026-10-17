@@ -235,8 +235,9 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role 
 
 // withApprovedHead is a merger's task with the head the issue's review round approved appended
 // under approvedHeadLabel, and any other role's task as it is. That head is the reviewer row's
-// recorded decision (the review that ended the round, review.go); the task gets no line when the
-// round recorded no approval. The reviewer's row keeps that decision until the reviewer starts
+// recorded decision (record.ApprovedHead; the review that ended the round, review.go); the task
+// gets no line when the round recorded no approval, and READY refuses that round too
+// (READY_NOT_APPROVED). The reviewer's row keeps that decision until the reviewer starts
 // again (clearHandoff), until a re-admission of the tree clears the generation's handoffs with it
 // (record.ClearTreeGeneration), so a merger resumed into a re-admitted tree is told no head and
 // refuses, and the round is reviewed again rather than merged on the last generation's approval.
@@ -245,16 +246,14 @@ func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue 
 	if role != claim.RoleMerger {
 		return task, nil
 	}
-	rows, err := store.Phases(ctx, tx, issue)
+	head, err := record.ApprovedHead(ctx, store, tx, issue)
 	if err != nil {
 		return "", err
 	}
-	for _, row := range rows {
-		if row.Role == claim.RoleReviewer && row.Decision != nil && row.Decision.State == "approved" {
-			return task + " " + approvedHeadLabel + ": " + row.Decision.Head + ".", nil
-		}
+	if head == "" {
+		return task, nil
 	}
-	return task, nil
+	return task + " " + approvedHeadLabel + ": " + head + ".", nil
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
@@ -267,9 +266,6 @@ func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, r
 	}
 	if handoff.Verdict != "" {
 		text += " Handoff verdict: " + handoff.Verdict + "."
-	}
-	if handoff.HandoffCommit == "" && handoff.Verdict == "" && handoff.Claim != "" {
-		text += " Resume the existing phase work."
 	}
 	if pr != nil && pr.Number != 0 {
 		text += fmt.Sprintf(" Pull request: #%d.", pr.Number)

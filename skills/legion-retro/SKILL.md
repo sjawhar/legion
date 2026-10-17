@@ -26,9 +26,9 @@ retrospective's durable output.
    issue. Retro writes **no handoff**. The removal exists because a squash merge commits the head
    merged into the base, and nothing on the base reads a handoff; the handoffs stay on the issue
    branch below that commit.
-4. The merger verifies the tip is the approved head plus retro's commits, quotes their
-   `jj diff --from <approved-sha> --to <tip-sha> --summary` in READY, and sends the READY packet
-   with its completion, which refuses a head that still carries `.legion/<issue>/`; the daemon
+4. The merger quotes retro's commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in
+   READY, and sends the READY packet with its completion, which refuses a head with anything above
+   the approved head but those commits, or still carrying `.legion/<issue>/`; the daemon
    posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
    configured. On READY's acceptance the daemon submits the merge, and it lands under the
    repository's rules: its required reviews and checks, and its merge queue when it enables one.
@@ -40,12 +40,15 @@ retrospective's durable output.
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
    owned by the architect and implemented by the same implementer; the parent stays open until it lands.
 
-Retro's commits sit above the reviewer's approved head and the approval stands: commits that
-change only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the
-tree goes from retro to the merger — never back to the tester or reviewer. A conflict-forced
-rebase after retro moves these commits with the branch. Any round after retro (a conflict round, a
-round a red CI sends back, a re-review) writes `.legion/<issue>/` again, and every approval moves
-the issue to retro once more: each retro ends with the removal again, or READY is refused.
+Retro's commits sit above the reviewer's approved head and the approval stands: commits that change
+only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the tree
+goes from retro to the merger — never back to the tester or reviewer. A conflict merge pushed above
+the approved head with no review round after it brings the base's paths above that head, so READY
+refuses it (`READY_UNREVIEWED_CHANGE`) and the reviewer reviews the new head as a new round; one the
+conflict procedure sends back through `implementing` is confirmed before READY. Any round after
+retro (a conflict round, a round a red CI sends back, a re-review) writes `.legion/<issue>/` again,
+and every approval moves the issue to retro once more: each retro ends with the removal again, or
+READY is refused.
 
 Do not start retro before step 2 or skip it because the change seems mechanical; the merger's
 `READY` comes only after step 3. The design gate is not a substitute for review and retro.
@@ -204,7 +207,7 @@ workspace stands on, the removal commit your push made, so push before you compl
 Before returning, verify all of the following:
 
 - The reviewer-approved head remains below the retro commits, and the reviewer's approval of that
-  head stands: the merger accepts the approved head plus the documentation commit and the removal.
+  head stands: READY accepts the approved head plus the documentation commit and the removal.
 - The learning documents and the Dispatch message both exist (never a GitHub issue comment).
 - The PR body carries what the repository's instructions derive from the pull request's changed
   paths at the retro head, written back before that head's push, and each line that affirms work

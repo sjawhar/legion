@@ -27,6 +27,8 @@ function CurrentRoute(): ReactNode {
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
     route: null,
+    repo: null,
+    resolved_repo: null,
     route_status: null,
     route_holder: null,
     key: "CORE-1",
@@ -205,6 +207,8 @@ const patched: Issue = {
   project: "CORE",
   rank: "U",
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "todo",
   title: "Plan the work",
   updated_at: "2026-09-13T00:00:00Z",

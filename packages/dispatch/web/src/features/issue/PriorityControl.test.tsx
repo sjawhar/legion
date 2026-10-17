@@ -26,6 +26,8 @@ const issue: Issue = {
   project: "CORE",
   rank: "U",
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "todo",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
@@ -42,6 +44,8 @@ const details: IssueDetails = {
 };
 const summary: IssueSummary = {
   route: null,
+  repo: null,
+  resolved_repo: null,
   route_status: null,
   route_holder: null,
   key: issue.key,

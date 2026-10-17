@@ -147,8 +147,9 @@ export interface ExecuteDispatchToolInput {
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
-  /** The resolved Dispatch (`activeDispatchSettings`): the server and the bearer it takes. */
-  readonly config: Pick<ActiveDispatchConfig, "url" | "token">;
+  /** The resolved Dispatch (`activeDispatchSettings`): the server, the bearer it takes, and the
+   *  public dashboard its printed links point at when there is one. */
+  readonly config: Pick<ActiveDispatchConfig, "url" | "token" | "publicUrl">;
   /** Host cancellation for the currently executing tool call. */
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
@@ -161,6 +162,9 @@ export interface DispatchToolResult {
   readonly details: Record<string, unknown>;
   /** Pictures the model is shown after the text, in the order the text names them. */
   readonly images?: readonly ToolImage[];
+  /** What the caller should hear beside the result rather than in it: the dispatch CLI writes
+   *  each line to stderr. The text already says what the reader needs. */
+  readonly warnings?: readonly string[];
 }
 
 interface ResolvedArtifact {
@@ -874,7 +878,8 @@ interface OwnerResolution {
 /**
  * Fills the owner (issue or project) from the arguments, the ref, or LEGION_ISSUE, pushing
  * every defect onto `problems` and continuing so the caller reports them all at once.
- * A `ref` given as a dashboard URL on `serverUrl` is rewritten to its dispatch:// form.
+ * A `ref` given as a dashboard URL on any of `dashboardUrls` (the API's own address, then the
+ * public dashboard when there is one) is rewritten to its dispatch:// form.
  */
 async function resolveOwnerArguments(
   tool: string,
@@ -882,7 +887,7 @@ async function resolveOwnerArguments(
   cwd: string,
   env: ExecutorEnvironment,
   exec: ExecFn,
-  serverUrl: string,
+  dashboardUrls: readonly string[],
   problems: string[]
 ): Promise<OwnerResolution> {
   if (issueFreeTools[tool] === true) return { args: input, ref: null, owner: null };
@@ -890,7 +895,10 @@ async function resolveOwnerArguments(
   let ref: ParsedDispatchRef | null = null;
   let args = input;
   if (typeof refArgument === "string") {
-    const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
+    const refText =
+      dashboardUrls
+        .map((dashboard) => dispatchRefFromUrl(refArgument, dashboard))
+        .find((ref) => ref !== undefined) ?? refArgument;
     if (refText !== refArgument) args = { ...input, ref: refText };
     const agentArtifact = parseAgentArtifactRef(refText);
     if (agentArtifact !== null) {
@@ -1330,11 +1338,57 @@ function progressText(progress: IssueProgress | undefined, sep: string): string 
   return parts.join(sep);
 }
 
+/** Which repository the issue targets and where it came from: its own, or resolved through its
+ *  parent chain and the project's default mapping. A Dispatch server from before the repository
+ *  fields sends neither field, and its answer is unknown, never none: none means the server
+ *  resolved no repository. */
+function repositoryLine(issue: {
+  readonly repo?: string | null;
+  readonly resolved_repo?: string | null;
+}): string {
+  if (issue.resolved_repo === undefined) {
+    return "Repository: unknown (this Dispatch server predates repository fields; upgrade it)";
+  }
+  if (issue.resolved_repo === null) return "Repository: none";
+  if (issue.repo !== null && issue.repo !== undefined) return `Repository: ${issue.repo} (own)`;
+  return `Repository: ${issue.resolved_repo} (inherited or project default)`;
+}
+
+/** The warning a read from a Dispatch server without the repository fields carries: it names the
+ *  refusal this client does not make, so a session's clients can update before its server does. */
+function repositoryFieldsWarnings(issue: {
+  readonly key: string;
+  readonly resolved_repo?: string | null;
+}): { readonly warnings?: readonly string[] } {
+  if (issue.resolved_repo !== undefined) return {};
+  return {
+    warnings: [
+      `dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so ${issue.key}'s repository is unknown; upgrade the server`,
+    ],
+  };
+}
+
+/** A Dispatch server from before the repository fields that takes a write naming `repo` answers
+ *  without the field: it did not save the repository, and that must not pass as a success. The
+ *  error says what the server did do, so the agent does not repeat the rest of the write. */
+function refuseUnsavedRepository(
+  verb: "created" | "updated",
+  issue: { readonly key: string; readonly repo?: string | null },
+  repo: string | undefined
+): void {
+  if (repo === undefined || issue.repo !== undefined) return;
+  const lost = repo === "" ? "the repository was not cleared" : `${repo} was not saved`;
+  throw new Error(
+    `Dispatch ${verb} ${issue.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`
+  );
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
   references: IssueReferences | string,
   graph: readonly string[],
+  linkBase: string,
   titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
@@ -1350,6 +1404,9 @@ function issueSummary(
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
+    // The issue's page, on the dashboard people open (DISPATCH_PUBLIC_URL when set), so an agent
+    // asked about the issue repeats a link rather than building one.
+    `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
     `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
@@ -1357,6 +1414,7 @@ function issueSummary(
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, titles)}`,
+    repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
       ? []
@@ -2108,6 +2166,10 @@ export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
   const { url: configUrl, token: configToken } = input.config;
+  // Every link the command prints is to Dispatch's dashboard as people open it: the public URL when
+  // the session has one (a pod reaches Dispatch at an in-cluster address nobody else can open), and
+  // the API's URL otherwise.
+  const linkBase = input.config.publicUrl ?? configUrl;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(
     async (...args: Parameters<typeof fetch>): Promise<Response> => {
@@ -2137,7 +2199,7 @@ export async function executeDispatchTool(
     input.cwd,
     env,
     exec,
-    configUrl,
+    input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl],
     problems
   );
   // Every owner-missing exit (no issue, bad LEGION_ISSUE, no repo in cwd) leaves owner null;
@@ -2179,12 +2241,12 @@ export async function executeDispatchTool(
     const project = optionalString(ownerArguments.args, "project");
     if (project !== undefined) {
       const response = await client.openAsksForProject(project);
-      return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
+      return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
     }
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
-    return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
+    return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -2272,6 +2334,7 @@ export async function executeDispatchTool(
       const priority = optionalPriority(args, "priority");
       const assignee = optionalString(args, "assignee");
       const components = optionalComponents(args, "components");
+      const repo = optionalString(args, "repo");
       const labels = args.labels;
       const blockedBy = args.blocked_by;
       try {
@@ -2286,9 +2349,11 @@ export async function executeDispatchTool(
           ...(priority === undefined ? {} : { priority }),
           ...(assignee === undefined ? {} : { assignee }),
           ...(components === undefined ? {} : { components }),
+          ...(repo === undefined ? {} : { repo }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
+        refuseUnsavedRepository("created", created, repo);
         const componentGuidance = await architectureGuidance(
           client,
           created.project,
@@ -2299,11 +2364,20 @@ export async function executeDispatchTool(
             isPrimarySpec: spec !== undefined,
           }),
           ...(componentGuidance === undefined ? [] : [componentGuidance]),
-          ...renderSuggestions(created.advice?.suggestions, configUrl),
+          ...renderSuggestions(created.advice?.suggestions, linkBase),
         ];
+        const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
+        // Dispatch picks the assignee when the call names none (the creating person, the personal
+        // token's owner, or the parent's), so the line says whom it answered.
+        const assigned =
+          created.assignee === undefined
+            ? ""
+            : created.assignee === null
+              ? "; unassigned"
+              : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} → ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -2320,7 +2394,7 @@ export async function executeDispatchTool(
           text: [
             `Not created: "${title}" looks like a duplicate.`,
             ...candidates.map((candidate) => {
-              const href = new URL(candidate.href, configUrl).toString();
+              const href = new URL(candidate.href, linkBase).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
             }),
             "Reference the existing issue, or run dispatch issue again with --force after reading it.",
@@ -2337,6 +2411,7 @@ export async function executeDispatchTool(
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
+      const repo = optionalString(args, "repo");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const blockedBy = Array.isArray(args.blocked_by) ? (args.blocked_by as string[]) : undefined;
@@ -2393,6 +2468,7 @@ export async function executeDispatchTool(
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
           ...(blockedBy === undefined ? {} : { blocked_by: blockedBy }),
           ...(components === undefined ? {} : { components }),
+          ...(repo === undefined ? {} : { repo: repo === "" ? null : repo }),
           ...(sentLinks === undefined ? {} : { external_links: sentLinks }),
           actor,
         });
@@ -2419,6 +2495,7 @@ export async function executeDispatchTool(
         if (error instanceof DispatchServiceError) throw refusalWithCode(error, taken, landed);
         throw withAccount(error, landed);
       }
+      refuseUnsavedRepository("updated", after, repo);
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
         ...(closingNote === undefined
@@ -2455,6 +2532,13 @@ export async function executeDispatchTool(
                 : `blocked by ${after.blocked_by.join(", ")}`,
             ]),
         ...(components === undefined ? [] : [componentsChange(components, after.components)]),
+        ...(repo === undefined
+          ? []
+          : [
+              after.repo === null
+                ? `repo cleared (resolves to ${after.resolved_repo ?? "none"})`
+                : `repo -> ${after.repo}`,
+            ]),
       ];
       const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
         setsStatus: status !== undefined,
@@ -2517,7 +2601,7 @@ export async function executeDispatchTool(
         ...(limit === undefined ? {} : { limit }),
         ...(offset === undefined ? {} : { offset }),
       });
-      return searchAnswer(search, query, offset, configUrl);
+      return searchAnswer(search, query, offset, linkBase);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -2611,7 +2695,7 @@ export async function executeDispatchTool(
         // both by code.
         throw refusalWithCode(error);
       }
-      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, linkBase).toString();
       return {
         text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
         details: { project: project.key, name: project.name, created_at: project.created_at },
@@ -2733,7 +2817,7 @@ export async function executeDispatchTool(
             : documentTopic(resolved.artifact);
       const adviceLines = [
         ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
-        ...renderSuggestions(ask.advice?.suggestions, configUrl),
+        ...renderSuggestions(ask.advice?.suggestions, linkBase),
       ];
       return {
         text: [
@@ -3413,10 +3497,12 @@ export async function executeDispatchTool(
           read.events,
           references,
           [...pictures.lines, ...graph],
+          linkBase,
           titles
         ),
         details: { issue: read.issue.key },
         ...showImages(pictures),
+        ...repositoryFieldsWarnings(read.issue),
       };
     }
     default:

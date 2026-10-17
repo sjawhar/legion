@@ -35,11 +35,12 @@ func parseIssueParent(raw json.RawMessage) (parent *string, provided bool, err e
 	return &key, true, nil
 }
 
-// parentDepthCap bounds every recursive issue walk — the ancestor walk, the children
-// subtree walk, the components lateral's owner search, and the architecture tree's
-// containment walks — like refs.Closure's depth cap: with `union` recursion the queries
-// terminate even if a raced reparent ever commits a cycle. parentDepthCapSQL is the same
-// number spliced into the walks built as SQL text.
+// parentDepthCap is the most links an issue may sit below its root: a create or reparent that
+// would put an issue deeper is refused (refuseParentTooDeep), so it bounds every recursive issue
+// walk — the ancestor walk, the children subtree walk, the components and repository laterals'
+// owner searches, and the architecture tree's containment walks — like refs.Closure's depth cap:
+// the queries terminate even if a raced reparent ever commits a cycle. parentDepthCapSQL is the
+// same number spliced into the walks built as SQL text.
 const parentDepthCap = 32
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
@@ -151,7 +152,8 @@ func lockPatchRowsAndParent(ctx context.Context, tx pgx.Tx, key string, named ..
 		"%s's parent changed at each of %d attempts while this request waited to lock it, so nothing was applied: read the issue and retry", key, parentLockAttempts)
 }
 
-// validateIssueParent reads the ancestor chain while the project's dependency lock is held.
+// validateIssueParent reads the ancestor chain while the project's dependency lock is held, and
+// refuses a parent that would make key its own ancestor or put key's subtree past parentDepthCap.
 func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent string) error {
 	if parent == key {
 		return errorf(http.StatusBadRequest, "PARENT_INPUT", "an issue cannot be its own parent")
@@ -193,7 +195,52 @@ func validateIssueParent(ctx context.Context, tx pgx.Tx, key, project, parent st
 			return errorf(http.StatusConflict, "PARENT_INPUT", "would create a cycle: %s", path)
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return refuseParentTooDeep(ctx, tx, key, parent)
+}
+
+// refuseParentTooDeep refuses a parent link that would put an issue, or the deepest issue under
+// it, more than parentDepthCap links below its root: 409 PARENT_INPUT. child is the issue being
+// moved, or "" for one being created, which has nothing under it. The caller holds the project's
+// dependency lock (lockProjectIssueDependencies), which every create with a parent and every
+// reparent takes, so two writes cannot each pass alone and together pass the cap. Both walks stop
+// one link past the cap, so a chain that loops or is already too deep ends them.
+func refuseParentTooDeep(ctx context.Context, tx pgx.Tx, child, parent string) error {
+	var above, below int
+	if err := tx.QueryRow(ctx, `
+		with recursive up as (
+			select parent_key, 1 as depth from issues where key = $1
+			union all
+			select i.parent_key, u.depth + 1
+			from issues i join up u on i.key = u.parent_key
+			where u.depth <= $3
+		), down as (
+			select key, 0 as depth from issues where key = $2
+			union all
+			select i.key, d.depth + 1
+			from issues i join down d on i.parent_key = d.key
+			where d.depth <= $3
+		)
+		select coalesce((select max(depth) from up), 0), coalesce((select max(depth) from down), 0)
+	`, parent, child, parentDepthCap).Scan(&above, &below); err != nil {
+		return err
+	}
+	if above+below <= parentDepthCap {
+		return nil
+	}
+	depth := strconv.Itoa(above+below) + " links"
+	if above > parentDepthCap || below > parentDepthCap {
+		// A walk stopped at its bound, so the chain is deeper than it read.
+		depth = "more than " + parentDepthCapSQL + " links"
+	}
+	if child == "" {
+		return errorf(http.StatusConflict, "PARENT_INPUT",
+			"an issue under %s would sit %s below its root; an issue sits at most %d links below its root", parent, depth, parentDepthCap)
+	}
+	return errorf(http.StatusConflict, "PARENT_INPUT",
+		"moving %s under %s would put the deepest issue under it %s below its root; an issue sits at most %d links below its root", child, parent, depth, parentDepthCap)
 }
 
 // waitNode is one half of an issue in the dependency graph. An issue starts after its blocked_by

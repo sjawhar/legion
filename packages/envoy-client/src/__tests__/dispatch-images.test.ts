@@ -817,6 +817,8 @@ describe("reading pictures", () => {
               inherited_from: null,
             },
             route: null,
+            repo: null,
+            resolved_repo: null,
             open_asks: [],
             last_seq: events.length,
             external_links: [],

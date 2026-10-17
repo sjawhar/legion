@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import publicUrlFixture from "../../../contracts/fixtures/dispatch-public-url.json";
 import { activeDispatchSettings, type DispatchEnvironment } from "../dispatch-config";
 import type { EnvoyHarness } from "../envoy-config";
 import { sessionConfigFile, sessionDispatchSettings } from "../session-settings";
@@ -262,6 +263,46 @@ describe("Dispatch from a harness's envoy.json", () => {
       notice: null,
       error: "DISPATCH_TOKEN holds whitespace or a control character",
     });
+  });
+
+  // DISPATCH_PUBLIC_URL is Dispatch's dashboard as people open it, which a pod's in-cluster
+  // DISPATCH_URL is not: the settings carry it, less a trailing slash, only when it is set, and one
+  // that is not an http or https URL turns Dispatch off naming it rather than printing bad links.
+  test("carries DISPATCH_PUBLIC_URL beside the server it links people to, and refuses one that is not a URL", () => {
+    const env = {
+      HOME: tempDir(),
+      DISPATCH_URL: "http://dispatch.example-ns.svc.cluster.local:8766",
+      DISPATCH_TOKEN: "token",
+    };
+    expect(
+      dispatchFor(
+        { ...env, DISPATCH_PUBLIC_URL: "https://dispatch.example.org/" },
+        { ...command, cwd: tempDir() }
+      )
+    ).toEqual({
+      enabled: true,
+      url: "http://dispatch.example-ns.svc.cluster.local:8766",
+      token: "token",
+      publicUrl: "https://dispatch.example.org",
+    });
+    expect(dispatchFor(env, { ...command, cwd: tempDir() })).not.toHaveProperty("publicUrl");
+    // The shared fixture (fixtures/dispatch-public-url.json): every value the daemon's CheckPod
+    // accepts at load (`valid`) is accepted here too, so no value boot lets through turns Dispatch
+    // off in an agent. Boot holds to a narrower rule, so `agentsOnly` is accepted here alone.
+    for (const url of publicUrlFixture.invalid) {
+      expect(
+        dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
+      ).toEqual({
+        enabled: false,
+        notice: null,
+        error: "DISPATCH_PUBLIC_URL must be an http or https URL",
+      });
+    }
+    for (const url of [...publicUrlFixture.valid, ...publicUrlFixture.agentsOnly]) {
+      expect(
+        dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
+      ).toMatchObject({ enabled: true, publicUrl: url.replace(/\/+$/, "") });
+    }
   });
 
   // A plugin passes its whole environment, the dispatch command drops empty variables: both read

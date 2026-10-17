@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -317,4 +318,20 @@ func noticeRows(t *testing.T, pool *pgxpool.Pool) []record.OutboxPayload {
 		t.Fatalf("iterate the notice rows: %v", err)
 	}
 	return payloads
+}
+
+// A retry's task names the issue's pull request, as a backward move's does, so the restarted
+// worker is told the pull request it works on.
+func TestARetrysTaskNamesThePullRequest(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42})
+	if _, err := intake.ApplyFact(ctx, pool, "architect", "retry", intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	task := startTask(t, pool, RoleFor(phase.Implementing))
+	if !strings.Contains(task, "Pull request: #42.") {
+		t.Fatalf("task = %q, want it to name pull request #42", task)
+	}
 }

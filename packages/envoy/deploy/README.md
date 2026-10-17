@@ -86,6 +86,12 @@ only the `dispatch` service. It retains the ten newest pre-deploy dumps. Its
 defaults target the devbox; set `REPO`, `COMPOSE_PROJECT`, or `BACKUPS` to run
 against another checkout, Compose project, or dump directory.
 
+Two releases of Dispatch never serve the database together here:
+`docker compose up -d --no-deps dispatch` stops and removes the old container before it starts the
+new one, which boots and migrates. A deployment that rolls Dispatch some other way must keep that
+order, and must never start an image older than its database's schema afterwards: migration `0113`
+requires both (`../cmd/dispatch/README.md`, "Database migrations").
+
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:
 
@@ -96,8 +102,56 @@ scripts/autodeploy.sh --once
 After health succeeds, the deployer reads `DISPATCH_SERVER_URL` from
 `compose/.env` and checks that `/auth/start` emits exactly
 `$DISPATCH_SERVER_URL/auth/callback`. It persists the new `ENVOY_IMAGE_TAG`
-only after both checks; a failed deployment restores the previous tag and
-restarts only `dispatch`.
+only after both checks. A pull that fails changes nothing; the previous image
+keeps serving. A deploy that fails after the new image started restores the
+previous tag and restarts only `dispatch`, unless the failed image moved the
+database's schema. Before each deploy the deployer reads the schema version and
+records, as `ENVOY_IMAGE_SCHEMA=<tag>:<version>` in `compose/.env`, the version
+the deployed tag runs against. It keeps that record until the tag changes, so a
+retry of a failed image compares against the version the previous tag runs
+against, not the one the failed attempt left. When a deploy fails, it first stops
+the failed image and confirms that no `dispatch` container still runs. Then it
+reads the version again, waiting on the advisory lock Dispatch's migration runner
+holds, so a migration the failed image left in flight ends before the read. If
+the stop or the read fails, or the version moved past the record, it starts
+nothing, logs `refusing to roll back to <previous>` with both versions, and exits
+1. Recovery is then forward: deploy an image that fixes the failure, or start the
+failed one by hand once its failure is understood. Never start the previous tag
+against the newer schema.
+
+The deployer's database clients (`pg_dump` for the backup, `psql` for the schema
+version) run in the `pg_dump` image under `docker run --init`, so the bound
+`timeout` puts on the schema read also ends a hung connection. Each gets
+`DATABASE_URL` with its password removed as its argument, and the password as
+`PGPASSWORD`; docker reads both from the deployer's environment by name. So no
+process's arguments carry the password, the containers' included, which are host
+processes too. `psql`'s stderr is dropped, since its diagnostics can quote the
+connection, and a failed read is reported by its exit status alone.
+
+The deployer accepts `DATABASE_URL` in exactly one form, and refuses every other
+before anything runs, with a log line that points here and never prints the URL:
+
+```text
+postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?<key>=<value>[&<key>=<value>]…]
+```
+
+- `<user>`, `<database>` and each `<value>` are ASCII letters, digits, `.`, `_` and `-`.
+- `<password>` is ASCII letters, digits, `.`, `_`, `~` and `-`, and percent-escapes.
+  So a password's `@ : / ? # [ ]`, `%`, a space and any other character, non-ASCII
+  included, must be percent-encoded (`%40 %3A %2F %3F %23 %5B %5D %25 %20`).
+  `%00` is refused, and the decoded password must be valid UTF-8: Docker rewrites
+  other bytes on their way to the clients.
+- `<host>` is dot-separated labels of ASCII letters, digits and hyphens, none empty
+  and none starting or ending with a hyphen: a host name or an IPv4 address. No
+  brackets or IPv6 literal, no second host, no socket path.
+- `<port>` is 1 to 65535.
+- `<key>` is `sslmode`, `connect_timeout` or `application_name`. A password in the
+  query is refused, under any spelling.
+
+The deployer checks the form with the ASCII ranges whatever the machine's locale.
+In that form the deployer, libpq and Dispatch's driver (pgx) all read the same
+password from the same place, so the deployer can be sure it hands that password
+to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in it.
 
 ## Listener configuration
 
@@ -147,7 +201,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 
 | Var | Required | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database). The compose runs no Postgres of its own. |
+| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database), as `postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require`, with the password percent-encoded. The auto-deployer accepts only that form, with `connect_timeout` and `application_name` the other query keys it allows, and refuses any other (Auto-deployer, above). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; Dispatch's client at the sign-in issuer (the sign-in pool's app client, or the Google web client) must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
@@ -180,7 +234,7 @@ The database's nightly logical backup is not this compose's job: the production
 deployment's own scheduled backup task `pg_dump`s the `dispatch` database to object
 storage and alerts when a day has no dump; restores go through that deployment's own
 restore tooling. `scripts/autodeploy.sh` still takes its own pre-deploy dump of
-`DATABASE_URL` before every image roll, kept locally for rollback.
+`DATABASE_URL` before every image roll, kept locally; it never restores one itself.
 
 ## Sync to a remote host
 

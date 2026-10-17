@@ -160,8 +160,9 @@ func TestTheComposedPlannerDispatchesItsPlanChecksFromTheHeadlessResidue(t *test
 // No role's handoffs reach the default branch: retro's last commit removes the issue's own
 // .legion/<issue>/ from the head that merges (dispatch://LEGION-605). No phase worker's composed
 // prompt still carries the rule this replaced: that the approved and the merged head keep .legion/,
-// and that the daemon strips the leftovers from the next issue's branch. The merger's check of the
-// commits above the approved head leaves out retro's removal beside its docs/solutions/ ones.
+// and that the daemon strips the leftovers from the next issue's branch. READY, not the merger,
+// holds the commits above the approved head to retro's removal and its docs/solutions/ ones, so no
+// prompt carries the merger's own fileset check any more, and the merger's names READY's refusals.
 func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
@@ -169,7 +170,8 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	retired := []string{"No role pushes a `.legion/` deletion", "No role removes `.legion/`", "nobody removes it before the merge", "strips whatever `.legion/`", "still carries `.legion/`",
-		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never"}
+		"Retro then commits only `docs/solutions/`", "no file changes above the approved head", "the same sha when retro added nothing", "Retro's `docs/solutions/` commit is never",
+		"'~(docs/solutions | .legion/<issue>)'"}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
 		parts, err := composer.Compose(role, false)
 		if err != nil {
@@ -188,8 +190,10 @@ func TestNoComposedPromptKeepsTheIssuesHandoffsOnTheMergedHead(t *testing.T) {
 				t.Errorf("the composed %s prompt still says %q", role, phrase)
 			}
 		}
-		if want := `'~(docs/solutions | .legion/<issue>)'`; role == claim.RoleMerger && !strings.Contains(text.String(), want) {
-			t.Errorf("the merger's check above the approved head does not exclude %s, which retro's last commit changes", want)
+		for _, want := range []string{"`READY_UNREVIEWED_CHANGE`", "`READY_NOT_APPROVED`"} {
+			if role == claim.RoleMerger && !strings.Contains(text.String(), want) {
+				t.Errorf("the merger's prompt does not name %s, READY's refusal of a change above the approved head no review approved", want)
+			}
 		}
 	}
 }

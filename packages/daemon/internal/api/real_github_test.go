@@ -26,17 +26,7 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	if os.Getenv(realGitHubProofEnabled) != "1" {
 		t.Skip("set LEGION_REAL_GITHUB=1 to run the real GitHub App credential proof")
 	}
-	apps, err := config.ResolveGitHubApps(config.GitHubApps{
-		Implement: config.GitHubApp{
-			AppID: "3202636", PrivateKeyCommand: privateKeyCommand("LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"),
-		},
-		Review: config.GitHubApp{
-			AppID: "3202653", PrivateKeyCommand: privateKeyCommand("GH_REVIEW_APP_PRIVATE_KEY_B64"),
-		},
-	})
-	if err != nil {
-		t.Fatalf("resolve the GitHub App private-key commands: %v", err)
-	}
+	apps := realGitHubApps(t)
 
 	h := newHarness(t)
 	tokens := appauth.New(apps, appauth.Options{})
@@ -82,6 +72,24 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 		t.Fatalf("clone through gh auth git-credential: %v: %s", err, strings.TrimSpace(string(output)))
 	}
 	t.Log("clone through gh auth git-credential: succeeded")
+}
+
+// realGitHubApps is Legion's real implement and review Apps, their private keys read from the
+// devbox's secrets store: the Apps the gated real-GitHub proofs drive.
+func realGitHubApps(t *testing.T) config.GitHubApps {
+	t.Helper()
+	apps, err := config.ResolveGitHubApps(config.GitHubApps{
+		Implement: config.GitHubApp{
+			AppID: "3202636", PrivateKeyCommand: privateKeyCommand("LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64"),
+		},
+		Review: config.GitHubApp{
+			AppID: "3202653", PrivateKeyCommand: privateKeyCommand("GH_REVIEW_APP_PRIVATE_KEY_B64"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("resolve the GitHub App private-key commands: %v", err)
+	}
+	return apps
 }
 
 func privateKeyCommand(key string) string {

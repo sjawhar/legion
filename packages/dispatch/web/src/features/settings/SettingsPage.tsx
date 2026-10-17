@@ -2,7 +2,7 @@ import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
-import { api } from "../../api/client";
+import { api, apiErrorMessage } from "../../api/client";
 import { projectsQuery } from "../../api/queries";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -36,9 +36,32 @@ import {
 import { ProjectSelect } from "./ProjectSelect";
 import { ProjectsSection } from "./ProjectsSection";
 
+interface MappingInput {
+  readonly repo: string;
+  readonly project: string;
+  readonly default?: boolean;
+}
+
+/** A mapping write the server refused or never answered, with what the page says about it: the
+ *  server's reason when it gave one (a mapping issues still name, say), else a generic line. */
 type FailedAction =
-  | { readonly kind: "put"; readonly project: string; readonly repo: string }
-  | { readonly kind: "delete"; readonly repo: string };
+  | ({ readonly kind: "put"; readonly message: string } & MappingInput)
+  | { readonly kind: "delete"; readonly message: string; readonly repo: string };
+
+/** The mappings with `mapping` in place of its row, and, when it is its project's default, every
+ *  other mapping of that project no longer the default: a project has at most one. */
+function withMapping(current: RepoProject[], mapping: RepoProject): RepoProject[] {
+  return [
+    ...current
+      .filter((candidate) => candidate.repo !== mapping.repo)
+      .map((candidate) =>
+        mapping.default && candidate.project === mapping.project && candidate.default
+          ? { ...candidate, default: false }
+          : candidate
+      ),
+    mapping,
+  ];
+}
 
 export function SettingsPage(): ReactNode {
   useDocumentTitle("Settings · Dispatch");
@@ -53,44 +76,62 @@ export function SettingsPage(): ReactNode {
   const putMapping = useMutation<
     RepoProject,
     Error,
-    { repo: string; project: string },
+    MappingInput,
     { previous: RepoProject[] | undefined }
   >({
-    mutationFn: ({ repo, project }: { repo: string; project: string }) =>
-      api.putRepoProject(repo, { project }),
-    onError: (_error, variables, context) => {
+    mutationFn: ({ repo, ...input }) => api.putRepoProject(repo, input),
+    onError: (error, variables, context) => {
       queryClient.setQueryData(["repo-projects"], context?.previous);
-      setFailedAction({ kind: "put", ...variables });
+      setFailedAction({
+        kind: "put",
+        message: apiErrorMessage(error, `Couldn't save ${variables.repo}.`),
+        ...variables,
+      });
     },
     onMutate: async (variables) => {
       await queryClient.cancelQueries({ queryKey: ["repo-projects"] });
       const previous = queryClient.getQueryData<RepoProject[]>(["repo-projects"]);
-      queryClient.setQueryData<RepoProject[]>(["repo-projects"], (current = []) => [
-        ...current.filter((mapping) => mapping.repo !== variables.repo),
-        {
+      const existing = previous?.find((mapping) => mapping.repo === variables.repo);
+      queryClient.setQueryData<RepoProject[]>(["repo-projects"], (current = []) =>
+        withMapping(current, {
           created_at: new Date().toISOString(),
           created_by: { id: "you", kind: "user" },
+          // As the server decides it: the body's default, else the mapping's own while its
+          // project is unchanged, else not the default.
+          default:
+            variables.default ??
+            (existing?.project === variables.project ? existing.default : false),
           project: variables.project,
           repo: variables.repo,
-        },
-      ]);
+        })
+      );
       return { previous };
     },
-    onSuccess: (mapping) => {
-      queryClient.setQueryData<RepoProject[]>(["repo-projects"], (current = []) => [
-        ...current.filter((candidate) => candidate.repo !== mapping.repo),
-        mapping,
-      ]);
+    onSuccess: (mapping, variables) => {
+      queryClient.setQueryData<RepoProject[]>(["repo-projects"], (current = []) =>
+        withMapping(current, mapping)
+      );
       setFailedAction(undefined);
-      setRepository("");
-      setProject("");
+      if (variables.default === undefined) {
+        setRepository("");
+        setProject("");
+      }
     },
+    // A write's answer is one row as the server saved it, not the project's mappings when the
+    // answer arrives: another write (another browser's default pick, read through a mapping event
+    // while this one was on the way) may have changed them since. Reading them again once the
+    // write settles leaves the page on the server's state, as useIssueFieldWrite does an issue's.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["repo-projects"] }),
   });
   const deleteMapping = useMutation<void, Error, string, { previous: RepoProject[] | undefined }>({
     mutationFn: (repo: string) => api.deleteRepoProject(repo),
-    onError: (_error, repo, context) => {
+    onError: (error, repo, context) => {
       queryClient.setQueryData(["repo-projects"], context?.previous);
-      setFailedAction({ kind: "delete", repo });
+      setFailedAction({
+        kind: "delete",
+        message: apiErrorMessage(error, `Couldn't delete ${repo}.`),
+        repo,
+      });
     },
     onMutate: async (repo) => {
       await queryClient.cancelQueries({ queryKey: ["repo-projects"] });
@@ -101,11 +142,13 @@ export function SettingsPage(): ReactNode {
       return { previous };
     },
     onSuccess: () => setFailedAction(undefined),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["repo-projects"] }),
   });
 
   const retry = () => {
     if (failedAction?.kind === "put") {
-      putMapping.mutate({ project: failedAction.project, repo: failedAction.repo });
+      const { kind: _kind, message: _message, ...variables } = failedAction;
+      putMapping.mutate(variables);
       return;
     }
     if (failedAction?.kind === "delete") {
@@ -140,7 +183,9 @@ export function SettingsPage(): ReactNode {
             Repositories → Projects
           </h2>
           <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
-            External issues use these mappings before falling back to the default project.
+            An issue's repository is one of its project's mappings. An issue with none of its own or
+            on its parent chain takes its project's Default. External issues use these mappings
+            before falling back to the default project.
           </p>
 
           {mappings.isPending || projects.isPending ? (
@@ -176,6 +221,9 @@ export function SettingsPage(): ReactNode {
                       <th className="px-4 py-3 font-semibold" scope="col">
                         Project
                       </th>
+                      <th className="px-4 py-3 font-semibold" scope="col">
+                        Default
+                      </th>
                       <th className="px-4 py-3" scope="col">
                         <span className="sr-only">Actions</span>
                       </th>
@@ -184,7 +232,7 @@ export function SettingsPage(): ReactNode {
                   <tbody>
                     {mappings.data.length === 0 ? (
                       <tr>
-                        <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={3}>
+                        <td className={`px-4 py-5 ${textMutedOnSurface}`} colSpan={4}>
                           No repository mappings yet.
                         </td>
                       </tr>
@@ -196,6 +244,23 @@ export function SettingsPage(): ReactNode {
                           </td>
                           <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
                             {mapping.project}
+                          </td>
+                          <td className="px-4 py-3">
+                            <input
+                              aria-label={`Default repository of ${mapping.project}: ${mapping.repo}`}
+                              checked={mapping.default}
+                              className="size-4 cursor-pointer disabled:cursor-not-allowed"
+                              disabled={deleteMapping.isPending || putMapping.isPending}
+                              name={`default-repository-${mapping.project}`}
+                              onChange={() =>
+                                putMapping.mutate({
+                                  default: true,
+                                  project: mapping.project,
+                                  repo: mapping.repo,
+                                })
+                              }
+                              type="radio"
+                            />
                           </td>
                           <td className="px-4 py-3 text-right">
                             <button
@@ -251,11 +316,7 @@ export function SettingsPage(): ReactNode {
               {failedAction !== undefined ? (
                 <div className="mt-4">
                   <QueryError
-                    message={
-                      failedAction.kind === "put"
-                        ? `Couldn't save ${failedAction.repo}.`
-                        : `Couldn't delete ${failedAction.repo}.`
-                    }
+                    message={failedAction.message}
                     onRetry={retry}
                     retrying={putMapping.isPending || deleteMapping.isPending}
                   />

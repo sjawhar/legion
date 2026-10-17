@@ -404,7 +404,8 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
 | `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim, then walk if a slot is free — a gap never stops the walk; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
 | Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch ask` only for a human to-do |
-| Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
+| Mention | GitHub PR @mention text | Answer, or route to the owning issue's architect role |
+| Slack mention (`from: slack`) | the mention's `channel_id`, `user_id`, `text`, `ts`, `thread_ts` | Nothing when your `Slack channels:` line does not name its `channel_id`; otherwise answer in its thread with `slack_post`: a state question from `read_state`, a work request filed as a Dispatch issue, an architect's question routed to that architect ([Slack mentions](skill://legion-controller/references/slack-mentions.md)) |
 | `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `read_state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `set_status` of the root to `backlog`; setting the root back to `todo` later re-admits it as a new generation, which starts again from its architect |
 | `worker-died on <KEY>` from the Go daemon with `role: "architect"` | the tree root whose architect's claim failed, and the phase the root was in | The tree's architect ran out of launches or prompts and the daemon relaunches nothing; every other notice of the tree goes to that architect, so nobody inside the tree can act. Verify in `read_state` (`issues.<KEY>.architect.state` is `failed`); if the root's phase is `done`, the tree is already parked: no action. Otherwise re-admit the tree (`set_status` of the root to `backlog`, then to `todo`: a new generation, whose architect starts again with fresh budgets) or leave it parked and say why on the issue |
 | Direct user message | — | Always first |
@@ -482,12 +483,13 @@ judgments.
 
 ## Mentions
 
-Read the mention and its artifact. Answer it when it asks the controller for triage or
-human-facing information. A human asking how to let a root proceed past its design gate
-approves the root issue's spec document in Dispatch — the `Approve` control in the document's
-header, or the approval question the architect's request opened in the Inbox. The controller
-never opens a gate and there is no operator command for it; a project that does not want the
-gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the authoritative
-owning architect role and route the verified context with `envoy_publish`. Do not route raw
-event traffic or invent a role token from a partial issue reference.
+Read the mention and its artifact; a Slack mention follows [Slack
+mentions](skill://legion-controller/references/slack-mentions.md). Answer it when it asks the
+controller for triage or human-facing information. A human asking how to let a root proceed past
+its design gate approves the root issue's spec document in Dispatch — the `Approve` control in the
+document's header, or the approval question the architect's request opened in the Inbox. The
+controller never opens a gate and there is no operator command for it; a project that does not
+want the gate at all runs `gates.design: off` in its `legion.yaml`. Otherwise resolve the
+authoritative owning architect role and route the verified context with `envoy_publish`. Do not
+route raw event traffic or invent a role token from a partial issue reference.
 

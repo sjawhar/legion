@@ -1,0 +1,31 @@
+# A Slack app manifest for Legion's Slack app (Slack: Create New App > From a manifest).
+#
+# The app sends each @Legion mention to the Envoy listener's /webhook/slack, which publishes it on
+# notifications.slack.<team>.<channel>.mention for the project's controller; the controller replies
+# in the thread with slack_post, which posts as this app's bot. Replace request_url with your
+# listener's public address. After installing the app:
+#   - set the listener's ENVOY_SLACK_SIGNING_SECRET to the app's signing secret (Basic Information)
+#     and list `slack` in its ENVOY_WEBHOOKS;
+#   - store the Bot User OAuth Token (xoxb-…) in the secrets broker as LEGION_SLACK_BOT_TOKEN, owner
+#     legion-daemon, tier agent;
+#   - invite the app to every channel a project's slack_channels names (`/invite @Legion`).
+display_information:
+  name: Legion
+  description: Ask the project's Legion controller from its Slack channel.
+features:
+  bot_user:
+    display_name: Legion
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - chat:write
+settings:
+  event_subscriptions:
+    request_url: https://envoy.internal.example/webhook/slack
+    bot_events:
+      - app_mention
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false
