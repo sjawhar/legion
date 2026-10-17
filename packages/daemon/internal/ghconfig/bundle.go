@@ -3,6 +3,7 @@ package ghconfig
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -28,14 +29,7 @@ func IsOwner(owner string) bool { return ownerLogin.MatchString(owner) }
 func OwnerDir(root, owner string) string { return filepath.Join(root, owner) }
 
 // OwnerNames is the bundle's owners, sorted.
-func (b Bundle) OwnerNames() []string {
-	owners := make([]string, 0, len(b.Owners))
-	for owner := range b.Owners {
-		owners = append(owners, owner)
-	}
-	slices.Sort(owners)
-	return owners
-}
+func (b Bundle) OwnerNames() []string { return slices.Sorted(maps.Keys(b.Owners)) }
 
 // Validate refuses a bundle with no Default, a Default absent from Owners, or an owner that is
 // not a lowercased GitHub login (letters, digits, hyphens) — a login is a path segment here.
