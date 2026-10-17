@@ -295,6 +295,15 @@ jobs:
       # without one (.github/actions/install-uv).
       - uses: ./.github/actions/install-uv
 
+      # The daemon's NATS tests start testnats.Image and, for its grant test, Envoy's HubImage
+      # (packages/envoy/testnatsimages), pulled first for the reason the action gives.
+      - name: Pull the NATS test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/daemon/internal/testnats/nats.go Image
+            packages/envoy/internal/testnats/nats.go HubImage
+
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -21,6 +20,7 @@ import (
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	"github.com/sjawhar/envoy/daemonpermissions"
+	"github.com/sjawhar/envoy/testnatsimages"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -37,7 +37,7 @@ const (
 // NATS server grant, while this test drives the daemon's real connection, durable consumers,
 // acknowledgements, and exceptions subscription through it.
 func TestDaemonPermissionsOnRealServers(t *testing.T) {
-	for _, image := range testnats.Images {
+	for _, image := range testnatsimages.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Run("the daemon restarts, acknowledges Dispatch and GitHub, and receives exceptions", func(t *testing.T) {
 				grant := daemonpermissions.Grant()
@@ -214,32 +214,22 @@ func startDaemonGrantServer(t *testing.T, image string, grant daemonpermissions.
 	t.Helper()
 	daemonSeed, daemonPublic := testnats.User(t)
 	adminSeed, adminPublic := testnats.User(t)
-	config := daemonGrantServerConfig(daemonPublic, adminPublic, grant)
-	server, uri := testnats.StartNkeyImageConfig(t, image, config, []string{"-DV", "-js", "--store_dir", "/data", "-m", "8222"})
+	// The server's configuration reads JSON, but not Go's HTML escaping of '>' as \u003e.
+	var permissions strings.Builder
+	encoder := json.NewEncoder(&permissions)
+	encoder.SetEscapeHTML(false)
+	require.NoError(t, encoder.Encode(map[string]map[string][]string{
+		"publish":   {"allow": grant.Publish},
+		"subscribe": {"allow": grant.Subscribe},
+	}))
+	server, uri := testnats.StartNkeyAuthorizedUsers(t, image,
+		testnats.NkeyUser{Public: daemonPublic, Permissions: strings.TrimSpace(permissions.String())},
+		testnats.NkeyUser{Public: adminPublic})
 	admin, err := natsauth.Connect([]string{uri}, adminSeed, nats.Timeout(5*time.Second))
 	require.NoError(t, err)
 	js, err := jetstream.New(admin)
 	require.NoError(t, err)
 	return daemonSeed, admin, js, server, uri
-}
-
-func daemonGrantServerConfig(daemonPublic, adminPublic string, grant daemonpermissions.Permissions) string {
-	return fmt.Sprintf(`jetstream {}
-authorization {
-  users = [
-    { nkey: %q, permissions: { publish: { allow: %s }, subscribe: { allow: %s } } },
-    { nkey: %q, permissions: { publish: { allow: [">"] }, subscribe: { allow: [">"] } } }
-  ]
-}
-`, daemonPublic, natsSubjectList(grant.Publish), natsSubjectList(grant.Subscribe), adminPublic)
-}
-
-func natsSubjectList(subjects []string) string {
-	quoted := make([]string, len(subjects))
-	for i, subject := range subjects {
-		quoted[i] = fmt.Sprintf("%q", subject)
-	}
-	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func daemonGrantServerLogs(t *testing.T, server *tcnats.NATSContainer) string {

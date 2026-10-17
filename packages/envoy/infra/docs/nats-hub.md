@@ -97,8 +97,8 @@ The hub refuses these before it registers anything, with an error naming the inp
   `deny` list of subject patterns, for any other client.
 
 `daemon: false` selects no permission set. `nats:Rules` is the one rules type every NATS component
-takes, whatever its cloud, and `nkey` is named as `aws:NatsService`'s users name it, so a user is
-written alike for both components.
+takes, whatever its cloud, and `nkey` is named as `aws:NatsService`'s users name it, so the two
+components spell a user's key and rules alike.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): a host's listener and a Legion daemon

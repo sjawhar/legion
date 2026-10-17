@@ -1266,12 +1266,13 @@ name, and `pod.env` may not set `NATS_NKEY_SEED_FILE`.
 The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemon_nkey_seed_file`
 (relative to `legion.yaml`'s directory), else `NATS_DAEMON_NKEY_SEED_FILE`, else
 `NATS_DAEMON_NKEY_SEED` in the daemon's environment, is the `legion-daemon` user the daemon's
-connection authenticates as. That user's grants, which `legion-pane` does not hold, are exactly
-what the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
+connection authenticates as. That user's grants, which `legion-pane` does not hold, cover what
+the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
 `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
 two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
-the trailing `>` reaches every consumer of the stream, each host's listener consumer included), and
+the trailing `>` reaches every consumer of the stream, each host's listener consumer included, and
+lets the seed create a push consumer that delivers stream messages to any subject), and
 subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
 subject: role and controller notices go to the Envoy listener over HTTP, and control directives
 over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified

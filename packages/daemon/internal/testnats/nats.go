@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -29,12 +28,6 @@ import (
 
 // Image is the NATS server image the daemon's existing NATS tests use.
 const Image = "mirror.gcr.io/library/nats:2.10"
-
-// HubImage is packages/envoy/internal/testnats.HubImage, the image the GCP hub is tested against; bump both together.
-const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
-
-// Images are the NATS server images a grant must work against.
-var Images = []struct{ Name, Ref string }{{"2.10", Image}, {"hub", HubImage}}
 
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
@@ -96,7 +89,7 @@ func URL(t testing.TB) string {
 	}
 	take(t)
 	startOnce.Do(func() {
-		started, err := start()
+		started, err := start(Image)
 		if err != nil {
 			startErr = err
 			return
@@ -284,9 +277,9 @@ func retryStreamStoreFailure(create func() error) error {
 // start runs a NATS container, with its monitoring endpoint on 8222. A container Docker created and never saw ready (a readiness wait
 // that timed out under load) comes back beside the error, and is removed before start returns:
 // no test's end would remove a container the package shares.
-func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
+func start(image string, options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
 	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
-	started, err := tcnats.Run(context.Background(), Image, options...)
+	started, err := tcnats.Run(context.Background(), image, options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))
 	}
@@ -298,7 +291,8 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 // client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	return StartNkeyAuthorizedUsers(t, NkeyUser{Public: user})
+	_, url := StartNkeyAuthorizedUsers(t, Image, NkeyUser{Public: user})
+	return url
 }
 
 // NkeyUser is one nkey user a server admits: its public key, and the server's permissions block for
@@ -308,9 +302,9 @@ type NkeyUser struct {
 	Permissions string
 }
 
-// StartNkeyAuthorizedUsers is StartNkeyAuthorized for a server admitting users alone, each with its
-// permissions.
-func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
+// StartNkeyAuthorizedUsers is StartNkeyAuthorized for a server of image admitting users alone,
+// each with its permissions. It returns the container, for a test that reads the server's log.
+func StartNkeyAuthorizedUsers(t testing.TB, image string, users ...NkeyUser) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	entries := make([]string, 0, len(users))
 	for _, user := range users {
@@ -321,7 +315,7 @@ func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
 		entries = append(entries, entry+" }")
 	}
 	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", strings.Join(entries, ", "))
-	container, err := start(tcnats.WithConfigFile(strings.NewReader(config)))
+	container, err := start(image, tcnats.WithConfigFile(strings.NewReader(config)))
 	if err != nil {
 		t.Fatalf("start nkey-authorized NATS: %v", err)
 	}
@@ -331,42 +325,7 @@ func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 	answering(t, url)
-	return url
-}
-
-// StartNkeyImageConfig runs image using config and serverArgs, returns its container for log
-// checks, and waits for the configuration's nkey authorization to refuse an anonymous connection.
-func StartNkeyImageConfig(t testing.TB, image, config string, serverArgs []string) (*tcnats.NATSContainer, string) {
-	t.Helper()
-	const configPath = "/etc/nats/nats-server.conf"
-	ctr, err := tcnats.Run(context.Background(), image,
-		testcontainers.WithCmd(append([]string{"-c", configPath}, serverArgs...)...),
-		testcontainers.WithFiles(testcontainers.ContainerFile{
-			Reader:            strings.NewReader(config),
-			ContainerFilePath: configPath,
-			FileMode:          0o644,
-		}),
-	)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		logs := ""
-		if ctr != nil {
-			if output, logErr := ctr.Logs(context.Background()); logErr == nil {
-				data, readErr := io.ReadAll(output)
-				_ = output.Close()
-				if readErr == nil {
-					logs = string(data)
-				}
-			}
-		}
-		t.Fatalf("start NATS on %s: %v\n%s", image, err, logs)
-	}
-	uri, err := ctr.ConnectionString(context.Background())
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
-	answering(t, uri)
-	return ctr, uri
+	return container, url
 }
 
 // answering returns once the server at url refuses a connection with no credential with its own

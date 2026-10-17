@@ -22,7 +22,7 @@ import (
 // by its label on the same Docker daemon testcontainers created it on.
 func TestAFailedStartLeavesNoContainer(t *testing.T) {
 	label := "legion-testnats-" + rand.Text()
-	created, err := start(
+	created, err := start(Image,
 		testcontainers.WithLabels(map[string]string{"legion.test": label}),
 		testcontainers.WithWaitStrategy(wait.ForLog("a line NATS never prints").WithStartupTimeout(3*time.Second)),
 	)

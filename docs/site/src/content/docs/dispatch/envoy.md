@@ -110,7 +110,10 @@ back on `_INBOX.>`.
 The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
 not just the daemon's two: a holder of the daemon's seed can read, recreate with another filter,
 and drain any consumer of the stream, every host's listener consumer and another project's daemon
-consumers included. Treat the daemon's seed as a credential of the whole stream.
+consumers included. It can also create a push consumer whose delivery subject is any subject at
+all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,
+other clients' inboxes, `agentstream.*.control`. Treat the daemon's seed as a credential of the
+whole stream and of every subject a push consumer can deliver to.
 
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
 `core.DaemonPermissions()` instead of a host's or an explicit user's grant.
@@ -121,8 +124,9 @@ running the daemon's consumers under exactly that grant, against a real server, 
 refusal: create both consumers, restart onto them, and have Dispatch and GitHub events
 acknowledged. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
-subject. `docs/kubernetes.md` in the repository records the run that verified the list above and
-how the daemon's credential is configured.
+subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that
+proof against the server images the hub runs, and `docs/kubernetes.md` says how the daemon's
+credential is configured.
 
 ## Running the listener
 
