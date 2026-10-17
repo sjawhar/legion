@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -427,6 +428,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
+	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
@@ -459,6 +461,18 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 	}
 	return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has failed %d attempts, next at %s: %s",
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
+}
+
+// heldSummary is the one line an operator reads for the lifecycle rows the daemon holds behind
+// their issues' running ones (api.State.HeldOutboxRows): how many, and the one that has waited
+// longest — the first such in the state's order, so ties go to the one due first.
+func heldSummary(held []api.HeldOutboxRow) string {
+	if len(held) == 0 {
+		return "held lifecycle rows: none"
+	}
+	longest := slices.MaxFunc(held, func(a, b api.HeldOutboxRow) int { return cmp.Compare(a.WaitedSeconds, b.WaitedSeconds) })
+	return fmt.Sprintf("held lifecycle rows: %d; the longest waiting, %s row %d of %s, has waited %s behind row %d",
+		len(held), longest.Kind, longest.ID, longest.Issue, time.Duration(longest.WaitedSeconds)*time.Second, longest.WaitsOn)
 }
 
 // strandedPhrases is how `legion state` names each move that brings a stranded claim back

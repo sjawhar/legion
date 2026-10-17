@@ -547,62 +547,235 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	return nil
 }
 
-// ClaimDue leases project's due rows, oldest first. The database is shared by the daemons of
-// several projects, and a row belongs to its issue's project: an issue key is `<project>-<n>`, and
-// a project key has no hyphen (the configuration's projects keys, claim.IsIssueKey). The scope is in
-// the select, not a filter of what it returns, because the lease is what would take another
-// project's row from its own daemon. An issue's Dispatch status writes run one at a time in the
-// order they were made: a status row waits while an older one for the same issue is unfinished,
-// because each carries the status its predecessor leaves, and a newer write run first would find the
-// board short of it and finish unwritten as though a human had moved it. A start of an issue's role
-// waits while an older issue_branch row of the issue is unfinished, so no role starts before its
-// issue's branch exists on GitHub (IssueBranch), and a create GitHub keeps refusing holds the
-// issue's roles back while the row retries. Supervise rows need no other such rule: a stop names the
-// run it ends through the claim's own record of the newest start run against it
-// (claims.last_start_row), so ordering them here would buy nothing that survives a retry the runtime
-// delayed.
-func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
-	if limit <= 0 {
-		return []OutboxRow{}, nil
+// The outbox's runnable predicates are one SQL text, so the lanes' list of due rows (DueRows), their
+// claim (ClaimRow) and the state report's held rows (HeldRows) can never disagree about which row
+// may run. Each refers to the statement's first five parameters, which outboxDueArgs supplies — $1
+// is now, $2 to $4 the kinds the ordering rules name, $5 the lifecycle lane's kinds — so a statement
+// embedding one numbers its own parameters from $6. The outer table is `outbox`, unaliased, which
+// the rules' subqueries name.
+
+// outboxUnleasedDue is a row due at $1 that no live lease holds.
+const outboxUnleasedDue = `outbox.next_at <= $1 and (outbox.lease_until is null or outbox.lease_until <= $1)`
+
+// outboxInOrder is the two rules that hold a due row behind an older one of its issue. An issue's
+// Dispatch status writes run one at a time in the order they were made: a status row waits while an
+// older one for the same issue is unfinished, because each carries the status its predecessor
+// leaves, and a newer write run first would find the board short of it and finish unwritten as
+// though a human had moved it. A start of an issue's role waits while an older issue_branch row of
+// the issue is unfinished, so no role starts before its issue's branch exists on GitHub
+// (IssueBranch), and a create GitHub keeps refusing holds the issue's roles back while the row
+// retries. Supervise rows need no other such rule: a stop names the run it ends through the claim's
+// own record of the newest start run against it (claims.last_start_row), so ordering them here
+// would buy nothing that survives a retry the runtime delayed.
+const outboxInOrder = `not (outbox.kind = $2 and exists (select 1 from outbox older
+			where older.kind = $2 and older.issue = outbox.issue and older.id < outbox.id))
+		and not (outbox.kind = $3 and outbox.payload->>'op' = 'start' and exists (select 1 from outbox branch
+			where branch.kind = $4 and branch.issue = outbox.issue and branch.id < outbox.id))`
+
+// outboxLaneFree is the rule that a lifecycle row ($5 is the lifecycle lane's kinds) runs only while
+// no other lifecycle row of its issue is under a live lease. Each lifecycle row reads the issue and
+// its claims and then acts on what it read — a start launches the role the issue's phase names, a
+// suspend stops the roles a start launched, a workspace removal takes the workspace they used — and
+// they were written to run one after another, each in the state its predecessor leaves (OutboxLane).
+// A lifecycle lane runs its rows that way on its own, but a lane is one daemon's: with the rule in
+// SQL, two daemons of a rolling restart never run one issue's lifecycle rows side by side, since the
+// second lists and claims nothing of the issue's while the first's lease is live. The state's
+// held-rows read (HeldRows) is this rule negated, so what it shows held is exactly what the lanes
+// hold back. Board rows are not under it: their lane runs them as they come due.
+const outboxLaneFree = `not (outbox.kind = any($5::text[]) and exists (select 1 from outbox running
+			where running.issue = outbox.issue and running.id <> outbox.id and running.kind = any($5::text[]) and running.lease_until > $1))`
+
+// outboxClaimable is a row a lane may run now: due, under no live lease, in order, and with no other
+// lifecycle row of its issue running.
+const outboxClaimable = outboxUnleasedDue + ` and ` + outboxInOrder + ` and ` + outboxLaneFree
+
+// lifecycleKindNames is the lifecycle lane's kinds as the outbox stores them, the $5 every
+// statement embedding the predicates takes and the lane UnfinishedLanes sorts rows into.
+var lifecycleKindNames = kindNames(laneKinds[LaneLifecycle])
+
+// outboxDueArgs is the parameters of a statement that embeds the predicates: now, the ordering
+// rules' kinds and the lifecycle lane's kinds first, then the statement's own.
+func outboxDueArgs(now time.Time, own ...any) []any {
+	return append([]any{now, string(OutboxKindDispatchStatus), string(OutboxKindSupervise), string(OutboxKindIssueBranch), lifecycleKindNames}, own...)
+}
+
+// kindNames is kinds as the text the outbox stores them in, an empty list for none.
+func kindNames(kinds []OutboxKind) []string {
+	names := make([]string, len(kinds))
+	for i, kind := range kinds {
+		names[i] = string(kind)
 	}
-	if leaseFor <= 0 {
-		return nil, fmt.Errorf("claim due outbox rows: lease duration must be positive")
-	}
+	return names
+}
+
+// DueRows lists the rows a lane may run at now (outboxClaimable), oldest first, leasing none: a
+// lane reads what is due, then claims each by id (ClaimRow). Issue "" is every issue of project,
+// kinds nil every kind. The database is shared by the daemons of several projects, and a row
+// belongs to its issue's project: an issue key is `<project>-<n>`, and a project key has no hyphen
+// (the configuration's projects keys, claim.IsIssueKey). The scope is in the select, and ClaimRow
+// claims only an id a list gave it, because a lease taken on another project's row is what would
+// take it from its own daemon.
+func (s *Postgres) DueRows(ctx context.Context, tx pgx.Tx, project, issue string, kinds []OutboxKind, now time.Time) ([]OutboxRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where split_part(issue, '-', 1) = $4 and next_at <= $1 and (lease_until is null or lease_until <= $1)
-		and not (kind = $3 and exists (select 1 from outbox older
-			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
-		and not (kind = $5 and payload->>'op' = 'start' and exists (select 1 from outbox branch
-			where branch.kind = $6 and branch.issue = outbox.issue and branch.id < outbox.id))
-		order by next_at, id limit $2 for update skip locked`,
-		now, limit, string(OutboxKindDispatchStatus), project, string(OutboxKindSupervise), string(OutboxKindIssueBranch))
+		where split_part(outbox.issue, '-', 1) = $6 and ($7::text = '' or outbox.issue = $7::text)
+		and (cardinality($8::text[]) = 0 or outbox.kind = any($8::text[]))
+		and `+outboxClaimable+`
+		order by next_at, id`, outboxDueArgs(now, project, issue, kindNames(kinds))...)
 	if err != nil {
-		return nil, fmt.Errorf("claim due outbox rows: %w", err)
+		return nil, fmt.Errorf("list due outbox rows: %w", err)
 	}
 	defer rows.Close()
-	claimed := []OutboxRow{}
+	due := []OutboxRow{}
 	for rows.Next() {
 		row, err := scanOutbox(rows)
 		if err != nil {
-			return nil, fmt.Errorf("claim due outbox rows: %w", err)
+			return nil, fmt.Errorf("list due outbox rows: %w", err)
 		}
-		claimed = append(claimed, row)
+		due = append(due, row)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("claim due outbox rows: %w", err)
+		return nil, fmt.Errorf("list due outbox rows: %w", err)
 	}
-	for i := range claimed {
-		token, err := leaseToken()
-		if err != nil {
-			return nil, err
-		}
-		until := now.Add(leaseFor)
-		if _, err := tx.Exec(ctx, "update outbox set lease_token = $2, lease_until = $3 where id = $1", claimed[i].ID, token, until); err != nil {
-			return nil, fmt.Errorf("claim outbox row %d: %w", claimed[i].ID, err)
-		}
-		claimed[i].LeaseToken, claimed[i].LeaseUntil = token, &until
+	return due, nil
+}
+
+// ClaimRow leases row id for leaseFor from now, if a lane may still run it at now: it is in the
+// outbox, due, under no live lease, in order, and no other lifecycle row of its issue is running
+// (outboxClaimable). The claim is one conditional update, never a read and then a write, so two
+// lanes that listed the same due row take it exactly once whichever commits first: the other's
+// update waits on the row lock, then finds the lease taken, the row finished and gone, or an older
+// row of its issue since queued ahead of it, and claims nothing. False is nothing claimed.
+//
+// The lane rule (outboxLaneFree) is the one predicate the row lock does not cover. Two daemons
+// claiming different lifecycle rows of one issue at once update different rows, so neither waits
+// on the other's row lock, and each update's subquery runs in its own READ COMMITTED snapshot,
+// where the other's uncommitted lease is invisible: Postgres rechecks a concurrently updated row's
+// new version against the where clause, but only the row being updated, never a subquery over
+// other rows, so both claims would succeed and the issue would have two lifecycle rows running
+// side by side. So a lifecycle claim is two statements: first a transaction-scoped advisory lock
+// keyed by the row's issue, then the update. The second daemon blocks on the lock until the first
+// commits, and its update then takes a fresh snapshot, in which the first's lease is live, and
+// refuses. The lock statement is a select over the row, so a board row, or a row finished and gone,
+// selects nothing and locks nothing: an issue's board lane never waits on its lifecycle claim. The
+// lock is released at the claim transaction's commit, so it is held for the claim alone, never
+// across an executor. intake.ApplyFact's advisory lock (hashtext('legion.apply_fact')) is a
+// different key, and no transaction takes both — a lane claims in a transaction of its own, and no
+// fact handler claims a row — so no lock ordering arises between them.
+func (s *Postgres) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.Time, leaseFor time.Duration) (OutboxRow, bool, error) {
+	if leaseFor <= 0 {
+		return OutboxRow{}, false, fmt.Errorf("claim outbox row %d: lease duration must be positive", id)
 	}
-	return claimed, nil
+	token, err := leaseToken()
+	if err != nil {
+		return OutboxRow{}, false, err
+	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('legion.outbox.lifecycle:' || issue)) from outbox
+		where id = $1 and kind = any($2::text[])`, id, lifecycleKindNames); err != nil {
+		return OutboxRow{}, false, fmt.Errorf("claim outbox row %d: %w", id, err)
+	}
+	row, err := scanOutbox(tx.QueryRow(ctx, `update outbox set lease_token = $7, lease_until = $8
+		where outbox.id = $6 and `+outboxClaimable+`
+		returning `+outboxColumns, outboxDueArgs(now, id, token, now.Add(leaseFor))...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OutboxRow{}, false, nil
+	}
+	if err != nil {
+		return OutboxRow{}, false, fmt.Errorf("claim outbox row %d: %w", id, err)
+	}
+	return row, true, nil
+}
+
+// RenewOutboxLease moves the lease on row id to until while leaseToken still holds it, so a lane
+// running a long row keeps it from the lapse that would let another claim it mid-run. False is a
+// lease no longer the caller's: lapsed and claimed by another, or the row finished.
+func (s *Postgres) RenewOutboxLease(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, until time.Time) (bool, error) {
+	tag, err := tx.Exec(ctx, "update outbox set lease_until = $3 where id = $1 and lease_token = $2", id, leaseToken, until)
+	if err != nil {
+		return false, fmt.Errorf("renew the lease of outbox row %d: %w", id, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// NextDue is the earliest moment after now one of issue's rows of kinds comes due: the least
+// next_at after now among the rows no live lease holds, so a lane with nothing to run sleeps until
+// it rather than polls. A row due already is not it, nor one another lane is running whose lease
+// outlasts its next_at. False is none; kinds nil is every kind.
+func (s *Postgres) NextDue(ctx context.Context, tx pgx.Tx, issue string, kinds []OutboxKind, now time.Time) (time.Time, bool, error) {
+	var next *time.Time
+	if err := tx.QueryRow(ctx, `select min(next_at) from outbox
+		where issue = $1 and (cardinality($2::text[]) = 0 or kind = any($2::text[]))
+		and next_at > $3 and (lease_until is null or lease_until <= $3)`, issue, kindNames(kinds), now).Scan(&next); err != nil {
+		return time.Time{}, false, fmt.Errorf("read when %s's outbox is next due: %w", issue, err)
+	}
+	if next == nil {
+		return time.Time{}, false, nil
+	}
+	return *next, true, nil
+}
+
+// UnfinishedLanes is every lane of project's issues with a row still in the outbox — due, running,
+// backing off or held — by issue then lane: the lanes the runner needs an executor for.
+func (s *Postgres) UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error) {
+	rows, err := tx.Query(ctx, `select distinct issue, case when kind = any($2::text[]) then $3::text else $4::text end as lane
+		from outbox where split_part(issue, '-', 1) = $1 order by issue, lane`,
+		project, lifecycleKindNames, string(LaneLifecycle), string(LaneBoard))
+	if err != nil {
+		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
+	}
+	defer rows.Close()
+	lanes := []LaneKey{}
+	for rows.Next() {
+		var key LaneKey
+		var lane string
+		if err := rows.Scan(&key.Issue, &lane); err != nil {
+			return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
+		}
+		key.Lane = OutboxLane(lane)
+		lanes = append(lanes, key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the unfinished outbox lanes of %s: %w", project, err)
+	}
+	return lanes, nil
+}
+
+// HeldRows is every due, unleased lifecycle row of project's issues a lane may not run at now
+// (outboxClaimable negated) that has a lifecycle row of its issue running to wait on (outboxLaneFree
+// negated), by next_at then id, each with that row: the oldest of its issue's running lifecycle
+// rows. Issue "" is every issue of project. It is the lanes' own predicates read back, so what the
+// state shows held is exactly what the lanes hold back. A start fenced behind an older issue_branch
+// row of its issue is held while the branch row runs — issue_branch is a lifecycle kind, so the
+// start waits on it — and listed by nothing while the branch row waits unleased for its retry, since
+// it then waits on no running row, as it did before the lanes. Board rows are never held: their lane
+// runs them as they come due. A row the lane rule holds fails the claim, so the claim's negation
+// adds no row to the lane rule's; it is written out because Postgres types a parameter by its uses
+// and refuses a statement with one it never uses, and the ordering rules' kinds are among the
+// parameters every fragment shares.
+func (s *Postgres) HeldRows(ctx context.Context, tx pgx.Tx, project, issue string, now time.Time) ([]HeldRow, error) {
+	rows, err := tx.Query(ctx, `select `+outboxColumns+`, (select min(running.id) from outbox running
+			where running.issue = outbox.issue and running.id <> outbox.id and running.kind = any($5::text[]) and running.lease_until > $1) as waits_on
+		from outbox where split_part(outbox.issue, '-', 1) = $6 and ($7::text = '' or outbox.issue = $7::text)
+		and outbox.kind = any($5::text[])
+		and `+outboxUnleasedDue+` and not (`+outboxClaimable+`) and not `+outboxLaneFree+`
+		order by next_at, id`,
+		outboxDueArgs(now, project, issue)...)
+	if err != nil {
+		return nil, fmt.Errorf("list the held outbox rows of %s: %w", project, err)
+	}
+	defer rows.Close()
+	held := []HeldRow{}
+	for rows.Next() {
+		var row HeldRow
+		var err error
+		if row.OutboxRow, err = scanOutbox(rows, &row.WaitsOn); err != nil {
+			return nil, fmt.Errorf("list the held outbox rows of %s: %w", project, err)
+		}
+		held = append(held, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the held outbox rows of %s: %w", project, err)
+	}
+	return held, nil
 }
 
 func (s *Postgres) WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error) {
@@ -648,9 +821,9 @@ func (s *Postgres) OutboxLeased(ctx context.Context, tx pgx.Tx, id int64, leaseT
 	return leased, nil
 }
 
-func (s *Postgres) ExpediteOutbox(ctx context.Context, tx pgx.Tx, id int64, now time.Time) error {
-	if _, err := tx.Exec(ctx, "update outbox set next_at = $2 where id = $1 and next_at > $2", id, now); err != nil {
-		return fmt.Errorf("expedite outbox row %d: %w", id, err)
+func (s *Postgres) ExpediteOutbox(ctx context.Context, tx pgx.Tx, row OutboxRow, now time.Time) error {
+	if _, err := tx.Exec(ctx, "update outbox set next_at = $2 where id = $1 and next_at > $2", row.ID, now); err != nil {
+		return fmt.Errorf("expedite outbox row %d: %w", row.ID, err)
 	}
 	return nil
 }
@@ -748,11 +921,10 @@ type roleRunIdentity struct {
 }
 
 // RoleRuns reads the claims and queued supervise rows of keys in two bounded queries, under the
-// caller's transaction snapshot. The outbox has no index on issue (only outbox_due, on next_at and
-// id), so the outbox query is a sequential scan of the pending rows, which finishing deletes; it
-// selects the selected issues' supervise rows with each payload's role and generation as text, and
-// decodes only the rows of keys' roles and generations. A row of another role is never decoded, so
-// one that does not decode fails only a read of its own role's run, as RoleRun's did.
+// caller's transaction snapshot. The outbox query reads the selected issues' supervise rows by the
+// outbox_issue index with each payload's role and generation as text, and decodes only the rows of
+// keys' roles and generations. A row of another role is never decoded, so one that does not decode
+// fails only a read of its own role's run, as RoleRun's did.
 func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (map[claim.Token]RoleRun, error) {
 	runs := make(map[claim.Token]RoleRun, len(keys))
 	if len(keys) == 0 {
@@ -849,8 +1021,8 @@ func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (
 // finished: due now, in flight, backing off after a failed attempt, or waiting behind an older
 // write for the same issue. Finishing deletes the row, so each one left is a write the outbox has
 // not finished; a write that reached Dispatch whose finish failed stays listed until its lease
-// expires and the rerun finishes it. Oldest first: the order ClaimDue writes one issue's statuses
-// in.
+// expires and the rerun finishes it. Oldest first: the order one issue's statuses run in
+// (outboxInOrder).
 func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error) {
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
 		where kind = $1 and split_part(issue, '-', 1) = $2 order by id`, string(OutboxKindDispatchStatus), project)
@@ -872,12 +1044,14 @@ func (s *Postgres) PendingStatusWrites(ctx context.Context, tx pgx.Tx, project s
 	return pending, nil
 }
 
-func scanOutbox(row scanner) (OutboxRow, error) {
+// scanOutbox reads one row of outboxColumns, then extra: the destinations of any columns the
+// statement selects after them.
+func scanOutbox(row scanner, extra ...any) (OutboxRow, error) {
 	var out OutboxRow
 	var kind string
 	var payload []byte
-	if err := row.Scan(&out.ID, &kind, &out.Issue, &payload, &out.Attempts, &out.NextAt, &out.LastError,
-		&out.CreatedAt, &out.LeaseToken, &out.LeaseUntil); err != nil {
+	if err := row.Scan(append([]any{&out.ID, &kind, &out.Issue, &payload, &out.Attempts, &out.NextAt, &out.LastError,
+		&out.CreatedAt, &out.LeaseToken, &out.LeaseUntil}, extra...)...); err != nil {
 		return OutboxRow{}, err
 	}
 	out.Kind = OutboxKind(kind)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -606,13 +607,14 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the fetch's own clone bound, workspace.FetchTimeout (30m), and nothing more:
+// ProvisionBound is the two clones' bounds together, workspace.FetchTimeout (30m) for
+// workspace-fetch's and workspace.CloneTimeout (30m) for workspace-init's, and nothing more:
 // provisioning from the feed onto the issue's own volume waits on no other pod, so no lock wait is
 // added to it. Pinned to a literal, since no test can wait the real bound out.
-func TestProvisionBoundIsTheFetchTimeoutExactly(t *testing.T) {
+func TestProvisionBoundIsBothClonesBoundsExactly(t *testing.T) {
 	g := newRig(t, nil)
-	if got := g.r.ProvisionBound(); got != 30*time.Minute {
-		t.Fatalf("ProvisionBound = %s, want %s", got, 30*time.Minute)
+	if got := g.r.ProvisionBound(); got != 60*time.Minute {
+		t.Fatalf("ProvisionBound = %s, want %s", got, 60*time.Minute)
 	}
 }
 
@@ -1496,16 +1498,25 @@ func supervisedSandboxMachine(
 }
 
 // restoredSandboxMachine is supervisedSandboxMachine over c, a claim as a daemon reads it back from
-// its store at boot, on the rig's runtime as it is now.
+// its store at boot, on the rig's runtime as it is now; its log is discarded.
 func restoredSandboxMachine(
 	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim,
+) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
+	t.Helper()
+	return loggedSandboxMachine(t, g, spec, c, io.Discard)
+}
+
+// loggedSandboxMachine is restoredSandboxMachine with the machine's log written to w, for a test
+// that reads what the machine says of a launch.
+func loggedSandboxMachine(
+	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim, w io.Writer,
 ) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
 	t.Helper()
 	store := &supervisedSandboxStore{claim: c}
 	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
 		Runtime: g.r, Conns: g.conns, Store: store, Specs: specs, Clock: sandboxMachineClock{},
-		Log:    slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		Log:    slog.New(slog.NewTextHandler(w, nil)),
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
 		Timeouts: supervise.Timeouts{
 			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour, LaunchBackoff: time.Millisecond,

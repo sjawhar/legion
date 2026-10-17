@@ -11,8 +11,9 @@ secret's owner and tier require it, and runs the command with each granted value
 environment. People and launchers use its other forms to log a machine in (`agent-secrets machine
 login`), register an agent session (`agent-secrets register --exec -- <agent>`), and inspect a
 session's grants (`agent-secrets self`). People manage the agent secrets themselves with
-`agent-secrets secret list|show|create|set|retag|delete|restore`, which calls AWS Secrets Manager
-under their own AWS sign-in and then asks the broker to reread each secret written, so the change
+`agent-secrets secret list|show|create|set|retag|delete|restore`, which calls the broker's own
+store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in and then asks the
+broker to reread each secret written, so the change
 is served at once; those forms need no helper and no session. From their own shell on a machine
 that runs the helper, they list and end their own machines' logins and their live grants with
 `agent-secrets machine list|revoke` and `agent-secrets grant list|revoke`, under that machine's

@@ -21,21 +21,27 @@ import (
 )
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
-// runs — the shared clone's own clone, a fetch, a jj operation, or a git configuration edit —
-// each bounded independently. The fetch's clone is the exception, under FetchTimeout instead
-// (below).
+// runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
+// two clones that copy the whole repository are the exceptions, under FetchTimeout and
+// CloneTimeout instead (below).
 const CommandTimeout = 5 * time.Minute
 
 // FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
-// enough for a large repository's slow but steadily progressing transfer to finish. Every other
-// provisioning command keeps CommandTimeout: this widens the one command whose duration follows
-// the repository's size and the network's speed, not a fixed step in provisioning.
+// enough for a large repository's slow but steadily progressing transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
+// CloneTimeout bounds the shared clone's own clone (ensureRepoClone): it copies and imports every
+// object of the repository, from a pod's feed or from GitHub, so its duration follows the
+// repository's size as the fetch's does. A 3.4 GB repository (816k objects, 421 refs) cloned from a
+// local feed in 253 s with four cores and 281 s with two on a 64-core devbox, using no more than
+// about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once a sandbox
+// slows it at all.
+const CloneTimeout = 30 * time.Minute
+
 // Command is one process the provisioner runs, each bounded independently of every other: most
-// hold the runner's own slow-command budget (RunChecked), and each attempt of the fetch's clone
-// holds what remains of FetchTimeout instead (Fetch) — never a budget shared across the whole
-// provisioning sequence.
+// hold the runner's own slow-command budget (RunChecked), each attempt of the fetch's clone holds
+// what remains of FetchTimeout instead (Fetch), and the shared clone's clone holds CloneTimeout
+// (ensureRepoClone) — never a budget shared across the whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string
@@ -481,7 +487,7 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 
 // runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
 // budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of
-// FetchTimeout for each attempt of its clone, that path's one caller.
+// FetchTimeout for each attempt of its clone, and ensureRepoClone with CloneTimeout.
 func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -520,7 +526,7 @@ func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) 
 	return checkedResult(argv, result, err)
 }
 
-// checkedResult is RunChecked's and Fetch's shared answer: a process that could not
+// checkedResult is the checked runners' shared answer: a process that could not
 // start, exited non-zero, or outlived its budget is an error naming the command. A clean exit
 // whose I/O draining outlived WaitDelay (exec.ErrWaitDelay) is not this: execRunner.Run already
 // reads that as the process's own true ExitCode, so it passes through the same as any other

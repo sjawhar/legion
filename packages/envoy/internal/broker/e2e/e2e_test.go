@@ -112,7 +112,7 @@ func newE2EServer(t *testing.T) *e2eServer {
 	}
 
 	reqMachine := &requests.Machine{
-		Store: st, Policy: current, Secrets: secrets.AWS{Client: local},
+		Store: st, Policy: current, Secrets: policytest.Store(local),
 		PendingTTL: 12 * time.Hour,
 		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
@@ -127,7 +127,7 @@ func newE2EServer(t *testing.T) *e2eServer {
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-		Policy: current, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+		Policy: current, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
 
 	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}
