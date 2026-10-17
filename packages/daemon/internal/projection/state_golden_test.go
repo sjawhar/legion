@@ -70,7 +70,7 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 			Token: controller, Project: "legion", Role: claim.RoleController,
 			State: supervise.StateReady, Session: "ses_controller", Locator: sandboxLocator(controller, "legion-legion-controller", "9d2a6f13-7c48-4e0b-b5a9-1f8e3d6c2a57", 1),
 		},
-	}, reports)
+	}, reports, admitted.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}

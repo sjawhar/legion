@@ -45,12 +45,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- Daemon API contract 29 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
+- Daemon API contract 30 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
   `legion state --json` carry each recorded issue's `repo` and `defaultBranch`, its pull request's
   `repo`, and the state's `repositories` (the project's mapping as the daemon serves it: `owners`,
   `mapped`, and `refused` with each left-out repository's `reason`). The strict reader refuses a
   state without `repositories`. Install this release with a `legion` built from the same commit.
-- Daemon API contract 28 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+- Daemon API contract 29 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
   tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
   issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
   first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
@@ -72,6 +72,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   permission and merges the pull request. Its new `merge-stalled` row covers a submission that
   ended because GitHub showed the pull request closed, or at another head, while the record still
   awaited READY's head, and GitHub's last change to it was more than 10 minutes old.
+- Daemon API contract 28 (LEGION-694): `legion state` carries `heldOutboxRows`, every due lifecycle
+  outbox row the daemon holds behind its issue's running lifecycle row — its id, kind, issue, how
+  long it has waited since it came due and the row it waits on — never null, and the plain
+  `legion state` names the held rows on one line beside the pending Dispatch status writes. (This
+  branch took 25, then 26 when LEGION-636 landed at 25, and contract 27 reserved 26 for it; but
+  pi-legion v10.3.5 and v10.3.6 were released declaring 27 without the field, so a daemon at 27
+  would pass their boot gate and they would refuse its state. 26 stays a gap no release declares,
+  and this branch takes 28, the number above the released one.) Install this release with a
+  `legion` built from the same commit.
 - Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
   names the repository's default branch (`--default-branch <name>`), which every branch and
   workspace now starts at, whatever its name (`develop`, `release/v7.1`, `release#stable`); an

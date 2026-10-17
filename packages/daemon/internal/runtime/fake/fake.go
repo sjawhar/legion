@@ -59,6 +59,10 @@ type Runtime struct {
 	InPod bool
 	// ProvisionGrace is what ProvisionBound answers: zero, the tmux answer, unless a test sets it.
 	ProvisionGrace time.Duration
+	// TryBound is what LaunchBound answers: zero, no bound stated, the tmux answer, unless a test
+	// sets it. The fake itself never ends a Spawn or Resume at it: a test that wants a try to run
+	// out scripts the error.
+	TryBound time.Duration
 	// Now stamps the observations the fake mints. NewRuntime sets it to time.Now; a test with a
 	// clock of its own replaces it before use.
 	Now func() time.Time
@@ -342,6 +346,12 @@ func (r *Runtime) ProvisionBound() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.ProvisionGrace
+}
+
+func (r *Runtime) LaunchBound() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.TryBound
 }
 
 // CleanupTree records its call and answers what FailCleanupTree set, nil by default.

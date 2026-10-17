@@ -1,4 +1,4 @@
--- 0044_issue_github_repository.up.sql — GitHub's spelling of an issue's repository.
+-- 0048_issue_github_repository.up.sql — GitHub's spelling of an issue's repository.
 --
 -- An issue's record keeps its repository in the spelling its workspace and shared clone were made
 -- under (repo), which can be a clone's that differs from GitHub's in case. GitHub's own spelling

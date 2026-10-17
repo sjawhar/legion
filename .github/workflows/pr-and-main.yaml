@@ -299,5 +299,14 @@ jobs:
         run: go test -count=1 ./...
         working-directory: packages/daemon
 
+      # The outbox's lane registry, lease renewal and held clock are the daemon's first goroutines
+      # that share state with the intake's commit hooks and the API, so the packages the lanes and
+      # their store live in run again under the race detector. The detector needs cgo, which the
+      # runners have gcc for and the pod a worker runs in does not, so this is the one place it
+      # runs. The lane tests hold a fake clock, so they are deterministic under it.
+      - name: Test the outbox's lanes and store under the race detector
+        run: go test -count=1 -race ./internal/daemon/ ./internal/record/
+        working-directory: packages/daemon
+
       - name: Stage 1 live proof
         run: bash scripts/e2e/stage1-skeleton.sh

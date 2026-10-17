@@ -960,7 +960,7 @@ func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
 			return false
 		}
 		defer tx.Rollback(context.Background())
-		state, err := projection.Project(context.Background(), tx, record.NewStore(), "CAPTURE", nil, nil)
+		state, err := projection.Project(context.Background(), tx, record.NewStore(), "CAPTURE", nil, nil, time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC))
 		if err != nil {
 			return false
 		}

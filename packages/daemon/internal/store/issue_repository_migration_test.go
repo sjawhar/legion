@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// A record written before 0046 carries no repository. Migration 0046 adds the repository and its
+// A record written before 0047 carries no repository. Migration 0047 adds the repository and its
 // default branch empty, for the next boot to fill from Dispatch and GitHub (the daemon's
 // backfillRepositories), and the record store refuses to write an empty one from then on.
-func TestIssuesPredating0046MigrateWithNoRepository(t *testing.T) {
+func TestIssuesPredating0047MigrateWithNoRepository(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 45)
+	migrateThrough(t, store, 46)
 	if _, err := store.Pool().Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'planning', 1, 'in_progress', 'A', 1)`); err != nil {
 		t.Fatal(err)
@@ -32,14 +32,14 @@ func TestIssuesPredating0046MigrateWithNoRepository(t *testing.T) {
 	}
 }
 
-// A record written before 0047 carries its repository in its own spelling and none of GitHub's.
-// Migration 0047 adds GitHub's spelling empty, for the next boot to read from GitHub before it
+// A record written before 0048 carries its repository in its own spelling and none of GitHub's.
+// Migration 0048 adds GitHub's spelling empty, for the next boot to read from GitHub before it
 // subscribes to the repository's events (the daemon's backfillRepositories): SQL cannot know it,
 // since the record's spelling may be a clone's and differ from GitHub's in case.
-func TestIssuesPredating0047MigrateWithNoGitHubSpelling(t *testing.T) {
+func TestIssuesPredating0048MigrateWithNoGitHubSpelling(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 46)
+	migrateThrough(t, store, 47)
 	if _, err := store.Pool().Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'root', 'planning', 1, 'in_progress', 'A', 1, 'acme/widgets', 'main')`); err != nil {
 		t.Fatal(err)

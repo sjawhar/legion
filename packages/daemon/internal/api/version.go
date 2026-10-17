@@ -176,15 +176,28 @@ package api
 // A 24 plugin's strict reader refuses a state whose deployment rows carry `source`, so the boot
 // gate and `legion probe-image` refuse the mixed pair.
 //
-// 27: sjawhar/legion#1986 (the base branch) -- a pod's `workspace-init provision` command names the
-// repository's default branch, `--default-branch <name>`, which it requires: an image whose
-// `legion` was built before 27 exits 2 on the unknown flag in every new issue pod's init container,
-// so the daemon's image probe, which holds the image's pi-legion to this number, refuses such an
-// image at boot instead. (26 is sjawhar/legion#1999's, open when this was taken; a
-// release declaring 26 carries no `--default-branch`, so this branch takes the number above it, as
-// the collision note says.)
+// 26: reserved for sjawhar/legion#1999 (LEGION-694) by 27 below while that branch was open; no
+// release declares it, since that branch landed at 28 once releases had declared 27 without its
+// field. A gap, left so the history reads as it happened.
 //
-// 28: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
+// 27: sjawhar/legion#1986 -- a pod's `workspace-init provision` command names the repository's
+// default branch, `--default-branch <name>`, which it requires: an image whose `legion` was built
+// before 27 exits 2 on the unknown flag in every new issue pod's init container, so the daemon's
+// image probe, which holds the image's pi-legion to this number, refuses such an image at boot
+// instead. (26 was sjawhar/legion#1999's, open when this was taken; a release declaring 26 would
+// carry no `--default-branch`, so this branch took the number above it, as the collision note says.)
+//
+// 28: LEGION-694 (sjawhar/legion#1999) -- api.State gains `heldOutboxRows`, every due lifecycle
+// outbox row held behind its issue's running lifecycle row (record.Store.HeldRows), each with its
+// id, kind, issue, how long it has waited and the row it waits on. Never null, so a plugin built
+// before it refuses the state, and the bump is why the two never meet. (This branch took 25, then
+// 26 when LEGION-636 landed at 25, and 27 above reserved 26 for it; but pi-legion v10.3.5 and
+// v10.3.6 were released from main declaring 27 without `heldOutboxRows`, so a daemon of this branch
+// at 27 would pass the boot gate against a plugin whose strict reader then refuses the state. The
+// release that first declares a number must carry your shapes: it does not, so this branch takes
+// the number above it, as the collision note says.)
+//
+// 29: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
 // directory per GitHub owner of the project under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's
 // owner's (write) and every other owner's read-only, with LEGION_GH_PATH the real gh the `gh`
 // wrapper first on PATH (`legion gh`; `/opt/legion/bin/gh` in the image) runs; every shared
@@ -192,15 +205,15 @@ package api
 // Secret's gh keys are per owner (`github-hosts-<owner>`, `github-config-<owner>`,
 // `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
 // `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
-// `expiresAt` in place of one `hosts` and `config`. An image built at 27 has neither the wrapper
-// nor the two commands, so the image probe refuses it.
+// `expiresAt` in place of one `hosts` and `config`. An image built before 29 has neither the
+// wrapper nor the two commands, so the image probe refuses it.
 //
-// 29: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
+// 30: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
 // targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
 // when the daemon first records it: `GET /legion/v1/state` and `read_record` answer `repo` and
 // `defaultBranch` on every issue and `repo` on its pull request, and the state answers
 // `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
 // repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
-// plugin at 28 reads the state with a strict schema that knows none of these fields, so it
+// plugin at 29 reads the state with a strict schema that knows none of these fields, so it
 // refuses the state.
-const DaemonAPIVersion = 29
+const DaemonAPIVersion = 30

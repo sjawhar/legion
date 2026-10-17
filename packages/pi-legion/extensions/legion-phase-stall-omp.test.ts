@@ -82,6 +82,7 @@ const STALL_STATE = {
     },
   },
   pendingStatusWrites: [],
+  heldOutboxRows: [],
   strandedClaims: [],
   capabilities: [],
   repositories: {

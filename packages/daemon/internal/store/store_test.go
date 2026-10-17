@@ -868,7 +868,7 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 				{lingering, "", record.PullRequestOpen},
 				{merging, "", record.PullRequestOpen},
 			} {
-				// The seed runs at a schema before 0046, which the record store's PutIssue writes
+				// The seed runs at a schema before 0047, which the record store's PutIssue writes
 				// beyond, so it writes the columns that schema has.
 				if _, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, linger_until, last_dispatch_seq)
 					values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0)`,
