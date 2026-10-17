@@ -709,33 +709,28 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	}
 }
 
-// The shared clone's clone copies the whole repository, so its duration follows the repository's
-// size as the fetch's clone does: it runs under CloneTimeout, never the slow-command budget every
-// other provisioning command keeps. From a pod's feed it is the one command that copies and imports
-// every object: a 3.4 GB repository took 4.2 to 4.7 minutes on a 64-core devbox, past the
-// 5-minute budget once a sandbox slows it.
+// The shared clone's clone runs under CloneTimeout; every other provisioning command keeps the
+// runner's slow-command budget.
 func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
 	run := newLocalRunner(t)
-	fetch := fetchRequest(t)
-	if _, err := Fetch(context.Background(), run, fetch); err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
+	req := feedRequest(t, run, provisionRequest(t))
 	before := len(run.Calls())
-	if _, err := Provision(context.Background(), run, Request{
-		StateDir: filepath.Join(t.TempDir(), "state"), Repo: ghrepo.MustParse("acme/widgets"), Issue: "WIDGETS-42", DefaultBranch: "main",
-		CredentialHelper: GitHubCredentialHelper, Source: FromFeed(fetch.Feed),
-		Log: func(line string) { t.Logf("provisioning logged: %s", line) },
-	}); err != nil {
+	if _, err := Provision(context.Background(), run, req); err != nil {
 		t.Fatalf("provision from the feed: %v", err)
 	}
+	clones := 0
 	for _, call := range run.Calls()[before:] {
 		want := testTimeout
 		if isClone(call.Argv) {
+			clones++
 			want = CloneTimeout
 		}
 		if call.Timeout != want {
 			t.Errorf("%q ran under %s, want %s", call.Argv, call.Timeout, want)
 		}
+	}
+	if clones != 1 {
+		t.Errorf("provisioning ran %d shared-clone clones, want 1", clones)
 	}
 }
 

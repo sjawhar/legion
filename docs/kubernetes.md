@@ -2117,9 +2117,9 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   `worker_boot_timeout_seconds`, the image pull's bound; from then on, `worker_boot_timeout_seconds`
   counted from the last moment it saw one running, and never longer than that plus
   `workspace.FetchTimeout` and `workspace.CloneTimeout` together (60 min;
-  `sandbox.Runtime.ProvisionBound`) from the first
-  (`awaitRoleLauncher`, `internal/runtime/sandbox/relaunch.go`). The fetch started no later than
-  that first sighting and the feed's clone after the fetch ended, so both end inside the bound, and
+  `sandbox.Runtime.ProvisionBound`) from the first (`awaitRoleLauncher`,
+  `internal/runtime/sandbox/relaunch.go`). The fetch started no later than that first sighting and
+  `workspace-init`'s clone of the feed after the fetch ended, so both end inside the bound, and
   `workspace-init`'s other commands then have at least the boot
   timeout. A pod that provisions for twenty minutes is one launch, not a launch failure per boot
   timeout, and a launcher that has not connected the boot timeout after provisioning ended still
@@ -2129,8 +2129,8 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   refuses at once and about 12½ minutes when every connect times out (127 s each), after which the
   fetch fails and the launch ends; each relaunch of the claim then holds its machine as long again,
   and an outbox row that reads that claim waits on it. A transfer that keeps making progress can
-  hold the launch for the whole 30 minutes, and the feed's clone of a large repository for up to
-  30 more. Once the launch returns, the boot watchdog
+  hold the launch for the whole 30 minutes, and `workspace-init`'s clone of the feed, for a large
+  repository, up to 30 more. Once the launch returns, the boot watchdog
   re-arms on the claim, bounded by its registration deadline
   (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
   6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
@@ -2221,10 +2221,9 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   /var/run/legion/feed`: a `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
   reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the issue's volume nor the config home. Provisioning's other commands are bounded by
-  `workspace.CommandTimeout` (5 minutes, fixed), but this clone's duration follows the
-  repository's size and the network's speed, not a fixed step in provisioning: it runs under
-  `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A clone that
+  It mounts neither the issue's volume nor the config home. This clone's duration follows the
+  repository's size and the network's speed, so it runs under `workspace.FetchTimeout` (30
+  minutes), one bound for every attempt of it, rather than `workspace.CommandTimeout` (5 minutes). A clone that
   fails transiently is cloned again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
   5xx, or a connection that could not be made or broke (connect, DNS, reset, timeout, empty reply,

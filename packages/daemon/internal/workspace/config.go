@@ -27,10 +27,7 @@ import (
 const CommandTimeout = 5 * time.Minute
 
 // FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
-// enough for a large repository's slow but steadily progressing transfer to finish. Every other
-// provisioning command but the shared clone's clone keeps CommandTimeout: this widens the one
-// command whose duration follows the repository's size and the network's speed, not a fixed step
-// in provisioning.
+// enough for a large repository's slow but steadily progressing transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
 // CloneTimeout bounds the shared clone's own clone (ensureRepoClone): it copies and imports every
@@ -529,7 +526,7 @@ func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) 
 	return checkedResult(argv, result, err)
 }
 
-// checkedResult is RunChecked's and Fetch's shared answer: a process that could not
+// checkedResult is the checked runners' shared answer: a process that could not
 // start, exited non-zero, or outlived its budget is an error naming the command. A clean exit
 // whose I/O draining outlived WaitDelay (exec.ErrWaitDelay) is not this: execRunner.Run already
 // reads that as the process's own true ExitCode, so it passes through the same as any other
