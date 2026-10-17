@@ -65,64 +65,31 @@ set_env_value() {
   fi
 }
 
-# database_url_split reads a postgres:// DATABASE_URL into db_url, the URL without its password,
-# and db_password, that password percent-decoded. The database clients below get db_url as their
-# argument and the password as PGPASSWORD, an environment variable, so no process's arguments
-# carry a credential: a container's processes are the host's, and /proc/<pid>/cmdline is
-# world-readable on a shared host. It prints nothing, and fails on any URL whose password it
-# cannot be sure of keeping off the clients' arguments:
-#   - not postgres:// or postgresql:// (a keyword/value connection string);
-#   - an @ after the first / or ?: libpq reads the credentials up to the first @ before the first
-#     /, a raw ? included, so this split and libpq's would disagree on where the password ends;
-#   - a query key holding a % (libpq decodes one, so `pass%77ord` is `password`), or a query key
-#     `password` or `sslpassword` in any case;
-#   - a password that is not percent-encoded, which psql would quote back in its error.
+# database_url_split reads DATABASE_URL into db_url, the URL without its password, and db_password,
+# that password percent-decoded. The database clients below get db_url as their argument and the
+# password as PGPASSWORD, an environment variable, so no process's arguments carry a credential:
+# a container's processes are the host's, and /proc/<pid>/cmdline is world-readable on a shared
+# host. It accepts exactly one shape and fails on every other, printing nothing:
+#
+#   postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?<key>=<value>[&<key>=<value>]…]
+#
+# <user> and <database> are [A-Za-z0-9._-]+; <password> is unreserved characters
+# ([A-Za-z0-9._~-]) and %XX escapes only, so a raw @ : / ? # [ ] or space in it is refused and has
+# to be percent-encoded; <host> is one name or IPv4 address, [A-Za-z0-9.-]+ (no brackets, no
+# second host, no socket path); <port> is digits; <key> is sslmode, connect_timeout or
+# application_name and <value> is [A-Za-z0-9._-]+. In that shape every reading of the URL, the
+# deployer's, libpq's and pgx's, puts the password in the same place, and nowhere else.
 database_url_split() {
-  local url="$1"
-  local scheme rest authority tail query param key userinfo password
-  local percent_encoded='^([^%]|%[0-9A-Fa-f]{2})*$'
-  case "$url" in
-    postgres://* | postgresql://*) ;;
-    *) return 1 ;;
-  esac
-  scheme="${url%%://*}"
-  rest="${url#*://}"
-  authority="${rest%%[/?]*}"
-  tail="${rest:${#authority}}"
-  if [[ "$tail" == *@* ]]; then
+  local value='[A-Za-z0-9._-]+'
+  local key='(sslmode|connect_timeout|application_name)'
+  local grammar="^(postgres|postgresql)://($value)(:(([A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+))?@([A-Za-z0-9.-]+)(:[0-9]+)?/($value)(\\?$key=$value(&$key=$value)*)?\$"
+  local password
+  if [[ ! "$1" =~ $grammar ]]; then
     return 1
   fi
-  query=""
-  if [[ "$tail" == *\?* ]]; then
-    query="${tail#*\?}"
-  fi
-  while [[ -n "$query" ]]; do
-    param="${query%%&*}"
-    if [[ "$query" == *\&* ]]; then
-      query="${query#*&}"
-    else
-      query=""
-    fi
-    key="${param%%=*}"
-    key="${key,,}"
-    if [[ "$key" == *%* || "$key" == password || "$key" == sslpassword ]]; then
-      return 1
-    fi
-  done
-  db_url="$url"
-  db_password=""
-  if [[ "$authority" == *@* ]]; then
-    userinfo="${authority%@*}"
-    db_url="$scheme://${userinfo%%:*}@${authority##*@}$tail"
-    if [[ "$userinfo" == *:* ]]; then
-      password="${userinfo#*:}"
-      if [[ ! "$password" =~ $percent_encoded ]]; then
-        return 1
-      fi
-      password="${password//\\/\\\\}"
-      printf -v db_password '%b' "${password//%/\\x}"
-    fi
-  fi
+  db_url="${BASH_REMATCH[1]}://${BASH_REMATCH[2]}@${BASH_REMATCH[6]}${BASH_REMATCH[7]}/${BASH_REMATCH[8]}${BASH_REMATCH[9]}"
+  password="${BASH_REMATCH[4]}"
+  printf -v db_password '%b' "${password//%/\\x}"
 }
 
 # pg_client runs shell command $2 in the pg_dump image, bounded at $1 seconds (0: unbounded), with
@@ -276,7 +243,7 @@ deploy() {
     return 1
   fi
   if ! database_url_split "$databaseUrl"; then
-    log "DATABASE_URL in $COMPOSE_ENV is not a postgres:// URL with its password percent-encoded in the userinfo and none in the query, so the deployer cannot keep the password off its database clients' process arguments; not deploying $sha"
+    log "DATABASE_URL in $COMPOSE_ENV is not the one form the deployer accepts, postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?sslmode=|connect_timeout=|application_name=…], with the password's reserved characters percent-encoded (packages/envoy/deploy/README.md, \"Auto-deployer\"), the one form in which it can keep the password off its database clients' process arguments; not deploying $sha"
     return 1
   fi
   dispatchPort=$(env_value DISPATCH_PORT)

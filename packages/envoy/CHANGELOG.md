@@ -410,14 +410,18 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
-- **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) refuses a
-  `DATABASE_URL` whose password it could not keep off its database clients' process arguments: a
-  keyword/value connection string, an `@` after the first `/` or `?` (a raw `/` or `?` in the
-  password), a `password` or `sslpassword` query key or any query key holding a `%`, or a password
-  with a malformed `%` escape. Percent-encode the password in the userinfo instead. Its `pg_dump`
-  and `psql` take the URL without the password as their argument and the password as
-  `PGPASSWORD`, run under `docker run --init` so a timeout ends them, and `psql`'s stderr, which
-  can quote the connection, is dropped.
+- **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
+  in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
+  optional query of `sslmode`, `connect_timeout` and `application_name`. The user, database and
+  query values are letters, digits, `.`, `_` and `-`, and the host is one name or IPv4 address.
+  The password is unreserved characters and percent-escapes, so its `@ : / ? # [ ]`, `%` and spaces
+  must be percent-encoded. Every other form is refused before anything runs: a keyword/value
+  string, a bracketed, IPv6, multi-host or socket host, any other query key, a password in the
+  query. The refusal states the accepted form and never prints the URL. In that form the deployer,
+  libpq and pgx all read the password from the same place, so its `pg_dump` and `psql` get the
+  URL without the password as their argument and the password as `PGPASSWORD` alone. They run
+  under `docker run --init` so a timeout ends them, and `psql`'s stderr, which can quote the
+  connection, is dropped.
 - The Dispatch auto-deployer no longer rolls a failed deploy back to the previous image once that
   deploy has moved the database's schema. It records the schema version the deployed tag runs
   against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys. When a deploy fails, it stops

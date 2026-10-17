@@ -128,19 +128,27 @@ process's arguments carry the password, the containers' included, which are host
 processes too. `psql`'s stderr is dropped, since its diagnostics can quote the
 connection, and a failed read is reported by its exit status alone.
 
-The deployer refuses, before anything runs, a `DATABASE_URL` whose password it
-could not be sure of keeping off those arguments:
+The deployer accepts `DATABASE_URL` in exactly one form, and refuses every other
+before anything runs, with a log line that states the form and never the URL:
 
-- one that is not a `postgres://` or `postgresql://` URL, such as a keyword/value
-  connection string;
-- one with an `@` after the first `/` or `?`: a raw `/` or `?` in the password,
-  where libpq reads the credentials past the point the deployer would stop;
-- one whose query has a `password` or `sslpassword` key, in any case, or any key
-  holding a `%`, which libpq would decode (`pass%77ord` is `password`);
-- one whose password holds a `%` that does not begin a two-digit hex escape.
+```text
+postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?<key>=<value>[&<key>=<value>]…]
+```
 
-Percent-encode the password's `/`, `?` and `%` (`%2F`, `%3F`, `%25`); raw `@`,
-`:`, `#` and `&` are accepted.
+- `<user>` and `<database>` are letters, digits, `.`, `_` and `-`.
+- `<password>` is letters, digits, `.`, `_`, `~` and `-`, and percent-escapes. So a
+  password's `@ : / ? # [ ]`, `%`, a space and any other character must be
+  percent-encoded (`%40 %3A %2F %3F %23 %5B %5D %25 %20`).
+- `<host>` is one host name or IPv4 address: no brackets or IPv6 literal, no
+  second host, no socket path.
+- `<port>` is digits.
+- `<key>` is `sslmode`, `connect_timeout` or `application_name`, and `<value>` is
+  letters, digits, `.`, `_` and `-`. A password in the query is refused, under any
+  spelling.
+
+In that form the deployer, libpq and Dispatch's driver (pgx) all read the same
+password from the same place, so the deployer can be sure it hands that password
+to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in it.
 
 ## Listener configuration
 
@@ -190,7 +198,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 
 | Var | Required | Notes |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database), as `postgres://<user>:<password>@<host>:<port>/<database>?<options>` with the password percent-encoded and none in the options: the auto-deployer refuses any other shape (Auto-deployer, above). The compose runs no Postgres of its own. |
+| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database), as `postgres://<user>:<password>@<host>:<port>/<database>?sslmode=require`, with the password percent-encoded. The auto-deployer accepts only that form, with `connect_timeout` and `application_name` the other query keys it allows, and refuses any other (Auto-deployer, above). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; Dispatch's client at the sign-in issuer (the sign-in pool's app client, or the Google web client) must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |

@@ -193,7 +193,7 @@ chmod +x "$bin/jj" "$bin/docker" "$bin/curl" "$tools/psql" "$tools/pg_dump"
 
 deploy_once() {
   PATH="$bin:$PATH" AUTODEPLOY_TEST_LOG="$log" AUTODEPLOY_TEST_ARGV="$argv" AUTODEPLOY_TEST_SCHEMA="$schema" \
-    AUTODEPLOY_TEST_TOOLS="$tools" AUTODEPLOY_TEST_PASSWORD="${test_password:-$password}" REPO="$repo" COMPOSE_DIR="$compose" \
+    AUTODEPLOY_TEST_TOOLS="$tools" AUTODEPLOY_TEST_PASSWORD="${test_password-$password}" REPO="$repo" COMPOSE_DIR="$compose" \
     BACKUPS="$backups" COMPOSE_PROJECT=dispatch-test IMAGE=example.test/dispatch \
     "$(dirname "$0")/autodeploy.sh" --once 2>&1
 }
@@ -315,34 +315,63 @@ if [[ "$output" != *"could not read the schema version"*"not deploying new-image
   fail 'deployer did not stop before deploying when the schema version was unreadable'
 fi
 
-# A password that is not percent-encoded is refused before any client runs, without being printed.
-fresh_env 'postgres://dispatch:review-secret%oops@db.test:5432/dispatch'
-if output=$(deploy_once); then
-  fail 'deployer deployed with a DATABASE_URL whose password is not percent-encoded'
-fi
-no_secret 'the malformed URL'
-if [[ "$output" != *"DATABASE_URL"*"not deploying new-image"* ]] || [[ -s "$log" || -s "$argv" ]]; then
-  fail 'deployer did not refuse the malformed DATABASE_URL before running anything'
-fi
-
-# A URL whose password the deployer cannot keep off the clients' arguments is refused the same
-# way: a raw ? or / in the password, where libpq's credentials run past the point the deployer's
-# would stop, and a password in the query, however its key is spelled. Each is a URL libpq would
-# connect with, the password it would use given to the fake, so a deployer that let one through
-# would put that password on a client's command line.
+# The deployer accepts one URL shape and refuses every other before any client starts, so no
+# password in a refused URL can reach a process's arguments, and the refusal never prints the URL.
+# These are every shape the review gates found getting past an earlier check, and the other shapes
+# outside the grammar: a malformed or raw-reserved password, a password in the query under any
+# spelling, a bracketed, multi-host or unix-socket host, an @ in the path or query, and a
+# keyword/value string. Most are URLs pgx or libpq would connect with; the fake is given the
+# password libpq would read, so a deployer that let one through would show it in some client's
+# arguments.
 for case in \
+  'review-secret|postgres://dispatch:review-secret%oops@db.test:5432/dispatch' \
   's?cret-canary|postgres://dispatch:s?cret-canary@db.test:5432/dispatch?sslmode=require' \
   's/cret-canary|postgres://dispatch:s/cret-canary@db.test:5432/dispatch' \
+  's|postgres://dispatch:s@cret-canary@db.test:5432/dispatch' \
+  's cret-canary|postgres://dispatch:s cret-canary@db.test:5432/dispatch' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require&password=review-secret' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?sslpassword=review-secret' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?pass%77ord=review-secret' \
-  'review-secret|postgres://dispatch@db.test:5432/dispatch?sslpassword=review-secret'; do
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require& password=review-secret' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?password =review-secret' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require&sslpassword =review-secret' \
+  'review-secret|postgres://dispatch@[::1?x]:5432,db.test:5432/dispatch?password=review-secret&sslmode=require' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@[::1]:5432/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db1.test:5432,db2.test:5432/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@%2Fvar%2Frun%2Fpostgresql/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dis@patch' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?application_name=a@b&password=review-secret' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?target_session_attrs=any' \
+  'review-secret|host=db.test user=dispatch password=review-secret dbname=dispatch'; do
   fresh_env "${case#*|}"
   if output=$(test_password="${case%%|*}" deploy_once); then
     fail "deployer deployed with ${case#*|}"
   fi
   no_secret "${case#*|}"
-  if [[ "$output" != *"DATABASE_URL"*"not deploying new-image"* ]] || [[ -s "$log" || -s "$argv" ]]; then
-    fail "deployer did not refuse ${case#*|} before running anything"
+  if [[ "$output" != *"DATABASE_URL"*"not deploying new-image"* ]] || [[ "$output" == *"${case#*|}"* ]] ||
+    [[ -s "$log" || -s "$argv" ]]; then
+    fail "deployer did not refuse ${case#*|} before running anything, without printing it"
+  fi
+done
+
+# The accepted shape splits as intended: each allowed query key, a URL with no port, and one with
+# no password at all. The clients get the URL without its password as their last argument, the
+# password reaches the fake libpq only as PGPASSWORD, and the deploy goes on (here to the origin
+# check's rollback).
+for case in \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?sslmode=require&connect_timeout=10&application_name=dispatch-deploy|postgres://dispatch@db.test:5432/dispatch?sslmode=require&connect_timeout=10&application_name=dispatch-deploy' \
+  'Az09._~-:/?#[] @|postgresql://dispatch.ro:Az09._~-%3A%2F%3F%23%5B%5D%20%40@db-1.internal.example/dispatch_prod|postgresql://dispatch.ro@db-1.internal.example/dispatch_prod' \
+  '|postgres://dispatch@db.test/dispatch|postgres://dispatch@db.test/dispatch'; do
+  IFS='|' read -r case_password case_url case_client_url <<<"$case"
+  fresh_env "$case_url"
+  if output=$(test_password="$case_password" deploy_once); then
+    fail "deployer did not reach the origin check with $case_url"
+  fi
+  no_secret "$case_url"
+  if [[ "$output" != *"rolling back to old-image"* ]] ||
+    [[ $(awk -v url="$case_client_url" '$NF == url' "$argv" | wc -l) -ne 3 ]] ||
+    { [[ -n "$case_password" ]] && grep -qF -- "$case_password" "$argv"; }; then
+    fail "deployer did not hand the clients $case_client_url, with the password as PGPASSWORD alone"
   fi
 done
 
