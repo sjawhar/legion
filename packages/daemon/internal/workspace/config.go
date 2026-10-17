@@ -22,26 +22,32 @@ import (
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
-// two clones that copy the whole repository are the exceptions, under FetchTimeout and
-// CloneTimeout instead (below).
+// exceptions are the fetch's transfers and the checks of what the repository cache streamed, under
+// FetchTimeout, and the shared clone's own clone, under CloneTimeout (both below).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
-// enough for a large repository's slow but steadily progressing transfer to finish.
+// FetchTimeout is the one bound for everything whose duration follows the repository's size and
+// the network's speed in a fetch, once it may start: every attempt of a transfer from GitHub, and,
+// for a feed filled from the repository cache, the cache's stream and its verification too, all
+// together (Fetch). It is long enough for a large repository's slow but steadily progressing
+// transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
-// CloneTimeout bounds the shared clone's own clone (ensureRepoClone): it copies and imports every
-// object of the repository, from a pod's feed or from GitHub, so its duration follows the
-// repository's size as the fetch's does. A 3.4 GB repository (816k objects, 421 refs) cloned from a
-// local feed in 253 s with four cores and 281 s with two on a 64-core devbox, using no more than
-// about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once a sandbox
-// slows it at all.
+// CloneTimeout is the one bound the shared clone's own clone (ensureRepoClone) gives the steps
+// whose duration follows the repository's size, all together, as the fetch's share FetchTimeout:
+// from GitHub, a `jj git clone` that copies and imports every object; from a pod's feed, a `git
+// clone --shared` that copies no object but checks out the working tree, then jj's import of every
+// commit, each given what remains. A 3.4 GB repository (816k objects, 421 refs) cloned from a local
+// feed by `jj git clone` in 253 s with four cores and 281 s with two on a 64-core devbox, using no
+// more than about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once
+// a sandbox slows it at all.
 const CloneTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
-// hold the runner's own slow-command budget (RunChecked), each attempt of the fetch's clone holds
-// what remains of FetchTimeout instead (Fetch), and the shared clone's clone holds CloneTimeout
-// (ensureRepoClone) — never a budget shared across the whole provisioning sequence.
+// hold the runner's own slow-command budget (RunChecked), each of the fetch's transfers and checks
+// holds what remains of FetchTimeout instead (Fetch), and each size-following step of the shared
+// clone's clone holds what remains of CloneTimeout (ensureRepoClone) — never a budget shared
+// across the whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string
@@ -595,31 +601,39 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	return err
 }
 
-// GitHubCredentialHelper is the `credential.helper` every shared clone gets: `gh auth
-// git-credential`, the helper `gh auth setup-git` itself writes, which answers git from the
-// hosts.yml under the process's GH_CONFIG_DIR (ghconfig.HostsFile). The `gh` in it is resolved on
-// PATH when git runs it, so the one it reaches is the process's own, and the value names no path
-// of this machine's that the clone would carry to another.
-const GitHubCredentialHelper = "!gh auth git-credential"
+// GitHubCredentialHelper is the `credential.helper` every shared clone gets: `legion
+// git-credential`, which answers git from the hosts.yml of the owner the repository's path names
+// (the owner's directory of LEGION_GH_OWNERS_DIR, and nothing else; ghconfig.HostsFile), since
+// every shared clone also sets credential.useHttpPath so git passes that path. The `legion` in it
+// is resolved on PATH when git runs it, so the one it reaches is the process's own (a pane's
+// launcher directory, the image's /opt/legion/bin), and the value names no path of this machine's
+// that the clone would carry to another.
+const GitHubCredentialHelper = "!legion git-credential"
 
-// ConfigureRepositoryCredential brings the shared clone's helper to GitHubCredentialHelper
-// (configureRepositoryCredential) and reports whether it wrote anything: the daemon runs it at
-// every boot over a clone an earlier daemon provisioned, whose helper may still name that daemon's
-// `legion credential`, so a pane's git answers from its GH_CONFIG_DIR as a clone provisioned now
-// does. A clone whose two helper keys already end in GitHubCredentialHelper is left as it is, so
-// the ordinary boot runs one read per key rather than five writes, and logs no rewrite.
+// ConfigureRepositoryCredential brings the shared clone's helper to GitHubCredentialHelper and its
+// credential.useHttpPath to true (configureRepositoryCredential) and reports whether it wrote
+// anything: the daemon runs it at every boot over a clone an earlier daemon provisioned, whose
+// helper may still name that daemon's (`legion credential`, or `gh auth git-credential`, which
+// answers every repository from one owner's files), so a pane's git answers from the owner's gh
+// files as a clone provisioned now does. A clone whose two helper keys already end in
+// GitHubCredentialHelper and whose useHttpPath is true is left as it is, so the ordinary boot runs
+// one read per key rather than six writes, and logs no rewrite.
 func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir string) (bool, error) {
 	gitDir := cloneDir + "/.git"
 	current := true
-	for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
+	for _, check := range []struct{ key, want string }{
+		{"credential.helper", GitHubCredentialHelper},
+		{"credential.https://github.com.helper", GitHubCredentialHelper},
+		{"credential.useHttpPath", "true"},
+	} {
 		// `git config --get-all` exits 1 for a key the clone never set, which is as stale as an old
 		// helper; a run that failed to start is an error.
-		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", key}, nil, "")
+		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", check.key}, nil, "")
 		if err != nil {
-			return false, fmt.Errorf("read the shared clone's %s: %w", key, err)
+			return false, fmt.Errorf("read the shared clone's %s: %w", check.key, err)
 		}
 		values := strings.Split(strings.TrimRight(result.Stdout, "\n"), "\n")
-		if result.ExitCode != 0 || values[len(values)-1] != GitHubCredentialHelper {
+		if result.ExitCode != 0 || values[len(values)-1] != check.want {
 			current = false
 		}
 	}
@@ -632,8 +646,9 @@ func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir str
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
 // one-shot clone/fetch environment has been removed: the clone's own credential.helper, and the
 // one for github.com, each reset and then set to credentialHelper, with credential.interactive
-// off so a helper that answers nothing fails rather than prompts. This ports the helper writes in
-// workspace.ts's provisionIssueWorkspace.
+// off so a helper that answers nothing fails rather than prompts, and credential.useHttpPath on so
+// git tells the helper which repository it asks for, whose owner picks the token. This ports the
+// helper writes in workspace.ts's provisionIssueWorkspace.
 func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, credentialHelper string) error {
 	gitDir := cloneDir + "/.git"
 	for _, argv := range [][]string{
@@ -642,6 +657,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 		{"git", "--git-dir=" + gitDir, "config", "--replace-all", "credential.https://github.com.helper", ""},
 		{"git", "--git-dir=" + gitDir, "config", "--add", "credential.https://github.com.helper", credentialHelper},
 		{"git", "--git-dir=" + gitDir, "config", "credential.interactive", "false"},
+		{"git", "--git-dir=" + gitDir, "config", "credential.useHttpPath", "true"},
 	} {
 		if _, err := RunChecked(ctx, run, argv, nil, ""); err != nil {
 			return err

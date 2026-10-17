@@ -76,6 +76,8 @@ function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
     project: "CORE",
     rank: "U",
     route: null,
+    repo: null,
+    resolved_repo: null,
     status: "todo",
     title: row.issue?.title ?? "",
     updated_at: row.created_at,

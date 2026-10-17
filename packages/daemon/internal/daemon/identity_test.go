@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,9 +16,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// A pane commits as its role's App: the launch carries the six git identity variables every worker
-// pane gets, nothing else of the Apps, and a launch whose identity cannot be resolved does not
-// happen.
+// A pane commits as its role's App, minted for the owner of the repository its issue's record names:
+// the launch carries the six git identity variables every worker pane gets, nothing else of the
+// Apps, and a launch whose identity cannot be resolved does not happen. A launch on no repository
+// (an issue the workflow does not record) commits nowhere and asks for no identity.
 func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	stateDir := t.TempDir()
 	token, err := claim.NewToken("s1", "S1-1", claim.RoleImplementer)
@@ -32,24 +34,31 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
-	s := specs{stateDir: stateDir, project: "s1", identity: func(_ context.Context, role claim.Role) (runtime.GitIdentity, error) {
-		if role != claim.RoleImplementer {
-			t.Errorf("identity asked for %s, want the claim's role", role)
-		}
-		return bot, nil
-	}}
+	var owners []string
+	repository := ghrepo.Repository{}
+	s := specs{stateDir: stateDir, project: "s1",
+		repository: func(context.Context, string) (ghrepo.Repository, string, error) { return repository, "main", nil },
+		identity: func(_ context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+			if role != claim.RoleImplementer {
+				t.Errorf("identity asked for %s, want the claim's role", role)
+			}
+			owners = append(owners, owner)
+			return bot, nil
+		}}
 	spec, err := s.SpawnSpec(context.Background(), c)
 	if err != nil {
 		t.Fatalf("SpawnSpec: %v", err)
 	}
-	if spec.Repository != (ghrepo.Repository{}) {
-		t.Errorf("the launch names repository %q with none configured", spec.Repository)
+	if !spec.Repository.IsZero() || len(spec.Env) != 0 {
+		t.Errorf("the launch on no repository names %q with env %v, want neither", spec.Repository, spec.Env)
 	}
-	s.repo, s.defaultBranch = ghrepo.MustParse("acme/widgets"), mainBranch
-	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != (ghrepo.MustParse("acme/widgets")) {
-		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
+	repository = ghrepo.MustParse("zeta/tools")
+	if spec, err = s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != ghrepo.MustParse("zeta/tools") {
+		t.Errorf("SpawnSpec on a recorded repository = %q, %v; want zeta/tools, the runtime's to locate the workspace from", spec.Repository, err)
 	}
-	s.repo = ghrepo.Repository{}
+	if want := []string{"zeta"}; !slices.Equal(owners, want) {
+		t.Errorf("identity asked for owners %q, want the recorded repository's owner alone, %q", owners, want)
+	}
 	identity := map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
 		"GIT_AUTHOR_NAME": bot.Name, "GIT_AUTHOR_EMAIL": bot.Email,
@@ -59,7 +68,7 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 		t.Errorf("the launch's Env = %v, want the six git identity variables alone", spec.Env)
 	}
 
-	s.identity = func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+	s.identity = func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
 		return runtime.GitIdentity{}, errors.New("github_app_not_installed")
 	}
 	if _, err := s.SpawnSpec(context.Background(), c); err == nil || !strings.Contains(err.Error(), "github_app_not_installed") {

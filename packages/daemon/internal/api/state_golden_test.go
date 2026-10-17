@@ -46,10 +46,12 @@ func populatedState() State {
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
-				Key:        "LEGION-208",
-				Generation: 3,
-				Phase:      phase.Implementing,
-				Status:     "in_progress",
+				Key:           "LEGION-208",
+				Generation:    3,
+				Phase:         phase.Implementing,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
 					State:   "ready",
@@ -105,6 +107,7 @@ func populatedState() State {
 					},
 				},
 				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
 					ChecksVerdict:  "pending",
@@ -122,11 +125,13 @@ func populatedState() State {
 				},
 			},
 			"LEGION-210": {
-				Key:        "LEGION-210",
-				Generation: 1,
-				Phase:      phase.Held,
-				Status:     "in_progress",
-				HoldReason: "escalated",
+				Key:           "LEGION-210",
+				Generation:    1,
+				Phase:         phase.Held,
+				Status:        "in_progress",
+				Repo:          "zeta/tools",
+				DefaultBranch: "release/v7.1",
+				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
 				},
@@ -155,6 +160,27 @@ func populatedState() State {
 			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
 			RolesWithoutResources: []claim.Role{claim.RoleTester},
 		}.Report()),
+		// The project maps three repositories of two owners; the review App is not installed on one,
+		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
+		// answered, zeta/tools' could not be read, and acme/legacy, mapped no longer, keeps its cache
+		// until its retention ends.
+		Repositories: RepositoriesView{
+			Owners: []string{"acme", "zeta"},
+			Mapped: []MappedRepositoryView{
+				{Repo: "acme/widgets", Default: true, Cache: &CacheView{
+					Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+					Head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992", LastFetchAt: time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC), Bytes: 6612345678,
+				}},
+				{Repo: "zeta/tools", Cache: &CacheView{
+					Repo: "zeta/tools", Sandbox: "legion-legion-cache-zeta-tools-1b2c3d4e", State: "failing",
+					Reason: "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+				}},
+			},
+			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			Caches: []CacheView{{
+				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
+			}},
+		},
 	}
 }
 
@@ -174,11 +200,13 @@ func TestStateStage3Golden(t *testing.T) {
 		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
 		Issues: map[string]Issue{
 			"LEGION-208": {
-				Key:        "LEGION-208",
-				Generation: 4,
-				Phase:      phase.Reviewing,
-				Status:     "needs_review",
-				Workers:    map[claim.Role]PhaseView{},
+				Key:           "LEGION-208",
+				Generation:    4,
+				Phase:         phase.Reviewing,
+				Status:        "needs_review",
+				Repo:          "sjawhar/legion-smoke",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
 			},
 		},
 		PendingStatusWrites: []PendingStatusWrite{{
@@ -354,15 +382,19 @@ func TestControllerSecretResponseGolden(t *testing.T) {
 	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
 }
 
-// What `legion controller start` fetches for the review App's token, rendered as the two files
-// `gh` reads.
+// What `legion controller start` fetches for the review App's read-only tokens, one per owner,
+// each rendered as the two files `gh` reads.
 func TestControllerCredentialResponseGolden(t *testing.T) {
 	expiresAt := time.Date(2026, 9, 22, 10, 15, 2, 0, time.UTC)
-	rendered := ghconfig.Render("ghs_placeholder_token", "review", expiresAt)
+	acme := ghconfig.Render("ghs_placeholder_acme_token", "review", expiresAt)
+	sjawhar := ghconfig.Render("ghs_placeholder_sjawhar_token", "review", expiresAt)
 	golden(t, "controller-github-credential.json", ControllerCredentialResponse{
-		Hosts:     rendered.Hosts,
-		Config:    rendered.Config,
-		App:       rendered.App,
+		Owners: map[string]ControllerOwnerCredential{
+			"acme":    {Hosts: acme.Hosts, Config: acme.Config},
+			"sjawhar": {Hosts: sjawhar.Hosts, Config: sjawhar.Config},
+		},
+		Default:   "acme",
+		App:       "review",
 		ExpiresAt: expiresAt.UTC().Format(timeFormat),
 	})
 }

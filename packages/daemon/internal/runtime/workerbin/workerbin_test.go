@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -11,11 +12,10 @@ import (
 )
 
 // Oh My Pi's bash tool sources the operator's rc file and snapshots the PATH it leaves, so an rc
-// that prepends its own directories (this devbox's dotfiles shims, with their own legion) lands
-// them ahead of the launcher directory. The prefix Oh My Pi runs before every command,
+// that prepends its own directories (this devbox's dotfiles shims, with their own legion and gh)
+// lands them ahead of the launcher directory. The prefix Oh My Pi runs before every command,
 // `${PI_SHELL_PREFIX} <command>` in its persistent shell, puts the installed directory back in
-// front, and running it again leaves PATH as it was. gh is not intercepted: the rc's gh, like any
-// other gh on PATH, reads the agent's credential from GH_CONFIG_DIR.
+// front, so legion and gh both resolve to its scripts, and running it again leaves PATH as it was.
 func TestShellPrefixResolvesLegionsLauncherAheadOfAnRcsDirectories(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state dir")
 	if err := Install(root, "/opt/legion"); err != nil {
@@ -38,15 +38,36 @@ func TestShellPrefixResolvesLegionsLauncherAheadOfAnRcsDirectories(t *testing.T)
 	if err != nil {
 		t.Fatalf("bash: %v: %s", err, out)
 	}
-	want := filepath.Join(LauncherDir(root), "legion") + "\n" + filepath.Join(rc, "gh") + "\nstable\n"
+	want := filepath.Join(LauncherDir(root), "legion") + "\n" + filepath.Join(LauncherDir(root), "gh") + "\nstable\n"
 	if string(out) != want {
 		t.Fatalf("resolved\n%s\nwant\n%s", out, want)
 	}
 }
 
-// Install puts the launcher alone under root: a private 0700 script in a 0700 directory that execs
-// the installing legion, and no gh interception directory beside it.
-func TestInstallInstallsThePrivateLauncherAndNothingElse(t *testing.T) {
+// The worker image's gh (packages/daemon/docker/gh, COPY'd to /opt/legion/bin/gh) is the script
+// Install writes for the image's legion, so a pod's gh and a pane's are one wrapper.
+func TestTheImagesGhIsTheWrapperInstallWrites(t *testing.T) {
+	root := t.TempDir()
+	if err := Install(root, "/opt/legion/bin/legion"); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	want, err := os.ReadFile(filepath.Join(LauncherDir(root), "gh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	image, err := os.ReadFile(filepath.Join("..", "..", "..", "docker", "gh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(image) != string(want) {
+		t.Fatalf("packages/daemon/docker/gh = %q, want the wrapper Install writes for /opt/legion/bin/legion, %q", image, want)
+	}
+}
+
+// Install puts two private 0700 scripts in a 0700 bin under root and nothing else: the launcher,
+// which execs the installing legion, and gh, which execs its `legion gh` (the wrapper that picks
+// the owner's gh directory).
+func TestInstallInstallsThePrivateLauncherAndTheGhWrapper(t *testing.T) {
 	root := t.TempDir()
 	if err := Install(root, "/opt/legion"); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -57,25 +78,36 @@ func TestInstallInstallsThePrivateLauncherAndNothingElse(t *testing.T) {
 	} else if info.Mode().Perm() != 0o700 {
 		t.Fatalf("bin mode = %o, want 0700", info.Mode().Perm())
 	}
-	launcher := filepath.Join(bin, "legion")
-	contents, err := os.ReadFile(launcher)
-	if err != nil {
-		t.Fatalf("launcher: %v", err)
+	for name, want := range map[string]string{
+		"legion": "#!/bin/sh\nexec '/opt/legion' \"$@\"\n",
+		"gh":     "#!/bin/sh\nexec '/opt/legion' gh \"$@\"\n",
+	} {
+		script := filepath.Join(bin, name)
+		contents, err := os.ReadFile(script)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if info, err := os.Stat(script); err != nil {
+			t.Fatalf("%s stat: %v", name, err)
+		} else if info.Mode().Perm() != 0o700 {
+			t.Fatalf("%s mode = %o, want 0700", name, info.Mode().Perm())
+		}
+		if string(contents) != want {
+			t.Fatalf("%s = %q, want %q", name, contents, want)
+		}
 	}
-	if info, err := os.Stat(launcher); err != nil {
-		t.Fatalf("launcher stat: %v", err)
-	} else if info.Mode().Perm() != 0o700 {
-		t.Fatalf("launcher mode = %o, want 0700", info.Mode().Perm())
-	}
-	if want := "#!/bin/sh\nexec '/opt/legion' \"$@\"\n"; string(contents) != want {
-		t.Fatalf("launcher = %q, want %q", contents, want)
-	}
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 || entries[0].Name() != "bin" {
-		t.Fatalf("Install left %d entries under root, want bin alone", len(entries))
+	for dir, want := range map[string][]string{root: {"bin"}, bin: {"gh", "legion"}} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		if !slices.Equal(names, want) {
+			t.Fatalf("%s holds %q after Install, want %q", dir, names, want)
+		}
 	}
 	if err := Install(root, "legion"); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
 		t.Fatalf("Install with a relative executable = %v, want a refusal", err)

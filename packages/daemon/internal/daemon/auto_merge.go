@@ -11,6 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -30,7 +31,7 @@ const autoMergeTimeout = 30 * time.Second
 func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
-	github, err := r.graphQL(ctx)
+	github, repo, err := r.graphQL(ctx, row.Issue)
 	if err != nil {
 		return err
 	}
@@ -38,11 +39,11 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 		head, _, err := r.awaitedREADY(ctx, row.Issue)
 		return head, err
 	}
-	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
+	disarmed, err := ghautomerge.Disarm(ctx, github, repo, payload.Number, keep)
 	if err != nil {
 		return err
 	}
-	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
+	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "repo", repo.String(), "number", payload.Number,
 		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
 	return nil
 }
@@ -60,7 +61,7 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
-	github, err := r.graphQL(ctx)
+	github, repo, err := r.graphQL(ctx, row.Issue)
 	if err != nil {
 		return err
 	}
@@ -73,11 +74,11 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 		}
 		return head, err
 	}
-	outcome, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, keep)
+	outcome, err := ghautomerge.Submit(ctx, github, repo, payload.Number, payload.Head, keep)
 	if err != nil {
 		return err
 	}
-	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head, "outcome", outcome)
+	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "repo", repo.String(), "number", payload.Number, "head", payload.Head, "outcome", outcome)
 	return nil
 }
 
@@ -96,13 +97,22 @@ func readyMergeEnded(cause error) record.Notice {
 }
 
 // graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the
-// issue branch and submits or disarms its pull request's merge.
-func (r *outbox) graphQL(ctx context.Context) (githubrest.Client, error) {
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+// issue branch and submits or disarms its pull request's merge, minted for the owner of the
+// repository issue's record names, and that repository.
+func (r *outbox) graphQL(ctx context.Context, issue string) (githubrest.Client, ghrepo.Repository, error) {
+	recorded, err := r.issue(ctx, issue)
 	if err != nil {
-		return githubrest.Client{}, fmt.Errorf("mint implement App token: %w", err)
+		return githubrest.Client{}, ghrepo.Repository{}, err
 	}
-	return githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}, nil
+	repo, err := issueRepository(recorded)
+	if err != nil {
+		return githubrest.Client{}, ghrepo.Repository{}, err
+	}
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	if err != nil {
+		return githubrest.Client{}, ghrepo.Repository{}, fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
+	}
+	return githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}, repo, nil
 }
 
 // awaitedREADY is the READY head issue awaits the merge of, and whether the record holds its pull

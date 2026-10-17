@@ -52,7 +52,7 @@ func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
 		} {
 			t.Run(move.name+", "+tc.name, func(t *testing.T) {
 				pool := migratedPool(t)
-				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 					Phase: tc.at, Generation: 1, Status: tc.status, Rank: "U"})
 				seedPR(t, pool, record.PullRequest{State: move.state, Issue: "LEGION-208", Repo: "sjawhar/legion",
 					Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
@@ -99,17 +99,17 @@ func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
 func TestAReenteredChildsPullRequestIsDisarmedAndStaysDisarmedOnPush(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-207", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-207", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-207", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 	parent := "LEGION-207"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-207", Parent: &parent, Project: "LEGION", Title: "child",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-207", Parent: &parent, Project: "LEGION", Title: "child",
 		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V", LastDispatchSeq: 4})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
 	engine := readyEngine("")
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-back-to-todo", intake.DispatchIssue{
-		Key: "LEGION-208", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-207", Rank: "V",
+		Key: "LEGION-208", ResolvedRepo: "sjawhar/legion", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-207", Rank: "V",
 	}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact child todo: %v", err)
 	}
@@ -129,9 +129,9 @@ func TestAReenteredChildsPullRequestIsDisarmedAndStaysDisarmedOnPush(t *testing.
 func TestAPushPastTheREADYHeadInALingeringTreeDisarmsWithoutATransition(t *testing.T) {
 	pool := migratedPool(t)
 	until := time.Now().Add(time.Hour)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-207", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-207", Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until})
 	parent := "LEGION-207"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-207", Parent: &parent, Project: "LEGION", Title: "child",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-207", Parent: &parent, Project: "LEGION", Title: "child",
 		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
@@ -161,10 +161,10 @@ func TestLeavingTheWorkflowDisarmsTheOpenPullRequests(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			parent := "LEGION-208"
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
-			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"})
-			seedIssue(t, pool, record.Issue{Key: "LEGION-210", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "merged", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "W"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-210", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "merged", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "W"})
 			for key, pr := range map[string]record.PullRequest{
 				"LEGION-208": {State: record.PullRequestOpen, Number: 42, HeadSHA: "head-42"},
 				"LEGION-209": {State: record.PullRequestOpen, Number: 43, HeadSHA: "head-43"},
@@ -177,7 +177,7 @@ func TestLeavingTheWorkflowDisarmsTheOpenPullRequests(t *testing.T) {
 			if tc.moved == "LEGION-208" {
 				status, kind = "done", "issue.closed"
 			}
-			applyRefusingNothing(t, pool, readyEngine(""), intake.DispatchIssue{Key: tc.moved, Seq: 2, Type: kind, Status: status, Title: "moved", Parent: parentOf(tc.moved), Rank: "U"})
+			applyRefusingNothing(t, pool, readyEngine(""), intake.DispatchIssue{Key: tc.moved, ResolvedRepo: "sjawhar/legion", Seq: 2, Type: kind, Status: status, Title: "moved", Parent: parentOf(tc.moved), Rank: "U"})
 			got := autoMergeDisables(t, pool)
 			slices.SortFunc(got, func(a, b record.AutoMergeDisable) int { return a.Number - b.Number })
 			if !slices.Equal(got, tc.want) {
@@ -210,7 +210,7 @@ func TestAWithdrawnREADYDisarmsTheMerge(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required}})

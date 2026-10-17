@@ -61,7 +61,7 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 	}
 	t.Cleanup(pool.Close)
 	putOutboxIssue(t, pool, record.NewStore(), record.Issue{
-		Key: issue, Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
+		Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
 	})
 	// The issue's tree is admitted, as every tree the workflow runs is: its lifecycle is open.
 	st, err := store.Open(context.Background(), cfg.PostgresDSN)

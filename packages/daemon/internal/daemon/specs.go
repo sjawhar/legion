@@ -25,26 +25,26 @@ var _ supervise.Specs = specs{}
 // specs builds the part of every launch the claim does not carry. An operator may retain a
 // one-off prompt under the state directory for the Stage 2 proof; otherwise the Go daemon
 // composes the shipped role parts plus its own role-specific instructions. The repository is the
-// configured project's, with its default branch as GitHub names it; the runtime locates the
-// issue's workspace from the repository and provisions it at the default branch.
+// one the claim's issue's record names, at the default branch the record names; the runtime
+// locates the issue's workspace from the repository and provisions it at the default branch.
 type specs struct {
 	stateDir     string
 	project      string
 	instructions string
 	secrets      map[string]string
-	repo         ghrepo.Repository
 	prompts      *prompts.Composer
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
-	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
-	// GitHub Apps.
-	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
-	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of); nil
-	// for a daemon with no GitHub Apps, which can launch no claim on a repository.
-	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
+	// identity is the role's App bot identity every pane commits as, minted for the owner of the
+	// repository the launch works; nil for a daemon with no GitHub Apps.
+	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
+	// repository is the repository issue's record names and its recorded default branch
+	// (workflowRuntime.issueRepository), zero for an issue the workflow does not record; nil for a
+	// daemon with no workflow, whose launches work no repository.
+	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
 	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
 	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
 	runtimeName string
@@ -98,32 +98,29 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 	if c.Role == claim.RoleMerger {
 		addressing += " " + MergeRulesFragment(s.mergeRules)
 	}
-	env := map[string]string{}
-	if s.identity != nil {
-		id, err := s.identity(ctx, c.Role)
-		if err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
-		}
-		env = id.Env()
-	}
 	spec := runtime.SpawnSpec{
-		Env:     env,
+		Env:     map[string]string{},
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            promptPaths,
 			Addressing:                 addressing,
 			DeploymentInstructionsPath: s.instructions,
 		},
-		Repository: s.repo,
 	}
-	if !s.repo.IsZero() {
-		if s.defaultBranch == nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("the default branch of %s for %s: the daemon reads it from GitHub, and has no GitHub Apps", s.repo, c.Token)
-		}
-		if spec.DefaultBranch, err = s.defaultBranch(ctx, s.repo); err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("the default branch of %s for %s: %w", s.repo, c.Token, err)
+	if s.repository != nil {
+		if spec.Repository, spec.DefaultBranch, err = s.repository(ctx, c.Issue); err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the repository of %s: %w", c.Token, err)
 		}
 	}
+	// A launch on no repository commits nowhere, so it carries no git identity.
+	if s.identity != nil && !spec.Repository.IsZero() {
+		id, err := s.identity(ctx, c.Role, spec.Repository.Owner())
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
+		}
+		spec.Env = id.Env()
+	}
+
 	if c.WorkspaceLost {
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}

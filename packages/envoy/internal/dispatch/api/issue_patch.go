@@ -29,6 +29,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		Parent        json.RawMessage       `json:"parent"`
 		BlockedBy     *[]string             `json:"blocked_by"`
 		Components    json.RawMessage       `json:"components"`
+		Repo          json.RawMessage       `json:"repo"`
 		Actor         *model.Actor          `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -118,6 +119,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	repo, repoProvided, err := parseIssueRepo(input.Repo)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -198,12 +204,19 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// does not already have (so a link can move to the issue that replaced it; a same-set
 		// resend or a kept URL's retyped kind rewrites the rows and emits issue.updated the same
 		// as any other accepted write here, it just adds nothing new) — alone or beside a
-		// reopening status; every other field, and closing it again, waits for a reopen.
+		// reopening status; every other field, its repository included, and closing it again,
+		// waits for a reopen.
 		addsLink := input.ExternalLinks != nil && !isExternalLinksSubset(*input.ExternalLinks, before.ExternalLinks)
-		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || addsLink || assigneeProvided || parentProvided || input.BlockedBy != nil
+		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || addsLink || assigneeProvided || parentProvided || input.BlockedBy != nil || repoProvided
 		reopening := input.Status != nil && status != "done"
 		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided && input.ExternalLinks == nil) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
+			return
+		}
+	}
+	if repo != nil {
+		if err := checkIssueRepoMapped(r.Context(), tx, *repo, before.Project); err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
 	}
@@ -271,6 +284,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			route = *input.Route
 		}
 		set("route", route)
+	}
+	if repoProvided {
+		set("repo", repo)
 	}
 	changed := len(sets) > 0 || componentsProvided || input.BlockedBy != nil
 	if changed {

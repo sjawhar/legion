@@ -153,7 +153,7 @@ that GitHub issue or pull request. Only `dispatch issue` with `--external` creat
 `dispatch issue --external owner/repo#n --project <project> --title '<title>'` before addressing it.
 
 Create an issue for newly tracked work with `dispatch issue --project <KEY> --title '<title>'` (`dispatch issue --help` lists `--parent`, `--spec-file`, `--label`, `--priority` and the rest).
-Labels are optional: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `--priority` is yours on creation too — see [Priority is yours to set](skill://dispatch/references/issues.md). Set `--assignee` (the email of a person who has signed in to Dispatch) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It prints
+Labels are optional: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `--priority` is yours on creation too — see [Priority is yours to set](skill://dispatch/references/issues.md). Set `--assignee` (the email of a person who has signed in to Dispatch) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. Set `--repo <owner/name>` when the issue targets a repository other than the one it would inherit: its parent's, else the project's default; the repository must be mapped to the project in Settings, and `dispatch read` shows the one the issue resolves to on its `Repository:` line. It prints
 the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 

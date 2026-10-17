@@ -302,8 +302,11 @@ func TestHelpListsEveryCommand(t *testing.T) {
 }
 
 // Every command answers -h, -help and --help with its usage, `usage: legion <command>…`, and exit
-// 0: the docs site's CLI generator fails the build on any other answer.
+// 0: the docs site's CLI generator fails the build on any other answer. It runs each help with no
+// LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
+// --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
+	unsetenv(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer
@@ -509,7 +512,7 @@ dispatch_url: https://dispatch.test
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://127.0.0.1:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: %q }
   review: { app_id: "2", private_key_command: %q }
@@ -886,7 +889,7 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: %q }
   review: { app_id: "2", private_key_command: %q }
@@ -938,7 +941,7 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }
@@ -1007,7 +1010,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-			if want := "Config OK: project=DEMO\n" + tc.want + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+			if want := "Config OK: project=DEMO\n" + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
 		})
@@ -1039,7 +1042,7 @@ func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
 			secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
-			want := "Config OK: project=DEMO\n" + secretsGap + tc.want
+			want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + tc.want
 			if code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
@@ -1069,7 +1072,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		}
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1078,7 +1081,7 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 		config := kubernetesCheckConfig(t, "")
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-		if want := "Config OK: project=DEMO\n" + secretsGap + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		if want := "Config OK: project=DEMO\n" + secretsGap + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
@@ -1091,6 +1094,25 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 		}
 	})
+}
+
+// defaultCacheLine is the line --check-config prints under kubernetes for the repository cache at
+// its defaults, before the plugins line.
+const defaultCacheLine = "repository cache: a 20Gi volume per mapped repository, fetched from GitHub every 10 minutes, kept 168 hours after its repository leaves the mapping; its container reserves cpu 1, memory 4Gi, ephemeral storage 1Gi under 2Gi\n"
+
+// --check-config names the repository cache each mapped repository gets, as the file settles it:
+// the defaults, or the file's own members over them.
+func TestStartCheckConfigNamesTheRepositoryCache(t *testing.T) {
+	legionState(t)
+	secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
+	pluginsGap := "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
+	config := kubernetesCheckConfig(t, "    repository_cache: {volume: 50Gi, refresh_minutes: 5, retain_hours: 24, resources: {cpu: \"2\"}}\n")
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+	cache := "repository cache: a 50Gi volume per mapped repository, fetched from GitHub every 5 minutes, kept 24 hours after its repository leaves the mapping; its container reserves cpu 2, memory 4Gi, ephemeral storage 1Gi under 2Gi\n"
+	if want := "Config OK: project=DEMO\n" + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+	}
 }
 
 // A decision may name only a capability the daemon measures from the deployment: anything else is

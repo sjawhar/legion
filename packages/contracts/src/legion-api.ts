@@ -148,6 +148,8 @@ const legionPhaseView = z.strictObject({
  * testing, and an approval through retro and every phase after it; absent until a review in a
  * round decides. */
 const legionPullRequestView = z.strictObject({
+  /** The repository (`owner/name`) the pull request is in, its issue's (contract 30). */
+  repo: nonEmptyString,
   number: z.number().int().positive(),
   head: nonEmptyString,
   checksVerdict: nonEmptyString.optional(),
@@ -215,6 +217,11 @@ const legionIssue = z.strictObject({
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_PHASES),
   status: nonEmptyString,
+  /** The repository (`owner/name`) the issue targets and that repository's default branch, taken
+   * when the daemon first recorded the issue and never changed after; absent on an issue the
+   * workflow does not record (phase `unrecorded`, an operator's claim) (contract 30). */
+  repo: nonEmptyString.optional(),
+  defaultBranch: nonEmptyString.optional(),
   /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
    * the controller. Absent while the issue's tree lingers or is closed, until it is re-admitted. */
   holdReason: z.literal("escalated").optional(),
@@ -285,6 +292,44 @@ const legionCapabilityState = z.strictObject({
   source: z.enum(["configuration", "boot"]).optional(),
 });
 
+/** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
+ * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
+ * whether its pod is Ready behind its own Service and its address then, from its last health read
+ * the default branch's `head`, `lastFetchAt` and the `bytes` it serves or the read's
+ * `healthError`, and, for a repository the mapping no longer names, `retainedUntil` (contract 31). */
+const legionCacheView = z.strictObject({
+  repo: nonEmptyString,
+  sandbox: nonEmptyString,
+  state: z.enum(["starting", "cloning", "ready", "failing", "refused"]),
+  reason: nonEmptyString.optional(),
+  ready: z.boolean(),
+  address: nonEmptyString.optional(),
+  head: nonEmptyString.optional(),
+  lastFetchAt: timestamp.optional(),
+  bytes: z.number().int().positive().optional(),
+  healthError: nonEmptyString.optional(),
+  retainedUntil: timestamp.optional(),
+});
+
+/** `api.RepositoriesView` — the project's repository mapping as the daemon serves it: the owners
+ * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
+ * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
+ * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
+ * of repositories the mapping no longer names. Every list sorted and never null (contracts 30,
+ * 31). */
+const legionRepositories = z.strictObject({
+  owners: z.array(nonEmptyString),
+  mapped: z.array(
+    z.strictObject({
+      repo: nonEmptyString,
+      default: z.boolean(),
+      cache: legionCacheView.optional(),
+    })
+  ),
+  refused: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  caches: z.array(legionCacheView),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
@@ -292,7 +337,8 @@ const legionCapabilityState = z.strictObject({
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
  * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
  * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
- * id, never null (contract 28). */
+ * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
+ * serves it (contract 30). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -303,6 +349,7 @@ export const LegionStateResponse = z.strictObject({
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
+  repositories: legionRepositories,
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;
@@ -376,11 +423,19 @@ export const LegionControllerSecretResponse = z.strictObject({
 });
 
 /** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:
- * the two files `ghconfig.Rendered` renders for the review App's token, which `legion controller
- * start` writes under `<state_dir>/gh` and refreshes every minute. The plugin never reads it. */
+ * the review App's read-only token for every GitHub owner of the project, each rendered as the two
+ * files gh reads (`ghconfig.Rendered`) and keyed by lowercased owner, the owner whose directory
+ * `GH_CONFIG_DIR` names, and the soonest of the tokens' expiries. `legion controller start` writes
+ * them under `<state_dir>/gh/<owner>` and refreshes them every minute. The plugin never reads it. */
 export const LegionControllerCredentialResponse = z.strictObject({
-  hosts: nonEmptyString,
-  config: nonEmptyString,
+  owners: z.record(
+    nonEmptyString,
+    z.strictObject({
+      hosts: nonEmptyString,
+      config: nonEmptyString,
+    })
+  ),
+  default: nonEmptyString,
   app: z.enum(["implement", "review"]),
   expiresAt: timestamp,
 });

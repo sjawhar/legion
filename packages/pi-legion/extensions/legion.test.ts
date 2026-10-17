@@ -1548,6 +1548,8 @@ describe("Legion OMP extension", () => {
             generation: 2,
             phase: "retro",
             status: "in_progress",
+            repo: "acme/widgets",
+            defaultBranch: "main",
             workers: {},
           },
         },
@@ -1555,6 +1557,12 @@ describe("Legion OMP extension", () => {
         heldOutboxRows: [],
         strandedClaims: [],
         capabilities: [],
+        repositories: {
+          owners: ["acme"],
+          mapped: [{ repo: "acme/widgets", default: true }],
+          refused: [],
+          caches: [],
+        },
       };
       const booted = await bootPane({
         role: options.role ?? "implementer",

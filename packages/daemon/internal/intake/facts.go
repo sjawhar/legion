@@ -39,6 +39,16 @@ type DispatchIssue struct {
 	// by its daemon-authored todo event.
 	ActorSession string
 	DaemonActor  bool
+	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to at the event: its
+	// own, else its nearest ancestor's, else its project's default; empty when it resolves to none.
+	// The workflow takes it when it first records the issue, and never after.
+	ResolvedRepo string
+	// ResolvedRepoMissing is an event JetStream retained from before Dispatch resolved an issue's
+	// repository: its payload has no resolved_repo, so ResolvedRepo says nothing. The consumer's
+	// PrepareRepository fills ResolvedRepo from the issue's record, or from Dispatch for an issue
+	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
+	// never records an issue from a fact still missing it.
+	ResolvedRepoMissing bool
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -52,6 +62,16 @@ type Handover struct {
 func (Handover) isFact() {}
 
 func (DispatchIssue) isFact() {}
+
+// RepoMappingChanged is Dispatch's settings.repo_project.updated on the daemon's own project: a
+// repository was mapped to the project, unmapped, moved or made its default. It is no workflow
+// fact: the consumer has the daemon read the mapping again (ConsumerSpec.RepositoryMapping) and
+// applies nothing.
+type RepoMappingChanged struct {
+	Project string
+}
+
+func (RepoMappingChanged) isFact() {}
 
 // DispatchArtifactKind identifies the three Dispatch artifact observations that affect a gate.
 type DispatchArtifactKind string
@@ -518,7 +538,7 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 			_ = tx.Rollback(ctx)
 		}
 	}()
-	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))"); err != nil {
+	if err := SerializeFacts(ctx, tx); err != nil {
 		return Result{}, fmt.Errorf("serialize fact %s/%s: %w", source, eventID, err)
 	}
 
@@ -551,4 +571,15 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 	committed = true
 	committedHooks()
 	return result, nil
+}
+
+// SerializeFacts takes, for tx's life, the lock every fact applies under (ApplyFact): until tx
+// commits or rolls back, no fact resolves a repository and commits an issue recorded on it. The
+// boot's reconcile, which records issues in its own transaction, takes it, as does a refresh of
+// the repository mapping across its live-record snapshot, its subscription update and its
+// publication, so a repository an admission is recording an issue on is never unsubscribed under
+// it.
+func SerializeFacts(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))")
+	return err
 }

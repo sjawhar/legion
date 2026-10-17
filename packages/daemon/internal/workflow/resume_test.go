@@ -22,7 +22,7 @@ func TestTheBootStartsNoClaimSuspendedBeforeItsSourceWasRecorded(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, tc := range []struct{ key, by string }{{"LEGION-208", "daemon"}, {"LEGION-209", "unknown"}} {
-		seedIssue(t, pool, record.Issue{Key: tc.key, Tree: tc.key, Project: "LEGION", Title: tc.key, Phase: phase.Implementing,
+		seedIssue(t, pool, record.Issue{Key: tc.key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: tc.key, Project: "LEGION", Title: tc.key, Phase: phase.Implementing,
 			Generation: 1, Status: "in_progress", Rank: "U", HandedOver: true})
 		seedSlot(t, pool, record.Slot{Issue: tc.key, Index: i})
 		token, err := claim.NewToken(project, tc.key, claim.RoleImplementer)

@@ -471,7 +471,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 17 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 18 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the stream connection, two active-sessions/Conversation
   // event reads, the primary artifact's comments, the margin's own issue-asks list,
@@ -479,17 +479,22 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // surface shares for the session, the header's lookup of the project's
   // architecture source (the `Components:` line offers its picker only when the
   // project has a source; the component tree itself is fetched only once the picker
-  // opens, never on load), me/agents/state, whose unread replies the Agents badge
+  // opens, never on load), the header's read of the repository mappings (an issue
+  // that resolves to no repository, as this one does, shows the `Repository:` item only
+  // when its project maps one), me/agents/state, whose unread replies the Agents badge
   // counts on every page (the sidebar's on desktop, the compact header's on phone), and
   // the credential requests waiting on the viewer, which the Needs-you badge counts beside
   // the inbox on every page, and `me/replies?limit=1`, whose total the Replies badge counts on
   // every page (the sidebar's on desktop, the compact header's on phone).
   // The header's assignee picker reads who has signed in only once the reader
   // reaches for it, so it is not in this count. The phone project (iphone) does not
-  // fetch the sidebar while its drawer is closed, so it uses 15. Asserted exactly (not
+  // fetch the sidebar while its drawer is closed, so it uses 16. Asserted exactly (not
   // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 15 : 17);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 16 : 18);
+  expect(
+    apiRequestUrls.filter((url) => url.endsWith("/api/v1/settings/repo-projects"))
+  ).toHaveLength(1);
   expect(apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/replies?limit=1"))).toHaveLength(
     1
   );

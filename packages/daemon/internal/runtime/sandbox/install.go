@@ -101,8 +101,11 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 // container), a pod missing a launcher, one with a container more, a Sandbox whose labels name no
 // kind, and a Sandbox of the tree-volume layout before per-issue volumes (treeVolumeLayout: no
 // claim template, or the tree root's `tree` template, the controller's of that layout included) are
-// each refused. The refusal names every one of them, each with its reason, and how many there are,
-// so an operator removes them all before the next boot rather than one per refused boot.
+// each refused. A repository cache's Sandbox (labelled legion.dev/cache) is judged by its own shape
+// alone (cacheSandboxShape), never as a pod of a kind, and refused, as `cache Sandbox <name>`, when
+// it is not one this runtime builds. The refusal names every one of them, each with its reason, and
+// how many there are, so an operator removes them all before the next boot rather than one per
+// refused boot.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
 	list, err := sandboxes.List(ctx, metav1.ListOptions{LabelSelector: labelProject + "=" + project})
 	if err != nil {
@@ -111,6 +114,12 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 	var refused []string
 	for _, object := range list.Items {
 		if object.GetLabels()[labelProbe] != "" {
+			continue
+		}
+		if object.GetLabels()[labelCache] != "" {
+			if reason := cacheSandboxShape(object); reason != "" {
+				refused = append(refused, "cache Sandbox "+object.GetName()+reason)
+			}
 			continue
 		}
 		if reason := legacyIssueSandbox(object); reason != "" {

@@ -434,8 +434,9 @@ func TestAKeptPodsBindingCheckLiftsItsLaunchersHoldOff(t *testing.T) {
 	if err != nil || s == nil {
 		t.Fatalf("the restarted runtime's store holds Sandbox %v (%v)", s, err)
 	}
-	if bound, err := r2.launcherBound(g.ctx, s, r2.storedPod(loc.Sandbox.Name), []claim.Role{claim.RoleTester}); err != nil || !bound {
-		t.Fatalf("launcherBound = %t, %v, want the kept pod bound", bound, err)
+	kept := launch{roles: []claim.Role{claim.RoleTester}}
+	if bound, err := r2.launcherBound(g.ctx, s, r2.storedPod(loc.Sandbox.Name), &kept); err != nil || !bound || kept.gitHubDefault != "sjawhar" {
+		t.Fatalf("launcherBound = %t, %v, default %q; want the kept pod bound with its Secret's default, sjawhar", bound, err, kept.gitHubDefault)
 	}
 	if handler, reason := accept(hello); handler == nil {
 		t.Fatalf("the kept pod's launcher was refused after its binding was read: %s", reason)
@@ -580,7 +581,7 @@ func TestTheInformersWatchOnTheirClientsAndALaunchsRequestsGoThroughTheRequests(
 		want   []string
 	}{
 		{"the informers' dynamic client", &informerDyn.Fake, []string{"list sandboxes", "watch sandboxes"}},
-		{"the informers' typed client", &informerKube.Fake, []string{"list pods", "watch pods"}},
+		{"the informers' typed client", &informerKube.Fake, []string{"list pods", "list services", "watch pods", "watch services"}},
 		{"the requests' dynamic client", &requestDyn.Fake, []string{"create sandboxes", "get sandboxes"}},
 		{"the requests' typed client", &requestKube.Fake, nil},
 	} {

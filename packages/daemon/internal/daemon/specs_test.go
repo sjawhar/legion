@@ -124,14 +124,13 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	s := specs{
 		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
 		instructions: "/state/deployment-instructions.md", secrets: map[string]string{"ENVOY_TOKEN": "envoy-bearer"},
-		repo: ghrepo.MustParse("acme/widgets"),
-		identity: func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
+			t.Error("the controller's launch asked for a repository")
+			return ghrepo.MustParse("acme/widgets"), "main", nil
+		},
+		identity: func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
 			t.Error("the controller's launch asked for a git identity")
 			return runtime.GitIdentity{}, nil
-		},
-		defaultBranch: func(context.Context, ghrepo.Repository) (string, error) {
-			t.Error("the controller's launch asked for a default branch")
-			return "main", nil
 		},
 	}
 	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
@@ -159,44 +158,60 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	}
 }
 
-// A launch on the project's repository names that repository's default branch as GitHub names it,
-// which each runtime provisions the issue's workspace at; a read that fails refuses the launch,
-// naming the repository, and a daemon with no repository asks for none.
-func TestAWorkerLaunchNamesItsRepositorysDefaultBranch(t *testing.T) {
+// A worker's launch is on the repository its issue's record names, at the default branch the record
+// names, whatever its name, which each runtime provisions the issue's workspace at; two issues on
+// two owners' repositories each launch on their own. A record that cannot be read refuses the
+// launch, naming the issue, and an issue the workflow does not record (an operator's claim)
+// launches on no repository.
+func TestAWorkerLaunchIsOnItsIssuesRecordedRepository(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
-	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
+	recorded := map[string][2]string{"S1-2": {"acme/widgets", "main"}, "S1-3": {"zeta/tools", "release/v7.1"}}
+	var asked []string
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer,
+		repository: func(_ context.Context, issue string) (ghrepo.Repository, string, error) {
+			asked = append(asked, issue)
+			if issue == "S1-9" {
+				return ghrepo.Repository{}, "", errors.New("read the record of S1-9: the database refused")
+			}
+			named, ok := recorded[issue]
+			if !ok {
+				return ghrepo.Repository{}, "", nil
+			}
+			return ghrepo.MustParse(named[0]), named[1], nil
+		}}
+	for issue, want := range recorded {
+		token, err := claim.NewToken("s1", issue, claim.RoleImplementer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: issue, Tree: "S1-1", Role: claim.RoleImplementer})
+		if err != nil || spec.Repository.String() != want[0] || spec.DefaultBranch != want[1] {
+			t.Fatalf("the launch of %s names %s at %q, %v; want %s at %s", issue, spec.Repository, spec.DefaultBranch, err, want[0], want[1])
+		}
+	}
+
+	refused, err := claim.NewToken("s1", "S1-9", claim.RoleImplementer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer}
-	var asked []ghrepo.Repository
-	read := func(_ context.Context, repo ghrepo.Repository) (string, error) {
-		asked = append(asked, repo)
-		return "release/v7.1", nil
+	if _, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: refused, Issue: "S1-9", Tree: "S1-1", Role: claim.RoleImplementer}); err == nil ||
+		!strings.Contains(err.Error(), "the repository of "+string(refused)) || !strings.Contains(err.Error(), "the database refused") {
+		t.Fatalf("SpawnSpec with an unreadable record = %v, want the refusal naming the claim and the read", err)
 	}
-	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repo: ghrepo.MustParse("acme/widgets"), defaultBranch: read}
-	spec, err := s.SpawnSpec(context.Background(), c)
+
+	operator, err := claim.NewToken("s1", "S1-5", claim.RoleImplementer)
 	if err != nil {
-		t.Fatalf("SpawnSpec: %v", err)
+		t.Fatal(err)
 	}
-	if spec.Repository != s.repo || spec.DefaultBranch != "release/v7.1" || !slices.Equal(asked, []ghrepo.Repository{s.repo}) {
-		t.Fatalf("the launch names %s at %q after asking for %v, want acme/widgets at release/v7.1, asked once", spec.Repository, spec.DefaultBranch, asked)
+	if spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: operator, Issue: "S1-5", Tree: "S1-5", Role: claim.RoleImplementer}); err != nil ||
+		!spec.Repository.IsZero() || spec.DefaultBranch != "" {
+		t.Fatalf("SpawnSpec of an unrecorded issue = %s at %q, %v; want no repository", spec.Repository, spec.DefaultBranch, err)
 	}
-
-	s.defaultBranch = func(context.Context, ghrepo.Repository) (string, error) {
-		return "", errors.New("read the default branch of acme/widgets: GitHub answered GET /repos/acme/widgets with 404")
-	}
-	if _, err := s.SpawnSpec(context.Background(), c); err == nil || !strings.Contains(err.Error(), "the default branch of acme/widgets for "+string(token)) || !strings.Contains(err.Error(), "404") {
-		t.Fatalf("SpawnSpec with a failed read = %v, want the refusal naming the repository and GitHub's answer", err)
-	}
-
-	asked = nil
-	s.repo, s.defaultBranch = ghrepo.Repository{}, read
-	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.DefaultBranch != "" || len(asked) != 0 {
-		t.Fatalf("SpawnSpec with no repository = %q, %v after asking for %v; want no default branch and no read", spec.DefaultBranch, err, asked)
+	if len(asked) != 4 {
+		t.Fatalf("asked for the repositories of %v, want each launch's issue once", asked)
 	}
 }
 

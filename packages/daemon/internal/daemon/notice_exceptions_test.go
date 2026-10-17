@@ -393,7 +393,7 @@ func TestANoticeToAnArchitectStoppedWithItsFinishedTreeIsNotSentAgain(t *testing
 func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
 	conn, err := nats.Connect(testnats.URL(t), nats.Timeout(time.Second))
@@ -565,7 +565,7 @@ func TestAReadyArchitectReleasesOnlyItsOwnNotices(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-9", Project: "LEGION", Tree: "LEGION-9", Title: "Another root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-9", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-9", Title: "Another root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_arch")
 	architectClaimOn(t, sup, "LEGION-2", supervise.StateWorking, "ses_sub")
@@ -787,7 +787,7 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			noticeTree(t, pool, records, false)
-			root := record.Issue{Key: "LEGION-1", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: tc.generation, Status: "in_progress"}
+			root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: tc.generation, Status: "in_progress"}
 			putOutboxIssue(t, pool, records, root)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			if _, _, err := sup.Create(context.Background(), supervise.Claim{

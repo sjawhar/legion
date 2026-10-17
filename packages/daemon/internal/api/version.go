@@ -196,4 +196,41 @@ package api
 // at 27 would pass the boot gate against a plugin whose strict reader then refuses the state. The
 // release that first declares a number must carry your shapes: it does not, so this branch takes
 // the number above it, as the collision note says.)
-const DaemonAPIVersion = 28
+//
+// 29: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
+// directory per GitHub owner of the project under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's
+// owner's (write) and every other owner's read-only, with LEGION_GH_PATH the real gh the `gh`
+// wrapper first on PATH (`legion gh`; `/opt/legion/bin/gh` in the image) runs; every shared
+// clone's credential helper is `legion git-credential` with `credential.useHttpPath` on. A role
+// Secret's gh keys are per owner (`github-hosts-<owner>`, `github-config-<owner>`,
+// `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
+// `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
+// `expiresAt` in place of one `hosts` and `config`. An image built before 29 has neither the
+// wrapper nor the two commands, so the image probe refuses it. (This branch took 28 while
+// sjawhar/legion#1999 was open; pi-legion v10.4.0 was released from main declaring 28 without
+// these shapes, so this branch takes the number above it, as the collision note says.)
+//
+// 30: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
+// targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
+// when the daemon first records it: `GET /legion/v1/state` and `read_record` answer `repo` and
+// `defaultBranch` on every issue and `repo` on its pull request, and the state answers
+// `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
+// repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
+// plugin at 29 reads the state with a strict schema that knows none of these fields, so it
+// refuses the state.
+//
+// 31: sjawhar/legion#1986 (the repository cache) -- the daemon runs one repository cache pod per
+// served repository, whose one container is the image's `legion workspace-init cache`, and every
+// issue pod's `workspace-init fetch` is told its repository's cache (`LEGION_REPOSITORY_CACHE_URL`)
+// and that cache's bearer token (`LEGION_REPOSITORY_CACHE_TOKEN_FILE`), and fills a fresh feed
+// from that cache alone, verified, fetching only the delta from GitHub; its `workspace-init
+// provision` makes the issue's clone shared with the feed, which now lives on the issue's own
+// volume. An image whose `legion` was built before 31 exits 2 on the unknown subcommand in every
+// cache pod, and its fetch clones from GitHub, ignoring the cache, so the daemon's image probe,
+// which holds the image's pi-legion to this number, refuses such an image at boot instead. The
+// state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
+// its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
+// `retainedUntil`, which a plugin at 30 reads with a strict schema that knows neither. (This change
+// took 30 while the issue's-repository change was open; that change took 30, so this one takes the
+// number above it, as the collision note says.)
+const DaemonAPIVersion = 31

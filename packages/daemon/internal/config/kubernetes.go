@@ -74,7 +74,34 @@ type Kubernetes struct {
 	// PluginsFromBinary is whether Plugins was filled from the binary's linked pair rather than
 	// read from the file; false while Plugins holds the file's own setting or is nil.
 	PluginsFromBinary bool
+	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
+	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
+	RepositoryCache RepositoryCacheConfig
 }
+
+// RepositoryCacheConfig is `runtime.kubernetes.repository_cache`: the volume each repository's
+// cache owns (a Kubernetes quantity), how many minutes between its fetches from GitHub, how many
+// hours the cache of a repository the mapping no longer names is kept before the orphan sweep
+// deletes it with its volume, and its one container's reservation, in a role's shape: cpu and
+// memory each both its request and its limit, its ephemeral storage a limit over a request.
+type RepositoryCacheConfig struct {
+	Volume         string
+	RefreshMinutes int
+	RetainHours    int
+	Resources      RoleResources
+}
+
+// defaultRepositoryCache is the cache when the file sets none of it: a 20Gi volume, as an issue's,
+// fetched every ten minutes, kept a week after its repository leaves the mapping; one CPU and 4Gi
+// for a process whose daily `git repack -a -d` of a large repository wants the memory, and the
+// roles' 1Gi request over a 2Gi limit on the node's disk, since the clone lives on the volume.
+var defaultRepositoryCache = RepositoryCacheConfig{
+	Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
+	Resources: RoleResources{CPU: "1", Memory: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"},
+}
+
+// DefaultRepositoryCache is the repository cache's settled configuration when the file sets none.
+func DefaultRepositoryCache() RepositoryCacheConfig { return defaultRepositoryCache }
 
 // PluginsConfig is `runtime.kubernetes.plugins`: the pi-legion and pi-envoy sources a
 // stale-plugin relaunch installs, each an exact semver version, an absolute tarball path, or an
@@ -350,7 +377,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles", "agent_secrets", "plugins")
+		"role_profiles", "agent_secrets", "plugins", "repository_cache")
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +438,75 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Plugins, err = readPlugins(fields["plugins"]); err != nil {
 		return nil, err
 	}
+	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
+		return nil, err
+	}
 	return block, nil
+}
+
+// readRepositoryCache reads `runtime.kubernetes.repository_cache`, settled: each member the file
+// sets, the default (DefaultRepositoryCache) for each it leaves out, its reservation field by field
+// as a role's is. A zero volume, refresh or retention is refused with the negatives, as no size and
+// no interval, and an ephemeral-storage request past its limit is refused naming both, as the API
+// server would refuse the pod.
+func readRepositoryCache(value *yaml.Node) (RepositoryCacheConfig, error) {
+	const key = kubernetesKey + ".repository_cache"
+	settled := defaultRepositoryCache
+	if value == nil || value.Tag == "!!null" {
+		return settled, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return RepositoryCacheConfig{}, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "volume", "refresh_minutes", "retain_hours", "resources")
+	if err != nil {
+		return RepositoryCacheConfig{}, err
+	}
+	volume, err := readQuantity(fields["volume"], key+".volume")
+	if err != nil {
+		return RepositoryCacheConfig{}, err
+	}
+	settled.Volume = cmp.Or(volume, settled.Volume)
+	for _, minutes := range []struct {
+		field string
+		into  *int
+	}{{"refresh_minutes", &settled.RefreshMinutes}, {"retain_hours", &settled.RetainHours}} {
+		read, err := readPositiveInteger(fields[minutes.field], key+"."+minutes.field, 0)
+		if err != nil {
+			return RepositoryCacheConfig{}, err
+		}
+		if read != nil {
+			*minutes.into = *read
+		}
+	}
+	if resources := fields["resources"]; resources != nil {
+		field := key + ".resources"
+		if resources.Kind != yaml.MappingNode {
+			return RepositoryCacheConfig{}, fmt.Errorf("%s must be a mapping of cpu, memory and ephemeral storage", field)
+		}
+		parts, err := members(resources, field, "cpu", "memory", "ephemeral_storage", "ephemeral_storage_request")
+		if err != nil {
+			return RepositoryCacheConfig{}, err
+		}
+		for _, quantity := range []struct {
+			field string
+			into  *string
+		}{
+			{"cpu", &settled.Resources.CPU}, {"memory", &settled.Resources.Memory},
+			{"ephemeral_storage", &settled.Resources.EphemeralStorage}, {"ephemeral_storage_request", &settled.Resources.EphemeralStorageRequest},
+		} {
+			read, err := readQuantity(parts[quantity.field], field+"."+quantity.field)
+			if err != nil {
+				return RepositoryCacheConfig{}, err
+			}
+			*quantity.into = cmp.Or(read, *quantity.into)
+		}
+	}
+	request, limit := resource.MustParse(settled.Resources.EphemeralStorageRequest), resource.MustParse(settled.Resources.EphemeralStorage)
+	if request.Cmp(limit) > 0 {
+		return RepositoryCacheConfig{}, fmt.Errorf("%s.resources.ephemeral_storage_request %s exceeds ephemeral_storage %s", key, settled.Resources.EphemeralStorageRequest, settled.Resources.EphemeralStorage)
+	}
+	return settled, nil
 }
 
 // ReadPodFile reads a `runtime.kubernetes.pod` block kept in a file of its own, such as an
@@ -1028,7 +1123,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
-		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},
+		{"projects", file.Projects == nil, "every pod's workspace is a repository Dispatch maps to the daemon's project"},
 	} {
 		if rule.absent {
 			return fmt.Errorf("%s is required when runtime is kubernetes: %s", rule.key, rule.why)

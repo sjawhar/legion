@@ -261,7 +261,7 @@ nats_urls:
 dispatch_url: http://127.0.0.1:$port_dispatch
 dispatch_token_file: $work/dispatch-token
 projects:
-  $project: { repo: $repo, merge_queue_role: merge-queue }
+  $project: { merge_queue_role: merge-queue }
 gates:
   design: root-issues
 admission_cap: 3
@@ -633,7 +633,7 @@ until_true 60 "NATS to be ready" grep -q 'Server is ready' "$evidence/logs/nats.
 start_listener
 start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "4b.13b acceptance $project" '{key:$key,name:$name}')" >/dev/null
-dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project}')" >/dev/null
+dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
   SMOKE_UPSTREAM_NATS="$upstream_nats" \
   start_process bridge env -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
@@ -1049,7 +1049,8 @@ for absent in LEGION_GRANT_FILE LEGION_GRANT; do
   ! tr '\0' '\n' <"/proc/$merger_omp/environ" | grep -q "^$absent=" || fail "$root1's merger pane still carries $absent"
 done
 merger_gh_dir=$(pane_value "$merger_omp" GH_CONFIG_DIR)
-[[ $merger_gh_dir == *-merger-gh ]] || fail "$root1's merger pane carries GH_CONFIG_DIR=$merger_gh_dir, want its claim's gh directory"
+[[ $merger_gh_dir == *-merger-gh/* && $(pane_value "$merger_omp" LEGION_GH_OWNERS_DIR) == "${merger_gh_dir%/*}" ]] ||
+  fail "$root1's merger pane carries GH_CONFIG_DIR=$merger_gh_dir, want an owner's directory of its claim's gh bundle (LEGION_GH_OWNERS_DIR)"
 f=$(claim_session_file "$root1" merger)
 # A bash command invokes `legion` when a word of it is legion or ends in /legion (never a word that
 # only contains it, such as legion-worker).

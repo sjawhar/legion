@@ -31,7 +31,7 @@ func TestApplyFactAdmitsRootAndQueuesWhenFull(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
-	apply(t, pool, admission, "root-todo", intake.DispatchIssue{Key: "LEGION-208", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Admission", Rank: "B", HandedOver: handed}, engineStub{})
+	apply(t, pool, admission, "root-todo", intake.DispatchIssue{Key: "LEGION-208", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Admission", Rank: "B", HandedOver: handed}, engineStub{})
 	root := issue(t, pool, "LEGION-208")
 	if root.Phase != phase.Admitted || root.Status != "in_progress" || root.Tree != root.Key {
 		t.Fatalf("admitted root = %#v, want admitted root with truthful in_progress status and its own tree", root)
@@ -43,7 +43,7 @@ func TestApplyFactAdmitsRootAndQueuesWhenFull(t *testing.T) {
 		{kind: record.OutboxKindSupervise, issue: "LEGION-208", payload: record.SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}},
 	})
 
-	apply(t, pool, admission, "queued-todo", intake.DispatchIssue{Key: "LEGION-209", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Queued", Rank: "A", HandedOver: handed}, engineStub{})
+	apply(t, pool, admission, "queued-todo", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "Queued", Rank: "A", HandedOver: handed}, engineStub{})
 	queued := issue(t, pool, "LEGION-209")
 	if queued.Status != "todo" || queued.Tree != queued.Key {
 		t.Fatalf("queued root = %#v, want slotless root with its observed todo status", queued)
@@ -64,20 +64,20 @@ func TestApplyFactPromotesWaitingRootsInRankOrder(t *testing.T) {
 	seedSlotted(t, pool, "LEGION-ACTIVE-2", "B")
 
 	for _, event := range []intake.DispatchIssue{
-		{Key: "LEGION-C", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank C", Rank: "C", HandedOver: handed},
-		{Key: "LEGION-A", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank A", Rank: "A", HandedOver: handed},
-		{Key: "LEGION-B", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B", HandedOver: handed},
+		{Key: "LEGION-C", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank C", Rank: "C", HandedOver: handed},
+		{Key: "LEGION-A", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank A", Rank: "A", HandedOver: handed},
+		{Key: "LEGION-B", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B", HandedOver: handed},
 	} {
 		apply(t, pool, admission, "arrive-"+event.Key, event, engineStub{})
 	}
 
-	apply(t, pool, admission, "leave-first", intake.DispatchIssue{Key: "LEGION-ACTIVE-1", Seq: 2, Type: "issue.updated", Status: "done", Title: "active", Rank: "A"}, engineStub{})
+	apply(t, pool, admission, "leave-first", intake.DispatchIssue{Key: "LEGION-ACTIVE-1", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "done", Title: "active", Rank: "A"}, engineStub{})
 	assertSlots(t, pool, []record.Slot{
 		{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow},
 		{Issue: "LEGION-ACTIVE-2", Index: 1, AdmittedAt: fixedNow},
 	})
 
-	apply(t, pool, admission, "leave-second", intake.DispatchIssue{Key: "LEGION-ACTIVE-2", Seq: 2, Type: "issue.updated", Status: "done", Title: "active", Rank: "B"}, engineStub{})
+	apply(t, pool, admission, "leave-second", intake.DispatchIssue{Key: "LEGION-ACTIVE-2", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "done", Title: "active", Rank: "B"}, engineStub{})
 	assertSlots(t, pool, []record.Slot{
 		{Issue: "LEGION-A", Index: 0, AdmittedAt: fixedNow},
 		{Issue: "LEGION-B", Index: 1, AdmittedAt: fixedNow},
@@ -96,8 +96,8 @@ func TestAnOperatorTreeHoldsOnlyItsOwnWorkflowRootsAdmission(t *testing.T) {
 	if _, err := pool.Exec(context.Background(), `insert into tree_lifecycles (project, tree, epoch, authority) values ('legion', 'LEGION-OPS', 1, 'operator')`); err != nil {
 		t.Fatal(err)
 	}
-	apply(t, pool, admission, "arrive-ops", intake.DispatchIssue{Key: "LEGION-OPS", Seq: 1, Type: "issue.updated", Status: "todo", Title: "held by the operator", Rank: "A", HandedOver: handed}, engineStub{})
-	apply(t, pool, admission, "arrive-b", intake.DispatchIssue{Key: "LEGION-B", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B", HandedOver: handed}, engineStub{})
+	apply(t, pool, admission, "arrive-ops", intake.DispatchIssue{Key: "LEGION-OPS", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "held by the operator", Rank: "A", HandedOver: handed}, engineStub{})
+	apply(t, pool, admission, "arrive-b", intake.DispatchIssue{Key: "LEGION-B", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B", HandedOver: handed}, engineStub{})
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-B", Index: 0, AdmittedAt: fixedNow}})
 	assertWaiting(t, pool, []string{"LEGION-OPS"})
 	if !strings.Contains(logged.String(), "admission waits for its tree's other authority") || !strings.Contains(logged.String(), "issue=LEGION-OPS") {
@@ -110,9 +110,9 @@ func TestApplyFactLeavesEngineRecordedChildWithoutSlotOrEffects(t *testing.T) {
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedSlotted(t, pool, "LEGION-ROOT", "A")
 	parent := "LEGION-ROOT"
-	child := record.Issue{Key: "LEGION-CHILD", Project: "LEGION", Title: "child", Parent: &parent, Tree: "LEGION-ROOT", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", LastDispatchSeq: 1}
+	child := record.Issue{Key: "LEGION-CHILD", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "child", Parent: &parent, Tree: "LEGION-ROOT", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", LastDispatchSeq: 1}
 
-	apply(t, pool, admission, "child-todo", intake.DispatchIssue{Key: child.Key, Seq: 1, Type: "issue.updated", Status: "todo", Title: child.Title, Parent: parent, Rank: child.Rank}, engineStub{store: record.NewStore(), recordChild: &child})
+	apply(t, pool, admission, "child-todo", intake.DispatchIssue{Key: child.Key, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: child.Title, Parent: parent, Rank: child.Rank}, engineStub{store: record.NewStore(), recordChild: &child})
 	if got := issue(t, pool, child.Key); !reflect.DeepEqual(got, child) {
 		t.Fatalf("child record = %#v, want engine-owned child %#v", got, child)
 	}
@@ -126,7 +126,7 @@ func TestApplyFactAdmitsOrphanAndLogsOnce(t *testing.T) {
 	var logs bytes.Buffer
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(&logs, nil)))
 
-	apply(t, pool, admission, "orphan-todo", intake.DispatchIssue{Key: "LEGION-ORPHAN", Seq: 1, Type: "issue.updated", Status: "todo", Title: "orphan", Parent: "LEGION-MISSING", Rank: "A", HandedOver: handed}, engineStub{})
+	apply(t, pool, admission, "orphan-todo", intake.DispatchIssue{Key: "LEGION-ORPHAN", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: "orphan", Parent: "LEGION-MISSING", Rank: "A", HandedOver: handed}, engineStub{})
 	orphan := issue(t, pool, "LEGION-ORPHAN")
 	if orphan.Parent == nil || *orphan.Parent != "LEGION-MISSING" || orphan.Tree != orphan.Key {
 		t.Fatalf("orphan record = %#v, want root tree preserving missing parent", orphan)
@@ -150,7 +150,7 @@ func TestApplyFactDropsWaitingIssueWhenHumanMovesItOutOfTodo(t *testing.T) {
 			admission := newAdmission(t, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			seedWaiting(t, pool, "LEGION-WAITING", "A")
 
-			apply(t, pool, admission, "leave-"+status, intake.DispatchIssue{Key: "LEGION-WAITING", Seq: 2, Type: "issue.updated", Status: status, Title: "waiting", Rank: "A"}, engineStub{})
+			apply(t, pool, admission, "leave-"+status, intake.DispatchIssue{Key: "LEGION-WAITING", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: status, Title: "waiting", Rank: "A"}, engineStub{})
 			if got := issue(t, pool, "LEGION-WAITING"); got.Status != status {
 				t.Fatalf("status = %q, want %q", got.Status, status)
 			}
@@ -166,7 +166,7 @@ func TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead(t *testing
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
 
-	apply(t, pool, admission, "phase-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "active", Rank: "A"}, engineStub{store: record.NewStore(), done: "LEGION-ACTIVE"})
+	apply(t, pool, admission, "phase-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "in_progress", Title: "active", Rank: "A"}, engineStub{store: record.NewStore(), done: "LEGION-ACTIVE"})
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
 	if got := issue(t, pool, "LEGION-NEXT"); got.Status != "in_progress" {
 		t.Fatalf("promoted status = %q, want in_progress", got.Status)
@@ -184,7 +184,7 @@ func TestApplyFactReleasesSlotWhenDispatchLeavesActiveSetAndPromotesHead(t *test
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
 
-	apply(t, pool, admission, "status-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", Seq: 2, Type: "issue.updated", Status: "done", Title: "active", Rank: "A"}, engineStub{})
+	apply(t, pool, admission, "status-done", intake.DispatchIssue{Key: "LEGION-ACTIVE", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "done", Title: "active", Rank: "A"}, engineStub{})
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-NEXT", Index: 0, AdmittedAt: fixedNow}})
 	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "done" {
 		t.Fatalf("released issue status = %q, want done", got.Status)
@@ -198,12 +198,12 @@ func TestApplyFactReleasesSlotWhenDispatchLeavesActiveSetAndPromotesHead(t *test
 func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	until := fixedNow.Add(time.Hour)
-	lingering := record.Issue{Key: "LEGION-LINGER", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
+	lingering := record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
 	putIssue(t, pool, lingering)
 
-	fact := intake.DispatchIssue{Key: lingering.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: lingering.Title, Rank: lingering.Rank, HandedOver: handed}
+	fact := intake.DispatchIssue{Key: lingering.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: lingering.Title, Rank: lingering.Rank, HandedOver: handed}
 	apply(t, pool, admission, "readmit", fact, engine)
 	readmitted := issue(t, pool, lingering.Key)
 	if readmitted.Generation != 4 || readmitted.LingerUntil != nil || readmitted.Phase != phase.Admitted || readmitted.Status != "in_progress" {
@@ -217,7 +217,7 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 	}
 	assertEffects(t, pool, readmittedEffects)
 
-	apply(t, pool, admission, "own-echo", intake.DispatchIssue{Key: lingering.Key, Seq: 3, Type: "issue.updated", Status: "in_progress", Title: lingering.Title, Rank: lingering.Rank}, engine)
+	apply(t, pool, admission, "own-echo", intake.DispatchIssue{Key: lingering.Key, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "in_progress", Title: lingering.Title, Rank: lingering.Rank}, engine)
 	assertSlots(t, pool, []record.Slot{{Issue: lingering.Key, Index: 0, AdmittedAt: fixedNow}})
 	assertEffects(t, pool, readmittedEffects)
 
@@ -238,18 +238,18 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
 	putIssue(t, pool, root)
 	parentKey := root.Key
-	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "mid-phase child", Tree: root.Key, Parent: &parentKey,
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "mid-phase child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Testing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
-	putIssue(t, pool, record.Issue{Key: "LEGION-210", Project: "LEGION", Title: "finished child", Tree: root.Key, Parent: &parentKey,
+	putIssue(t, pool, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "finished child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
-	putIssue(t, pool, record.Issue{Key: "LEGION-211", Project: "LEGION", Title: "production-check child", Tree: root.Key, Parent: &parentKey,
+	putIssue(t, pool, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "production-check child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "D", LastDispatchSeq: 1})
 
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
@@ -271,11 +271,11 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 func TestAResumedMergerIsToldNoApprovedHeadAcrossGenerations(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
 	putIssue(t, pool, root)
 	parentKey := root.Key
-	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merging child", Tree: root.Key, Parent: &parentKey,
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "merging child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
 	inTx(t, pool, func(tx pgx.Tx) {
 		if err := record.NewStore().PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "review-claim",
@@ -284,7 +284,7 @@ func TestAResumedMergerIsToldNoApprovedHeadAcrossGenerations(t *testing.T) {
 		}
 	})
 
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
@@ -316,11 +316,11 @@ func TestAResumedMergerIsToldNoApprovedHeadAcrossGenerations(t *testing.T) {
 func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
 	putIssue(t, pool, root)
 	parentKey := root.Key
-	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "awaiting child", Tree: root.Key, Parent: &parentKey,
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "awaiting child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1})
 	inTx(t, pool, func(tx pgx.Tx) {
 		if err := record.NewStore().PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merge-claim",
@@ -329,7 +329,7 @@ func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 		}
 	})
 
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
@@ -354,15 +354,15 @@ func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	until := fixedNow.Add(time.Hour)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}
 	putIssue(t, pool, root)
 	parentKey := root.Key
-	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merged child", Tree: root.Key, Parent: &parentKey,
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "merged child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.AwaitingMerge, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
 	inTx(t, pool, func(tx pgx.Tx) {
-		if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 42,
+		if err := record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "acme/widgets", Number: 42,
 			Branch: "legion/LEGION-209", HeadSHA: "head", Failing: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
@@ -377,13 +377,13 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 		return starts
 	}
 
-	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
 		t.Fatalf("ApplyFact merge: %v", err)
 	}
 	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
 		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
 	}
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
 		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
 	}
@@ -493,12 +493,12 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-100", "A")
-			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 2}
+			root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Admitted, Generation: 2, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 2}
 			putIssue(t, pool, root)
 			parentKey := root.Key
-			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "child", Tree: root.Key, Parent: &parentKey,
+			child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "child", Tree: root.Key, Parent: &parentKey,
 				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "C", LastDispatchSeq: 1}
 			putIssue(t, pool, child)
 			project, err := claim.ProjectToken(testProject)
@@ -587,7 +587,7 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			}
 			before, beforeResumes := testerStarts()
 
-			apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
+			apply(t, pool, admission, "free-the-slot", intake.DispatchIssue{Key: "LEGION-100", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.closed", Status: "done", Title: "LEGION-100", Rank: "A"}, engine)
 			if slotted := issue(t, pool, root.Key); slotted.Status != "in_progress" {
 				t.Fatalf("the waiting root after the slot freed = %s, want it promoted", slotted.Status)
 			}
@@ -606,12 +606,12 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, "LEGION-1", "A")
 	seedWaiting(t, pool, "LEGION-2", "B")
 	seedWaiting(t, pool, "LEGION-3", "C")
 
-	apply(t, pool, admission, "rerank", intake.DispatchIssue{Key: "LEGION-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "renamed", Parent: "LEGION-9", Rank: "AB", HandedOver: handed}, engine)
+	apply(t, pool, admission, "rerank", intake.DispatchIssue{Key: "LEGION-3", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "renamed", Parent: "LEGION-9", Rank: "AB", HandedOver: handed}, engine)
 	got := issue(t, pool, "LEGION-3")
 	if got.Rank != "AB" || got.Title != "renamed" || got.Parent == nil || *got.Parent != "LEGION-9" || got.LastDispatchSeq != 2 {
 		t.Fatalf("observed record = %#v, want rank AB, title renamed, parent LEGION-9, seq 2", got)
@@ -629,20 +629,20 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
 	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
-	putIssue(t, pool, record.Issue{Key: key, Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
 	const child = "LEGION-2"
 	parent := key
-	putIssue(t, pool, record.Issue{Key: child, Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "child", Tree: key, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending})
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		ctx := context.Background()
 		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: key, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
 			t.Fatalf("seed gate: %v", err)
 		}
-		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", CheckedHead: "merged", Failing: []string{}}); err != nil {
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "acme/widgets", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", CheckedHead: "merged", Failing: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
@@ -653,7 +653,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		}
 	})
 
-	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A", HandedOver: handed}, engine)
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A", HandedOver: handed}, engine)
 	readmitted := issue(t, pool, key)
 	if readmitted.Generation != 2 || readmitted.Phase != phase.Admitted || readmitted.ReadyPendingVersion != nil {
 		t.Fatalf("readmitted = %#v, want generation 2, admitted, no READY pending", readmitted)
@@ -723,7 +723,7 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child, artifact = "LEGION-1", "LEGION-2", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
 			approved := 1
 			seedSlotted(t, pool, root, "A")
@@ -745,7 +745,7 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 				for _, put := range []error{
 					records.PutIssue(ctx, tx, *rootIssue),
 					records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}),
-					records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", LastDispatchSeq: 2}),
+					records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", LastDispatchSeq: 2}),
 					records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleImplementer, Claim: "child-implementer", HandoffCommit: "child-check", LastHandoff: "child-check", Rounds: 1}),
 				} {
 					if put != nil {
@@ -754,7 +754,7 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 				}
 			})
 
-			apply(t, pool, admission, "child-reopened", intake.DispatchIssue{Key: child, Seq: 3, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: tc.handedOver}, engine)
+			apply(t, pool, admission, "child-reopened", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B", HandedOver: tc.handedOver}, engine)
 			reopened := issue(t, pool, child)
 			var architectStarts, told int
 			for _, got := range effects(t, pool) {
@@ -787,11 +787,11 @@ func TestReconcileNeverReadmitsAChildAsARoot(t *testing.T) {
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedSlotted(t, pool, "LEGION-1", "A")
 	parent := "LEGION-1"
-	putIssue(t, pool, record.Issue{Key: "LEGION-2", Tree: "LEGION-1", Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "B"})
+	putIssue(t, pool, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "B"})
 
 	reconcile(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-1", Title: "LEGION-1", Status: "in_progress", Rank: "A"},
-		{Key: "LEGION-2", Title: "child", Status: "todo", Parent: &parent, Rank: "B"},
+		{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Title: "LEGION-1", Status: "in_progress", Rank: "A"},
+		{Key: "LEGION-2", ResolvedRepo: "acme/widgets", Title: "child", Status: "todo", Parent: &parent, Rank: "B"},
 	})
 	if got := issue(t, pool, "LEGION-2"); got.Tree != "LEGION-1" || got.Generation != 1 {
 		t.Fatalf("reconciled child = %#v, want it kept in LEGION-1's tree at generation 1", got)
@@ -805,9 +805,9 @@ func TestReconcileReadmitsALingeringRootSetBackToTodo(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	until := fixedNow.Add(time.Hour)
-	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until})
+	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until})
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", Title: "lingering", Status: "todo", Rank: "A", HandedOver: handed}})
+	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", ResolvedRepo: "acme/widgets", Title: "lingering", Status: "todo", Rank: "A", HandedOver: handed}})
 	readmitted := issue(t, pool, "LEGION-LINGER")
 	if readmitted.Generation != 4 || readmitted.LingerUntil != nil || readmitted.Phase != phase.Admitted || readmitted.Status != "in_progress" {
 		t.Fatalf("reconciled root = %#v, want generation 4, admitted, and no linger", readmitted)
@@ -822,8 +822,8 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	until := fixedNow.Add(time.Hour)
-	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until})
-	putIssue(t, pool, record.Issue{Key: "LEGION-CHILD", Project: "LEGION", Title: "child", Tree: "LEGION-LINGER", Parent: record.ParentOf("LEGION-LINGER"), Phase: phase.Done, Generation: 3, Status: "done", Rank: "B"})
+	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until})
+	putIssue(t, pool, record.Issue{Key: "LEGION-CHILD", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Title: "child", Tree: "LEGION-LINGER", Parent: record.ParentOf("LEGION-LINGER"), Phase: phase.Done, Generation: 3, Status: "done", Rank: "B"})
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		if err := records.PutGate(context.Background(), tx, record.DesignGate{Issue: "LEGION-CHILD", ArtifactID: "artifact-child", LatestVersion: 2}); err != nil {
@@ -843,7 +843,7 @@ func TestReadmissionClearsTheGenerationOfEveryIssueOfTheTree(t *testing.T) {
 		}
 	})
 
-	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", Title: "lingering", Status: "todo", Rank: "A", HandedOver: handed}})
+	reconcile(t, pool, admission, []dispatch.IssueSummary{{Key: "LEGION-LINGER", ResolvedRepo: "acme/widgets", Title: "lingering", Status: "todo", Rank: "A", HandedOver: handed}})
 
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
@@ -884,9 +884,9 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	seedWaiting(t, pool, "LEGION-C", "C")
 	admission.cap = 2
 	summaries := []dispatch.IssueSummary{
-		{Key: "LEGION-C", Title: "C", Status: "todo", Rank: "C", HandedOver: handed},
-		{Key: "LEGION-B", Title: "B", Status: "todo", Rank: "B", HandedOver: handed},
-		{Key: "LEGION-A", Title: "A", Status: "todo", Rank: "A", HandedOver: handed},
+		{Key: "LEGION-C", ResolvedRepo: "acme/widgets", Title: "C", Status: "todo", Rank: "C", HandedOver: handed},
+		{Key: "LEGION-B", ResolvedRepo: "acme/widgets", Title: "B", Status: "todo", Rank: "B", HandedOver: handed},
+		{Key: "LEGION-A", ResolvedRepo: "acme/widgets", Title: "A", Status: "todo", Rank: "A", HandedOver: handed},
 	}
 
 	reconcile(t, pool, admission, summaries)
@@ -916,7 +916,7 @@ func TestReconcileReleasesSlotWhoseDispatchStatusLeftActiveSet(t *testing.T) {
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 
 	reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-ACTIVE", Title: "active", Status: "done", Rank: "A", LastSeq: 1},
+		{Key: "LEGION-ACTIVE", ResolvedRepo: "acme/widgets", Title: "active", Status: "done", Rank: "A", LastSeq: 1},
 	}, 1, 1, true)
 	assertSlots(t, pool, nil)
 	if got := issue(t, pool, "LEGION-ACTIVE"); got.Status != "done" {
@@ -928,7 +928,7 @@ func TestCapturedDispatchTodoEventAdmitsAndProjectsActiveSlot(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	js := testJetStream(t)
-	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	consumers, err := intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}, AckWait: time.Second, NakDelay: time.Millisecond, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}

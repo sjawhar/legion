@@ -32,6 +32,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -95,11 +96,16 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 		t.Fatalf("provision secret data %v", provision.Data)
 	}
 	secret := g.secret(roleSecretName(name, spec.Role))
-	if len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 || string(secret.Data[GitHubConfigKey]) != ghconfig.Config {
-		t.Fatalf("role secret keys %v, want the launcher token and the role's two gh files", slices.Sorted(maps.Keys(secret.Data)))
+	wantKeys := []string{LauncherTokenFile, GitHubConfigKey("acme"), GitHubConfigKey("sjawhar"), GitHubDefaultKey, GitHubHostsKey("acme"), GitHubHostsKey("sjawhar")}
+	slices.Sort(wantKeys)
+	if keys := slices.Sorted(maps.Keys(secret.Data)); !slices.Equal(keys, wantKeys) || len(secret.Data[LauncherTokenFile]) == 0 ||
+		string(secret.Data[GitHubConfigKey("sjawhar")]) != ghconfig.Config || string(secret.Data[GitHubDefaultKey]) != "sjawhar" {
+		t.Fatalf("role secret keys %v, want the launcher token, the default owner sjawhar and each owner's two gh files %v", keys, wantKeys)
 	}
-	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey]); err != nil || token != staticCredentialToken(spec.Role) {
-		t.Fatalf("the tester's hosts.yml holds token %q (%v), want its App's %q", token, err, staticCredentialToken(spec.Role))
+	for owner, want := range map[string]string{"sjawhar": staticCredentialToken(spec.Role), "acme": staticReadToken(spec.Role, "acme")} {
+		if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey(owner)]); err != nil || token != want {
+			t.Fatalf("the tester's %s hosts.yml holds token %q (%v), want %q", owner, token, err, want)
+		}
 	}
 	var start shimwire.LauncherStart
 	for _, frame := range g.sent(workerToken) {
@@ -115,7 +121,7 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 }
 
-// The controller's one Secret holds the review App's gh files beside its launcher token: the
+// The controller's one Secret holds the review App's gh bundle beside its launcher token: the
 // controller acts as the review App (appauth.AppRoleFor), so its launch mints a credential and its
 // pod projects it at a gh volume like a workflow role's.
 func TestTheControllersSecretHoldsTheReviewAppsGhFilesBesideTheLauncherToken(t *testing.T) {
@@ -123,8 +129,9 @@ func TestTheControllersSecretHoldsTheReviewAppsGhFilesBesideTheLauncherToken(t *
 	g.spawn(controllerSpec(t))
 	name := SandboxName(controllerToken)
 	secret := g.secret(roleSecretName(name, claim.RoleController))
-	if secret == nil || len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 || len(secret.Data[GitHubHostsKey]) == 0 || len(secret.Data[GitHubConfigKey]) == 0 {
-		t.Fatalf("the controller's Secret holds %v, want the launcher token and the review App's two gh files", secret)
+	if secret == nil || len(secret.Data) != 6 || len(secret.Data[LauncherTokenFile]) == 0 || string(secret.Data[GitHubDefaultKey]) != "sjawhar" ||
+		len(secret.Data[GitHubHostsKey("sjawhar")]) == 0 || len(secret.Data[GitHubConfigKey("acme")]) == 0 {
+		t.Fatalf("the controller's Secret holds %v, want the launcher token, the default and the review App's gh files of each owner", secret)
 	}
 	found := false
 	for _, volume := range g.pod(name).Spec.Volumes {
@@ -505,21 +512,22 @@ func TestAReplacementGenerationOutlivesTheKilledInstancesTerminatedStatus(t *tes
 // The Secrets hold a launch's credentials when the issue Sandbox is set Running, so no launcher
 // starts on a missing Secret, and the one-generation boot token travels only in the launcher's
 // start command, never in a Secret. A later generation of the role in the same pod sets nothing
-// Running again (decision 6).
+// Running again (decision 6). The repository cache the first launch makes is set Running too, by
+// its own lifecycle (repocache_test.go); only the issue Sandbox's patches are counted here.
 func TestTheSecretsHoldTheLaunchsCredentialsWhenRunningIsPatched(t *testing.T) {
 	g := newRig(t, nil)
 	var mu sync.Mutex
 	var atRunning []string
 	name := SandboxName(workerToken)
 	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
+		if a.(k8stesting.PatchAction).GetName() == name && modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
 			mu.Lock()
 			defer mu.Unlock()
 			provision, role := g.secret(secretName(name)), g.secret(roleSecretName(name, claim.RoleTester))
 			switch {
 			case provision == nil || role == nil:
 				atRunning = append(atRunning, "missing secret")
-			case len(provision.Data[provisionTokenKey]) == 0 || len(role.Data[LauncherTokenFile]) == 0:
+			case len(provision.Data[provisionTokenKey]) == 0 || len(provision.Data[cacheTokenKey]) == 0 || len(role.Data[LauncherTokenFile]) == 0:
 				atRunning = append(atRunning, "incomplete secrets")
 			default:
 				atRunning = append(atRunning, "ok")
@@ -607,14 +615,16 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the two clones' bounds together, workspace.FetchTimeout (30m) for
-// workspace-fetch's and workspace.CloneTimeout (30m) for workspace-init's, and nothing more:
-// provisioning from the feed onto the issue's own volume waits on no other pod, so no lock wait is
-// added to it. Pinned to a literal, since no test can wait the real bound out.
-func TestProvisionBoundIsBothClonesBoundsExactly(t *testing.T) {
+// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (70m: the
+// wait for the repository cache, then the one bound the fetch's stream, verification and delta
+// share) for workspace-fetch and workspace.CloneTimeout (30m) for workspace-init's shared clone,
+// and nothing more: provisioning from the feed onto the issue's own volume waits on no other pod,
+// so no lock wait is added to it. Pinned to a literal, 100 minutes, since no test can wait the real
+// bound out.
+func TestProvisionBoundIsTheFetchsWholeBudgetAndTheClonesBound(t *testing.T) {
 	g := newRig(t, nil)
-	if got := g.r.ProvisionBound(); got != 60*time.Minute {
-		t.Fatalf("ProvisionBound = %s, want %s", got, 60*time.Minute)
+	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+workspace.FetchTimeout+workspace.CloneTimeout; got != 100*time.Minute || got != want {
+		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the fetch's bound after it, and the shared clone's", got, want)
 	}
 }
 
@@ -786,13 +796,14 @@ func (d *deadlineTokens) Token(ctx context.Context, owner string) (string, error
 }
 
 // The provisioning token is minted under the pod's launch turn, so its mint is bounded like any
-// other API call: a stalled GitHub connection must not hold the pod's turn for good.
+// other API call: a stalled GitHub connection must not hold the pod's turn for good. So is the
+// repository cache's, which the issue's first launch makes.
 func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 	tokens := &deadlineTokens{}
 	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = tokens }))
 	g.spawn(workerSpec(t))
-	if len(tokens.bounded) != 1 || !tokens.bounded[0] {
-		t.Fatalf("mints bounded: %v, want one with a deadline", tokens.bounded)
+	if len(tokens.bounded) != 2 || slices.Contains(tokens.bounded, false) {
+		t.Fatalf("mints bounded: %v, want the provisioning token's and the cache's, each with a deadline", tokens.bounded)
 	}
 }
 
@@ -839,11 +850,11 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 		},
 		"a role's github credential mint": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				credential := func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
+				credential := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
 					if failed.CompareAndSwap(false, true) {
-						return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+						return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 					}
-					return staticCredential(ctx, role)
+					return staticCredential(ctx, role, owner)
 				}
 				return withOptions(func(o *Options) { o.GitHubCredential = credential }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
 			},
@@ -1588,13 +1599,15 @@ func (s *supervisedSandboxStore) RetireDelivery(_ context.Context, c supervise.C
 }
 
 // A Running patch the server applied but whose answer never arrived (a client timeout) is as
-// ambiguous as a pod that never came: the launch sets its Sandbox Suspended before returning.
+// ambiguous as a pod that never came: the launch sets its Sandbox Suspended before returning. The
+// repository cache the launch makes first is answered as usual.
 func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(t *testing.T) {
 	g := newRig(t, nil)
 	g.hold.Store(true)
 	applyThenTimeOut := k8stesting.ObjectReaction(g.dyn.Tracker())
 	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
-		if !modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
+		patch := a.(k8stesting.PatchAction)
+		if patch.GetName() != SandboxName(workerToken) || !modePatched(t, string(patch.GetPatch()), modeRunning) {
 			return false, nil, nil
 		}
 		if _, _, err := applyThenTimeOut(a); err != nil {

@@ -232,12 +232,20 @@
               "defaultMode": 288,
               "items": [
                 {
-                  "key": "github-hosts",
-                  "path": "hosts.yml"
+                  "key": "github-hosts-acme",
+                  "path": "acme/hosts.yml"
                 },
                 {
-                  "key": "github-config",
-                  "path": "config.yml"
+                  "key": "github-config-acme",
+                  "path": "acme/config.yml"
+                },
+                {
+                  "key": "github-hosts-sjawhar",
+                  "path": "sjawhar/hosts.yml"
+                },
+                {
+                  "key": "github-config-sjawhar",
+                  "path": "sjawhar/config.yml"
                 }
               ],
               "secretName": "legion-legion-controller-controller-boot"

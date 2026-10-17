@@ -39,7 +39,7 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 	controller := claim.ControllerToken("legion")
 	admitted := time.Date(2026, 10, 6, 18, 2, 11, 0, time.UTC)
 	store := projectionStore{
-		issues: []record.Issue{{Key: issue, Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true}},
+		issues: []record.Issue{{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Status: "in_progress", Phase: phase.Admitted, Generation: 1, HandedOver: true}},
 		phases: map[string][]record.PhaseRow{issue: {{Issue: issue, Role: claim.RoleArchitect, Claim: architect}}},
 		slots:  []record.Slot{{Issue: issue, Index: 0, AdmittedAt: admitted}},
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -42,10 +44,11 @@ import (
 // Sandbox's operatingMode is the daemon's request to the real Sandbox controller, not a claim about
 // that controller's pods. A list honours its label selector's `key=value` terms. Every Sandbox
 // delete is recorded with its options and, with foreground propagation, takes the PVC the Sandbox
-// owns as garbage collection would; a create gives the new Sandbox a uid and is recorded; a patch
-// applies the daemon's JSON patch, refusing one whose uid or resourceVersion test fails; role
-// Secrets are accepted and forgotten; and every PVC request is counted, since the restricted daemon
-// identity has none.
+// owns as garbage collection would; a create gives the new Sandbox a uid and is recorded, and one
+// asking for a Service gets the headless Service the controller makes for it (controllerService),
+// sent to every watch of Services; a patch applies the daemon's JSON patch, refusing one whose uid
+// or resourceVersion test fails; role Secrets are accepted and forgotten; and every PVC request is
+// counted, since the restricted daemon identity has none.
 type issueSandboxAPI struct {
 	mu      sync.Mutex
 	objects map[string]map[string]any
@@ -55,6 +58,24 @@ type issueSandboxAPI struct {
 	created     []string
 	pvcRequests int
 	uids        int
+	// services are the Services the stand-in controller made, by name, and serviceWatches every
+	// open watch of them.
+	services       map[string]map[string]any
+	serviceWatches []chan map[string]any
+}
+
+// controllerService is the headless Service the Agent Sandbox controller makes for the Sandbox
+// name with uid: controlled by it, labelled and selecting by the FNV-1a hash of its name.
+func controllerService(name, uid string) map[string]any {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(name))
+	label := map[string]any{"agents.x-k8s.io/sandbox-name-hash": fmt.Sprintf("%08x", hash.Sum32())}
+	return map[string]any{
+		"apiVersion": "v1", "kind": "Service",
+		"metadata": map[string]any{"name": name, "namespace": "legion", "resourceVersion": "1", "labels": label,
+			"ownerReferences": []any{map[string]any{"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox", "name": name, "uid": uid, "controller": true}}},
+		"spec": map[string]any{"clusterIP": "None", "selector": label},
+	}
 }
 
 // issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning its volume.
@@ -68,7 +89,7 @@ func issueSandbox(name, uid, tree, issue string) map[string]any {
 }
 
 func newIssueSandboxAPI(sandboxes ...map[string]any) *issueSandboxAPI {
-	a := &issueSandboxAPI{objects: map[string]map[string]any{}, pvcs: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}}
+	a := &issueSandboxAPI{objects: map[string]map[string]any{}, pvcs: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}, services: map[string]map[string]any{}}
 	for _, s := range sandboxes {
 		name := s["metadata"].(map[string]any)["name"].(string)
 		a.objects[name], a.pvcs[name] = s, true
@@ -83,7 +104,13 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("sendInitialEvents") == "true" {
 			a.mu.Lock()
 			version, kind := "v1", "Pod"
-			if strings.HasSuffix(r.URL.Path, "/sandboxes") {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/services"):
+				kind = "Service"
+				for _, object := range a.services {
+					_ = json.NewEncoder(w).Encode(map[string]any{"type": "ADDED", "object": object})
+				}
+			case strings.HasSuffix(r.URL.Path, "/sandboxes"):
 				version, kind = "agents.x-k8s.io/v1beta1", "Sandbox"
 				for _, object := range a.objects {
 					_ = json.NewEncoder(w).Encode(map[string]any{"type": "ADDED", "object": object})
@@ -96,8 +123,22 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.mu.Unlock()
 		}
 		w.(http.Flusher).Flush()
-		<-r.Context().Done()
-		return
+		var added chan map[string]any
+		if strings.HasSuffix(r.URL.Path, "/services") {
+			added = make(chan map[string]any, 64)
+			a.mu.Lock()
+			a.serviceWatches = append(a.serviceWatches, added)
+			a.mu.Unlock()
+		}
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case object := <-added:
+				_ = json.NewEncoder(w).Encode(map[string]any{"type": "ADDED", "object": object})
+				w.(http.Flusher).Flush()
+			}
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -114,6 +155,12 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		status(http.StatusForbidden, metav1.StatusReasonForbidden)
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/pods"):
 		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "PodList", "metadata": map[string]any{"resourceVersion": "1"}, "items": []any{}})
+	case r.Method == http.MethodGet && strings.HasSuffix(path, "/services"):
+		items := []any{}
+		for _, object := range a.services {
+			items = append(items, object)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "ServiceList", "metadata": map[string]any{"resourceVersion": "1"}, "items": items})
 	case strings.Contains(path, "/pods/"):
 		missing()
 	case strings.Contains(path, "/secrets/") && r.Method == http.MethodGet:
@@ -148,6 +195,13 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		meta["uid"], meta["resourceVersion"], meta["generation"] = fmt.Sprintf("sandbox-uid-created-%d", a.uids), "1", float64(1)
 		a.objects[name], a.pvcs[name] = object, true
 		a.created = append(a.created, name)
+		if spec, _ := object["spec"].(map[string]any); spec["service"] == true {
+			service := controllerService(name, meta["uid"].(string))
+			a.services[name] = service
+			for _, watch := range a.serviceWatches {
+				watch <- service
+			}
+		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(object)
 	case strings.Contains(path, "/sandboxes/"):
@@ -320,7 +374,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
 	putOutboxIssue(t, pool, records, issue)
 	if _, err := st.OpenTreeLifecycle(ctx, "legion", issue.Tree, treelifecycle.AuthorityWorkflow); err != nil {
 		t.Fatal(err)
@@ -343,7 +397,8 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 			StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout: time.Second, BusyBackoff: time.Millisecond, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-			Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: quietLogger(),
+			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: quietLogger(),
+			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -355,7 +410,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	}
 	sup, stopRuntime := newSupervisorRuntime()
 	clock := time.Now()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
 	// newRunner is the outbox over the given supervisor: the restart below builds a second one
 	// over the restarted runtime, since the outbox carries locks a copy must not.
 	newRunner := func(sup *supervisor) *outbox {
@@ -371,7 +426,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	if err := st.PutClaim(ctx, stored); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "close", intake.DispatchIssue{Key: issue.Key, Seq: 2, Type: "issue.closed", Status: "done", Title: issue.Title, Rank: "U"}, engine); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "close", intake.DispatchIssue{Key: issue.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.closed", Status: "done", Title: issue.Title, Rank: "U"}, engine); err != nil {
 		t.Fatal(err)
 	}
 	clock = clock.Add(time.Second)
@@ -458,10 +513,10 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 	records := record.NewStore()
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
 	parent := root.Key
-	done := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "done child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V", LastDispatchSeq: 1}
-	parked := record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "parked child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W", LastDispatchSeq: 1}
+	done := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "done child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V", LastDispatchSeq: 1}
+	parked := record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "parked child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W", LastDispatchSeq: 1}
 	for _, issue := range []record.Issue{root, done, parked} {
 		putOutboxIssue(t, pool, records, issue)
 	}
@@ -494,7 +549,8 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 		StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 		Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 		BootTimeout: 300 * time.Millisecond, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-		Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: logger,
+		Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: logger,
+		RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -529,10 +585,10 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock := time.Now()
-	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, logger)
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, logger)
 	admission := admit.New(records, engine, 2, "LEGION", logger)
 	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st, tokens: outboxTokens{},
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), githubAPI: newBranchGitHub(t, nil, branchExists).url, defaultBranch: mainBranch,
+		stateDir: t.TempDir(), githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: done.Key, Status: "todo"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine, admission}, log: logger, now: func() time.Time { return clock },
 	}
@@ -567,7 +623,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	}
 
 	// (a) The done child: its claims closed, its Sandbox and volume gone, its parent untouched.
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-done", intake.DispatchIssue{Key: done.Key, Seq: 2, Type: "issue.closed", Status: "done", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-done", intake.DispatchIssue{Key: done.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.closed", Status: "done", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	run("the done child's close")
@@ -610,7 +666,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	}
 
 	// (c) The parked child: today's path, its Sandbox Suspended and kept, its sessions retained.
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: parked.Key, Seq: 2, Type: "issue.updated", Status: "backlog", Title: parked.Title, Parent: root.Key, Rank: "W"}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: parked.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: parked.Title, Parent: root.Key, Rank: "W"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	run("the parked child's move to backlog")
@@ -631,7 +687,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	// again: a fresh spawn into a new Sandbox whose workspace-init expects no volume. The fixture
 	// runs no controller, so the launch ends at its wait for a pod; what it asked of the API is
 	// what the assertion reads.
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-todo", intake.DispatchIssue{Key: done.Key, Seq: 3, Type: "issue.updated", Status: "todo", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-todo", intake.DispatchIssue{Key: done.Key, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	run("the re-entered child's branch and status")

@@ -17,15 +17,33 @@ your cluster, from one published worker image.
 | A Kubernetes cluster | Agent Sandbox installed, a gVisor runtime class, a node pool for Legion, a namespace and a storage class ([below](#the-cluster)). |
 | A host for the daemon | Reachable from the pods on two ports: the API (`port`, 13370 by default) and the worker stream (`worker_stream_port`, the API port plus one). |
 | Postgres | One database for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment). |
-| [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents. |
+| [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents, and the project's repositories mapped to it in Dispatch's Settings → Repositories → Projects, one of them the project's default ([below](#the-projects-repositories)). |
 | The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
-| Two GitHub Apps | An **implement** App (the implementer's and merger's identity) and a **review** App (every other role's), each installed on the owner of every repository Legion works, with its private key ([below](#the-two-github-apps)). |
+| Two GitHub Apps | An **implement** App (the implementer's and merger's identity) and a **review** App (every other role's), each installed on every repository Legion works, with its private key ([below](#the-two-github-apps)). |
 | The worker image | `ghcr.io/sjawhar/legion-worker`, pinned by digest. |
 | A model route | An Oh My Pi provider file and settings overlay, and the credential they read ([below](#the-model-route)). |
 
+## The project's repositories
+
+A project's repositories are Dispatch's mapping, set on Dispatch's Settings → Repositories →
+Projects page, one of them the project's default; `legion.yaml` names none. Each issue targets the
+repository Dispatch resolves for it: its own (the issue header's Repository picker, or
+`dispatch issue-update --repo owner/name`), else its nearest ancestor's, else the project's default.
+The daemon records an issue on that repository, and its default branch as GitHub names it, when it
+first records the issue, and keeps both: a later change of the issue's repository in Dispatch is
+not applied, and the daemon says so on the issue. An issue whose repository resolves to none, or to
+one the daemon does not serve, is not admitted, and the daemon says why on the issue.
+
+The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
+mapped repository both GitHub Apps are installed on, and leaves out one either App is missing from:
+the boot logs it, `legion state --json` lists it under `repositories.refused` with the App it lacks,
+and an issue on it is not admitted until the App is installed, when moving the issue to `todo`
+again admits it. A project with no repository mapped does not boot; one whose every repository
+lacks an App boots serving none and admits nothing until an App is installed.
+
 ## The two GitHub Apps
 
-Create two GitHub Apps and install both on the owner of every repository Legion works. The daemon
+Create two GitHub Apps and install both on every repository Legion works. The daemon
 mints each agent's token from its role's App, with the App's whole installation permissions, so the
 Apps' permissions are exactly what Legion's agents can do on GitHub:
 
@@ -93,6 +111,8 @@ and the checks that branch requires (its rulesets and its branch protection), th
   - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
   - `secrets`: create, delete, update, get (never list);
   - `pods`: get, list, watch; `pods/log`: get;
+  - `services`: get, list, watch, so a launch checks its repository cache's Service is the cache's
+    own before an issue pod is told its address;
   - `events`: list;
   - and a cluster-scoped get on the CRD `sandboxes.agents.x-k8s.io` and a get on the Deployment
     `agent-sandbox-controller` in `agent-sandbox-system`.
@@ -134,8 +154,8 @@ the kubeconfig it names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) name
 
 What each part is for:
 
-- **`project`** is the Dispatch project key, and it must also be a key of `projects`, which maps
-  each Dispatch project the daemon runs to its GitHub repository. A project may name a
+- **`project`** is the Dispatch project key, and it must also be a key of `projects`, which names
+  each Dispatch project the daemon runs (its repositories are [Dispatch's mapping](#the-projects-repositories)). A project may name a
   `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
   when the head's own CI turns red before the merge, or the head starts conflicting with its base.
   Its optional `merge.by_hand` mapping holds regular-expression paths, each matched anywhere in a
@@ -359,6 +379,14 @@ Closing the terminal leaves the project without one, and the daemon logs
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
 
+   **After the first upgrade to a release whose repositories are Dispatch's mapping,** a
+   `legion.yaml` that still sets `projects.<KEY>.repo` is refused at load with
+   `Unknown key "projects.<KEY>.repo": the project's repositories are Dispatch's mapping`. Upgrade
+   Dispatch first, map the project's repositories there with the old `repo` as the project's
+   default, then delete the key and upgrade the daemon: its first boot records each issue it
+   already runs on the repository Dispatch resolves for it, and refuses to boot, naming every
+   issue, while one resolves to none.
+
    **After the first upgrade to a release without `review_workflows`,** a `legion.yaml` that still
    sets `projects.<KEY>.review_workflows` is refused at load with
    `Unknown key "projects.<KEY>.review_workflows"`, by `legion start --check-config` and by the
@@ -455,12 +483,14 @@ Closing the terminal leaves the project without one, and the daemon logs
   ```
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
-  issue under `issues` with its `phase`, `status`, `holdReason`, `architect` and `workers` (each
-  claim's `state`), `pullRequest` (`head`, `checksVerdict`, `fixAttempts`) and `designGate`
-  (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`,
+  issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
+  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
+  `fixAttempts`) and `designGate` (`currentVersion`, `approvedVersion`), the `controllerLocator`,
+  `pendingStatusWrites`,
   `heldOutboxRows` ([An issue's stop or start waits behind its own launch](/legion/legion/troubleshooting/#an-issues-stop-or-start-waits-behind-its-own-launch)),
   `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
-  and `agentSecretsLogin` when the broker is configured:
+  `repositories` (the project's mapping as the daemon serves it: `owners`, `mapped`, and `refused`
+  with each left-out repository's `reason`), and `agentSecretsLogin` when the broker is configured:
 
   ```sh
   legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'
