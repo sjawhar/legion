@@ -209,4 +209,4 @@ package api
 // wrapper nor the two commands, so the image probe refuses it. (This branch took 28 while
 // sjawhar/legion#1999 was open; pi-legion v10.4.0 was released from main declaring 28 without
 // these shapes, so this branch takes the number above it, as the collision note says.)
-const DaemonAPIVersion = 28
+const DaemonAPIVersion = 29

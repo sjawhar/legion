@@ -45,13 +45,15 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- Daemon API contract 28 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+- Daemon API contract 29 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
   tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
   issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
   first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
   owner a command names, and git answers from that owner's directory through `legion git-credential`.
   The controller's credential answer is per owner. An image built before it is refused by the
-  daemon's image probe. Install this release with a `legion` built from the same commit.
+  daemon's image probe. (This change took 28 while LEGION-694 was open; pi-legion v10.4.0 was
+  released declaring 28 without these shapes, so it takes 29, the number above the released one.)
+  Install this release with a `legion` built from the same commit.
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
