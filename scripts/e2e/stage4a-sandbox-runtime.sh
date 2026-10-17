@@ -174,14 +174,24 @@ cleanup() {
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
   # namespace_clean's snapshot is a LIST by label, not a GET by name; on this cluster a LIST can
-  # still show an object several GETs in a row have already confirmed NotFound, for a while after
-  # a burst of deletes (five Sandboxes and the bridge pod/Service here) — confirmed live,
-  # 2026-10-17, three times: bridge_stop's own GET-based poll returned success, and teardown's own
-  # LIST-based wait gave up still seeing the same pod, both before this delay existed. A fixed
-  # settle window, not another retry loop around namespace_clean itself (shared with Stage 4b,
-  # outside this script), buys the watch cache time to catch up before the one-shot snapshot it
-  # takes is trusted.
-  sleep 20
+  # still show an object a direct GET has already confirmed NotFound for ten or more minutes
+  # after bridge_stop's own GET-based poll returned success and teardown's own LIST-based wait
+  # gave up still seeing it — confirmed live, 2026-10-17, four separate runs, the object itself
+  # eventually gone each time once checked much later. A fixed delay was not enough (tried 20s);
+  # this polls the exact query namespace_clean's snapshot runs, for up to 10 more minutes, so the
+  # one-shot snapshot it takes is only trusted once this cluster's own LIST view agrees with the
+  # GET-confirmed truth — never a retry loop around namespace_clean itself, shared with Stage 4b.
+  local settle_deadline settle_left
+  settle_deadline=$(($(date +%s) + 600))
+  while :; do
+    settle_left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>/dev/null) || settle_left=unknown
+    [ -n "$settle_left" ] || break
+    [ "$(date +%s)" -lt "$settle_deadline" ] || {
+      echo "   [operator] namespace-clean's own listing still shows $settle_left after 10 extra minutes past teardown; proceeding to the snapshot anyway"
+      break
+    }
+    sleep 5
+  done
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
