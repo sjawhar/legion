@@ -133,8 +133,8 @@ type controllerDaemonOptions struct {
 type fakeTx struct{}
 
 func (fakeTx) Begin(context.Context) (pgx.Tx, error) { return fakeTx{}, nil }
-func (fakeTx) Commit(context.Context) error           { return nil }
-func (fakeTx) Rollback(context.Context) error         { return nil }
+func (fakeTx) Commit(context.Context) error          { return nil }
+func (fakeTx) Rollback(context.Context) error        { return nil }
 func (fakeTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
 	return 0, errors.New("unexpected copy")
 }
