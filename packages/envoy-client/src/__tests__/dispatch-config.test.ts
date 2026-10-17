@@ -286,8 +286,9 @@ describe("Dispatch from a harness's envoy.json", () => {
       publicUrl: "https://dispatch.example.org",
     });
     expect(dispatchFor(env, { ...command, cwd: tempDir() })).not.toHaveProperty("publicUrl");
-    // The same cases the daemon's CheckPod refuses at load (fixtures/dispatch-public-url.json), so
-    // no value the daemon accepts turns Dispatch off in an agent.
+    // The shared fixture (fixtures/dispatch-public-url.json): every value the daemon's CheckPod
+    // accepts at load (`valid`) is accepted here too, so no value boot lets through turns Dispatch
+    // off in an agent. Boot holds to a narrower rule, so `agentsOnly` is accepted here alone.
     for (const url of publicUrlFixture.invalid) {
       expect(
         dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
@@ -297,7 +298,7 @@ describe("Dispatch from a harness's envoy.json", () => {
         error: "DISPATCH_PUBLIC_URL must be an http or https URL",
       });
     }
-    for (const url of publicUrlFixture.valid) {
+    for (const url of [...publicUrlFixture.valid, ...publicUrlFixture.agentsOnly]) {
       expect(
         dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
       ).toMatchObject({ enabled: true, publicUrl: url.replace(/\/+$/, "") });

@@ -144,9 +144,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		// in-cluster DISPATCH_URL the runtime hands every agent.
 		{name: "Dispatch's public dashboard", pod: env("DISPATCH_PUBLIC_URL", "https://dispatch.example.org")},
 		{name: "a public dashboard with no scheme", pod: env("DISPATCH_PUBLIC_URL", "dispatch.example.org"),
-			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off`},
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
 		{name: "a public dashboard on another scheme", pod: env("DISPATCH_PUBLIC_URL", "ftp://dispatch.example.org"),
-			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off`},
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
@@ -160,15 +160,17 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 	}
 }
 
-// CheckPod accepts exactly the DISPATCH_PUBLIC_URL values the agents' dispatch command accepts:
-// both read packages/contracts/fixtures/dispatch-public-url.json, so a value the daemon lets through
-// at load never turns Dispatch off in every agent (an empty hostname, a port out of range).
+// CheckPod accepts only DISPATCH_PUBLIC_URL values the agents' dispatch command accepts: both read
+// packages/contracts/fixtures/dispatch-public-url.json, where boot accepts `valid` alone and the
+// agents' test accepts `valid` and `agentsOnly`, so a value the daemon lets through at load never
+// turns Dispatch off in every agent (a numeric last label that is no IPv4 address, invalid
+// punycode, a forbidden host character, a zone, an empty hostname, a port out of range).
 func TestCheckPodHoldsDispatchPublicURLToTheAgentsRule(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "dispatch-public-url.json"))
 	if err != nil {
 		t.Fatalf("read the public-URL fixture: %v", err)
 	}
-	var fixture struct{ Valid, Invalid []string }
+	var fixture struct{ Valid, Invalid, AgentsOnly []string }
 	if err := json.Unmarshal(raw, &fixture); err != nil {
 		t.Fatalf("parse the public-URL fixture: %v", err)
 	}
@@ -181,8 +183,8 @@ func TestCheckPodHoldsDispatchPublicURLToTheAgentsRule(t *testing.T) {
 			t.Errorf("CheckPod(%q) = %v, want it accepted", value, err)
 		}
 	}
-	for _, value := range fixture.Invalid {
-		want := fmt.Sprintf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off", value)
+	for _, value := range append(fixture.Invalid, fixture.AgentsOnly...) {
+		want := fmt.Sprintf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
 		if err := check(value); err == nil || err.Error() != want {
 			t.Errorf("CheckPod(%q) = %v, want %q", value, err, want)
 		}

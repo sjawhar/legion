@@ -60,7 +60,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Changed
 
 - The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
-  `DISPATCH_PUBLIC_URL` that is not an http or https URL, naming it.
+  `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no
+  userinfo, a host that is a plain DNS name, a dotted-quad IPv4 or a bracketed IPv6 address, a
+  port from 1 to 65535), naming it, so a value it accepts never turns Dispatch off in an agent.
 - The controller skill's Slack replies give the link and assignee `dispatch` printed, never an
   assumed one.
 - The `legion-worker` and `legion-architect` skills say how the daemon's submission of an accepted

@@ -170,9 +170,9 @@ export function dispatchSettings(
     ).replace(/\/+$/, "");
     const token =
       source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    // The daemon refuses at load exactly what is refused here (its CheckPod and this read hold to
-    // packages/contracts/fixtures/dispatch-public-url.json): an http(s) URL with a hostname and,
-    // when it names one, a port from 1 to 65535; the URL parser itself refuses the rest.
+    // An http(s) URL the URL parser takes whose port, when it names one, is from 1 to 65535. The
+    // daemon accepts at load only values taken here, under a narrower rule (its CheckPod and this
+    // read hold to packages/contracts/fixtures/dispatch-public-url.json).
     const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
     const publicParsed = publicUrl === undefined ? undefined : httpUrl(publicUrl);
     if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
