@@ -270,10 +270,12 @@ users, the listener reaches `"status":"healthy"` as a user holding `ListenerPerm
 session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
 receives a send and a role message, and is refused a publish to another session's subject).
 `core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
-`envoy-dispatch` against `DispatchPermissions`, and proves both delivery durables (each binds and
-acknowledges a message), the outbox's owner-topic JetStream publish, the agent stream relay, and
-Dispatch creating the redelivery bucket, which the test client then reads and writes; its negative
-control removes the delivery durable's filtered create permission and receives that server
+`envoy-dispatch` against `DispatchPermissions`, with the test client connected as a second user of
+its own (`testClientPermissions`, the session set plus the exact calls its checks make), and proves
+both delivery durables (each binds and acknowledges a message), the outbox's owner-topic JetStream
+publish, the agent stream relay, Dispatch creating the redelivery bucket, which the test client
+then reads and writes, and that Dispatch's own user is refused a publish to a session's frames; its
+negative control removes the delivery durable's filtered create permission and receives that server
 violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 

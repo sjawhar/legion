@@ -86,13 +86,15 @@ func bucketPermissions(bucket string) []string {
 }
 
 // DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
-// envoy-listener beside it share: HostPermissions(machineID), the listener's machine id, then what
-// Dispatch itself needs. Publish, in this order: the stream calls and acknowledgements of each
-// durable Dispatch binds, the KV calls for its webhook-redelivery bucket, and every session's agent
-// stream control subject. Subscribe: every session's agent stream frames.
+// envoy-listener beside it share: ListenerPermissions(machineID), the listener's machine id, then
+// what Dispatch itself needs. No session connects as this user, so it holds none of
+// SessionPermissions: it cannot publish any session's frames or subscribe any session's control
+// subject. Publish, in this order: the stream calls and acknowledgements of each durable Dispatch
+// binds, the KV calls for its webhook-redelivery bucket, and every session's agent stream control
+// subject. Subscribe: every session's agent stream frames.
 func DispatchPermissions(machineID string) Permissions {
-	host := HostPermissions(machineID)
-	publish := host.Publish.Allow
+	listener := ListenerPermissions(machineID)
+	publish := listener.Publish.Allow
 	for _, durable := range []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable} {
 		publish = append(publish,
 			jsAPI+"CONSUMER.INFO."+bus.Stream+"."+durable,
@@ -105,7 +107,7 @@ func DispatchPermissions(machineID string) Permissions {
 	publish = append(publish, contracts.AgentStreamControlSubject("*"))
 	return Permissions{
 		Publish:   Rules{Allow: publish},
-		Subscribe: Rules{Allow: append(host.Subscribe.Allow, contracts.AgentStreamFramesSubject("*"))},
+		Subscribe: Rules{Allow: append(listener.Subscribe.Allow, contracts.AgentStreamFramesSubject("*"))},
 	}
 }
 
