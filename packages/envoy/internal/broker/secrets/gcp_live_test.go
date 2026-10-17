@@ -20,7 +20,7 @@ import (
 // Credentials, the way the broker runs on GKE, and asserts what the fake asserts: a secret on the
 // agent-secrets key with annotations is listed, described and read; one on Google's default key is
 // not OnKey; one with no version has no value; a disabled one has no value and is not readable; one
-// with an expire_time an hour ahead is Deleted. Every secret it makes is under a random prefix of
+// with an expire_time an hour ahead is left out and not described. Every secret it makes is under a random prefix of
 // its own and deleted at the end, so the broker's namespace is untouched.
 //
 //	BROKER_GCP_LIVE_PROJECT=<project number> BROKER_GCP_LIVE_KMS_KEY=<key name> \
@@ -110,13 +110,13 @@ func TestGCPLive(t *testing.T) {
 		for _, ls := range listings {
 			byID[ls.ID] = ls
 		}
-		if len(byID) == 5 || time.Now().After(deadline) {
+		if len(byID) == 4 || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(3 * time.Second)
 	}
-	if len(byID) != 5 {
-		t.Fatalf("List answered %d secrets within 90s, want 5: %+v", len(byID), byID)
+	if _, listed := byID[expiring]; len(byID) != 4 || listed {
+		t.Fatalf("List answered %d secrets within 90s, want the 4 with no expire_time: %+v", len(byID), byID)
 	}
 	onKey := func(ls Listing) bool {
 		t.Helper()
@@ -126,7 +126,7 @@ func TestGCPLive(t *testing.T) {
 		}
 		return on
 	}
-	if ls := byID[served]; !onKey(ls) || !ls.HasCurrentValue || ls.Deleted || ls.Tags["owner"] != "ada@example.com" || ls.Tags["tier"] != "human" {
+	if ls := byID[served]; !onKey(ls) || !ls.HasCurrentValue || ls.Tags["owner"] != "ada@example.com" || ls.Tags["tier"] != "human" {
 		t.Fatalf("served = %+v", ls)
 	}
 	if ls := byID[defaultKey]; onKey(ls) || !ls.HasCurrentValue {
@@ -138,8 +138,8 @@ func TestGCPLive(t *testing.T) {
 	if ls := byID[disabled]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("disabled = %+v; want on the key with no value", ls)
 	}
-	if ls := byID[expiring]; !ls.Deleted {
-		t.Fatalf("expiring = %+v; want Deleted", ls)
+	if _, err := store.Describe(ctx, expiring); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Describe(expiring) = %v, want ErrNotFound", err)
 	}
 	if _, err := store.Read(ctx, expiring); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Read(expiring) = %v, want ErrNotFound: Secret Manager still holds its value, and the store must not release it", err)

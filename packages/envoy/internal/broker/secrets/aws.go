@@ -91,7 +91,8 @@ func (a AWS) ValidName(id string) error {
 
 // List lists every secret under prefix with ListSecrets' name filter, a case-sensitive prefix
 // match, reading every page. Whether a secret has a value is read from the same listing's
-// SecretVersionsToStages, with no call per secret. A listing's OnKey reads the key's aliases at
+// SecretVersionsToStages, with no call per secret; ListSecrets leaves out a secret scheduled for
+// deletion, since it is not asked to include one. A listing's OnKey reads the key's aliases at
 // most once per List, the first time it is asked about a secret that names its key by one, so a
 // secret the policy refuses for its name or tags costs no KMS call. A failed Secrets Manager call
 // fails the whole List.
@@ -109,7 +110,7 @@ func (a AWS) List(ctx context.Context, prefix string) ([]Listing, error) {
 		for _, e := range page.SecretList {
 			listings = append(listings, Listing{
 				ID: aws.ToString(e.Name), Source: aws.ToString(e.ARN), Tags: TagMap(e.Tags),
-				OnKey: a.onKey(aws.ToString(e.KmsKeyId), keys), HasCurrentValue: HasCurrentVersion(e.SecretVersionsToStages), Deleted: e.DeletedDate != nil,
+				OnKey: a.onKey(aws.ToString(e.KmsKeyId), keys), HasCurrentValue: HasCurrentVersion(e.SecretVersionsToStages),
 			})
 		}
 	}
@@ -118,7 +119,7 @@ func (a AWS) List(ctx context.Context, prefix string) ([]Listing, error) {
 
 // Describe reads one secret with DescribeSecret, which is read-after-write consistent where
 // ListSecrets may lag a change by minutes: ErrNotFound for one Secrets Manager does not hold, and
-// Deleted for one scheduled for deletion, which DescribeSecret still answers.
+// for one scheduled for deletion, which DescribeSecret still answers with its DeletedDate.
 func (a AWS) Describe(ctx context.Context, id string) (Listing, error) {
 	out, err := a.Client.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(id)})
 	var notFound *types.ResourceNotFoundException
@@ -127,10 +128,12 @@ func (a AWS) Describe(ctx context.Context, id string) (Listing, error) {
 		return Listing{}, ErrNotFound
 	case err != nil:
 		return Listing{}, fmt.Errorf("describe %s: %w", id, err)
+	case out.DeletedDate != nil:
+		return Listing{}, ErrNotFound
 	}
 	return Listing{
 		ID: aws.ToString(out.Name), Source: aws.ToString(out.ARN), Tags: TagMap(out.Tags),
-		OnKey: a.onKey(aws.ToString(out.KmsKeyId), a.keys()), HasCurrentValue: HasCurrentVersion(out.VersionIdsToStages), Deleted: out.DeletedDate != nil,
+		OnKey: a.onKey(aws.ToString(out.KmsKeyId), a.keys()), HasCurrentValue: HasCurrentVersion(out.VersionIdsToStages),
 	}, nil
 }
 

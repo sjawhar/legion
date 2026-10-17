@@ -880,7 +880,7 @@ func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
 	if err != nil || req.GrantID == nil {
 		t.Fatalf("Create = %+v, %v, want an automatic grant", req, err)
 	}
-	reader := gatedReader{Store: m.Secrets, entered: make(chan struct{}, 1), gate: make(chan struct{})}
+	reader := gatedReader{Reader: m.Secrets, entered: make(chan struct{}, 1), gate: make(chan struct{})}
 	m.Secrets = reader
 	done := make(chan error, 1)
 	go func() {
@@ -898,10 +898,10 @@ func TestValuesHoldsNoPooledConnectionWhileReadingSecrets(t *testing.T) {
 	}
 }
 
-// gatedReader is a secrets.Store that announces each Read on entered and answers from the Store
+// gatedReader is a secrets.Reader that announces each Read on entered and answers from the Store
 // it wraps only once gate is closed.
 type gatedReader struct {
-	secrets.Store
+	secrets.Reader
 	entered chan struct{}
 	gate    chan struct{}
 }
@@ -909,7 +909,7 @@ type gatedReader struct {
 func (g gatedReader) Read(ctx context.Context, source string) (string, error) {
 	g.entered <- struct{}{}
 	<-g.gate
-	return g.Store.Read(ctx, source)
+	return g.Reader.Read(ctx, source)
 }
 
 // awaitEntered waits for one announcement on entered, failing t after five seconds.

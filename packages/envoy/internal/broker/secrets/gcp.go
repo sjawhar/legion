@@ -11,7 +11,6 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
-	gax "github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -59,19 +58,11 @@ func ValidGCPKeyName(name string) error {
 	return nil
 }
 
-// GCPClient is the four Secret Manager calls the GCP store reads with; *secretmanager.Client
-// implements it, and the tests' fake stands in over gRPC behind one.
-type GCPClient interface {
-	ListSecrets(ctx context.Context, req *secretmanagerpb.ListSecretsRequest, opts ...gax.CallOption) *secretmanager.SecretIterator
-	GetSecret(ctx context.Context, req *secretmanagerpb.GetSecretRequest, opts ...gax.CallOption) (*secretmanagerpb.Secret, error)
-	GetSecretVersion(ctx context.Context, req *secretmanagerpb.GetSecretVersionRequest, opts ...gax.CallOption) (*secretmanagerpb.SecretVersion, error)
-	AccessSecretVersion(ctx context.Context, req *secretmanagerpb.AccessSecretVersionRequest, opts ...gax.CallOption) (*secretmanagerpb.AccessSecretVersionResponse, error)
-}
-
 // GCP is the Store over Google Cloud Secret Manager.
 type GCP struct {
-	// Client reads the secrets.
-	Client GCPClient
+	// Client reads the secrets: Secret Manager's own client, which the tests dial to a fake
+	// Secret Manager over gRPC.
+	Client *secretmanager.Client
 	// KeyName is the agent-secrets key's resource name (BROKER_SECRETS_KMS_KEY_NAME); a secret
 	// whose current version is encrypted with any other key, Google's default one included, is
 	// not OnKey.
@@ -112,7 +103,7 @@ func (g GCP) ValidName(id string) error {
 // List lists every secret of the prefix's project whose id starts with the prefix's id prefix:
 // ListSecrets' name filter (name:<id prefix>) is a case-insensitive substring match, so a listed
 // secret whose full name does not start with prefix, byte for byte, is dropped here before any
-// call is made for it. It reads every page, then each kept secret's latest version with one
+// call is made for it, as is one with an expire_time, scheduled for deletion. It reads every page, then each kept secret's latest version with one
 // GetSecretVersion for its state and key. A failed call fails the whole List.
 func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 	parent, idPrefix, ok := strings.Cut(prefix, "/secrets/")
@@ -125,7 +116,7 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 		if err != nil {
 			return nil, fmt.Errorf("list secrets under %s: %w", prefix, gcpErr(err))
 		}
-		if !strings.HasPrefix(secret.GetName(), prefix) {
+		if !strings.HasPrefix(secret.GetName(), prefix) || secret.GetExpireTime() != nil {
 			continue
 		}
 		ls, err := g.listing(ctx, secret)
@@ -138,10 +129,10 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 }
 
 // Describe reads one secret with GetSecret, then its latest version with GetSecretVersion:
-// ErrNotFound for one Secret Manager does not hold, and Deleted for one with an expire_time:
+// ErrNotFound for one Secret Manager does not hold, and for one with an expire_time:
 // `agent-secrets secret delete` schedules a deletion by setting one (Secret Manager deletes the
 // secret, with every version, when that time comes), so a secret with one is the counterpart of a
-// Secrets Manager secret in its recovery window, which the policy stops serving at once.
+// Secrets Manager secret in its recovery window, which the broker stops serving at once.
 func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: id})
 	if status.Code(err) == codes.NotFound {
@@ -150,13 +141,16 @@ func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 	if err != nil {
 		return Listing{}, fmt.Errorf("describe %s: %w", id, gcpErr(err))
 	}
+	if secret.GetExpireTime() != nil {
+		return Listing{}, ErrNotFound
+	}
 	return g.listing(ctx, secret)
 }
 
 // listing is the Listing of one Secret the API answered, with its latest version read.
 func (g GCP) listing(ctx context.Context, secret *secretmanagerpb.Secret) (Listing, error) {
 	name := secret.GetName()
-	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations(), Deleted: secret.GetExpireTime() != nil}
+	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations()}
 	if ls.Tags == nil {
 		ls.Tags = map[string]string{}
 	}

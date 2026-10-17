@@ -17,6 +17,9 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
+// awsListLag is the AWS store's ListLag, which every Local-backed Current here runs on.
+var awsListLag = policytest.Store(secrets.NewLocal()).ListLag()
+
 // staleLister freezes ListSecrets at construction while DescribeSecret stays live: AWS's
 // documented ListSecrets lag, reproduced.
 type staleLister struct {
@@ -82,7 +85,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal("reread must serve NEW_KEY")
 	}
 
-	now = reread.Add(policy.ListLag - time.Second)
+	now = reread.Add(awsListLag - time.Second)
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +93,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal("a full reload inside listLag of the reread dropped NEW_KEY")
 	}
 
-	now = reread.Add(policy.ListLag + time.Second)
+	now = reread.Add(awsListLag + time.Second)
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -179,8 +182,8 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 	}
 
 	// The listing is fetched inside listLag of the rereads, and Load returns after it ran out.
-	now = reread.Add(policy.ListLag - time.Second)
-	lister.fetched = func() { now = reread.Add(policy.ListLag + time.Second) }
+	now = reread.Add(awsListLag - time.Second)
+	lister.fetched = func() { now = reread.Add(awsListLag + time.Second) }
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +223,7 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 
 	// Deleted (from the console, say) while the next reload lists: its listing still shows OLD_KEY,
 	// and its own re-describe finds it gone.
-	now = reread.Add(policy.ListLag / 2)
+	now = reread.Add(awsListLag / 2)
 	lister.fetched = func() { store.Delete(policytest.ID("OLD_KEY")) }
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -230,7 +233,7 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	}
 
 	lister.fetched = nil
-	now = reread.Add(policy.ListLag + time.Second)
+	now = reread.Add(awsListLag + time.Second)
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}

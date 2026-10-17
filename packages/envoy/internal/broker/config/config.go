@@ -75,16 +75,14 @@ type Config struct {
 	// it that carries an owner and a tier tag (Secret Manager: annotation) and is encrypted with
 	// the agent-secrets key, and rereads them every five minutes.
 	SecretsPrefix string
-	// BROKER_SECRETS_KMS_KEY_ARN: the ARN of the AWS KMS key every agent secret is encrypted with.
-	// Required with aws-secrets-manager, refused with gcp-secret-manager. A secret under the
-	// prefix encrypted with any other key, the AWS-managed one included, is refused.
-	SecretsKMSKeyARN string
-	// BROKER_SECRETS_KMS_KEY_NAME: the resource name of the Cloud KMS key every agent secret is
-	// encrypted with, projects/<project>/locations/global/keyRings/<ring>/cryptoKeys/<key> (global,
-	// since a secret with automatic replication takes a global key). Required with
-	// gcp-secret-manager, refused with aws-secrets-manager. A secret whose current version is
-	// encrypted with any other key, Google's default encryption included, is refused.
-	SecretsKMSKeyName string
+	// BROKER_SECRETS_KMS_KEY_ARN, BROKER_SECRETS_KMS_KEY_NAME: the agent-secrets key every agent
+	// secret is encrypted with, one variable per store, each required with its store and refused
+	// with the other. With aws-secrets-manager, BROKER_SECRETS_KMS_KEY_ARN, the AWS KMS key's ARN;
+	// with gcp-secret-manager, BROKER_SECRETS_KMS_KEY_NAME, the Cloud KMS key's resource name
+	// projects/<project>/locations/global/keyRings/<ring>/cryptoKeys/<key> (global, since a secret
+	// with automatic replication takes a global key). A secret under the prefix encrypted with any
+	// other key, the provider's default one included, is refused.
+	SecretsKMSKey string
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
@@ -323,8 +321,6 @@ func Load(getenv func(string) string) (Config, error) {
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
-		SecretsKMSKeyARN:   getenv("BROKER_SECRETS_KMS_KEY_ARN"),
-		SecretsKMSKeyName:  getenv("BROKER_SECRETS_KMS_KEY_NAME"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
 		K8sOIDCAudience:    getenv("BROKER_K8S_OIDC_AUDIENCE"),
 		EnvoyURL:           getenv("BROKER_ENVOY_URL"),
@@ -335,16 +331,17 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	// Each store takes its own key variable and refuses the other's, so a deployment moved
 	// between stores cannot keep the old key set and silently mean nothing by it.
-	keyVar, key, otherKeyVar, otherKey := "BROKER_SECRETS_KMS_KEY_ARN", cfg.SecretsKMSKeyARN, "BROKER_SECRETS_KMS_KEY_NAME", cfg.SecretsKMSKeyName
+	keyVar, otherKeyVar := "BROKER_SECRETS_KMS_KEY_ARN", "BROKER_SECRETS_KMS_KEY_NAME"
 	if cfg.SecretsStore == secrets.StoreGCP {
-		keyVar, key, otherKeyVar, otherKey = otherKeyVar, otherKey, keyVar, key
+		keyVar, otherKeyVar = otherKeyVar, keyVar
 	}
-	if otherKey != "" {
+	if getenv(otherKeyVar) != "" {
 		return Config{}, fmt.Errorf("%s is not read with BROKER_SECRETS_STORE=%s; set %s instead", otherKeyVar, cfg.SecretsStore, keyVar)
 	}
+	cfg.SecretsKMSKey = getenv(keyVar)
 	for _, req := range []struct{ name, value string }{
 		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
-		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, key},
+		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, cfg.SecretsKMSKey},
 	} {
 		if strings.TrimSpace(req.value) == "" {
 			return Config{}, fmt.Errorf("%s is required", req.name)
@@ -362,15 +359,15 @@ func Load(getenv func(string) string) (Config, error) {
 		if !strings.HasSuffix(cfg.SecretsPrefix, "/") || strings.HasPrefix(cfg.SecretsPrefix, "/") || strings.ContainsFunc(cfg.SecretsPrefix, unicode.IsSpace) {
 			return Config{}, fmt.Errorf("BROKER_SECRETS_PREFIX must be a Secrets Manager name prefix ending in /, such as production/agent-secrets/, got %q", cfg.SecretsPrefix)
 		}
-		if !secrets.ValidAWSKeyARN(cfg.SecretsKMSKeyARN) {
-			return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
+		if !secrets.ValidAWSKeyARN(cfg.SecretsKMSKey) {
+			return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKey)
 		}
 	case secrets.StoreGCP:
 		if err := secrets.ValidGCPPrefix(cfg.SecretsPrefix); err != nil {
-			return Config{}, fmt.Errorf("BROKER_SECRETS_PREFIX must be %w", err)
+			return Config{}, fmt.Errorf("BROKER_SECRETS_PREFIX: %w", err)
 		}
-		if err := secrets.ValidGCPKeyName(cfg.SecretsKMSKeyName); err != nil {
-			return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_NAME must be %w", err)
+		if err := secrets.ValidGCPKeyName(cfg.SecretsKMSKey); err != nil {
+			return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_NAME: %w", err)
 		}
 	}
 	services, err := parseServiceAccounts("BROKER_SERVICES", getenv("BROKER_SERVICES"))

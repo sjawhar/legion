@@ -232,8 +232,8 @@ func TestGCPListReadsAnnotationsKeyStateAndExpiry(t *testing.T) {
 	for _, ls := range listings {
 		byID[ls.ID] = ls
 	}
-	if len(byID) != 7 {
-		t.Fatalf("List answered %d secrets, want the 7 under the prefix: %+v", len(byID), listings)
+	if len(byID) != 5 {
+		t.Fatalf("List answered %d secrets, want the 5 under the prefix with no expire_time: %+v", len(byID), listings)
 	}
 	onKey := func(ls Listing) bool {
 		t.Helper()
@@ -244,7 +244,7 @@ func TestGCPListReadsAnnotationsKeyStateAndExpiry(t *testing.T) {
 		return on
 	}
 	served := byID[fakePrefix+"served"]
-	if served.Source != served.ID || served.Tags["owner"] != "ada@example.com" || served.Tags["tier"] != "human" || !onKey(served) || !served.HasCurrentValue || served.Deleted {
+	if served.Source != served.ID || served.Tags["owner"] != "ada@example.com" || served.Tags["tier"] != "human" || !onKey(served) || !served.HasCurrentValue {
 		t.Fatalf("served = %+v; want on the key, with a value, tagged from its annotations", served)
 	}
 	if ls := byID[fakePrefix+"default-key"]; onKey(ls) || !ls.HasCurrentValue {
@@ -256,11 +256,10 @@ func TestGCPListReadsAnnotationsKeyStateAndExpiry(t *testing.T) {
 	if ls := byID[fakePrefix+"no-version"]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("no-version = %+v; want on the key (its replication policy's) with no current value", ls)
 	}
-	if ls := byID[fakePrefix+"expiring"]; !ls.Deleted || !onKey(ls) || !ls.HasCurrentValue {
-		t.Fatalf("expiring = %+v; want Deleted from the moment it has an expire_time, as delete sets one", ls)
-	}
-	if ls := byID[fakePrefix+"expired"]; !ls.Deleted {
-		t.Fatalf("expired = %+v; want Deleted", ls)
+	for _, name := range []string{"expiring", "expired"} {
+		if ls, listed := byID[fakePrefix+name]; listed {
+			t.Fatalf("%s = %+v; want it left out from the moment it has an expire_time, as delete sets one", name, ls)
+		}
 	}
 	if ls := byID[fakePrefix+"no-tags"]; len(ls.Tags) != 0 || ls.Tags == nil {
 		t.Fatalf("no-tags = %+v; want an empty, non-nil tag map", ls)
@@ -285,8 +284,10 @@ func TestGCPDescribeAndRead(t *testing.T) {
 	if on, err := ls.OnKey(ctx); err != nil || !on {
 		t.Fatalf("Describe(served).OnKey = %v, %v; want on the key", on, err)
 	}
-	if _, err := store.Describe(ctx, fakePrefix+"missing"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("Describe(missing) = %v, want ErrNotFound", err)
+	for _, name := range []string{"missing", "expiring"} {
+		if _, err := store.Describe(ctx, fakePrefix+name); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Describe(%s) = %v, want ErrNotFound", name, err)
+		}
 	}
 	if v, err := store.Read(ctx, fakePrefix+"served"); err != nil || v != "hello" {
 		t.Fatalf("Read(served) = %q, %v", strings.ReplaceAll(v, "hello", "[ok]"), err)

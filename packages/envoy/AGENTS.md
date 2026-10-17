@@ -2273,7 +2273,9 @@ load; GCP: the latest version's
 `kms_key_version_name`, or the replication policy's key for a secret with no version, already read),
 `HasCurrentValue` (AWS: a version labelled `AWSCURRENT` in the same listing's
 `SecretVersionsToStages`, with no call per secret; GCP: `versions/latest` is `ENABLED`, one
-`GetSecretVersion` per listed secret) and `Deleted` (AWS `DeletedDate`, GCP `expire_time`), and the
+`GetSecretVersion` per listed secret); a secret scheduled for deletion (AWS `DeletedDate`, GCP
+`expire_time`) is one the store does not hold, left out of `List` and `ErrNotFound` from
+`Describe` and `Read`; and the
 value check comes after every other reason, so a secret refused for a tag or its key is logged for
 that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
 an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
