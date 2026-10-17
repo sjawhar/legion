@@ -531,8 +531,9 @@ func TestAPIAuthRefusesHostsAnUnauthenticatedListenerDoesNotServe(t *testing.T) 
 				request.Header.Set("Authorization", "Bearer "+tc.token)
 			}
 			recorder := httptest.NewRecorder()
+			var logged bytes.Buffer
 
-			apiAuth(tc.token, nil, allowed, logging.NewWithWriter("test-machine", io.Discard), next).ServeHTTP(recorder, request)
+			apiAuth(tc.token, nil, allowed, logging.NewWithWriter("test-machine", &logged), next).ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("Host %q: status = %d, want %d; body = %s", tc.host, recorder.Code, tc.wantStatus, recorder.Body.String())
@@ -545,6 +546,11 @@ func TestAPIAuthRefusesHostsAnUnauthenticatedListenerDoesNotServe(t *testing.T) 
 				if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil || !strings.Contains(body.Error, "ENVOY_ALLOWED_HOSTS") {
 					t.Fatalf("body = %q (%v), want a JSON error naming ENVOY_ALLOWED_HOSTS", recorder.Body.String(), err)
 				}
+				if !strings.Contains(logged.String(), "listener: request for a host it does not serve") {
+					t.Fatalf("log = %q, want the refusal line", logged.String())
+				}
+			} else if strings.Contains(logged.String(), "does not serve") {
+				t.Fatalf("log = %q, want no refusal line for a served request", logged.String())
 			}
 		})
 	}
