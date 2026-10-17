@@ -21,6 +21,8 @@ import { ToolInputError } from "./tool-input-errors";
 export interface DispatchCliIo {
   /** Where the text the model reads goes: results, refusals and notices alike. */
   stdout(text: string): void;
+  /** Where a result's warnings go (`DispatchToolResult.warnings`), one line each, beside it. */
+  stderr(text: string): void;
   /** A file's text; `-` is all of stdin. */
   readText(path: string): string;
   readonly cwd: string;
@@ -223,6 +225,9 @@ export async function runDispatchCli(
       ...(io.fetchImpl === undefined ? {} : { fetchImpl: io.fetchImpl }),
     });
     text = result.text;
+    for (const warning of result.warnings ?? []) {
+      io.stderr(`${warning}\n`);
+    }
     try {
       for (const image of result.images ?? []) {
         const picture = writePicture(dir, image);

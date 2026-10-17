@@ -9,7 +9,7 @@ tags:
   - READY
   - merger
 date: 2026-10-10
-status: active
+status: superseded by the daemon's READY merge submission (`ready_merge` outbox row, `ghautomerge.Submit`) — no role runs `gh pr merge --auto` any more; the daemon submits an accepted READY's merge itself, choosing an enqueue, an immediate merge or an arm from GitHub's own answers (`isMergeQueueEnabled`, `mergeStateStatus`, `autoMergeAllowed`), and waits rather than failing in a repository without auto-merge, whose `Auto merge is not allowed for this repository` refusal stranded READY here. The rule to submit only after your own gate accepts stands (the row is queued only when READY is accepted), and so do the `--disable-auto`/`dequeuePullRequest` facts the daemon's disarm uses
 module: packages/daemon/internal/prompts
 related_issues:
   - "LEGION-631"

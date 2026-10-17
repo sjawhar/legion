@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -614,14 +615,16 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the fetch's whole budget, workspace.FetchBudget — the wait for the repository
-// cache, then the one bound its stream, verification and delta share — and nothing more:
-// provisioning from the feed onto the issue's own volume waits on no other pod, so no lock wait is
-// added to it. Pinned to a literal, 70 minutes, since no test can wait the real bound out.
-func TestProvisionBoundIsTheFetchsWholeBudget(t *testing.T) {
+// ProvisionBound is the two provisioning phases' bounds together, workspace.FetchBudget (70m: the
+// wait for the repository cache, then the one bound the fetch's stream, verification and delta
+// share) for workspace-fetch and workspace.CloneTimeout (30m) for workspace-init's shared clone,
+// and nothing more: provisioning from the feed onto the issue's own volume waits on no other pod,
+// so no lock wait is added to it. Pinned to a literal, 100 minutes, since no test can wait the real
+// bound out.
+func TestProvisionBoundIsTheFetchsWholeBudgetAndTheClonesBound(t *testing.T) {
 	g := newRig(t, nil)
-	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+workspace.FetchTimeout; got != 70*time.Minute || got != want {
-		t.Fatalf("ProvisionBound = %s, want %s: the cache wait and the fetch's bound after it", got, want)
+	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+workspace.FetchTimeout+workspace.CloneTimeout; got != 100*time.Minute || got != want {
+		t.Fatalf("ProvisionBound = %s, want %s: the cache wait, the fetch's bound after it, and the shared clone's", got, want)
 	}
 }
 
@@ -1506,16 +1509,25 @@ func supervisedSandboxMachine(
 }
 
 // restoredSandboxMachine is supervisedSandboxMachine over c, a claim as a daemon reads it back from
-// its store at boot, on the rig's runtime as it is now.
+// its store at boot, on the rig's runtime as it is now; its log is discarded.
 func restoredSandboxMachine(
 	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim,
+) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
+	t.Helper()
+	return loggedSandboxMachine(t, g, spec, c, io.Discard)
+}
+
+// loggedSandboxMachine is restoredSandboxMachine with the machine's log written to w, for a test
+// that reads what the machine says of a launch.
+func loggedSandboxMachine(
+	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim, w io.Writer,
 ) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
 	t.Helper()
 	store := &supervisedSandboxStore{claim: c}
 	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
 		Runtime: g.r, Conns: g.conns, Store: store, Specs: specs, Clock: sandboxMachineClock{},
-		Log:    slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		Log:    slog.New(slog.NewTextHandler(w, nil)),
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 1, PromptRetires: 1},
 		Timeouts: supervise.Timeouts{
 			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour, LaunchBackoff: time.Millisecond,

@@ -40,7 +40,7 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 	}).Handler
 	root, child := "LEGION-208", "LEGION-209"
 	approved := 1
-	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		if err := records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)}); err != nil {
 			return err
@@ -109,7 +109,7 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 		Handlers: []intake.Handler{engine}, Dispatch: statuses,
 	}).Handler
 	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
-	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
 	}); err != nil {
@@ -163,7 +163,7 @@ func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testi
 		Handlers: []intake.Handler{engine}, Dispatch: statuses,
 	}).Handler
 	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
-	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		for _, put := range []error{
 			records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Now()}),

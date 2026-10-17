@@ -25,7 +25,7 @@ type fixedRepositories struct {
 
 func (r fixedRepositories) ResolveRepository(resolved string) (Resolution, error) {
 	if branch, ok := r.served[resolved]; ok {
-		return Resolution{Repo: resolved, DefaultBranch: branch}, nil
+		return Resolution{Repo: resolved, DefaultBranch: branch, GitHubRepo: resolved}, nil
 	}
 	if reason, ok := r.leftOut[resolved]; ok {
 		return Resolution{Refusal: reason, LeftOut: true}, nil
@@ -43,7 +43,7 @@ var testRepositories = fixedRepositories{
 // openTree seeds a running root with an open gate, under which a todo child is recorded.
 func openTree(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 }
@@ -113,7 +113,7 @@ func TestARecordedIssueKeepsItsRepositoryAndSaysAnEditIsNotApplied(t *testing.T)
 	pool := migratedPool(t)
 	openTree(t, pool)
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/tools", DefaultBranch: "release/v7.1", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/tools", DefaultBranch: "release/v7.1", GitHubRepo: "acme/tools", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
 		Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog", Rank: "V", LastDispatchSeq: 2})
 	apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
 	apply("child-back-to-todo-elsewhere", childTodo(3, "acme/widgets"))
@@ -145,7 +145,7 @@ func TestARetainedEventIsAppliedWithTheRecordsRepositoryAndNeverRecordsAnUnreadO
 	pool := migratedPool(t)
 	openTree(t, pool)
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/tools", DefaultBranch: "release/v7.1", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/tools", DefaultBranch: "release/v7.1", GitHubRepo: "acme/tools", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
 		Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog", Rank: "V", LastDispatchSeq: 2})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	retained := childTodo(3, "")

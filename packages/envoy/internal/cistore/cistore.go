@@ -32,9 +32,6 @@ import (
 	"github.com/sjawhar/envoy/internal/logging"
 )
 
-// Bucket is the JetStream KV bucket name for per-commit CI state.
-const Bucket = "envoy_ci_state"
-
 // recordBudget bounds how long one write of a commit's record retries. It retries a lost
 // compare-and-swap, and a transient KV error (kvErrorLasts), from a fresh read. Concurrent
 // observations of one commit within this process are combined into one write (update), so the
@@ -335,7 +332,7 @@ func Open(nc *nats.Conn, logger *logging.Logger, opts ...Option) (*Store, error)
 		return nil, err
 	}
 	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
-		Bucket:   Bucket,
+		Bucket:   bus.CIStateBucket,
 		Replicas: o.replicas,
 		Storage:  nats.FileStorage,
 		TTL:      o.ttl,

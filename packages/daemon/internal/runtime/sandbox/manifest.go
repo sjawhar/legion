@@ -63,6 +63,15 @@ const (
 	gvisor    = "gvisor"
 )
 
+// doNotDisruptAnnotation and safeToEvictAnnotation are the autoscaler stop-eviction annotation
+// keys podTemplate sets unconditionally (probeManifest sets only the first): Karpenter's own
+// (AWS), and the Cluster Autoscaler's, which GKE Autopilot honours as a request for
+// extended-duration protection.
+const (
+	doNotDisruptAnnotation = "karpenter.sh/do-not-disrupt"
+	safeToEvictAnnotation  = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+)
+
 // The pod runs as the image's legion user.
 const podUser = 1000
 
@@ -410,7 +419,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	return podTemplate{
 		Metadata: podMetadata{
 			Labels:      r.labels(l),
-			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+			Annotations: map[string]string{doNotDisruptAnnotation: "true", safeToEvictAnnotation: "false"},
 		},
 		Spec: spec,
 	}
@@ -753,16 +762,35 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment(xdgStateHome)...)
 }
 
-// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget, the fetch's whole bound — its
-// wait for the repository cache, then the stream, verification and delta that share one
-// FetchTimeout — which is how much longer than the boot timeout a launch may wait for its pod's
-// launcher, counted from when it first sees one of the pod's init containers running
-// (awaitRoleLauncher). The fetch started no later than that, so it ends inside the bound, failing
-// on its own, naming why, when it runs out; workspace-init's provisioning from the feed onto the
-// issue's own volume, local work that waits on no other pod, then has at least the boot timeout.
-// A test shortens it (provisionBound).
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
+// real bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
+// budget (its wait for the repository cache, then the stream, verification and delta that share
+// one FetchTimeout) and workspace-init's shared clone of the feed, each of whose size-following
+// steps runs under CloneTimeout. It is how much longer than the boot timeout a launch may wait for
+// its pod's launcher, counted from when it first sees one of the pod's init containers running
+// (awaitRoleLauncher). The fetch started no later than that and the shared clone after the fetch
+// ended, so both end inside the bound, each failing on its own, naming why, when it runs out;
+// workspace-init's other commands, local work that waits on no other pod, then have at least the
+// boot timeout. A test shortens it (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
+}
+
+// LaunchBound satisfies runtime.Runtime: the longest one launch try may run once it holds its
+// pod's launch turn (relaunch), the sum of a replacing try's waits and of its bounded calls at
+// their full budgets (launchBound): the boot timeout three times — ensureSandbox's wait for a
+// Sandbox being deleted, awaitPodGone, awaitNewPod — then awaitRoleLauncher's backstop, twice the
+// boot timeout plus ProvisionBound and two recheck intervals (launcherBackstop), then the
+// termination grace the start frame has past the launcher deadline, then relaunchCalls times
+// apiTimeout for every client call, mint, store read and launcher frame between those waits. The
+// wait for the launch turn itself (lockPod) is outside it: that is another launch's time, bounded
+// by that launch's own try, and counting it here would end a try that had not yet begun. Generous
+// by design — a try that runs every call to its budget is still legitimate, and the one thing the
+// bound must never be is shorter than a provisioning pod's rightful wait; a hung try ends at the
+// bound either way, charged to the launch budget, and the next try runs. A test shortens it
+// (launchBound).
+func (r *Runtime) LaunchBound() time.Duration {
+	return r.launchBound
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells

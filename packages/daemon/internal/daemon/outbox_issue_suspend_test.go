@@ -374,7 +374,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
 	putOutboxIssue(t, pool, records, issue)
 	if _, err := st.OpenTreeLifecycle(ctx, "legion", issue.Tree, treelifecycle.AuthorityWorkflow); err != nil {
 		t.Fatal(err)
@@ -411,10 +411,15 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	sup, stopRuntime := newSupervisorRuntime()
 	clock := time.Now()
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, quietLogger())
-	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st,
-		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "done"}}, notices: &outboxPublisher{},
-		handlers: []intake.Handler{engine}, log: quietLogger(), now: func() time.Time { return clock },
+	// newRunner is the outbox over the given supervisor: the restart below builds a second one
+	// over the restarted runtime, since the outbox carries locks a copy must not.
+	newRunner := func(sup *supervisor) *outbox {
+		return &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st,
+			dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "done"}}, notices: &outboxPublisher{},
+			handlers: []intake.Handler{engine}, log: quietLogger(), now: func() time.Time { return clock },
+		}
 	}
+	runner := newRunner(sup)
 	token := claim.Token("legion-legion-legion-208-planner")
 	stored := supervise.Claim{Token: token, Project: "legion", Tree: issue.Tree, TreeEpoch: 1, Issue: issue.Key, Role: claim.RolePlanner,
 		State: supervise.StateLaunching, Generation: 1, Session: "saved-planner", SessionFile: "/legion/sessions/planner.jsonl"}
@@ -440,9 +445,7 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	// membership or an in-memory suspension request; the same database owns the pending effect.
 	stopRuntime()
 	restarted, _ := newSupervisorRuntime()
-	recovered := *runner
-	recovered.supervisor = restarted
-	runner = &recovered
+	runner = newRunner(restarted)
 	// The stored role's orderly stop completes independently of the runtime watch population.
 	stored.State = supervise.StateSuspended
 	if err := st.PutClaim(ctx, stored); err != nil {
@@ -510,10 +513,10 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	}
 	t.Cleanup(st.Close)
 	records := record.NewStore()
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1}
 	parent := root.Key
-	done := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "done child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V", LastDispatchSeq: 1}
-	parked := record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "parked child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W", LastDispatchSeq: 1}
+	done := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "done child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V", LastDispatchSeq: 1}
+	parked := record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "parked child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W", LastDispatchSeq: 1}
 	for _, issue := range []record.Issue{root, done, parked} {
 		putOutboxIssue(t, pool, records, issue)
 	}

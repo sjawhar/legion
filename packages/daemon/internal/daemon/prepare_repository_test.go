@@ -21,7 +21,7 @@ func TestARecordedIssuesEventIsPreparedFromItsRecord(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-301", Tree: "LEGION-301", Project: "LEGION", Title: "existing", Phase: phase.Done,
-		Generation: 1, Status: "done", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main"})
+		Generation: 1, Status: "done", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"})
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
 	repos := newRepositories("LEGION")
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets")}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)

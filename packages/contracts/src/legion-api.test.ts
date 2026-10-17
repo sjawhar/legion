@@ -269,7 +269,7 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
-// Contract 29: every recorded issue carries the repository it targets and its default branch, its
+// Contract 30: every recorded issue carries the repository it targets and its default branch, its
 // pull request the repository it is in, and the state the project's repository mapping as the
 // daemon serves it, each left-out repository named with the App it lacks. Contract 30: each mapped
 // repository carries its cache under the Kubernetes runtime, Ready with its last health read or
@@ -508,6 +508,34 @@ test("the state golden names the claims nothing will wake, and the list cannot b
 
   const dropped = fixture("state.json") as Record<string, unknown>;
   delete dropped.strandedClaims;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
+// The lifecycle rows held behind their issues' running ones (contract 28): the golden carries
+// LEGION-208's supervise row 802 waiting behind row 801 for two and a half minutes, a state with none
+// carries an empty list rather than none, a row's wait is never negative, and the list cannot be
+// dropped: a plugin from before the field refuses the state, which is what the bump is for.
+test("the state golden names the held lifecycle rows, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.heldOutboxRows).toEqual([
+    { id: 802, kind: "supervise", issue: "LEGION-208", waitedSeconds: 150, waitsOn: 801 },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).heldOutboxRows).toEqual([]);
+
+  const negative = fixture("state.json") as { heldOutboxRows: unknown[] };
+  negative.heldOutboxRows = [
+    { id: 802, kind: "supervise", issue: "LEGION-208", waitedSeconds: -1, waitsOn: 801 },
+  ];
+  expect(LegionStateResponse.safeParse(negative).success).toBeFalse();
+
+  const unnamed = fixture("state.json") as { heldOutboxRows: unknown[] };
+  unnamed.heldOutboxRows = [
+    { id: 802, kind: "supervise", issue: "LEGION-208", waitedSeconds: 150 },
+  ];
+  expect(LegionStateResponse.safeParse(unnamed).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.heldOutboxRows;
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 

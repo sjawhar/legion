@@ -9,7 +9,7 @@ type servedRepositories map[string]string
 
 func (r servedRepositories) ResolveRepository(resolved string) (workflow.Resolution, error) {
 	if branch, ok := r[resolved]; ok {
-		return workflow.Resolution{Repo: resolved, DefaultBranch: branch}, nil
+		return workflow.Resolution{Repo: resolved, DefaultBranch: branch, GitHubRepo: resolved}, nil
 	}
 	return workflow.Resolution{Refusal: resolved + " is not mapped to the project in Dispatch"}, nil
 }

@@ -71,7 +71,7 @@ type servedRepositories map[string]string
 
 func (r servedRepositories) ResolveRepository(resolved string) (workflow.Resolution, error) {
 	if branch, ok := r[resolved]; ok {
-		return workflow.Resolution{Repo: resolved, DefaultBranch: branch}, nil
+		return workflow.Resolution{Repo: resolved, DefaultBranch: branch, GitHubRepo: resolved}, nil
 	}
 	if resolved == "acme/gadgets" {
 		return workflow.Resolution{Refusal: "the review App is not installed on acme/gadgets", LeftOut: true}, nil
@@ -214,7 +214,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank, HandedOver: true}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank, HandedOver: true}); err != nil {
 			t.Fatalf("put active issue: %v", err)
 		}
 		slots, err := records.Slots(context.Background(), tx)
@@ -229,7 +229,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 
 func seedWaiting(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
-	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank, HandedOver: true})
+	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank, HandedOver: true})
 }
 
 func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {

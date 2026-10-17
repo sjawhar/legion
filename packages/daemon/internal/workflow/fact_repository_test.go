@@ -39,7 +39,7 @@ func TestAGitHubFactFromAnotherRepositoryChangesNothing(t *testing.T) {
 				pool := migratedPool(t)
 				openTree(t, pool)
 				parent := "LEGION-208"
-				seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+				seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
 					Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "V", LastDispatchSeq: 1})
 				seedPR(t, pool, record.PullRequest{Issue: "LEGION-209", Repo: recorded, Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head",
 					HeadUpdatedAt: updated.Add(-time.Hour), Failing: []string{}, Generation: 1, State: record.PullRequestOpen})
@@ -60,7 +60,7 @@ func TestAPullRequestInAnotherSpellingOfTheIssuesRepositoryIsItsOwn(t *testing.T
 	pool := migratedPool(t)
 	openTree(t, pool)
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
 		Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
 	applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))("opened", intake.PullRequestOpened{
 		Repo: "Acme/Widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", UpdatedAt: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)})

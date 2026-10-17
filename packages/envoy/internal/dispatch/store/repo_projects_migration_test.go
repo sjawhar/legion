@@ -10,7 +10,7 @@ import (
 
 // repoProjectsDefaultVersion is the migration that adds a project's default repository and an
 // issue's own repository.
-const repoProjectsDefaultVersion = 112
+const repoProjectsDefaultVersion = 113
 
 // The migration adds the project's default repository and an issue's own repository. At most one
 // mapping of a project is the default; an issue's repository must be a mapping of its own project;

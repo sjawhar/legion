@@ -85,7 +85,7 @@ issues you own as well as the root. An issue left at `triage` while work is unde
 Waiting for the deploy lane is not a status and is never announced.
 
 ```bash
-# PATCH /api/v1/issues/{key} — status, title, labels, priority, external links (merged by URL), route, parent, blocked_by, repo
+# PATCH /api/v1/issues/{key} — status, title, labels, priority, external links (merged by URL, or cleared by an empty list), route, parent, blocked_by, repo
 dispatch issue-update --issue PROJ-175 --status testing
 dispatch issue-update --issue PROJ-175 --status done --reason 'Shipped in owner/repo#7; verified on the production dashboard.'
 dispatch issue-update --issue PROJ-175 --priority 1   # 0–3; see Priority is yours to set
@@ -101,14 +101,16 @@ error names the posted message; after a timeout or a server error it also says t
 landed, so read the issue's status first. A retry points its reason at the posted message rather
 than repeating it.
 
-The two clears differ: `--clear-priority` sends null, while `--parent ''`, `--route ''` and
-`--repo ''` clear with an empty string. Guessing the other one is a refusal either way.
+The three clears differ: `--clear-priority` sends null, `--parent ''`, `--route ''` and
+`--repo ''` clear with an empty string, and `--clear-external-links` / `--clear-blocked-by` send an
+empty list. Guessing the wrong shape is a refusal either way.
 
 An issue targets one repository: its own `--repo`, else its nearest ancestor's, else the project's
 default (set on the Settings page), else none. A repository not mapped to the issue's project is
 refused `REPO_NOT_MAPPED`, naming it. `dispatch read` prints the result as
 `Repository: owner/name (own)`, `Repository: owner/name (inherited or project default)`, or
-`Repository: none`.
+`Repository: none`. `Repository: unknown (…)` means the Dispatch server is older than repository
+fields: the read still works, and a `--repo` write there fails rather than drop the repository.
 
 Link the pull request that delivers the issue with `--external-link` when you open it; the issue page
 renders its state and checks from that link, and `dispatch read` lists it under `External links:`.
@@ -129,7 +131,8 @@ Priority is the coarse bucket a backlog is read by: `0` is P0, the highest, thro
 lowest, and `null` clears it. Agents set it (`dispatch://LEGION/artifact/issue-status-conventions-md`)
 — on creation, and on a grooming pass over issues that have none — and say what you set and why;
 the human overrides anything they disagree with from the dashboard. A closed
-issue takes only `rank`, `components`, and a reopening `status` (any status but `done`);
+issue takes only `rank`, `components`, a reopening `status` (any status but `done`), and an
+external-links write that adds no new link (so a link can move to the issue that replaced it);
 everything else, `priority` included, waits for the reopen (`409 ISSUE_CLOSED`). So reopen it
 first, then set the priority — the two cannot go in one command. `rank` itself is not a flag:
 reorder it the way [Issue reads](#board-rank-priority-and-assignee-on-a-read) describes, through `PATCH /api/v1/issues/{key}`.

@@ -236,7 +236,9 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
 // contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
 // clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.shared) it is a git
-// clone shared with the feed (sharedClone), which copies none of the history.
+// clone shared with the feed (sharedClone), which copies none of the history. Each step whose
+// duration follows the repository's size (the clone, a shared clone's checkout and jj's import of
+// every commit) runs under CloneTimeout, not the runner's slow-command budget (cloneChecked).
 func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
@@ -267,7 +269,7 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultB
 		if err := sharedClone(ctx, run, temporary, remote, defaultBranch, source); err != nil {
 			return err
 		}
-	} else if _, err := RunChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, source.env, ""); err != nil {
+	} else if err := cloneChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, source.env); err != nil {
 		return err
 	}
 	complete, err := pathExists(filepath.Join(temporary, ".jj"))
@@ -299,14 +301,14 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultB
 // default branch the feed lacks is left untracked, for the base's own refusal to name
 // (baseCommit).
 func sharedClone(ctx context.Context, run Runner, temporary, remote, defaultBranch string, source remote) error {
-	if _, err := RunChecked(ctx, run, []string{"git", "clone", "--shared", "--quiet", source.shared, temporary}, source.env, ""); err != nil {
+	if err := cloneChecked(ctx, run, []string{"git", "clone", "--shared", "--quiet", source.shared, temporary}, source.env); err != nil {
 		return err
 	}
 	gitDir := filepath.Join(temporary, ".git")
 	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, ""); err != nil {
 		return err
 	}
-	if _, err := RunChecked(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil, ""); err != nil {
+	if err := cloneChecked(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil); err != nil {
 		return err
 	}
 	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, "")
@@ -317,6 +319,14 @@ func sharedClone(ctx context.Context, run Runner, temporary, remote, defaultBran
 		return nil
 	}
 	_, err = runCheckedOnClone(ctx, run, temporary, "bookmark", "track", originRow(defaultBranch))
+	return err
+}
+
+// cloneChecked runs one step of the shared clone's clone whose duration follows the repository's
+// size under CloneTimeout, checked as RunChecked checks its commands.
+func cloneChecked(ctx context.Context, run Runner, argv, env []string) error {
+	result, err := runCommandTimeout(ctx, run, argv, env, "", CloneTimeout)
+	_, err = checkedResult(argv, result, err)
 	return err
 }
 

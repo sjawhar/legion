@@ -1,4 +1,4 @@
--- 0043_issue_repository.up.sql — the repository an issue targets and its default branch.
+-- 0047_issue_repository.up.sql — the repository an issue targets and its default branch.
 --
 -- Both are taken when the daemon first records the issue (a root's admission, a child's recording
 -- under its tree, an orphan's admission) and never change after. Existing rows are filled by the

@@ -90,7 +90,7 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			root := record.Issue{Key: "LEGION-300", Tree: "LEGION-300", Project: "LEGION", Title: "root", Phase: phase.Planning, Generation: 1, Status: "in_progress",
-				DispatchStatus: "in_progress", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", HandedOver: true, LastDispatchSeq: 1}
+				DispatchStatus: "in_progress", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", HandedOver: true, LastDispatchSeq: 1}
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 				if err := records.PutIssue(ctx, tx, root); err != nil {
 					return err

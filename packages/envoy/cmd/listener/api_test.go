@@ -875,7 +875,7 @@ func TestARoleLookupWhoseSessionCacheTrailsTheBucketKeepsAFreshClaim(t *testing.
 		t.Fatalf("the lapsed claim after the lookup = %q, %v; want it released", holder, err)
 	}
 
-	roles, err := claimant.client.JS().KeyValue(store.RoleBucket)
+	roles, err := claimant.client.JS().KeyValue(bus.RoleClaimBucket)
 	if err != nil {
 		t.Fatalf("open the role bucket: %v", err)
 	}
@@ -1409,7 +1409,7 @@ func TestRoleSetHandlerSoftClaim(t *testing.T) {
 		// ses:bad is outside nats.go's key alphabet, so no session registers under it, and its
 		// interest can be neither read nor written (bus.ErrInvalidKey). An earlier build's
 		// bare-string claim, or a direct bucket write, can still name it as the holder.
-		roles, err := client.JS().KeyValue(store.RoleBucket)
+		roles, err := client.JS().KeyValue(bus.RoleClaimBucket)
 		if err != nil {
 			t.Fatalf("open the role bucket: %v", err)
 		}

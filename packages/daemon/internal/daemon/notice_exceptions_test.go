@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // laneReport is the listener's report of a failed role-lane forward, as
@@ -143,6 +144,66 @@ func TestANoticeTheListenerCouldNotForwardIsQueuedAgain(t *testing.T) {
 			}
 			if sent := delivered[0]; sent.key != "legion-outbox:7" || sent.payload.(record.Notice).ResendOf != 0 {
 				t.Fatalf("the copy went out under key %q with payload %+v; want the key of row 7, and the notice without the row it copies", sent.key, sent.payload)
+			}
+		})
+	}
+}
+
+// A notice queued again (rehold) runs as every row does, on its lane: the re-hold's commit wakes
+// the lane, which publishes a copy due at once with no restart and no sweep fired; a copy due after
+// the re-send delay is held, its lane's wait armed for the delay, and goes once the delay has
+// passed on the clock.
+func TestAReheldNoticeIsPublishedByItsLaneWithoutASweep(t *testing.T) {
+	for _, tc := range []struct {
+		name, reason       string
+		architect          supervise.ClaimState
+		session, recipient string
+		delayed            bool
+	}{
+		{"a copy due at once", "delivery_failed", supervise.StateWorking, "ses_live", "ses_live", false},
+		{"a copy due after the re-send delay", "no_holder", supervise.StateLaunching, "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			noticeTree(t, pool, record.NewStore(), false)
+			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+			architectClaimOn(t, sup, "LEGION-1", tc.architect, tc.session)
+			clock := microClock()
+			publisher := &holderPublisher{}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", notices: publisher, supervisor: sup, project: "legion"}
+			runner.records = wakingRecords(runner)
+			runLanes(t, runner, clock)
+
+			notice := record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}
+			report := laneReport{"evt-exception", tc.reason, architectTopic(t, "LEGION-1"), "pr-blocked on LEGION-2", notice, "legion-outbox:7", tc.recipient}
+			delay := noticeReholdDelays[0]
+			_, delaysBefore := clock.armed(delay)
+			if err := runner.rehold(context.Background(), report.envelope(t)); err != nil {
+				t.Fatalf("rehold: %v", err)
+			}
+			if tc.delayed {
+				testwait.Eventually(t, "the lane armed its wait for the re-send delay", func() bool {
+					_, total := clock.armed(delay)
+					return total == delaysBefore+1
+				})
+				if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 1 {
+					t.Fatalf("delivered %+v with %d rows left before the re-send delay passed, want nothing and the copy held", delivered, outboxRows(t, pool))
+				}
+				clock.advance(delay)
+				if fired := clock.fire(delay); fired == 0 {
+					t.Fatal("no timer armed for the re-send delay fired")
+				}
+			}
+			testwait.Eventually(t, "the re-held notice was published", func() bool {
+				_, delivered := publisher.snapshot()
+				return len(delivered) == 1 && outboxRows(t, pool) == 0
+			})
+			_, delivered := publisher.snapshot()
+			if fmt.Sprint(deliveredKinds(t, delivered)) != "[pr-blocked to LEGION-1]" || delivered[0].key != "legion-outbox:7" {
+				t.Fatalf("delivered %v under key %q, want the re-held notice at the root architect under the key of the row it copies", deliveredKinds(t, delivered), delivered[0].key)
+			}
+			if _, sweeps := clock.armed(outboxLease); !tc.delayed && sweeps != 1 {
+				t.Fatalf("sweep timers armed = %d, want the one Run armed at boot and never fired", sweeps)
 			}
 		})
 	}
@@ -332,7 +393,7 @@ func TestANoticeToAnArchitectStoppedWithItsFinishedTreeIsNotSentAgain(t *testing
 func TestARoleLaneExceptionOnNATSQueuesTheNoticeAgain(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion", now: time.Now}
 	conn, err := nats.Connect(testnats.URL(t), nats.Timeout(time.Second))
@@ -504,7 +565,7 @@ func TestAReadyArchitectReleasesOnlyItsOwnNotices(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-9", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-9", Title: "Another root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-9", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-9", Title: "Another root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	architectClaimOn(t, sup, "LEGION-1", supervise.StateRegistered, "ses_arch")
 	architectClaimOn(t, sup, "LEGION-2", supervise.StateWorking, "ses_sub")
@@ -726,7 +787,7 @@ func TestAReheldCatchUpNeverFollowsANewerOne(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			noticeTree(t, pool, records, false)
-			root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: tc.generation, Status: "in_progress"}
+			root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-1", Title: "Root", Phase: phase.Implementing, Generation: tc.generation, Status: "in_progress"}
 			putOutboxIssue(t, pool, records, root)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			if _, _, err := sup.Create(context.Background(), supervise.Claim{

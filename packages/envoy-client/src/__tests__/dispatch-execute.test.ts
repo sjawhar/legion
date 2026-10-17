@@ -2755,6 +2755,53 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  // A Dispatch server from before the repository fields that took the write anyway answers
+  // without repo: the repository was not saved, so the write fails loudly, naming what did happen.
+  test("a repo write to a Dispatch server older than the repository fields fails loudly", async () => {
+    const olderIssue = {
+      key: "LEGION-216",
+      title: "Repo work",
+      project: "LEGION",
+      status: "todo",
+      external_links: [],
+      components: issueComponents("inherit", []),
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname === "/api/v1/projects/LEGION/architecture-source") return sourceNull();
+      return response(olderIssue);
+    };
+    const run = (tool: string, args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    await expect(
+      run("dispatch_issue", { project: "LEGION", title: "Repo work", repo: "acme/gadgets" })
+    ).rejects.toThrow(
+      "Dispatch created LEGION-216 without its repository: this Dispatch server predates repository fields, so acme/gadgets was not saved; upgrade the server"
+    );
+    await expect(
+      run("dispatch_issue_update", { issue: "LEGION-216", repo: "acme/gadgets" })
+    ).rejects.toThrow(
+      "Dispatch updated LEGION-216 without its repository: this Dispatch server predates repository fields, so acme/gadgets was not saved; upgrade the server"
+    );
+    await expect(run("dispatch_issue_update", { issue: "LEGION-216", repo: "" })).rejects.toThrow(
+      "Dispatch updated LEGION-216 without its repository: this Dispatch server predates repository fields, so the repository was not cleared; upgrade the server"
+    );
+    // A write that names no repository asks nothing of the field.
+    expect(
+      (await run("dispatch_issue_update", { issue: "LEGION-216", title: "Renamed" })).text
+    ).toContain("LEGION-216");
+  });
+
   test("dispatch_read names the issue's repository and where it came from", async () => {
     const read = async (repo: Record<string, unknown>) => {
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -2792,17 +2839,28 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       });
-      return result.text;
+      return result;
     };
 
-    expect(await read({ repo: null, resolved_repo: "acme/widgets" })).toContain(
+    expect((await read({ repo: null, resolved_repo: "acme/widgets" })).text).toContain(
       "Route: none\nRepository: acme/widgets (inherited or project default)\n"
     );
-    expect(await read({ repo: "acme/gadgets", resolved_repo: "acme/gadgets" })).toContain(
+    expect((await read({ repo: "acme/gadgets", resolved_repo: "acme/gadgets" })).text).toContain(
       "Repository: acme/gadgets (own)\n"
     );
-    expect(await read({ repo: null, resolved_repo: null })).toContain("Repository: none\n");
-    await expect(read({})).rejects.toThrow("Dispatch issue is missing resolved_repo");
+    const none = await read({ repo: null, resolved_repo: null });
+    expect(none.text).toContain("Repository: none\n");
+    expect(none.warnings).toBeUndefined();
+    // A Dispatch server from before the repository fields sends neither: the repository is
+    // unknown, never none, and the read still answers, naming the refusal it did not make in a
+    // warning the CLI writes to stderr.
+    const older = await read({});
+    expect(older.text).toContain(
+      "Repository: unknown (this Dispatch server predates repository fields; upgrade it)\n"
+    );
+    expect(older.warnings).toEqual([
+      "dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so DSP-42's repository is unknown; upgrade the server",
+    ]);
   });
 
   test("dispatch_whoami returns the session and the personal token's owner", async () => {
@@ -2950,6 +3008,79 @@ describe("executeDispatchTool", () => {
         body: {
           status: "testing",
           external_links: [existingLink, { url: pullRequest }],
+          actor: {
+            kind: "session",
+            id: "session-42",
+            origin: expect.objectContaining({ host: "omp", cwd: "/workspace" }),
+          },
+        },
+      },
+    ]);
+  });
+
+  test("dispatch_issue_update clears external links instead of re-sending the existing set", async () => {
+    const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
+    const existingLink = { url: "https://ci.example/run/1", kind: "url" };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        pathname,
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      if (pathname !== "/api/v1/issues/ACME-176") {
+        throw new Error(`unexpected request: ${method} ${pathname}`);
+      }
+      if (method === "GET") {
+        return response({
+          key: "ACME-176",
+          title: "Issue update tool",
+          status: "in_progress",
+          labels: [],
+          route: null,
+          external_links: [existingLink],
+        });
+      }
+      return response({
+        key: "ACME-176",
+        title: "Issue update tool",
+        status: "in_progress",
+        labels: [],
+        route: null,
+        external_links: [],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "ACME-176", external_links: [] },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text:
+        "ACME-176: external links cleared " +
+        "(not subscribed to ACME-176; envoy_subscribe notifications.dispatch.issue.ACME-176.> for every event on it)",
+      details: {
+        issue: "ACME-176",
+        status: "in_progress",
+        external_links: [],
+      },
+    });
+    expect(requests).toEqual([
+      { method: "GET", pathname: "/api/v1/issues/ACME-176" },
+      {
+        method: "PATCH",
+        pathname: "/api/v1/issues/ACME-176",
+        body: {
+          external_links: [],
           actor: {
             kind: "session",
             id: "session-42",

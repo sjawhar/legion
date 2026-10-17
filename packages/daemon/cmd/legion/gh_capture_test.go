@@ -233,10 +233,13 @@ func realGHForCapture(t *testing.T) string {
 // request `legion gh` and `legion git-credential` let through carries the token of the owner of
 // the repository it targets — -R before the command, a selector after `--`, an option's value read
 // as that option's from the leaf command's own help, GH_REPO under an explicit endpoint, -R under
-// GH_REPO — the issue owner's write token only for the issue owner's repository and for a command
-// naming none, another owner's read-only token for that owner's. A command the wrapper cannot read
-// for certain, one naming two owners, and one naming an owner the bundle does not hold are refused
-// with exit 2 and send nothing.
+// GH_REPO, --help=false, a name in --repos under --org, -R after an optional-value shorthand, every
+// argument of a plural slot — the issue owner's write token only for the issue owner's repository
+// and for a command naming none, another owner's read-only token for that owner's. A command the
+// wrapper cannot read for certain (a gh alias or an extension, run or as `gh help`'s target, a
+// search qualifier it cannot read, GH_HOST naming another host, an argument a later gh's usage
+// names otherwise), one naming two owners, and one naming an owner the bundle does not hold are
+// refused with exit 2 and send nothing; no alias or extension runs, and gh's own help answers.
 func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	gh := realGHForCapture(t)
 	git, err := exec.LookPath("git")
@@ -310,8 +313,30 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		t.Skipf("%s sent %+v for acme's directory: it does not read GH_CONFIG_DIR; set LEGION_GH_PATH to the real gh", gh, control)
 	}
 
-	// Every command of both reviews' reproductions, and controls: each either sends GitHub the
-	// token of the owner it targets, and only that token, or is refused with exit 2 and sends
+	// acme's directory, the issue owner's, holds gh aliases of its own beside gh's default co
+	// (which an aliases key of the file's own replaces, so it is listed again): one naming
+	// sjawhar's repository, one nested under pr, and a shell alias; and gh has an extension.
+	// Neither alias nor extension may run: each would touch its marker. A gh printing pr view's
+	// usage with <URL> for <url>, as no gh this was read from does, stands for a later gh's help.
+	ran := filepath.Join(home, "ran")
+	config := filepath.Join(ghconfig.OwnerDir(root, "acme"), ghconfig.ConfigFile)
+	aliases := ghconfig.Config + "aliases:\n    co: pr checkout\n    pv: pr view -R sjawhar/legion\n    pr pv2: pr view -R sjawhar/legion\n    shx: '!touch " + ran + "-shx'\n"
+	if err := os.WriteFile(config, []byte(aliases), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	extension := filepath.Join(home, ".data", "gh", "extensions", "gh-hello")
+	if err := os.MkdirAll(extension, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extension, "gh-hello"), []byte("#!/bin/sh\ntouch '"+ran+"-hello'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	drift := filepath.Join(home, "gh-drift")
+	if err := os.WriteFile(drift, []byte("#!/bin/sh\nfor last; do :; done\nif [ \"$last\" = --help ]; then\n  '"+gh+"' \"$@\" | sed 's/<url>/<URL>/g'\n  exit\nfi\nexec '"+gh+"' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Every command of the three reviews' reproductions, and controls: each either sends GitHub
+	// the token of the owner it targets, and only that token, or is refused with exit 2 and sends
 	// nothing. Each asks for a field only the server answers (title, nameWithOwner), so no gh
 	// version answers it locally without a request. deploy-key add reads its key file from the
 	// working directory.
@@ -325,7 +350,7 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		owner  string // the owner whose token every request carries; "" when refused
 		refuse string // the refusal's text, exit 2 and no request
 	}{
-		// The re-review's reproductions.
+		// The first re-review's reproductions.
 		{nil, []string{"-R", "sjawhar/legion", "pr", "view", "1", "--json", "title"}, "sjawhar", ""},
 		{nil, []string{"--repo=sjawhar/legion", "pr", "view", "1", "--json", "title"}, "sjawhar", ""},
 		{nil, []string{"api", "--", "repos/sjawhar/legion"}, "sjawhar", ""},
@@ -337,6 +362,36 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		{[]string{"GH_REPO=acme/widgets"}, []string{"pr", "view", "1", "-R", "sjawhar/legion", "--json", "title"}, "sjawhar", ""},
 		{nil, []string{"pr", "view", "https://github.com/sjawhar/legion/pull/1", "-R", "acme/widgets", "--json", "title"}, "", "more than one owner"},
 		{nil, []string{"repo", "view", "--json", "nameWithOwner", "sjawhar/legion"}, "sjawhar", ""},
+		// The second re-review's reproductions: --help=false, before the command's name or
+		// after; a name in --repos, which gh reads under --org; -c taking its optional value.
+		{nil, []string{"api", "repos/sjawhar/legion", "--help=false"}, "sjawhar", ""},
+		{nil, []string{"pr", "view", "1", "-R", "sjawhar/legion", "--help=false", "--json", "title"}, "sjawhar", ""},
+		{nil, []string{"--help", "pr", "view", "1", "-R", "sjawhar/legion", "--help=false", "--json", "title"}, "sjawhar", ""},
+		{nil, []string{"secret", "set", "TOKEN", "--org", "sjawhar", "--repos", "legion", "--body", "dummy", "-R", "sjawhar/legion"}, "sjawhar", ""},
+		{nil, []string{"browse", "-c", "-R", "sjawhar/legion", "--no-browser"}, "sjawhar", ""},
+		// The gaps it found that fail open: a gh alias at any depth, gh's default co among them;
+		// a shell alias; an extension; the Copilot CLI; a search qualifier gh and GitHub read
+		// otherwise; GH_HOST naming another host; and a usage spelling an argument otherwise.
+		{nil, []string{"pv", "1", "--json", "title"}, "", `"pv" is a gh alias`},
+		{nil, []string{"pr", "pv2", "1", "--json", "title"}, "", `"pv2" is a gh alias`},
+		{nil, []string{"co", "https://github.com/sjawhar/legion/pull/1"}, "", `"co" is a gh alias`},
+		{nil, []string{"shx"}, "", `"shx" is a gh alias`},
+		{nil, []string{"hello", "-R", "sjawhar/legion"}, "", `"hello" is a gh extension`},
+		// gh 2.65.0 has no copilot, and refuses it as a command it does not know.
+		{nil, []string{"copilot"}, "", "`gh copilot`"},
+		{nil, []string{"search", "issues", "(repo:sjawhar/legion)"}, "", "is a search qualifier this cannot read for certain"},
+		{nil, []string{"search", "issues", "repo:sjawhar/legion", "is:open"}, "sjawhar", ""},
+		{[]string{"GH_HOST=ghe.example.com"}, []string{"api", "repos/sjawhar/legion"}, "", `GH_HOST is "ghe.example.com"`},
+		{[]string{"LEGION_GH_PATH=" + drift}, []string{"pr", "view", "--json", "title", "https://github.com/sjawhar/legion/pull/1"}, "", "<URL>"},
+		// The third re-review's: gh's help of an extension runs the extension, so a help target is
+		// read as a command, a gh alias or an extension refused; and a plural slot takes one or
+		// more arguments, every one a selector.
+		{nil, []string{"help", "hello"}, "", `"hello" is a gh extension`},
+		{nil, []string{"help", "pr", "pv2"}, "", `"pv2" is a gh alias`},
+		{nil, []string{"help", "co"}, "", `"co" is a gh alias`},
+		{nil, []string{"issue", "edit", "1", "2", "--title", "capture", "-R", "sjawhar/legion"}, "sjawhar", ""},
+		{nil, []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/1", "https://github.com/sjawhar/legion/issues/2", "--title", "capture"}, "sjawhar", ""},
+		{nil, []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/1", "https://github.com/acme/widgets/issues/2", "--title", "capture"}, "", "more than one owner"},
 		// Controls: the issue owner's repository, a command naming none, an owner outside the
 		// bundle, and an option the leaf's help does not list.
 		{nil, []string{"pr", "view", "--json", "title", "https://github.com/sjawhar/legion/pull/2"}, "sjawhar", ""},
@@ -360,6 +415,21 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 			t.Errorf("%s exit 0 against the capture proxy, which answers nothing: %s", what, out)
 		}
 		wantSent(what, tc.owner, false)
+	}
+	// gh's own help and its topics still answer, exit 0, and send nothing.
+	for _, args := range [][]string{{"help"}, {"help", "pr", "view"}, {"help", "environment"}, {"pr", "view", "--help"}} {
+		code, out := run(ghEnv, os.Args[0], append([]string{"gh"}, args...)...)
+		if code != 0 || out == "" {
+			t.Errorf("legion gh %s = exit %d, %q; want gh's help, exit 0", strings.Join(args, " "), code, out)
+		}
+		if sent := proxy.take(); len(sent) != 0 {
+			t.Errorf("legion gh %s sent %+v, want nothing", strings.Join(args, " "), sent)
+		}
+	}
+	for _, marker := range []string{"-shx", "-hello"} {
+		if _, err := os.Stat(ran + marker); err == nil {
+			t.Errorf("%s ran: `legion gh` ran a gh alias or extension", strings.TrimPrefix(marker, "-"))
+		}
 	}
 
 	helper := []string{"-c", "credential.helper=", "-c", "credential.helper=!legion git-credential", "-c", "credential.useHttpPath=true", "-c", "credential.interactive=false"}
