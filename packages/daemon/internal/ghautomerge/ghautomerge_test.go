@@ -353,6 +353,62 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 	}
 }
 
+// failedRun is the merge_group run whose checks failed on the commit the merge queue built for #42.
+const failedRun = "https://github.com/acme/widgets/actions/runs/7"
+
+// unexplained is a hypothetical queue removal reason, one GitHub gives no other meaning: GitHub's
+// own are merged, failed_checks, manual and merge_conflict, and this stands for any it adds.
+const unexplained = "timed_out"
+
+// enqueued and enabled are GitHub's timeline records of the pull request entering the merge queue
+// and of its auto-merge being enabled.
+const (
+	enqueued = `{"__typename":"AddedToMergeQueueEvent","createdAt":"2026-10-16T05:00:00Z"}`
+	enabled  = `{"__typename":"AutoMergeEnabledEvent","createdAt":"2026-10-16T05:00:00Z"}`
+)
+
+// pagedChecks is a merge queue commit whose checks GitHub lists over two pages: the first, cut at
+// 100, all passed, and its integration failure is on the second, secondChecksPage, which moreChecks
+// reads after the cursor after-100.
+var pagedChecks = func() string {
+	var passing []string
+	for i := range 100 {
+		passing = append(passing, fmt.Sprintf(`{"__typename":"CheckRun","name":"check-%d","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"%s/job/%d","checkSuite":{"workflowRun":{"url":"%s"}}}`, i, failedRun, i, failedRun))
+	}
+	return `{"oid":"group-sha","statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":true,"endCursor":"after-100"},"nodes":[` + strings.Join(passing, ",") + `]}}}`
+}()
+
+const secondChecksPage = `{"pageInfo":{"hasNextPage":false,"endCursor":"after-101"},"nodes":[` +
+	`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"` + failedRun + `/job/200","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}`
+
+// dequeued is GitHub's record of the pull request taken out of the merge queue by actor for reason,
+// with commit, the commit the queue built for it, or null.
+func dequeued(reason, actor, commit string) string {
+	return fmt.Sprintf(`{"__typename":"RemovedFromMergeQueueEvent","id":"RFMQE_9","createdAt":"2026-10-16T05:10:00Z","reason":%q,"actor":{"login":%q},"beforeCommit":%s}`, reason, actor, commit)
+}
+
+// disableReasons is GitHub's sentence for each auto-merge reason code these tests use, as its
+// timeline answers them.
+var disableReasons = map[string]string{
+	"manually_disabled":    "Manually disabled by user",
+	"merge_commit_blocked": "Merge commits are not allowed on this repository",
+	"closed":               "Pull request was closed",
+}
+
+// disabled is GitHub's record of the pull request's auto-merge turned off for reasonCode, with its
+// sentence, by actor, or naming no actor when actor is empty.
+func disabled(reasonCode, actor string) string {
+	reason, ok := disableReasons[reasonCode]
+	if !ok {
+		panic("no sentence of GitHub's for auto-merge reason code " + reasonCode)
+	}
+	login := "null"
+	if actor != "" {
+		login = fmt.Sprintf(`{"login":%q}`, actor)
+	}
+	return fmt.Sprintf(`{"__typename":"AutoMergeDisabledEvent","id":"AMDE_9","createdAt":"2026-10-16T05:10:00Z","reason":%q,"reasonCode":%q,"actor":%s}`, reason, reasonCode, login)
+}
+
 // Once the row has seen READY's head armed or queued (armed), an open pull request at that head with
 // nothing armed is a removal someone made, which Submit reads from the pull request's timeline and
 // never answers with a second submission (LEGION-800). The merge queue taking it out because the
@@ -369,7 +425,6 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 // a conflict mean what they say, so they read none, and a page GitHub fails to answer never turns
 // the merge's wait into a failure.
 func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
-	const failedRun = "https://github.com/acme/widgets/actions/runs/7"
 	red := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
 		`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
 		`{"__typename":"CheckRun","name":"e2e","status":"IN_PROGRESS","conclusion":null,"detailsUrl":"` + failedRun + `/job/3","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
@@ -387,27 +442,6 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 	needsAction := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
 		`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}},` +
 		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"ACTION_REQUIRED","detailsUrl":"` + failedRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}}}`
-	// paged is a queue's commit whose checks GitHub lists over two pages: the first, cut at 100,
-	// all passed, and its integration failure is on the second (moreContexts).
-	var passing []string
-	for i := range 100 {
-		passing = append(passing, fmt.Sprintf(`{"__typename":"CheckRun","name":"check-%d","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"%s/job/%d","checkSuite":{"workflowRun":{"url":"%s"}}}`, i, failedRun, i, failedRun))
-	}
-	paged := `{"oid":"group-sha","statusCheckRollup":{"contexts":{"pageInfo":{"hasNextPage":true,"endCursor":"after-100"},"nodes":[` + strings.Join(passing, ",") + `]}}}`
-	secondPage := `{"pageInfo":{"hasNextPage":false,"endCursor":"after-101"},"nodes":[` +
-		`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"` + failedRun + `/job/200","checkSuite":{"workflowRun":{"url":"` + failedRun + `"}}}]}`
-	enqueued := `{"__typename":"AddedToMergeQueueEvent","createdAt":"2026-10-16T05:00:00Z"}`
-	enabled := `{"__typename":"AutoMergeEnabledEvent","createdAt":"2026-10-16T05:00:00Z"}`
-	dequeued := func(reason, actor, commit string) string {
-		return fmt.Sprintf(`{"__typename":"RemovedFromMergeQueueEvent","id":"RFMQE_9","createdAt":"2026-10-16T05:10:00Z","reason":%q,"actor":{"login":%q},"beforeCommit":%s}`, reason, actor, commit)
-	}
-	disabled := func(reasonCode, actor string) string {
-		login := "null"
-		if actor != "" {
-			login = fmt.Sprintf(`{"login":%q}`, actor)
-		}
-		return fmt.Sprintf(`{"__typename":"AutoMergeDisabledEvent","id":"AMDE_9","createdAt":"2026-10-16T05:10:00Z","reason":"Manually disabled by user","reasonCode":%q,"actor":%s}`, reasonCode, login)
-	}
 	for _, tc := range []struct {
 		name     string
 		queue    bool
@@ -425,26 +459,24 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 	}{
 		{name: "a person dequeues it while its merge group runs", queue: true, timeline: []string{enqueued, dequeued("manual", "a-maintainer", cancelled)},
 			removed: []string{"a-maintainer", "merge queue", "manual"}},
-		{name: "the merge queue removes it on a merge group that only cancelled", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", cancelled)},
-			removed: []string{"github-merge-queue", "merge queue", "timed_out"}},
-		{name: "the merge queue removes it on a merge group whose run needs action", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", needsAction)},
-			failed: []string{"timed_out", "integration (action_required, " + failedRun + ")"}},
-		{name: "the merge queue removes it for failed_checks, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", paged)},
+		{name: "the merge queue removes it for an unexplained reason on a merge group that only cancelled", queue: true, timeline: []string{enqueued, dequeued(unexplained, "github-merge-queue", cancelled)},
+			removed: []string{"github-merge-queue", "merge queue", unexplained}},
+		{name: "the merge queue removes it for an unexplained reason on a merge group whose run needs action", queue: true, timeline: []string{enqueued, dequeued(unexplained, "github-merge-queue", needsAction)},
+			failed: []string{unexplained, "integration (action_required, " + failedRun + ")"}},
+		{name: "the merge queue removes it for failed_checks, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", pagedChecks)},
 			pages: 1, failed: []string{"failed_checks", "integration (failure, " + failedRun + ")"}},
-		{name: "the merge queue removes it for an unexplained reason, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", paged)},
-			pages: 1, failed: []string{"timed_out", "integration (failure, " + failedRun + ")"}},
-		{name: "a person dequeues it from a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("manual", "a-maintainer", paged)},
+		{name: "the merge queue removes it for an unexplained reason, its failure past the first 100 checks", queue: true, timeline: []string{enqueued, dequeued(unexplained, "github-merge-queue", pagedChecks)},
+			pages: 1, failed: []string{unexplained, "integration (failure, " + failedRun + ")"}},
+		{name: "a person dequeues it from a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("manual", "a-maintainer", pagedChecks)},
 			failPages: true, removed: []string{"a-maintainer", "merge queue", "manual"}},
-		{name: "the merge queue finds a conflict in a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merge_conflict", "github-merge-queue", paged)},
+		{name: "the merge queue finds a conflict in a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merge_conflict", "github-merge-queue", pagedChecks)},
 			failPages: true, removed: []string{"github-merge-queue", "merge queue", "merge_conflict"}},
-		{name: "the merge queue takes it out to merge a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", paged)},
+		{name: "the merge queue takes it out to merge a merge group of more than 100 checks", queue: true, timeline: []string{enqueued, dequeued("merged", "github-merge-queue", pagedChecks)},
 			failPages: true, wait: "disappeared", routine: true},
-		{name: "GitHub turns off the auto-merge the daemon enabled, naming it", timeline: []string{enabled, disabled("merge_commit_blocked", "legion-implementer")},
-			removed: []string{"GitHub turned off the auto-merge", "naming legion-implementer, the App that submitted it", "merge_commit_blocked"}},
 		{name: "the merge queue removes it for failed_checks", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", red)},
 			failed: []string{"#42", "head", "failed_checks", "group-sha", "integration (timed_out, " + failedRun + ")"}},
-		{name: "the merge queue removes it on a red merge group whatever its reason", queue: true, timeline: []string{enqueued, dequeued("timed_out", "github-merge-queue", red)},
-			failed: []string{"timed_out", "integration (timed_out, " + failedRun + ")"}},
+		{name: "the merge queue removes it for an unexplained reason on a red merge group", queue: true, timeline: []string{enqueued, dequeued(unexplained, "github-merge-queue", red)},
+			failed: []string{unexplained, "integration (timed_out, " + failedRun + ")"}},
 		{name: "the merge queue removes it for failed_checks naming no commit", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", "null")},
 			failed: []string{"failed_checks", "named no commit"}},
 		{name: "the merge queue removes it for failed_checks with no failing run read", queue: true, timeline: []string{enqueued, dequeued("failed_checks", "github-merge-queue", green)},
@@ -454,9 +486,11 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 		{name: "the merge queue finds a conflict", queue: true, timeline: []string{enqueued, dequeued("merge_conflict", "github-merge-queue", "null")},
 			removed: []string{"github-merge-queue", "merge queue", "merge_conflict"}},
 		{name: "a person turns its auto-merge off", timeline: []string{enabled, disabled("manually_disabled", "a-maintainer")},
-			removed: []string{"a-maintainer", "auto-merge", "manually_disabled", "Manually disabled by user"}},
-		{name: "GitHub turns its auto-merge off", timeline: []string{enabled, disabled("merge_commit_blocked", "a-maintainer")},
-			removed: []string{"a-maintainer", "auto-merge", "merge_commit_blocked"}},
+			removed: []string{"a-maintainer turned off the auto-merge", "manually_disabled: Manually disabled by user"}},
+		{name: "auto-merge is turned off with GitHub naming no actor", timeline: []string{enabled, disabled("manually_disabled", "")},
+			removed: []string{"someone turned off the auto-merge", "manually_disabled: Manually disabled by user"}},
+		{name: "GitHub turns its auto-merge off, naming the App that enabled it", timeline: []string{enabled, disabled("merge_commit_blocked", "legion-implementer")},
+			removed: []string{"GitHub turned off the auto-merge", "naming legion-implementer, the App that submitted it", "merge_commit_blocked: Merge commits are not allowed on this repository"}},
 		{name: "the daemon's own disarm lands late", timeline: []string{enabled, disabled("manually_disabled", "legion-implementer")}, resubmit: true},
 		{name: "the daemon's own disarm, then a person's dequeue", queue: true, timeline: []string{enqueued, disabled("manually_disabled", "legion-implementer"), dequeued("manual", "a-maintainer", "null")},
 			removed: []string{"a-maintainer", "merge queue", "manual"}},
@@ -474,7 +508,7 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 				mergeState = "CLEAN"
 			}
 			g := &github{head: "head", mergeState: mergeState, queueRequired: tc.queue, autoMergeOK: true, timeline: tc.timeline,
-				contextPages: map[string]string{"after-100": secondPage}, failPages: tc.failPages}
+				contextPages: map[string]string{"after-100": secondChecksPage}, failPages: tc.failPages}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
 			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
 			var failed *MergeFailed
@@ -528,6 +562,41 @@ func TestSubmitReadsARemovalItDidNotMakeInsteadOfSubmittingAgain(t *testing.T) {
 			}
 			if g.pageReads != tc.pages {
 				t.Fatalf("reads of the queue commit's further checks %d, want %d", g.pageReads, tc.pages)
+			}
+		})
+	}
+}
+
+// A queue removal whose checks GitHub fails to answer past their first page is a failure the row
+// retries, never a judgment of the page it read: failed_checks judged on that page alone would say
+// GitHub reported no failing run, and an unexplained reason would read as a removal by someone. The
+// retry, with the page answered, finds the failure on it.
+func TestSubmitRetriesAQueueRemovalWhoseChecksGitHubFailsToRead(t *testing.T) {
+	for _, reason := range []string{"failed_checks", unexplained} {
+		t.Run(reason, func(t *testing.T) {
+			g := &github{head: "head", mergeState: "CLEAN", queueRequired: true, autoMergeOK: true,
+				timeline:     []string{enqueued, dequeued(reason, "github-merge-queue", pagedChecks)},
+				contextPages: map[string]string{"after-100": secondChecksPage}, failPages: true}
+			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
+			var failed *MergeFailed
+			var removed *Removed
+			var refused *Refused
+			if err == nil || errors.Is(err, wait.ErrWaiting) || errors.As(err, &failed) || errors.As(err, &removed) || errors.As(err, &refused) ||
+				strings.Contains(err.Error(), "no failing run") || !strings.Contains(err.Error(), "after-100") {
+				t.Fatalf("Submit with the queue commit's second page of checks unanswered = %v (%T), want a failure to retry naming the page", err, err)
+			}
+			g.mu.Lock()
+			g.failPages = false
+			g.mu.Unlock()
+			_, err = Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", true, keeping("head"))
+			if !errors.As(err, &failed) || !strings.Contains(err.Error(), "integration (failure, "+failedRun+")") {
+				t.Fatalf("the retry once GitHub answers the page = %v (%T), want MergeFailed naming the failure on it", err, err)
+			}
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if len(g.mutations) != 0 || g.pageReads != 2 {
+				t.Fatalf("mutations %v and page reads %d, want none and one each run", g.mutations, g.pageReads)
 			}
 		})
 	}

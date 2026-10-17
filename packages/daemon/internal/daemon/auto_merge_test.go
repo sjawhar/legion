@@ -464,7 +464,7 @@ func TestADelayedDisarmNeverLosesTheREADYMerge(t *testing.T) {
 	if disables, arms := github.counts(); disables != 0 || arms != 0 {
 		t.Fatalf("disables %d and arms %d while READY's arm stands, want the arm kept and none sent", disables, arms)
 	}
-	github.remove(autoMergeDisabledEvent("manually_disabled", implementApp))
+	github.remove(manuallyDisabledEvent(implementApp))
 	run("after the earlier disable lands")
 	assertMergeRows(t, pool, 1, "merge-refused", 0)
 	if _, arms := github.counts(); arms != 1 {
@@ -601,7 +601,7 @@ func TestARemovalByAPersonEndsTheREADYMergeAndTellsTheArchitect(t *testing.T) {
 			g := newArmableGitHub(t)
 			g.set(func(g *armableGitHub) { g.armed, g.timeline = false, nil })
 			return g
-		}, autoMergeDisabledEvent("manually_disabled", "a-maintainer"), []string{"#42", "auto-merge", "manually_disabled", "a-maintainer", "ready-head"}},
+		}, manuallyDisabledEvent("a-maintainer"), []string{"#42", "auto-merge", "manually_disabled", "a-maintainer", "ready-head"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			github := tc.github(t)
@@ -763,7 +763,7 @@ func serveArmable(t *testing.T, g *armableGitHub) *armableGitHub {
 		case strings.Contains(string(body), "disablePullRequestAutoMerge"):
 			g.disables++
 			g.armed = false
-			g.timeline = append(g.timeline, autoMergeDisabledEvent("manually_disabled", implementApp))
+			g.timeline = append(g.timeline, manuallyDisabledEvent(implementApp))
 			_, _ = io.WriteString(w, `{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`)
 		case strings.Contains(string(body), "enablePullRequestAutoMerge"):
 			if !strings.Contains(string(body), `"head":"ready-head"`) {
@@ -829,11 +829,11 @@ func timelineEvent(kind string) string {
 	return fmt.Sprintf(`{"__typename":%q,"createdAt":"2026-10-16T05:00:00Z"}`, kind)
 }
 
-// autoMergeDisabledEvent is GitHub's record of the pull request's auto-merge turned off by actor, for
-// GitHub's reason code.
-func autoMergeDisabledEvent(reasonCode, actor string) string {
-	return fmt.Sprintf(`{"__typename":"AutoMergeDisabledEvent","id":"AMDE_1","createdAt":"2026-10-16T05:10:00Z","reason":"Manually disabled by user","reasonCode":%q,"actor":{"login":%q}}`,
-		reasonCode, actor)
+// manuallyDisabledEvent is GitHub's record of the pull request's auto-merge turned off by actor, a
+// person or the implement App's disarm: reason code manually_disabled, with GitHub's sentence for it.
+func manuallyDisabledEvent(actor string) string {
+	return fmt.Sprintf(`{"__typename":"AutoMergeDisabledEvent","id":"AMDE_1","createdAt":"2026-10-16T05:10:00Z","reason":"Manually disabled by user","reasonCode":"manually_disabled","actor":{"login":%q}}`,
+		actor)
 }
 
 // dequeuedEvent is GitHub's record of the pull request taken out of the merge queue by actor for
@@ -850,8 +850,8 @@ const failedMergeGroupRun = "https://github.com/acme/widgets/actions/runs/7"
 // failedMergeGroup is the commit the merge queue built for #42, on which its merge_group run's
 // integration job failed and its lint job passed.
 const failedMergeGroup = `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
-	`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedMergeGroupRun + `/job/1","checkSuite":{"branch":{"name":"gh-readonly-queue/main/pr-42-base-sha"},"workflowRun":{"url":"` + failedMergeGroupRun + `","event":"merge_group"}}},` +
-	`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"` + failedMergeGroupRun + `/job/2","checkSuite":{"branch":{"name":"gh-readonly-queue/main/pr-42-base-sha"},"workflowRun":{"url":"` + failedMergeGroupRun + `","event":"merge_group"}}}]}}}`
+	`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedMergeGroupRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedMergeGroupRun + `"}}},` +
+	`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"` + failedMergeGroupRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedMergeGroupRun + `"}}}]}}}`
 
 // A reopen at READY's head that lands while a worker is recording GitHub's permanent refusal takes
 // the row from that worker: the worker's notice rolls back with its finish, and the run that holds
