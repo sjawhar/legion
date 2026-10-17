@@ -225,7 +225,14 @@ cleanup() {
     }
     sleep 2
   done
-  if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
+  if [ -z "$compared" ] && [ -n "$snapshotted" ]; then
+    (namespace_clean) || status=1
+    if [ -f "$evidence/namespace-after.txt" ]; then
+      while IFS= read -r leftover_name; do
+        case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
+      done < <(comm -13 <(sort "$evidence/namespace-before.txt") <(sort "$evidence/namespace-after.txt"))
+    fi
+  fi
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
   echo "evidence: $evidence (transcript.log, runtime.log, the namespace snapshots)"
