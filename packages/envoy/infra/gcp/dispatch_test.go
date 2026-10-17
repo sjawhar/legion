@@ -1,7 +1,13 @@
 package gcp_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"strings"
 	"testing"
 
@@ -42,6 +48,28 @@ func dispatchArgs() *gcp.DispatchArgs {
 		SignInClientSecret: pulumi.String("example-client-secret"),
 		SignInDomain:       "example.com",
 	}
+}
+
+// testAppPrivateKeyPEM is a throwaway P-256 key generated for the test, never a real credential.
+func testAppPrivateKeyPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+}
+
+// dispatchBrokerAndAppArgs is dispatchArgs with both optional pairs set: the secrets-broker relay
+// (agentSecretsUrl with agentSecretsToken) and the GitHub App (appClientId with appPrivateKey).
+func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
+	t.Helper()
+	args := dispatchArgs()
+	args.AgentSecretsUrl = "https://example-broker.internal.example"
+	args.AgentSecretsToken = pulumi.String("example-agent-secrets-token")
+	args.AppClientId = "example-app-client-id"
+	args.AppPrivateKey = pulumi.String(testAppPrivateKeyPEM(t))
+	return args
 }
 
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
@@ -104,6 +132,18 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
+		{name: "an agent secrets token without its URL", edit: func(a *gcp.DispatchArgs) { a.AgentSecretsToken = pulumi.String("example-agent-secrets-token") }, err: []string{"agentSecretsUrl", "required when agentSecretsToken is set"}},
+		{name: "an agent secrets URL without its token", edit: func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://example-broker.internal.example" }, err: []string{"agentSecretsToken", "required when agentSecretsUrl is set"}},
+		{name: "an agent secrets URL with a path", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example/v1"
+			a.AgentSecretsToken = pulumi.String("example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "no path"}},
+		{name: "an agent secrets URL without a scheme", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "example-broker.internal.example"
+			a.AgentSecretsToken = pulumi.String("example-agent-secrets-token")
+		}, err: []string{"agentSecretsUrl", "absolute http(s) URL"}},
+		{name: "an app client ID without its key", edit: func(a *gcp.DispatchArgs) { a.AppClientId = "example-app-client-id" }, err: []string{"appPrivateKey", "required when appClientId is set"}},
+		{name: "an app private key without its client ID", edit: func(a *gcp.DispatchArgs) { a.AppPrivateKey = pulumi.String("example-key") }, err: []string{"appClientId", "required when appPrivateKey is set"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -168,6 +208,8 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
+		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
+		{"a seed as the app client ID", "appClientId", func(a *gcp.DispatchArgs) { a.AppClientId = seed }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := dispatchArgs()
@@ -459,4 +501,113 @@ func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
 		require.Equal(t, protect, inputs["deletionProtection"])
 		require.Equal(t, protect, inputs["settings"].(map[string]any)["deletionProtectionEnabled"])
 	}
+}
+
+// Dispatch itself trims one trailing slash off DISPATCH_AGENT_SECRETS_URL, so the component
+// renders the value as Dispatch reads it.
+func TestDispatchTrimsTheAgentSecretsUrlsTrailingSlash(t *testing.T) {
+	args := dispatchBrokerAndAppArgs(t)
+	args.AgentSecretsUrl = "https://example-broker.internal.example/"
+	settings, err := gcp.ResolveDispatch(args)
+	require.NoError(t, err)
+	require.Equal(t, "https://example-broker.internal.example", settings.AgentSecretsURL)
+}
+
+// appPrivateKey is an Input, checked once it resolves inside the ApplyT that renders
+// DISPATCH_APP_PEM_B64: a value no PEM block parses from (a path, or the base64 of the PEM pasted
+// instead of the PEM) is refused naming appPrivateKey and never echoing it, so a wrong paste fails
+// the preview or update rather than the pod's boot.
+func TestDispatchRefusesANonPEMAppPrivateKeyOnceItResolves(t *testing.T) {
+	args := dispatchBrokerAndAppArgs(t)
+	args.AppPrivateKey = pulumi.String("example-not-a-pem")
+	_, err := runDispatch(t, args, true)
+	require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: appPrivateKey does not parse as a PEM block (not echoed)")
+	require.NotContains(t, err.Error(), "example-not-a-pem")
+}
+
+func unwrappedProperty(value resource.PropertyValue) resource.PropertyValue {
+	for {
+		switch {
+		case value.IsSecret():
+			value = value.SecretValue().Element
+		case value.IsOutput():
+			value = value.OutputValue().Element
+		default:
+			return value
+		}
+	}
+}
+
+// stringProperty is value as the string it holds, unwrapped from any secret or output wrapper.
+// The mock engine records a Secret's stringData values as plain strings whatever their marking
+// (the existing DISPATCH_SIGNIN_CLIENT_SECRET records plain too), so secretness is not observable
+// here; pulumi.ToSecret in refuseDispatchSeedInSecret and dispatchAppPEM carries it.
+func stringProperty(t *testing.T, value resource.PropertyValue) string {
+	t.Helper()
+	unwrapped := unwrappedProperty(value)
+	require.True(t, unwrapped.IsString(), "the value is not a string: %s", unwrapped.TypeString())
+	return unwrapped.StringValue()
+}
+
+// dispatchSecretData is the <hostname>-dispatch Secret's stringData as the mocks recorded it.
+func dispatchSecretData(t *testing.T, m *pulumitest.Mocks) resource.PropertyMap {
+	t.Helper()
+	for _, registration := range m.Registrations() {
+		if registration.Type == "kubernetes:core/v1:Secret" && registration.Name == "example-dispatch-dispatch" {
+			return unwrappedProperty(registration.Inputs["stringData"]).ObjectValue()
+		}
+	}
+	t.Fatal("no example-dispatch-dispatch Secret registered")
+	return nil
+}
+
+func secretDataKeys(data resource.PropertyMap) []string {
+	keys := make([]string, 0, len(data))
+	for key := range data {
+		keys = append(keys, string(key))
+	}
+	return keys
+}
+
+// Both pairs set, the <hostname>-dispatch Secret gains exactly two keys:
+// DISPATCH_AGENT_SECRETS_TOKEN, the token the pod mounts as a file, and DISPATCH_APP_PEM_B64, the
+// base64 of the PEM.
+func TestDispatchSecretCarriesTheBrokerTokenAndTheAppKey(t *testing.T) {
+	pemText := testAppPrivateKeyPEM(t)
+	args := dispatchBrokerAndAppArgs(t)
+	args.AppPrivateKey = pulumi.String(pemText)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	data := dispatchSecretData(t, m)
+	require.ElementsMatch(t, []string{
+		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
+		"DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_APP_PEM_B64",
+	}, secretDataKeys(data))
+	require.Equal(t, "example-agent-secrets-token", stringProperty(t, data["DISPATCH_AGENT_SECRETS_TOKEN"]))
+	decoded, err := base64.StdEncoding.DecodeString(stringProperty(t, data["DISPATCH_APP_PEM_B64"]))
+	require.NoError(t, err)
+	require.Equal(t, pemText, string(decoded))
+}
+
+// Unset, neither pair leaves a trace: the Secret keeps exactly its four keys, and
+// TestDispatchPodMatchesGolden pins the pod template byte-identical to before the inputs existed.
+func TestDispatchSecretCarriesNoBrokerOrAppKeyUnset(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{
+		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
+	}, secretDataKeys(dispatchSecretData(t, m)))
+}
+
+// Both pairs set, the pod template gains exactly the broker env pair (DISPATCH_AGENT_SECRETS_URL
+// and DISPATCH_AGENT_SECRETS_TOKEN_FILE), the app env pair (DISPATCH_APP_CLIENT_ID plain and
+// DISPATCH_APP_PEM_B64 from the Secret), the read-only token mount and its one-key volume.
+func TestDispatchPodWithBrokerAndAppMatchesGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	deployment := m.One(t, "kubernetes:apps/v1:Deployment")
+	template := deployment.Inputs["spec"].ObjectValue()["template"]
+	got, err := json.MarshalIndent(normalizedProperty(template), "", "  ")
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, "dispatch-pod-with-broker-and-app.golden"), string(got)+"\n")
 }

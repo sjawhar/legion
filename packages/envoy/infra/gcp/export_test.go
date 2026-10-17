@@ -27,6 +27,8 @@ type DispatchSettings struct {
 	DeletionProtection bool
 	Namespace          string
 	ServeConfig        string
+	AgentSecretsURL    string
+	AppClientID        string
 }
 
 // ResolveDispatch resolves Dispatch's plain inputs for the external refusal and default tests.
@@ -41,6 +43,8 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 		DeletionProtection: s.deletionProtection,
 		Namespace:          s.namespace,
 		ServeConfig:        s.serveConfig,
+		AgentSecretsURL:    s.agentSecretsURL,
+		AppClientID:        s.appClientID,
 	}, nil
 }
 

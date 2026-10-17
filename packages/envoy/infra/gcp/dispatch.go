@@ -3,7 +3,9 @@ package gcp
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
+	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -50,6 +52,19 @@ type DispatchArgs struct {
 	SignInClientSecret pulumi.StringInput `pulumi:"signInClientSecret" provider:"secret"`
 	SignInDomain       string             `pulumi:"signInDomain"`
 
+	// AgentSecretsUrl and agentSecretsToken turn on Dispatch's secrets-broker relay together:
+	// DISPATCH_AGENT_SECRETS_URL (an absolute http(s) URL with no path; a trailing slash is
+	// trimmed, as Dispatch trims it) and the token the pod reads from the file
+	// DISPATCH_AGENT_SECRETS_TOKEN_FILE names. Set both or neither.
+	AgentSecretsUrl   string             `pulumi:"agentSecretsUrl,optional"`
+	AgentSecretsToken pulumi.StringInput `pulumi:"agentSecretsToken,optional" provider:"secret"`
+
+	// AppClientId and appPrivateKey turn on Dispatch's GitHub App together:
+	// DISPATCH_APP_CLIENT_ID and, as the base64 of the PEM appPrivateKey holds,
+	// DISPATCH_APP_PEM_B64. Set both or neither; nothing sends a numeric App ID.
+	AppClientId   string             `pulumi:"appClientId,optional"`
+	AppPrivateKey pulumi.StringInput `pulumi:"appPrivateKey,optional" provider:"secret"`
+
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
@@ -77,6 +92,8 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 		{"cloudSqlProxyImage", args.CloudSqlProxyImage},
 		{"signInClientId", args.SignInClientId},
 		{"signInDomain", args.SignInDomain},
+		{"agentSecretsUrl", args.AgentSecretsUrl},
+		{"appClientId", args.AppClientId},
 	} {
 		if bus.HoldsSeed(value.value) {
 			return value.input, true
@@ -124,6 +141,7 @@ type dispatchSettings struct {
 	images                                      struct{ envoy, tailscale, proxy string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
+	agentSecretsURL, appClientID                string
 	deletionProtection                          bool
 	serveConfig                                 string
 }
@@ -178,6 +196,27 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.SignInClientSecret == nil {
 		return dispatchSettings{}, errors.New("signInClientSecret is required")
 	}
+	if args.AgentSecretsToken != nil && args.AgentSecretsUrl == "" {
+		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsToken is set")
+	}
+	agentSecretsURL := strings.TrimSuffix(args.AgentSecretsUrl, "/")
+	if args.AgentSecretsUrl != "" {
+		if args.AgentSecretsToken == nil {
+			return dispatchSettings{}, errors.New("agentSecretsToken is required when agentSecretsUrl is set")
+		}
+		// The shape Dispatch itself requires of DISPATCH_AGENT_SECRETS_URL, checked here so a bad
+		// URL fails the resolver rather than the pod's boot.
+		parsed, err := url.Parse(agentSecretsURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
+			return dispatchSettings{}, fmt.Errorf("agentSecretsUrl %q must be an absolute http(s) URL with no path, as Dispatch requires of DISPATCH_AGENT_SECRETS_URL", args.AgentSecretsUrl)
+		}
+	}
+	if args.AppPrivateKey != nil && args.AppClientId == "" {
+		return dispatchSettings{}, errors.New("appClientId is required when appPrivateKey is set")
+	}
+	if args.AppClientId != "" && args.AppPrivateKey == nil {
+		return dispatchSettings{}, errors.New("appPrivateKey is required when appClientId is set")
+	}
 
 	s := dispatchSettings{
 		hostname:           args.Hostname,
@@ -194,6 +233,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.images.proxy = args.CloudSqlProxyImage
 	s.signIn.clientID = args.SignInClientId
 	s.signIn.domain = args.SignInDomain
+	s.agentSecretsURL = agentSecretsURL
+	s.appClientID = args.AppClientId
 	if args.DatabaseVersion != nil {
 		if *args.DatabaseVersion == "" {
 			return dispatchSettings{}, errors.New("databaseVersion is empty; leave it unset for " + defaultDispatchDatabaseVersion)

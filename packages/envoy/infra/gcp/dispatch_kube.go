@@ -1,6 +1,8 @@
 package gcp
 
 import (
+	"encoding/base64"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"strings"
@@ -108,6 +110,22 @@ func refuseDispatchSeedInSecret(value pulumi.StringInput, dispatch, input string
 	})).(pulumi.StringOutput)
 }
 
+// dispatchAppPEM is appPrivateKey once it resolves, rendered as the base64 Dispatch reads from
+// DISPATCH_APP_PEM_B64: a value holding an nkey seed, or one no PEM block parses from, is refused
+// naming appPrivateKey and never the value, so no child is registered with it. ApplyT keeps the
+// input's secretness, and ToSecret marks the result secret whatever its own marking.
+func dispatchAppPEM(value pulumi.StringInput, dispatch string) pulumi.StringOutput {
+	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
+		if bus.HoldsSeed(v) {
+			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal("appPrivateKey"))
+		}
+		if block, _ := pem.Decode([]byte(v)); block == nil {
+			return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey does not parse as a PEM block (not echoed)"))
+		}
+		return base64.StdEncoding.EncodeToString([]byte(v)), nil
+	})).(pulumi.StringOutput)
+}
+
 // dispatchListenerEnv renders the envoy-listener container's environment from the one NATS URL
 // once it resolves. core's Env names its own inputs — natsUrls by index and socks5Proxy, neither
 // an input of gcp:Dispatch — so each refusal is mapped onto natsUrl, this component's input. The
@@ -188,9 +206,16 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", cloud.password.Result)
-	if _, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: pulumi.StringMap{
+	dispatchSecretData := pulumi.StringMap{
 		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret"),
-	}}, child...); err != nil {
+	}
+	if s.agentSecretsURL != "" {
+		dispatchSecretData["DISPATCH_AGENT_SECRETS_TOKEN"] = refuseDispatchSeedInSecret(args.AgentSecretsToken, dispatch, "agentSecretsToken")
+	}
+	if s.appClientID != "" {
+		dispatchSecretData["DISPATCH_APP_PEM_B64"] = dispatchAppPEM(args.AppPrivateKey, dispatch)
+	}
+	if _, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: dispatchSecretData}, child...); err != nil {
 		return nil, err
 	}
 	serveName := s.hostname + "-serve"
@@ -225,6 +250,26 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		return env, nil
 	}).(corev1.EnvVarArrayOutput)
 
+	dispatchEnv := corev1.EnvVarArray{
+		valueEnv("HOME", "/home/envoy"), secretEnv("DATABASE_URL", dispatchSecretName, "DATABASE_URL"), secretEnv("DISPATCH_AGENT_TOKEN", dispatchSecretName, "DISPATCH_AGENT_TOKEN"), secretEnv("DISPATCH_SIGNING_KEY", dispatchSecretName, "DISPATCH_SIGNING_KEY"), secretEnv("DISPATCH_SIGNIN_CLIENT_SECRET", dispatchSecretName, "DISPATCH_SIGNIN_CLIENT_SECRET"),
+		valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "0.0.0.0"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: natsURL}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", "127.0.0.1:1055"), valueEnv("ENVOY_URL", "http://127.0.0.1:9020"),
+	}
+	dispatchMounts := corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}
+	volumes := corev1.VolumeArray{
+		corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}},
+		corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}},
+	}
+	if s.agentSecretsURL != "" {
+		// The token is one key of the <hostname>-dispatch Secret, mounted alone as a read-only
+		// file of a volume of its own; DISPATCH_AGENT_SECRETS_TOKEN_FILE names that file.
+		dispatchEnv = append(dispatchEnv, valueEnv("DISPATCH_AGENT_SECRETS_URL", s.agentSecretsURL), valueEnv("DISPATCH_AGENT_SECRETS_TOKEN_FILE", "/var/run/secrets/dispatch/agent-secrets-token"))
+		dispatchMounts = append(dispatchMounts, corev1.VolumeMountArgs{Name: pulumi.String("agent-secrets-token"), MountPath: pulumi.String("/var/run/secrets/dispatch"), ReadOnly: pulumi.Bool(true)})
+		volumes = append(volumes, corev1.VolumeArgs{Name: pulumi.String("agent-secrets-token"), Secret: &corev1.SecretVolumeSourceArgs{SecretName: pulumi.String(dispatchSecretName), Items: corev1.KeyToPathArray{corev1.KeyToPathArgs{Key: pulumi.String("DISPATCH_AGENT_SECRETS_TOKEN"), Path: pulumi.String("agent-secrets-token")}}}})
+	}
+	if s.appClientID != "" {
+		dispatchEnv = append(dispatchEnv, valueEnv("DISPATCH_APP_CLIENT_ID", s.appClientID), secretEnv("DISPATCH_APP_PEM_B64", dispatchSecretName, "DISPATCH_APP_PEM_B64"))
+	}
+
 	// The pod is ready only once the Auth Proxy can connect (roles/cloudsql.client) and the seed
 	// volume can mount (roles/secretmanager.secretAccessor), so the Deployment waits for both
 	// grants; registered before them, its readiness wait would race IAM propagation on the first
@@ -251,16 +296,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 						corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources("200m", "256Mi"), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
 					},
 					Containers: corev1.ContainerArray{
-						corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources("1", "4Gi"), Env: corev1.EnvVarArray{
-							valueEnv("HOME", "/home/envoy"), secretEnv("DATABASE_URL", dispatchSecretName, "DATABASE_URL"), secretEnv("DISPATCH_AGENT_TOKEN", dispatchSecretName, "DISPATCH_AGENT_TOKEN"), secretEnv("DISPATCH_SIGNING_KEY", dispatchSecretName, "DISPATCH_SIGNING_KEY"), secretEnv("DISPATCH_SIGNIN_CLIENT_SECRET", dispatchSecretName, "DISPATCH_SIGNIN_CLIENT_SECRET"),
-							valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "0.0.0.0"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: natsURL}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", "127.0.0.1:1055"), valueEnv("ENVOY_URL", "http://127.0.0.1:9020"),
-						}, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
+						corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources("1", "4Gi"), Env: dispatchEnv, VolumeMounts: dispatchMounts, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 						corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("200m", "512Mi"), Env: listenerEnv, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:9020/healthz")}}}},
 					},
-					Volumes: corev1.VolumeArray{
-						corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}},
-						corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}},
-					},
+					Volumes: volumes,
 				},
 			},
 		},

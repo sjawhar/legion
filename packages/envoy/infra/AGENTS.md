@@ -115,10 +115,13 @@ versions. Never add the module to the root `go.work`.
   `gcp:Dispatch` follows the same shape: `NewDispatch` refuses a seed in its own name first
   (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
   string input the component carries (`gcp.dispatchSeededInput`, one row each in
-  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret` and
-  `natsSeedSecret` are checked for a seed once they resolve, before any child takes them
-  (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
-  `TestConstructRefusesASeedInADispatchInput`); and `natsUrl` is checked inside the `ApplyT` that
+  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
+  `natsSeedSecret`, `agentSecretsToken` and `appPrivateKey` are checked for a seed once they
+  resolve, before any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `gcp.dispatchAppPEM`, `TestConstructRefusesASeedInADispatchInput`), and `appPrivateKey` is also
+  refused, naming it and never echoing it, when no PEM block parses from it once it resolves
+  (`gcp.dispatchAppPEM`, `TestDispatchRefusesANonPEMAppPrivateKeyOnceItResolves`); and `natsUrl`
+  is checked inside the `ApplyT` that
   renders the listener container's environment, where core's `Env` refusals — which name core's
   own inputs, `natsUrls` and `socks5Proxy` — are mapped onto `natsUrl`, each a `core.InputError`
   naming it, wrapped with the component's type and name and never a panic
