@@ -17,8 +17,8 @@ import (
 )
 
 // autoMergeTimeout bounds one auto_merge_disable or ready_merge row's GitHub calls, its token's
-// mint with them: the runner executes its rows one at a time, so one unanswered call would stall
-// every effect behind it.
+// mint with them: the row runs on its issue's lifecycle lane, so one unanswered call would hold
+// every later lifecycle row of the issue behind it.
 const autoMergeTimeout = 30 * time.Second
 
 // autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's

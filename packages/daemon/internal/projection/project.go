@@ -4,6 +4,7 @@ package projection
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -17,11 +18,12 @@ import (
 
 // Project joins durable issue facts to current supervision claims for GET /legion/v1/state. The
 // caller owns the repeatable-read transaction, so its record reads and claims share one snapshot.
-// project is the Dispatch project whose pending status writes the state lists. reports is each
-// claim's latest capability report, by claim (LEGION-663): a claim with one shows it whatever its
-// incarnation — the view carries the reporting process's, for a reader to compare with the
-// locator's — and a claim with none shows no capabilities. Nil is no reports.
-func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim, reports map[claim.Token]capabilities.Report) (api.State, error) {
+// project is the Dispatch project whose pending status writes and held lifecycle rows the state
+// lists. reports is each claim's latest capability report, by claim (LEGION-663): a claim with one
+// shows it whatever its incarnation — the view carries the reporting process's, for a reader to
+// compare with the locator's — and a claim with none shows no capabilities. Nil is no reports. now
+// is the instant the held rows are read at (record.Store.HeldRows) and their waits are measured from.
+func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim, reports map[claim.Token]capabilities.Report, now time.Time) (api.State, error) {
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
 		return api.State{}, err
@@ -41,6 +43,10 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		return api.State{}, err
 	}
 	pending, err := s.PendingStatusWrites(ctx, tx, project)
+	if err != nil {
+		return api.State{}, err
+	}
+	held, err := s.HeldRows(ctx, tx, project, "", now)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -194,6 +200,16 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			NextAt:    row.NextAt,
 			LastError: row.LastError,
 		})
+	}
+	projected.HeldOutboxRows = make([]api.HeldOutboxRow, len(held))
+	for i, row := range held {
+		projected.HeldOutboxRows[i] = api.HeldOutboxRow{
+			ID:            row.ID,
+			Kind:          string(row.Kind),
+			Issue:         row.Issue,
+			WaitedSeconds: max(0, int64(now.Sub(row.NextAt).Seconds())),
+			WaitsOn:       row.WaitsOn,
+		}
 	}
 	return projected, nil
 }

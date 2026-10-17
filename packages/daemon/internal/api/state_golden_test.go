@@ -132,6 +132,9 @@ func populatedState() State {
 				},
 			},
 		},
+		// LEGION-208's lifecycle lane is running row 801; the supervise row queued after it came due
+		// two and a half minutes ago and waits behind it (record.Store.HeldRows).
+		HeldOutboxRows: []HeldOutboxRow{{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801}},
 		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
 		// and nothing retries the claim until its architect retries the phase.
 		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},

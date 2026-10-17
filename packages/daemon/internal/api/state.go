@@ -34,6 +34,10 @@ type State struct {
 	Admission           Admission            `json:"admission"`
 	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
+	// HeldOutboxRows is every due lifecycle outbox row held behind its issue's running lifecycle
+	// row (record.Store.HeldRows), in the order the store lists them: next_at, then id. Never null;
+	// empty while every due lifecycle row runs (contract 28).
+	HeldOutboxRows []HeldOutboxRow `json:"heldOutboxRows"`
 	// StrandedClaims is every claim nothing will wake (workflow.Stranded), by issue and then
 	// role: the trees that will not move again until someone acts. Never null; empty while every
 	// claim is running or waits on something that will wake it.
@@ -114,9 +118,9 @@ type AgentSecretsLoginView struct {
 	State string `json:"state"`
 }
 
-// MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `strandedClaims` and
-// `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the plugin's strict
-// reader refuses.
+// MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `heldOutboxRows`,
+// `strandedClaims` and `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the
+// plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -125,6 +129,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
+	}
+	if out.HeldOutboxRows == nil {
+		out.HeldOutboxRows = []HeldOutboxRow{}
 	}
 	if out.StrandedClaims == nil {
 		out.StrandedClaims = []StrandedClaim{}
@@ -299,6 +306,21 @@ type PendingStatusWrite struct {
 	Attempts  int             `json:"attempts"`
 	NextAt    time.Time       `json:"nextAt"`
 	LastError string          `json:"lastError,omitempty"`
+}
+
+// HeldOutboxRow is a due lifecycle effect its issue's lifecycle lane cannot run yet, because
+// another lifecycle row of the issue is running: the lane runs an issue's lifecycle rows one at a
+// time, in the order they were queued, so a start, a suspend or a workspace removal waits while an
+// earlier one of its issue is under a live lease. WaitedSeconds counts from the moment the row
+// became due (its next_at), so a retried row's earlier backoffs are not counted as waiting on its
+// sibling; WaitsOn is the id of the running row — or, for a role's start fenced behind its issue's
+// branch row, that branch row while it runs.
+type HeldOutboxRow struct {
+	ID            int64  `json:"id"`
+	Kind          string `json:"kind"`
+	Issue         string `json:"issue"`
+	WaitedSeconds int64  `json:"waitedSeconds"`
+	WaitsOn       int64  `json:"waitsOn"`
 }
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
