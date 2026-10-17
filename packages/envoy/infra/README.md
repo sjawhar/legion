@@ -149,7 +149,9 @@ digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
-`deletionProtection` to `true`. `existingNamespace`, `false` by default, makes the component use
+`deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
+`deletionProtectionEnabled`, which refuses a delete from the API or the console too.
+`existingNamespace`, `false` by default, makes the component use
 the namespace as it exists in the cluster rather than create it, for a deployment where another
 program owns the namespace. On a stack that has already applied, turning it on removes the
 Namespace from the program, and the next update deletes the namespace and everything in it, the

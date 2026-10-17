@@ -811,3 +811,17 @@ func TestDispatchListenerPodMatchesGolden(t *testing.T) {
 	require.NoError(t, err)
 	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 }
+
+// Pulumi's deletionProtection stops only a Pulumi delete; the instance's own setting stops the API
+// and the console too, and the same input drives both.
+func TestDispatchProtectsItsInstanceServerSide(t *testing.T) {
+	for _, protect := range []bool{true, false} {
+		args := dispatchArgs()
+		args.DeletionProtection = &protect
+		m, err := runDispatch(t, args, true)
+		require.NoError(t, err)
+		inputs := m.One(t, "gcp:sql/databaseInstance:DatabaseInstance").Inputs.Mappable()
+		require.Equal(t, protect, inputs["deletionProtection"])
+		require.Equal(t, protect, inputs["settings"].(map[string]any)["deletionProtectionEnabled"])
+	}
+}
