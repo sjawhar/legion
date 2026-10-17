@@ -386,7 +386,7 @@
 ### Changed
 
 - An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
-  a request whose `Host`, port stripped, case folded and one trailing dot dropped, is `localhost`,
+  a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,
   a loopback address (`127.0.0.0/8`, `::1`) or a name in the new `ENVOY_ALLOWED_HOSTS`
   (comma-separated names or addresses, no port; an entry that is not a host name or an address,
   such as one with a port, scheme or path, refuses startup naming it).

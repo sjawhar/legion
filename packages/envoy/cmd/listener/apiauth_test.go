@@ -500,6 +500,7 @@ func TestAPIAuthRefusesHostsAnUnauthenticatedListenerDoesNotServe(t *testing.T) 
 		{name: "refuses a rebinding host with its port", host: "rebind.attacker.example:9020", path: "/v1/messages/publish", wantStatus: http.StatusMisdirectedRequest},
 		{name: "refuses a rebinding host without a port", host: "rebind.attacker.example", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
 		{name: "refuses a host that only ends in an allowed name", host: "evil-hub.internal.example:9020", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
+		{name: "refuses a non-ASCII letter that lower-cases to an allowed one", host: "HUB.\u0130NTERNAL.EXAMPLE", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
 		{name: "refuses an address that only starts like an allowed one", host: "192.0.2.100:9020", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
 		{name: "refuses an empty host", host: "", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
 		{name: "refuses a non-loopback address", host: "192.0.2.7:9020", path: "/v1/sessions", wantStatus: http.StatusMisdirectedRequest},
