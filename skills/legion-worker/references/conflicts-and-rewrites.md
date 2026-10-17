@@ -52,12 +52,12 @@ Every path it cites is in sjawhar/legion.
 ## The unchanged-diff check
 
 The fingerprint every role compares after a conflict-forced rebase (every flag and the fileset
-verified on jj 0.45.1):
+verified on jj 0.45.1; the issue-scoped fileset on jj 0.46.0):
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
   jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <head-sha>)" --to <head-sha> \
-    --git --context 0 '~(.legion | docs/solutions)' \
+    --git --context 0 "~(.legion/$LEGION_ISSUE | docs/solutions)" \
   | sed -e '/^@@/d' -e '/^index /d' | sha256sum
 ```
 
@@ -72,15 +72,16 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
 - `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
   on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
-- The single fileset `'~(.legion | docs/solutions)'` leaves out the handoff ledger and retro's
-  learnings: process artifacts the merge gate already exempts from re-review
-  (`skill://legion-worker/references/merge-gate.md`), which change
-  between one role's verified head and the next without changing the product. This is what lets
-  each role compare against *its own* last verified head instead of trusting another role's
-  numbers. It must be one expression: jj unions positional filesets, so two separate
-  `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing. Once
-  `.legion/` is gone, jj warns `No matching entries for paths: .legion` on stderr; the hash is
-  unaffected.
+- The single fileset `"~(.legion/$LEGION_ISSUE | docs/solutions)"` leaves out this issue's
+  handoff ledger and retro's learnings, exactly what READY lets sit above the approved head
+  (`skill://legion-worker/references/merge-gate.md`): process artifacts which change
+  between one role's verified head and the next without changing the product. Another issue's
+  `.legion/<KEY>/`, or any other path under `.legion/`, stays in the hash, since READY refuses it.
+  This is what lets each role compare against *its own* last verified head instead of trusting
+  another role's numbers. It must be one expression: jj unions positional filesets, so two
+  separate `'~.legion' '~docs/solutions'` arguments select every file and exclude nothing.
+  Once `.legion/<issue>/` is gone, jj warns `No matching entries for paths: .legion/<issue>` on
+  stderr; the hash is unaffected.
 
 Where each role gets its two heads: the implementer — the tip before and after its own rebase;
 the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of

@@ -75,6 +75,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   or shows the approved head is not the head's ancestor, and `READY_NOT_APPROVED` when the round
   recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
   `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
+  The unchanged-diff fingerprint in `legion-worker`'s conflicts-and-rewrites reference now leaves
+  out `.legion/<issue>/` instead of all of `.legion/`, so it stays equal only where READY's scope
+  does; the reviewer's prompt sends a return after approval to that rule, and a return with no
+  recorded approval to a new round.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
