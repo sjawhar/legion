@@ -139,7 +139,7 @@ port 8766, through that Service; the listener binds the pod's loopback either wa
 | Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
 | Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
 | ClusterIP Service | Port 8766 to the Dispatch pod: the in-cluster path the NetworkPolicy opens to the namespaces `allowedNamespaces` names. |
-| NetworkPolicy | Ingress to the Dispatch pod: no rule at all with `allowedNamespaces` unset or empty, so nothing in the cluster reaches it; otherwise one rule admitting the named namespaces' pods on port 8766. |
+| NetworkPolicy | Ingress to the Dispatch pod: no rule at all with `allowedNamespaces` unset or empty, so no other pod reaches it (Kubernetes still admits the pod's own node); otherwise one rule admitting the named namespaces' pods on port 8766. |
 | Project IAM member and secret IAM member | `roles/cloudsql.client`, conditioned to this Cloud SQL instance alone, and `roles/secretmanager.secretAccessor` on the NATS seed secret, each granted to the pod's Workload Identity principal. |
 
 ### Inputs
@@ -168,11 +168,14 @@ built from the cluster's own Workload Identity pool, so it resolves only once th
 creates the pool exists. The component itself grants that principal `roles/cloudsql.client` — at
 project scope with an IAM condition limiting it to this component's Cloud SQL instance, since
 Cloud SQL has no per-instance IAM — and `roles/secretmanager.secretAccessor` only on the NATS seed
-secret; the Deployment waits for both grants, so the pod never starts before it may connect. The
+secret; the Deployment waits for both grants to be written. IAM can take minutes to apply a new
+binding (Google cites typically two, sometimes seven or more), and the pod restarts until the
+proxy may connect. The
 Cloud SQL grant is an additive IAM member beside whatever the project already holds, and writing
 it needs `resourcemanager.projects.setIamPolicy` on the identity the `gcp` provider runs as
-(`roles/resourcemanager.projectIamAdmin` or equivalent). The pod's Kubernetes Role is limited to
-its Tailscale state Secret.
+(`roles/resourcemanager.projectIamAdmin` or equivalent). The pod's Kubernetes Role lets it read and
+update its Tailscale state Secret and create Secrets in its namespace, since Tailscale creates its
+state Secret on first start.
 
 ### The pod
 
@@ -208,7 +211,9 @@ and the database retains backups and point-in-time recovery.
 The first `pulumi up` needs no out-of-band grant: the component writes the conditioned
 `roles/cloudsql.client` member and the seed accessor itself, and the Deployment waits for both, so
 the only IAM prerequisite is that the `gcp` provider's identity may set the project's IAM policy
-(`resourcemanager.projects.setIamPolicy`, §Inputs).
+(`resourcemanager.projects.setIamPolicy`, §Inputs). If the new binding takes longer to apply than
+the Deployment's ten-minute readiness wait, that `pulumi up` fails on the wait, and the next one
+resumes it.
 
 ### YAML
 
