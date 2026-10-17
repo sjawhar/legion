@@ -33,20 +33,21 @@ const CommandTimeout = 5 * time.Minute
 // transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
-// CloneTimeout bounds each step of the shared clone's own clone (ensureRepoClone) whose duration
-// follows the repository's size, as the fetch's does: from GitHub, a `jj git clone` that copies and
-// imports every object; from a pod's feed, a `git clone --shared` that copies no object but checks
-// out the working tree, then jj's import of every commit. A 3.4 GB repository (816k objects, 421
-// refs) cloned from a local feed by `jj git clone` in 253 s with four cores and 281 s with two on a
-// 64-core devbox, using no more than about two cores either way, so CommandTimeout's fixed 5
-// minutes is no bound for such a step once a sandbox slows it at all.
+// CloneTimeout is the one bound the shared clone's own clone (ensureRepoClone) gives the steps
+// whose duration follows the repository's size, all together, as the fetch's share FetchTimeout:
+// from GitHub, a `jj git clone` that copies and imports every object; from a pod's feed, a `git
+// clone --shared` that copies no object but checks out the working tree, then jj's import of every
+// commit, each given what remains. A 3.4 GB repository (816k objects, 421 refs) cloned from a local
+// feed by `jj git clone` in 253 s with four cores and 281 s with two on a 64-core devbox, using no
+// more than about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once
+// a sandbox slows it at all.
 const CloneTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
 // hold the runner's own slow-command budget (RunChecked), each of the fetch's transfers and checks
-// holds what remains of FetchTimeout instead (Fetch), and each step of the shared clone's clone
-// whose duration follows the repository's size holds CloneTimeout (ensureRepoClone) — never a
-// budget shared across the whole provisioning sequence.
+// holds what remains of FetchTimeout instead (Fetch), and each size-following step of the shared
+// clone's clone holds what remains of CloneTimeout (ensureRepoClone) — never a budget shared
+// across the whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string

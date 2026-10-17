@@ -1822,10 +1822,12 @@ cache's address and token only once the Service of that name is the cache's own:
 the cache's Sandbox, by uid, selecting exactly the pods the controller stamps with the hash of the
 Sandbox's name (`agents.x-k8s.io/sandbox-name-hash`), and headless (`clusterIP: None`) with no
 `externalName`, the shape the controller makes. Anyone who may create a Service in the namespace
-could make one of the cache's name first. One without the controller's tracking label the
-controller refuses to adopt and leaves standing; one with it the controller adopts, writing its
-own controller reference and the exact selector but keeping the planted `type` and
-`externalName`, so an `ExternalName` Service would send the token to its maker's host. Either
+could make one of the cache's name first, or write a controller reference into one itself, which
+the API server accepts. The controller refuses to adopt one without its tracking label, or one
+with a cluster IP, and leaves it standing; one with the label and no cluster IP, an `ExternalName`
+Service among them, it adopts, writing its own controller reference and the exact selector but
+keeping the planted `type` and `externalName`, so it would send the token to its maker's host.
+Either
 way the launch waits, logging `the repository cache's Service is not the cache's` with the Service
 and why, and fails at the boot timeout naming them, with no pod made and no token written, and
 `legion state` shows the cache `refused` with the same reason. The controller never resets a
@@ -2261,8 +2263,8 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   the repository cache, then its stream, verification and delta under one
   `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, all within
   `workspace.FetchBudget` ([Trust model](#trust-model-the-provisioning-token)), then
-  `workspace-init`'s shared clone of the feed, each step of it that follows the repository's size
-  within `workspace.CloneTimeout`, and its other commands, each up to `workspace.CommandTimeout`;
+  `workspace-init`'s shared clone of the feed, whose steps that follow the repository's size share
+  one `workspace.CloneTimeout`, and its other commands, each up to `workspace.CommandTimeout`;
   it waits on no other pod
   and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
   and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
@@ -2440,9 +2442,9 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   name, then the workspace add, `update-stale`, and the configuration writes, once it has removed
   the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). The shared
   clone copies no object, but its checkout of the working tree and jj's import of every commit
-  follow the repository's size, so each runs under a bound of its own, `workspace.CloneTimeout`
-  (30 minutes), rather than `workspace.CommandTimeout`; every other command here keeps the 5
-  minutes.
+  follow the repository's size, so the two share one bound of their own, `workspace.CloneTimeout`
+  (30 minutes), the import given what the checkout left, rather than `workspace.CommandTimeout`;
+  every other command here keeps the 5 minutes.
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
   volume, and no other provision shares the repository. What an agent of the issue planted can run
   there, with nothing to take that the agent does not already hold.

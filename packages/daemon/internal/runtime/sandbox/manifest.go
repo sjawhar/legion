@@ -765,8 +765,8 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
 // real bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
 // budget (its wait for the repository cache, then the stream, verification and delta that share
-// one FetchTimeout) and workspace-init's shared clone of the feed, each of whose size-following
-// steps runs under CloneTimeout. It is how much longer than the boot timeout a launch may wait for
+// one FetchTimeout) and workspace-init's shared clone of the feed, whose size-following steps
+// share one CloneTimeout. It is how much longer than the boot timeout a launch may wait for
 // its pod's launcher, counted from when it first sees one of the pod's init containers running
 // (awaitRoleLauncher). The fetch started no later than that and the shared clone after the fetch
 // ended, so both end inside the bound, each failing on its own, naming why, when it runs out;

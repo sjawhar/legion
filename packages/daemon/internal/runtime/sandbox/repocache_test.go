@@ -1149,6 +1149,9 @@ func TestAnIssuePodGetsNoCacheAddressFromAServiceThatIsNotTheCaches(t *testing.T
 		"an ExternalName Service the controller adopted": {func(s *corev1.Service) {
 			s.Spec.Type, s.Spec.ClusterIP, s.Spec.ExternalName = corev1.ServiceTypeExternalName, "", "collector.attacker.example"
 		}, "is a ExternalName Service"},
+		"a ClusterIP Service whose maker wrote the controller reference": {func(s *corev1.Service) {
+			s.Spec.Type, s.Spec.ClusterIP = corev1.ServiceTypeClusterIP, "10.0.0.196"
+		}, "is a ClusterIP Service"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := rootSpec(t)

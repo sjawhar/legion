@@ -50,7 +50,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only
   the delta from GitHub; `legion state`'s `repositories` carries each mapped repository's `cache`
   (its `state`: `starting`, `cloning`, `ready`, `failing`, or `refused` while a Service of its
-  name is not its own) and the `caches` of repositories no longer mapped. An image built before it
+  name is not its own or the daemon's Services watch is failing) and the `caches` of repositories
+  no longer mapped. An image built before it
   is refused by the daemon's image probe. (This change took 30 while the issue's-repository change
   was open; that change took 30, so this one takes the number above it.) Install this release with
   a `legion` built from the same commit.

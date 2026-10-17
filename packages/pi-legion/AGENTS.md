@@ -89,9 +89,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 30 for contract 30's issue repository on `GET /legion/v1/state` and `read_record`
-(sjawhar/legion#1986: each issue's `repo` and `defaultBranch`, its pull request's `repo`, and the
-state's `repositories`, the project's mapping as the daemon serves it), after contract 29's
+number is 31 for contract 31's repository cache (sjawhar/legion#1986: `workspace-init cache`, the
+issue pods' `LEGION_REPOSITORY_CACHE_URL` and `LEGION_REPOSITORY_CACHE_TOKEN_FILE`, and the state's
+`repositories[].cache` and `caches`), after contract 30's issue repository on
+`GET /legion/v1/state` and `read_record` (sjawhar/legion#1986: each issue's `repo` and
+`defaultBranch`, its pull request's `repo`, and the state's `repositories`, the project's mapping as
+the daemon serves it), after contract 29's
 per-owner gh bundle (sjawhar/legion#1986: `LEGION_GH_OWNERS_DIR` with one gh directory per owner,
 `LEGION_GH_PATH`, the `legion gh` wrapper and `legion git-credential`, and the controller's
 per-owner credential answer), after contract 28's
