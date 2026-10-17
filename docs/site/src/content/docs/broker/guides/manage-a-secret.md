@@ -221,9 +221,11 @@ broker: serving DEMO_DEPLOY_TOKEN
 Name `--owner`, `--tier` or both. `retag` reads the tags the secret holds and sends both in one
 request, the unchanged one as it is: on AWS, so an IAM condition on the request's tags (one that
 lets a person tag only their own secret, say) sees both. GCP has no such condition (an IAM
+condition cannot test an annotation's value the way it can an AWS tag), so GCP's access is
 coarser: anyone granted `secretmanager.secrets.update` on the namespace can retag any secret
 under it, shared ones included, and anyone granted `secretmanager.versions.add` (the permission
-`set` needs) can replace any secret's value under it the same way. For a secret missing a tag, name that one too.
+`set` needs) can replace any secret's value under it the same way. For a secret missing a tag,
+name that one too.
 
 You can retag your own secret, to `--owner shared` too. Once a secret is shared, its owner and
 tier are an administrator's to change: on AWS, by the IAM condition above; on GCP, because a
