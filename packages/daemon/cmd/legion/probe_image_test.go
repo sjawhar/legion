@@ -234,10 +234,11 @@ func TestProbeImageRefusesAnImageWhoseWorkspaceInitTakesNoDefaultBranch(t *testi
 }
 
 // lastContractWithoutGhBundles is the last daemon API contract whose image carries no `gh`
-// wrapper at /opt/legion/bin/gh and whose `legion` has no `gh` or `git-credential` command: a role
-// container of an image built at it runs the real gh on one owner's files, and its clone's
+// wrapper at /opt/legion/bin/gh and whose `legion` has no `gh` or `git-credential` command: 29,
+// main's contract when this work took the number above it (pi-legion v10.5.0 declares it). A
+// role container of an image built at it runs the real gh on one owner's files, and its clone's
 // `legion git-credential` helper exits 2.
-const lastContractWithoutGhBundles = 27
+const lastContractWithoutGhBundles = 29
 
 // An image built before per-owner gh bundles carries a pi-legion declaring that older contract, so
 // the daemon's probe Sandbox, asking for this binary's own, refuses it by both numbers before any

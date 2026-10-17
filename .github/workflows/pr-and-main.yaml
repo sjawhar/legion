@@ -50,6 +50,9 @@ jobs:
       - name: Check every manifest names the one exact zod
         run: .github/scripts/check-zod-version.sh
 
+      - name: Check the saved gh help is the worker image's gh
+        run: .github/scripts/check-gh-version.sh
+
       - name: Check image triggers cover every image input
         run: .github/scripts/check-image-trigger-paths.sh
 
@@ -237,6 +240,9 @@ jobs:
 
       - name: Test the zod version check
         run: .github/scripts/check-zod-version.test.sh
+
+      - name: Test the gh version check
+        run: .github/scripts/check-gh-version.test.sh
 
       - name: Test the image trigger path check
         run: .github/scripts/check-image-trigger-paths.test.sh

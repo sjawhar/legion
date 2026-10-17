@@ -47,7 +47,6 @@ type workflowRuntime struct {
 	handlers        []intake.Handler
 	dispatch        dispatch.Client
 	tokens          appauth.Tokens
-	owner           string
 	grants          *credential.Grants
 	project         config.Project
 	projectID       string
@@ -198,7 +197,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
 	// through the runtime, since the outbox itself is built later (attach).
 	w := &workflowRuntime{
-		pool: st.Pool(), tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
+		pool: st.Pool(), tokens: tokens, reviewAppLogin: reviewAppLogin,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
