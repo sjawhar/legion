@@ -1363,7 +1363,7 @@ func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
 			run := newLocalRunner(t)
 			clock := newTestClock()
 			start := clock.Now()
-			slow := &slowFetch{recordingRunner: run, clock: clock, took: tc.took, timeouts: map[string][]time.Duration{}}
+			slow := &slowSteps{recordingRunner: run, clock: clock, step: cacheFetchStep, took: tc.took, timeouts: map[string][]time.Duration{}}
 			served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: tc.notReady}
 			req := fetchRequest(t)
 			req.CacheURL, req.CacheToken, req.Clock, req.Log = served.serve(t), testCacheToken, clock, func(string) {}
@@ -1388,38 +1388,18 @@ func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
 	}
 }
 
-// slowFetch is the local runner with the clock time a fetch from the cache takes: each of the
-// pack's indexing, the history's check and the delta from GitHub records the timeout it was given,
-// then takes took of the clock's time — or, given less than that, runs to its timeout and is
-// killed there — before it runs.
-type slowFetch struct {
-	*recordingRunner
-	clock    *testClock
-	took     map[string]time.Duration
-	timeouts map[string][]time.Duration
-}
-
-func (r *slowFetch) Run(ctx context.Context, command Command) (Result, error) {
-	step := ""
-	switch argv := command.Argv; {
+// cacheFetchStep names the steps of a fetch from the cache whose duration follows the
+// repository's size: each pack's indexing, the history's check, and the delta from GitHub.
+func cacheFetchStep(argv []string) string {
+	switch {
 	case slices.Contains(argv, "index-pack"):
-		step = "index-pack"
+		return "index-pack"
 	case slices.Contains(argv, "fsck"):
-		step = "fsck"
+		return "fsck"
 	case len(argv) > 2 && argv[0] == "git" && argv[2] == "fetch":
-		step = "fetch"
+		return "fetch"
 	}
-	if step == "" {
-		return r.recordingRunner.Run(ctx, command)
-	}
-	r.timeouts[step] = append(r.timeouts[step], command.Timeout)
-	took := r.took[step]
-	if command.Timeout < took {
-		r.clock.advance(command.Timeout)
-		return Result{ExitCode: -1, TimedOut: true}, nil
-	}
-	r.clock.advance(took)
-	return r.recordingRunner.Run(ctx, command)
+	return ""
 }
 
 // assertNothingFilledTheFeed fails when Fetch cloned from GitHub or left anything at, or beside,

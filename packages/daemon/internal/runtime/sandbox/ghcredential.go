@@ -90,12 +90,8 @@ func fetchUnfinished(pod *corev1.Pod) bool {
 	if pod.Status.Phase != corev1.PodPending {
 		return false
 	}
-	for _, status := range pod.Status.InitContainerStatuses {
-		if status.Name == fetchContainer {
-			return status.State.Terminated == nil || status.State.Terminated.ExitCode != 0
-		}
-	}
-	return true
+	status := initContainerStatus(pod, fetchContainer)
+	return status == nil || status.State.Terminated == nil || status.State.Terminated.ExitCode != 0
 }
 
 // refreshProvisioningToken brings the provisioning Secret of pod, owned by the Sandbox with uid, to

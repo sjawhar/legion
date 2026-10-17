@@ -817,7 +817,7 @@ func TestTheSharedClonesStepsShareOneCloneTimeout(t *testing.T) {
 			defer func() { _ = source.remove() }()
 			clock := newTestClock()
 			start := clock.Now()
-			run := &slowClone{recordingRunner: local, clock: clock, took: tc.took, timeouts: map[string][]time.Duration{}}
+			run := &slowSteps{recordingRunner: local, clock: clock, step: sharedCloneStep, took: tc.took, timeouts: map[string][]time.Duration{}}
 			cloneDir := filepath.Join(t.TempDir(), "acme", "widgets")
 
 			err = ensureRepoClone(context.Background(), run, clock, cloneDir, GitHubURL(req.Repo), "main", source)
@@ -838,22 +838,20 @@ func TestTheSharedClonesStepsShareOneCloneTimeout(t *testing.T) {
 	}
 }
 
-// slowClone is the local runner with the clock time each of the shared clone's size-following
-// steps takes (`git clone --shared`, then `jj git init`): each records the timeout it was given,
-// then takes took of the clock's time, or, given less than that, runs to its timeout and is killed
-// there, before it runs.
-type slowClone struct {
+// slowSteps is the local runner with the clock time each step a test names takes: step names the
+// command's step, "" for one that takes no clock time; each named step records the timeout it was
+// given, then takes took of the clock's time — or, given less than that, runs to its timeout and is
+// killed there — before it runs.
+type slowSteps struct {
 	*recordingRunner
 	clock    *testClock
+	step     func(argv []string) string
 	took     map[string]time.Duration
 	timeouts map[string][]time.Duration
 }
 
-func (r *slowClone) Run(ctx context.Context, command Command) (Result, error) {
-	step := ""
-	if commandWith(command.Argv, "git", "clone", "--shared") || commandWith(command.Argv, "jj", "git", "init") {
-		step = strings.Join(command.Argv[:2], " ")
-	}
+func (r *slowSteps) Run(ctx context.Context, command Command) (Result, error) {
+	step := r.step(command.Argv)
 	if step == "" {
 		return r.recordingRunner.Run(ctx, command)
 	}
@@ -865,6 +863,15 @@ func (r *slowClone) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	r.clock.advance(took)
 	return r.recordingRunner.Run(ctx, command)
+}
+
+// sharedCloneStep names the shared clone's size-following steps, `git clone --shared` and then
+// `jj git init`.
+func sharedCloneStep(argv []string) string {
+	if commandWith(argv, "git", "clone", "--shared") || commandWith(argv, "jj", "git", "init") {
+		return strings.Join(argv[:2], " ")
+	}
+	return ""
 }
 
 // The feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent can push to

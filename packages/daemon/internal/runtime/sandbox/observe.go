@@ -365,6 +365,17 @@ func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 	return nil
 }
 
+// initContainerStatus is containerStatus for an init container: the status of pod's init
+// container name, or nil when the kubelet reports none for it yet.
+func initContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == name {
+			return &pod.Status.InitContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never
 // changes its verdict, so the read is bounded whole (call).
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {

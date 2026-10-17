@@ -359,9 +359,7 @@ func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Tim
 // (fetchCacheState), since the fetch's own failure, which names why it ran so long, has not come.
 // Nothing for a pod past its fetch.
 func (r *Runtime) stillFetching(pod *corev1.Pod) string {
-	if !slices.ContainsFunc(pod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
-		return status.Name == fetchContainer && status.State.Running != nil
-	}) {
+	if status := initContainerStatus(pod, fetchContainer); status == nil || status.State.Running == nil {
 		return ""
 	}
 	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
