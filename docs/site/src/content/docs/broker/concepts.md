@@ -147,9 +147,8 @@ an email (`@` and `.` are outside its alphabet), and the broker compares the own
 login byte for byte; an annotation holds the email as it is.
 
 People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
-changes them under the person's own AWS sign-in
-([manage a secret](/legion/broker/guides/manage-a-secret/)); under Secret Manager, `gcloud secrets`
-does ([operating the broker](/legion/broker/operate/#people-who-manage-secrets)).
+changes them under the person's own cloud sign-in, both stores
+([manage a secret](/legion/broker/guides/manage-a-secret/)).
 
 Who gets a secret follows from those two tags alone:
 
@@ -214,7 +213,8 @@ grant's read of its value is refused `SECRET_NOT_IN_STORE`. A change nothing rer
 as a tag edited in the AWS console, takes effect within about ten minutes on AWS: at the next read
 of the namespace, or the one after, since Secrets Manager's listing can lag a change by up to five
 minutes. On Google Secret Manager it usually takes effect at the next read of the namespace too,
-but Google bounds its listing's lag only at a few hours, so a change made with `gcloud` should be
+but Google bounds its listing's lag only at a few hours, so a change made any other way than
+`agent-secrets secret` (`gcloud`, the console) should be
 followed by a reread. A read that fails (Secrets Manager or KMS out of reach) is logged, and the policy from the
 last good read stays in force. The broker leaves out a secret it cannot serve, and logs it by name
 on every read

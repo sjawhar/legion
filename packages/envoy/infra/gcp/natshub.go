@@ -101,6 +101,9 @@ var (
 	// imageRule takes an image reference pinned by digest, with none of the characters that would
 	// split the unit's docker command or that systemd expands in it (whitespace, $, %).
 	imageRule = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$`)
+	// secretIDRule is Secret Manager's rule for a secret id (secrets.create), which also keeps it
+	// whole in the unit's command.
+	secretIDRule = regexp.MustCompile(`^[A-Za-z0-9_-]{1,255}$`)
 )
 
 // healthCheckRanges are the source ranges of Google Cloud's health checks.
@@ -108,7 +111,7 @@ var healthCheckRanges = []string{"130.211.0.0/22", "35.191.0.0/16"}
 
 // NatsHubArgs are the inputs of an envoy-infra:gcp:NatsHub.
 type NatsHubArgs struct {
-	Users          []NATSUserArgs     `pulumi:"users"`
+	Users          []NATSUserArgs     `pulumi:"users,optional"` // see authorization for what may be empty
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey" provider:"secret"`
 	Hostname       string             `pulumi:"hostname"`             // ^[a-z][a-z0-9-]{0,24}[a-z0-9]$
 	Tags           []string           `pulumi:"tags"`                 // "tag:<name>", at least one
@@ -122,6 +125,10 @@ type NatsHubArgs struct {
 	// resources
 	Network    pulumi.StringPtrInput `pulumi:"network,optional"`
 	Subnetwork pulumi.StringPtrInput `pulumi:"subnetwork,optional"` // only with network
+	// The hub's own Envoy listener; see docs/nats-hub.md, "The hub's listener".
+	Listener *HubListenerArgs `pulumi:"listener,optional"`
+	// The user a client presenting no credential becomes, granted core.SessionPermissions.
+	SessionUser *SessionUserArgs `pulumi:"sessionUser,optional"`
 }
 
 // NATSUserArgs are one nkey user of the hub: a host's, as a rule, which its listener and its
@@ -147,6 +154,30 @@ type PermissionsArgs struct {
 
 // Annotate names the type gcp:Permissions in the schema, for the reason NATSUserArgs's gives.
 func (p *PermissionsArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Permissions") }
+
+// HubListenerArgs are the hub's own Envoy listener: its image, the Secret Manager secret in the
+// hub's project that holds its NATS user's seed, and that seed's public key. The hub renders the
+// user itself, named after the hub's hostname, the listener's machine id, and granted
+// core.ListenerPermissions for that machine.
+type HubListenerArgs struct {
+	Image      string `pulumi:"image"`      // pinned: <name>@sha256:<digest>
+	SeedSecret string `pulumi:"seedSecret"` // a secret id, never the seed
+	NKey       string `pulumi:"nkey"`       // the seed's public key; never the seed
+}
+
+// Annotate names the type gcp:HubListener in the schema, for the reason NATSUserArgs's gives.
+func (l *HubListenerArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "HubListener") }
+
+// SessionUserArgs is the NATS user every client presenting no credential becomes: an agent session
+// on any device that reaches the hub. It is granted core.SessionPermissions and has no seed, so its
+// nkey is a public key whose seed nobody keeps.
+type SessionUserArgs struct {
+	Name string `pulumi:"name"`
+	NKey string `pulumi:"nkey"` // a user public key; never its seed
+}
+
+// Annotate names the type gcp:SessionUser in the schema, for the reason NATSUserArgs's gives.
+func (u *SessionUserArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "SessionUser") }
 
 // NatsHub is NATS with JetStream on one Container-Optimized OS VM, joined to a tailnet. The VM is
 // the one instance of a managed group, which recreates it when NATS's /healthz fails and keeps its
@@ -237,7 +268,7 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	if args.Subnetwork != nil && args.Network == nil {
 		return settings{}, errors.New("subnetwork is set without network; the firewall needs the network the subnetwork belongs to")
 	}
-	auth, err := authorization(args.Users)
+	auth, err := authorization(args.Hostname, args.Users, args.Listener, args.SessionUser)
 	if err != nil {
 		return settings{}, err
 	}
@@ -253,10 +284,41 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 		tailscaleImage: args.TailscaleImage,
 		natsConf:       conf,
 	}
+	if s.vm.listener, err = resolveListener(args); err != nil {
+		return settings{}, err
+	}
 	if s.userData, err = s.vm.userData(); err != nil {
 		return settings{}, fmt.Errorf("render the cloud-config: %w", err)
 	}
 	return s, nil
+}
+
+// resolveListener checks the hub's listener input and returns the listener it gives, or nil for a
+// hub without one. The listener runs as machine hostname, listens on the VM's loopback on the
+// listener's default port, and reaches NATS there too.
+func resolveListener(args *NatsHubArgs) (*listener, error) {
+	l := args.Listener
+	if l == nil {
+		return nil, nil
+	}
+	if !imageRule.MatchString(l.Image) {
+		return nil, fmt.Errorf("listener.image %q must be pinned by digest, as <name>@sha256:<64 lowercase hex digits>", l.Image)
+	}
+	if !secretIDRule.MatchString(l.SeedSecret) {
+		return nil, fmt.Errorf("listener.seedSecret %q must be a secret id in the hub's project, matching %s", l.SeedSecret, secretIDRule)
+	}
+	if l.SeedSecret == args.Hostname+tailnetAuthKeySuffix {
+		return nil, fmt.Errorf("listener.seedSecret %q is the hub's own tailnet auth key secret", l.SeedSecret)
+	}
+	env, err := core.ListenerConfig{
+		MachineID:  args.Hostname,
+		Port:       core.DefaultListenerPort,
+		ListenHost: "127.0.0.1",
+	}.Env([]string{localNATS})
+	if err != nil {
+		return nil, err
+	}
+	return &listener{image: l.Image, seedSecret: l.SeedSecret, env: env}, nil
 }
 
 // seededInput names the first plain input of args that the hub itself carries and that holds an
@@ -289,6 +351,9 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		if u.MachineID != nil {
 			fields = append(fields, field{fmt.Sprintf("users[%d].machineId", i), *u.MachineID})
 		}
+	}
+	if args.Listener != nil {
+		fields = append(fields, field{"listener.image", args.Listener.Image}, field{"listener.seedSecret", args.Listener.SeedSecret})
 	}
 	for _, f := range fields {
 		if bus.HoldsSeed(f.value) {
@@ -327,12 +392,19 @@ func refuseSeedInSecret(value pulumi.StringInput, hub, input string) pulumi.Stri
 	})).(pulumi.StringOutput)
 }
 
-// authorization maps the users onto core's: each a keyed user with a seed, whose permissions are
-// its host's set when it names a machine id and its own when it names permissions. core validates
-// the rest when it renders, a seed in a name or a rule entry first. Its own refusals name a user
-// by its index alone: they come before core has read the names, so quoting one could quote a seed.
-func authorization(users []NATSUserArgs) (core.Authorization, error) {
-	auth := core.Authorization{Users: make([]core.User, 0, len(users))}
+// authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
+// permissions are its host's set when it names a machine id and its own when it names permissions.
+// The listener's user follows them, named hostname, with the listener's set for that machine and a
+// seed; the session user comes last, with the session's set and no seed, as the authorization's
+// noAuthUser. A hub needs users or a listener: with the session user alone, no client could hold
+// more than a session's grant, and no listener could run. core validates the rest when it renders,
+// a seed in a name or a rule entry first. The hub's own refusals name a user by its index alone:
+// they come before core has read the names, so quoting one could quote a seed.
+func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, session *SessionUserArgs) (core.Authorization, error) {
+	if len(users) == 0 && l == nil {
+		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
+	}
+	auth := core.Authorization{Users: make([]core.User, 0, len(users)+2)}
 	for i, u := range users {
 		where := fmt.Sprintf("users[%d]", i)
 		if u.NKey == "" {
@@ -358,6 +430,27 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
 		})
+	}
+	if l != nil {
+		if l.NKey == "" {
+			return core.Authorization{}, errors.New("listener.nkey is required")
+		}
+		perms := core.ListenerPermissions(hostname)
+		auth.Users = append(auth.Users, core.User{
+			Name: hostname, NKey: l.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
+			Label: "listener",
+		})
+	}
+	if session != nil {
+		if session.NKey == "" {
+			return core.Authorization{}, errors.New("sessionUser.nkey is required")
+		}
+		perms := core.SessionPermissions()
+		auth.Users = append(auth.Users, core.User{
+			Name: session.Name, NKey: session.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe,
+			Label: "sessionUser",
+		})
+		auth.NoAuthUser = session.Name
 	}
 	return auth, nil
 }
@@ -419,6 +512,19 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 	}, child)
 	if err != nil {
 		return nil, err
+	}
+	// The listener's seed secret is the consumer's, as the seed in it is: the hub only reads it.
+	readsSecrets := []pulumi.Resource{version, accessor}
+	if l := s.vm.listener; l != nil {
+		seedAccessor, err := secretmanager.NewSecretIamMember(ctx, hostname+"-listener-seed-accessor", &secretmanager.SecretIamMemberArgs{
+			SecretId: pulumi.String(l.seedSecret),
+			Role:     pulumi.String("roles/secretmanager.secretAccessor"),
+			Member:   account.Member,
+		}, child)
+		if err != nil {
+			return nil, err
+		}
+		readsSecrets = append(readsSecrets, seedAccessor)
 	}
 
 	var network pulumi.StringOutput
@@ -494,10 +600,11 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		return nil, err
 	}
 
-	// The VM fetches the key at its first boot, so its group is created once the key's version
-	// and the account's access to it exist. pulumi up waits for the group to be stable, which it
-	// is once its VM is healthy, so a create or update may wait for the first boot's read of the
-	// data disk: its timeout is the initial delay after the provider's own (groupWait).
+	// The VM fetches the key at its first boot, and the listener's seed whenever the listener
+	// starts, so its group is created once the key's version and the account's access to both
+	// exist. pulumi up waits for the group to be stable, which it is once its VM is healthy, so a
+	// create or update may wait for the first boot's read of the data disk: its timeout is the
+	// initial delay after the provider's own (groupWait).
 	wait := (time.Duration(s.initialDelaySec)*time.Second + groupWait).String()
 	group, err := compute.NewInstanceGroupManager(ctx, hostname, &compute.InstanceGroupManagerArgs{
 		BaseInstanceName: pulumi.String(hostname),
@@ -523,7 +630,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		},
 		WaitForInstances:       pulumi.Bool(true),
 		WaitForInstancesStatus: pulumi.String("STABLE"),
-	}, child, pulumi.DependsOn([]pulumi.Resource{version, accessor}),
+	}, child, pulumi.DependsOn(readsSecrets),
 		pulumi.Timeouts(&pulumi.CustomTimeouts{Create: wait, Update: wait}))
 	if err != nil {
 		return nil, err

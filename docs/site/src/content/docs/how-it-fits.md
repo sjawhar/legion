@@ -98,9 +98,9 @@ Dispatch relays the decision to the broker under the signed-in person's own iden
 holds no Dispatch credential: Dispatch reads the pending requests from the broker and sends back
 each decision. A grant lasts until its session ends, or for the shorter lifetime its request named,
 and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
-environment rather than printing it. People create and change the secrets themselves, in AWS
-Secrets Manager under their own AWS sign-in, with `agent-secrets secret`, which has the broker
-serve each change at once.
+environment rather than printing it. People create and change the secrets themselves, in the
+broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in, with
+`agent-secrets secret`, which has the broker serve each change at once.
 
 ## Envoy: the events between them
 

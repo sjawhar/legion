@@ -34,18 +34,24 @@ write_files:
           {"nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "permissions": {"publish": {"allow": ["notifications.agent.>", "notifications.dispatch.>", "notifications.github.>", "notifications.slack.>", "notifications.legion.>", "notifications.ghostwispr.>", "notifications.whatsapp.>", "notifications.envoy.exceptions.notifications.agent.>", "notifications.role.>", "notifications.envoy.exceptions.notifications.>", "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", "$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS", "$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS", "$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-host-a", "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a", "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host-a.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.KV_envoy_interests", "$JS.API.STREAM.CREATE.KV_envoy_interests", "$JS.API.DIRECT.GET.KV_envoy_interests.>", "$JS.API.STREAM.MSG.GET.KV_envoy_interests", "$KV.envoy_interests.>", "$JS.API.CONSUMER.CREATE.KV_envoy_interests.>", "$JS.API.CONSUMER.DELETE.KV_envoy_interests.>", "$JS.FC.KV_envoy_interests.>", "$JS.API.STREAM.INFO.KV_envoy_roles", "$JS.API.STREAM.CREATE.KV_envoy_roles", "$JS.API.DIRECT.GET.KV_envoy_roles.>", "$JS.API.STREAM.MSG.GET.KV_envoy_roles", "$KV.envoy_roles.>", "$JS.API.CONSUMER.CREATE.KV_envoy_roles.>", "$JS.API.CONSUMER.DELETE.KV_envoy_roles.>", "$JS.FC.KV_envoy_roles.>", "$JS.API.STREAM.INFO.KV_envoy_sessions", "$JS.API.STREAM.CREATE.KV_envoy_sessions", "$JS.API.DIRECT.GET.KV_envoy_sessions.>", "$JS.API.STREAM.MSG.GET.KV_envoy_sessions", "$KV.envoy_sessions.>", "$JS.API.CONSUMER.CREATE.KV_envoy_sessions.>", "$JS.API.CONSUMER.DELETE.KV_envoy_sessions.>", "$JS.FC.KV_envoy_sessions.>", "$JS.API.STREAM.INFO.KV_envoy_ci_state", "$JS.API.STREAM.CREATE.KV_envoy_ci_state", "$JS.API.DIRECT.GET.KV_envoy_ci_state.>", "$JS.API.STREAM.MSG.GET.KV_envoy_ci_state", "$KV.envoy_ci_state.>", "$JS.API.CONSUMER.CREATE.KV_envoy_ci_state.>", "$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>", "$JS.FC.KV_envoy_ci_state.>", "$JS.API.STREAM.PURGE.KV_envoy_interests", "_INBOX.>", "agentstream.*.frames"]}, "subscribe": {"allow": ["_INBOX.>", "notifications.role.> envoy-listener-example-host-a", "notifications.>", "agentstream.*.control"]}}}
           # example-operator
           {"nkey": "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG", "permissions": {"publish": {"allow": [">"]}, "subscribe": {"allow": [">"], "deny": ["$SYS.>"]}}}
+          # example-hub
+          {"nkey": "UBZEZDPQNFYMZ4J4XOLTB2IN5PBPZ6FZEGY55R623A4GPBPZLTQFKDYV", "permissions": {"publish": {"allow": ["notifications.agent.>", "notifications.dispatch.>", "notifications.github.>", "notifications.slack.>", "notifications.legion.>", "notifications.ghostwispr.>", "notifications.whatsapp.>", "notifications.envoy.exceptions.notifications.agent.>", "notifications.role.>", "notifications.envoy.exceptions.notifications.>", "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", "$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS", "$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS", "$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-hub", "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-hub", "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-hub.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.KV_envoy_interests", "$JS.API.STREAM.CREATE.KV_envoy_interests", "$JS.API.DIRECT.GET.KV_envoy_interests.>", "$JS.API.STREAM.MSG.GET.KV_envoy_interests", "$KV.envoy_interests.>", "$JS.API.CONSUMER.CREATE.KV_envoy_interests.>", "$JS.API.CONSUMER.DELETE.KV_envoy_interests.>", "$JS.FC.KV_envoy_interests.>", "$JS.API.STREAM.INFO.KV_envoy_roles", "$JS.API.STREAM.CREATE.KV_envoy_roles", "$JS.API.DIRECT.GET.KV_envoy_roles.>", "$JS.API.STREAM.MSG.GET.KV_envoy_roles", "$KV.envoy_roles.>", "$JS.API.CONSUMER.CREATE.KV_envoy_roles.>", "$JS.API.CONSUMER.DELETE.KV_envoy_roles.>", "$JS.FC.KV_envoy_roles.>", "$JS.API.STREAM.INFO.KV_envoy_sessions", "$JS.API.STREAM.CREATE.KV_envoy_sessions", "$JS.API.DIRECT.GET.KV_envoy_sessions.>", "$JS.API.STREAM.MSG.GET.KV_envoy_sessions", "$KV.envoy_sessions.>", "$JS.API.CONSUMER.CREATE.KV_envoy_sessions.>", "$JS.API.CONSUMER.DELETE.KV_envoy_sessions.>", "$JS.FC.KV_envoy_sessions.>", "$JS.API.STREAM.INFO.KV_envoy_ci_state", "$JS.API.STREAM.CREATE.KV_envoy_ci_state", "$JS.API.DIRECT.GET.KV_envoy_ci_state.>", "$JS.API.STREAM.MSG.GET.KV_envoy_ci_state", "$KV.envoy_ci_state.>", "$JS.API.CONSUMER.CREATE.KV_envoy_ci_state.>", "$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>", "$JS.FC.KV_envoy_ci_state.>", "$JS.API.STREAM.PURGE.KV_envoy_interests"]}, "subscribe": {"allow": ["_INBOX.>", "notifications.role.> envoy-listener-example-hub"]}}}
+          # example-sessions
+          {"nkey": "UCNPQVMRWOOJWCD7XDVLH6MEOVFBMTV4LAQSKZYROSETYJVFAWDMNKVA", "permissions": {"publish": {"allow": ["_INBOX.>", "agentstream.*.frames"]}, "subscribe": {"allow": ["notifications.>", "agentstream.*.control"]}}}
         ]
       }
-  - path: /etc/envoy/fetch-tailnet-key
+      # example-sessions: a client presenting no credential becomes this user
+      no_auth_user: "UCNPQVMRWOOJWCD7XDVLH6MEOVFBMTV4LAQSKZYROSETYJVFAWDMNKVA"
+  - path: /etc/envoy/fetch-secret
     permissions: "0755"
     content: |
       #!/bin/sh
-      # fetch-tailnet-key OUT SECRET writes the latest version of the Secret Manager secret SECRET,
-      # in this VM's project, to the file OUT, readable by root alone. It authenticates as the VM's
-      # service account, with a token from the metadata server, and tries six times, ten seconds
-      # apart: a new grant on the secret can take a while to reach Secret Manager.
+      # fetch-secret OUT SECRET writes the latest version of the Secret Manager secret SECRET, in this
+      # VM's project, to the file OUT, readable by root alone. It authenticates as the VM's service
+      # account, with a token from the metadata server, and tries six times, ten seconds apart: a new
+      # grant on the secret can take a while to reach Secret Manager.
       # GCE_METADATA_HOST and SECRET_MANAGER_ENDPOINT replace the metadata server's host and Secret
-      # Manager's base URL. Nothing of the key or the token is printed or passed in a command's
+      # Manager's base URL. Nothing of the value or the token is printed or passed in a command's
       # arguments.
       set -u
       out=$1
@@ -65,14 +71,14 @@ write_files:
           return 0
         fi
         rm -f "$tmp"
-        echo "fetch-tailnet-key: the latest version of $secret holds no key" >&2
+        echo "fetch-secret: the latest version of $secret is empty" >&2
         return 1
       }
 
       attempt=1
       until fetch; do
         if [ "$attempt" -ge 6 ]; then
-          echo "fetch-tailnet-key: no key after $attempt attempts" >&2
+          echo "fetch-secret: nothing fetched from $secret after $attempt attempts" >&2
           exit 1
         fi
         attempt=$((attempt + 1))
@@ -91,6 +97,39 @@ write_files:
         sleep 5
       done
       : >"$key" && touch "$marker"
+  - path: /etc/envoy/listener-seed-env
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # listener-seed-env ENV_FILE SECRET writes the latest version of the Secret Manager secret SECRET,
+      # an nkey seed, to ENV_FILE as the one line NATS_NKEY_SEED=<seed>, readable by root alone. It
+      # fetches with the fetch-secret beside it, and so retries as that does. Nothing of the seed is
+      # printed or passed in a command's arguments.
+      set -u
+      env_file=$1
+      secret=$2
+      raw=$(mktemp "$env_file.raw.XXXXXX") || exit 1
+      trap 'rm -f "$raw"' EXIT
+      trap 'rm -f "$raw"; exit 1' INT TERM
+      "$(dirname "$0")/fetch-secret" "$raw" "$secret" || exit 1
+      seed=$(cat "$raw") || exit 1
+      case $seed in
+      *'
+      '*)
+        echo "listener-seed-env: the latest version of $secret holds more than one line" >&2
+        exit 1
+        ;;
+      esac
+      tmp=$(mktemp "$env_file.XXXXXX") || exit 1
+      if printf 'NATS_NKEY_SEED=%s\n' "$seed" >"$tmp" && mv -f "$tmp" "$env_file"; then
+        exit 0
+      fi
+      rm -f "$tmp"
+      exit 1
+  - path: /etc/tailscale-serve/serve.json
+    permissions: "0644"
+    content: |
+      {"TCP":{"9020":{"TCPForward":"127.0.0.1:9020"}}}
   - path: /etc/systemd/system/fetch-tailnet-key.service
     permissions: "0644"
     content: |
@@ -105,7 +144,7 @@ write_files:
       [Service]
       Type=oneshot
       RemainAfterExit=yes
-      ExecStart=/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key example-hub-tailnet-auth-key
+      ExecStart=/etc/envoy/fetch-secret /run/envoy/tailnet-auth-key example-hub-tailnet-auth-key
   - path: /etc/systemd/system/tailscaled.service
     permissions: "0644"
     content: |
@@ -118,7 +157,7 @@ write_files:
       AssertPathIsMountPoint=/mnt/disks/data
 
       [Service]
-      ExecStart=/usr/bin/docker run --rm --name tailscaled --network host --cap-add NET_ADMIN --device /dev/net/tun -v /mnt/disks/data/tailscale:/var/lib/tailscale -v /run/envoy/tailnet-auth-key:/run/envoy/tailnet-auth-key:ro -e TS_AUTHKEY=file:/run/envoy/tailnet-auth-key -e TS_AUTH_ONCE=true -e TS_STATE_DIR=/var/lib/tailscale -e TS_USERSPACE=false -e TS_HOSTNAME=example-hub -e TS_EXTRA_ARGS=--advertise-tags=tag:example-host example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+      ExecStart=/usr/bin/docker run --rm --name tailscaled --network host --cap-add NET_ADMIN --device /dev/net/tun -v /mnt/disks/data/tailscale:/var/lib/tailscale -v /run/envoy/tailnet-auth-key:/run/envoy/tailnet-auth-key:ro -v /etc/tailscale-serve:/etc/tailscale-serve:ro -e TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json -e TS_AUTHKEY=file:/run/envoy/tailnet-auth-key -e TS_AUTH_ONCE=true -e TS_STATE_DIR=/var/lib/tailscale -e TS_USERSPACE=false -e TS_HOSTNAME=example-hub -e TS_EXTRA_ARGS=--advertise-tags=tag:example-host example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
       Restart=always
       RestartSec=10
   - path: /etc/systemd/system/tailnet-joined.service
@@ -164,6 +203,24 @@ write_files:
       ExecStop=/usr/bin/docker stop -t 30 nats
       Restart=always
       RestartSec=10
+  - path: /etc/systemd/system/envoy-listener.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Envoy's listener, which the tailnet reaches through Tailscale Serve
+      Requires=docker.service
+      Wants=network-online.target nats.service
+      After=docker.service network-online.target nats.service
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      ExecStart=/usr/bin/docker run --rm --name envoy-listener --network host --env-file /run/envoy/listener.env -e PORT=9020 -e ENVOY_LISTEN_HOST=127.0.0.1 -e ENVOY_MACHINE_ID=example-hub -e NATS_URLS=nats://127.0.0.1:4222 example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+      ExecStartPre=/etc/envoy/listener-seed-env /run/envoy/listener.env example-hub-listener-seed
+      TimeoutStartSec=600
+      ExecStop=/usr/bin/docker stop -t 30 envoy-listener
+      Restart=always
+      RestartSec=10
 runcmd:
   - systemctl daemon-reload
   - systemctl start fetch-tailnet-key.service
@@ -171,3 +228,4 @@ runcmd:
   - systemctl start tailnet-joined.service
   - systemctl start nats-firewall.service
   - systemctl start nats.service
+  - systemctl start envoy-listener.service

@@ -41,7 +41,7 @@ versions. Never add the module to the root `go.work`.
 | `nats/` | The schema types every NATS component shares, whatever its cloud, importing no cloud package: `RulesArgs`, `nats:Rules`, one direction's permissions of a NATS user, which `aws:User` and `gcp:Permissions` take (`rules.go`). A type shared by components of more than one cloud lives here, never in one cloud's package, so a single-cloud consumer's SDK shows no other cloud's types; `gcp/imports_test.go` fails if the `gcp` package compiles any `aws` package. |
 | `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
 | `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
-| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the key fetcher's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the secret fetcher's, the listener's seed script's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
 | `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
@@ -160,9 +160,10 @@ versions. Never add the module to the root `go.work`.
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. The hub's cloud-config is its instance template's `user-data`, and a template cannot
   change, so any change to the cloud-config's text replaces every hub's VM on its next update.
-  Change them only with the goldens. `gcp/fetch_key_test.go`, `gcp/tailnet_joined_test.go` and
-  `gcp/data_disk_test.go` run the key fetcher, the joined script and the data disk's bootcmd
-  entry as the golden holds them, so a change to any of them is tested there.
+  Change them only with the goldens. `gcp/fetch_key_test.go`, `gcp/listener_seed_env_test.go`,
+  `gcp/tailnet_joined_test.go` and `gcp/data_disk_test.go` run the secret fetcher, the listener's
+  seed script, the joined script and the data disk's bootcmd entry as the golden holds them, so a
+  change to any of them is tested there.
 - **Permission sets.** `core/permissions.go` builds each set from names that
   `packages/envoy/internal/bus` and `internal/contracts` export, and the plugin and the command
   compile no other Envoy package (`go list -deps ./cmd/...`), so a change to Envoy's stores cuts no
@@ -232,19 +233,19 @@ provider's computed outputs added (`host/listener_test.go`, `gcp/natshub_test.go
 `internal/providers/` on a mock of its own, the refusals against each resolver directly, the
 plugin in process through pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`,
 and `host/construct_test.go` and `gcp/construct_test.go` through `pulumitest.Construct`), the
-hub's cloud-config against its golden (`gcp/cloudconfig_test.go`), the key fetcher's script under
-`/bin/sh` against `httptest` fakes of the metadata server and Secret Manager, with a `sleep` stub
-first on its `PATH` that records each wait (`gcp/fetch_key_test.go`, which needs `curl`, `jq`,
-`base64` and `mktemp` on this machine and fails, never skips, without one), the joined script
-under `/bin/sh` with `docker` and `sleep` stubbed (`gcp/tailnet_joined_test.go`, which needs
-`jq`), the data disk's entry under `/bin/sh` against zeroed, ext4, zeroed-first-MiB, last-MiB,
-damaged-superblock and missing disk images, and twice on one it refuses, with `blockdev`,
-`mkfs.ext4`, `fsck.ext4` and `mount` stubbed and `cmp` recorded (`gcp/data_disk_test.go`, which
-needs util-linux's `blkid`, GNU `cmp` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
-skips, without one), each under `/bin/sh` or the shell `ENVOY_TEST_SHELL` names, as `bash` or
-`busybox sh` (`gcp/shell_test.go`; busybox's shell runs its own `sleep`, `cmp`, `blockdev` and
-`mount` ahead of `PATH`, so rows that stub or record those fail under it), the seed command
-against a fake `Store` (`seed/seed_test.go`), the AWS SDK
+hub's cloud-config against its golden (`gcp/cloudconfig_test.go`), the secret fetcher's script
+under `/bin/sh` against `httptest` fakes of the metadata server and Secret Manager, with a `sleep`
+stub first on its `PATH` that records each wait (`gcp/fetch_key_test.go`, which needs `curl`,
+`jq`, `base64` and `mktemp` on this machine and fails, never skips, without one), the listener's
+seed script with the fetcher beside it against the same fakes (`gcp/listener_seed_env_test.go`),
+the joined script under `/bin/sh` with `docker` and `sleep` stubbed (`gcp/tailnet_joined_test.go`,
+which needs `jq`), the data disk's entry under `/bin/sh` against zeroed, ext4, zeroed-first-MiB,
+last-MiB, damaged-superblock and missing disk images, and twice on one it refuses, with
+`blockdev`, `mkfs.ext4`, `fsck.ext4` and `mount` stubbed and `cmp` recorded
+(`gcp/data_disk_test.go`, which needs util-linux's `blkid`, GNU `cmp` and e2fsprogs' `mkfs.ext4`
+on this machine and fails, never skips, without one), each under `/bin/sh` or the shell
+`ENVOY_TEST_SHELL` names, as `bash` (`gcp/shell_test.go`), the seed command against a fake
+`Store` (`seed/seed_test.go`), the AWS SDK
 against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which
 fails a test on any request it does not expect (`seed/awsfake_test.go`, the store's tests in
 `seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over TLS
@@ -261,7 +262,11 @@ on a real server: its users connect, a client with no credential is refused, the
 `core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
 root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as the
 same user receives, and the server refuses nothing the set allows; without the durable's consumer
-create, the listener never reaches `"status":"healthy"`). The `envoy-infra-go` job in
+create, the listener never reaches `"status":"healthy"`; and, as a hub with a listener renders its
+users, the listener reaches `"status":"healthy"` as a user holding `ListenerPermissions` while a
+session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
+receives a send and a role message, and is refused a publish to another session's subject). The
+`envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh

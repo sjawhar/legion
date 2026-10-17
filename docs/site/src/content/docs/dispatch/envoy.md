@@ -130,12 +130,16 @@ The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image.
 | `ENVOY_LISTEN_HOST`, `PORT` | Where to listen. Defaults: `127.0.0.1` and `9020`. |
 | `ENVOY_API_TOKEN` | The bearer token `/v1` callers must send. |
 | `ENVOY_OIDC_ISSUER`, `ENVOY_OIDC_AUDIENCE` | Also accept Kubernetes service-account tokens from that issuer for that audience. Set both or neither. |
+| `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | The mention that publishes a `.mention` event. Defaults to `@legion`. |
 
 A listener on anything but loopback refuses to start without `ENVOY_API_TOKEN` or the OIDC pair.
+A listener with neither serves `/v1` only to a request whose `Host` is `localhost`, a loopback
+address or a name in `ENVOY_ALLOWED_HOSTS`, and answers any other `Host` with a JSON `421`, so a
+page that rebinds its own name to the listener's address cannot use the API.
 Keep the API private: only `/webhook/...` needs to be reachable from GitHub.
 
 ### With Pulumi

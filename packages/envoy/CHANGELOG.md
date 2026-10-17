@@ -35,8 +35,9 @@
   `gcp_project` for GCP), the other store's omitted. `secrets.Store` is the one interface the
   policy and the value release read through, with `secrets.AWS` and `secrets.GCP` behind it;
   `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
-  `agent-secrets secret` manages AWS Secrets Manager only in this release and refuses a broker on
-  the GCP store by name; a Secret Manager secret is written with `gcloud secrets`.
+  `agent-secrets secret` manages both stores: against a GCP broker it reads and writes Secret
+  Manager itself under the person's own Application Default Credentials, refusing a service
+  account's.
 - `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
   `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
   dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the
@@ -426,6 +427,16 @@
   the recovery to an operator, forward. It also stops before a deploy whose schema version it
   cannot read, and a failed pull no longer restarts the service. CI runs its test
   (`deploy/scripts/autodeploy_test.sh`) in the `envoy-go` job.
+- An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
+  a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,
+  a loopback address (`127.0.0.0/8`, `::1`) or a name in the new `ENVOY_ALLOWED_HOSTS`
+  (comma-separated names or addresses, no port; an entry that is not a host name or an address,
+  such as one with a port, scheme or path, refuses startup naming it).
+  Any other `Host`, an empty one included, is answered 421 with a JSON error naming it, so a
+  DNS-rebinding page can no longer drive the bearer-free API through a loopback port or a forward
+  that reaches it. A listener that requires a bearer checks no `Host`. `/healthz`, `/metrics` and
+  the webhook routes are unaffected. An unauthenticated listener clients reach by another name (a
+  tailnet forward to it) must list that name in `ENVOY_ALLOWED_HOSTS`, or those clients get the 421.
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret
