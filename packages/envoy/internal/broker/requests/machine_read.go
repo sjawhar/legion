@@ -65,7 +65,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 			return nil, nil, err
 		}
 		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); err != nil {
+			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); err != nil {
 				return nil, nil, err
 			}
 		}
@@ -125,14 +125,22 @@ func requestedSecrets(ctx context.Context, q querier, requestID string) ([]reque
 // withheld from the session that its request got automatically is judged as an approval by
 // decidedBy too: the withhold ended every grant that got the name without asking (withhold), so a
 // live one was approved after it, by someone the withheld name let approve it
-// (currentPolicyAdmits), and an automatic grant, which no one decided, never passes.
-func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, requester policy.Requester) error {
+// (currentPolicyAdmits), and an automatic grant, which no one decided, never passes. A grant whose
+// frozen source is not the one the policy now serves the name from (the broker moved between
+// stores, or, on AWS, the secret was replaced by another of the same name, which gets a new ARN;
+// a Secret Manager source is the resource name, which a recreated secret keeps) is not live
+// either: the frozen source no longer names the secret the policy decides about, so the session
+// asks again.
+func stillAllowed(set *policy.Set, name, frozenSource, frozenDecision, decidedBy string, requester policy.Requester) error {
 	d, err := set.Evaluate(name, requester)
 	if errors.Is(err, policy.ErrUnknownSecret) {
 		return fmt.Errorf("%w: %s is no longer an agent secret", ErrGrantNotLive, name)
 	}
 	if err != nil {
 		return err
+	}
+	if set.Secrets[name].Source != frozenSource {
+		return fmt.Errorf("%w: %s is now served from another source than this grant's", ErrGrantNotLive, name)
 	}
 	switch {
 	case d.Outcome == policy.Deny:
@@ -378,7 +386,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 			return Request{}, false, err
 		}
 		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
+			if err := stillAllowed(set, g.name, g.source, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
 				return Request{}, false, nil
 			} else if err != nil {
 				return Request{}, false, err

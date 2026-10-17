@@ -2,13 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- The MCP server lists `slack_post` beside the ten `envoy_*` tools (sjawhar/legion#1998), a reply
+  in a Slack thread with the bot token the secrets broker grants (`LEGION_SLACK_BOT_TOKEN`).
+
 ### Changed
 
+- `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
+  `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
+  address.
+- `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
   `machine_id` for a session whose plugin predates the field) rather than the listener that
   registered it, so filtering by machine finds a session on its own machine again even when every
   session shares one listener.
-
 - The `dispatch` command's approval texts, and the `dispatch` skill this plugin ships, state the
   carried approval (LEGION-573): a human's own answer to a decision block carries their approval
   to the version it writes when that answer is the whole change since the version they approved,

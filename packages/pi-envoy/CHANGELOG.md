@@ -4,11 +4,19 @@
 
 ### Changed
 
+- `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
+  `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
+  address.
+- Plugin interface version 3 (sjawhar/legion#1998): in the daemon-launched controller's process
+  (`roleClaim.slackRoleOwned`), a resumed session restores its registered interests after
+  dropping every Slack topic among them, from the listener and from what it restores, since a
+  restored one would outlive the controller role. Install it with the `@sjawhar/pi-legion` released
+  beside it.
+- `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
   `machine_id` for a session whose plugin predates the field) rather than the listener that
   registered it, so filtering by machine finds a session on its own machine again even when every
   session shares one listener.
-
 - A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
   profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
@@ -35,6 +43,10 @@
 
 ### Added
 
+- The `slack_post` tool (sjawhar/legion#1998): a reply in a Slack thread as the Legion Slack app,
+  with the bot token the secrets broker grants the session (`LEGION_SLACK_BOT_TOKEN`), which only
+  the posting process holds. The project's controller answers its Slack channels' mentions with
+  it.
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
   runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
   registers on `/legion/v1/claims/register` with that boot token in place of a controller

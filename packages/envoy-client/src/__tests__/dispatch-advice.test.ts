@@ -498,7 +498,7 @@ describe("Dispatch write advice", () => {
     [
       "dispatch_issue",
       { project: "DSP", title: "Created issue" },
-      `Created DSP-42: Created issue ${issueSuffix}`,
+      `Created DSP-42: Created issue → http://dispatch.test/issues/DSP-42 ${issueSuffix}`,
       { issue: "DSP-42" },
     ],
     [

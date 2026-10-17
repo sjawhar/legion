@@ -30,12 +30,12 @@ const (
 	accessPath  = "/v1/projects/example-project/secrets/" + fetchSecret + "/versions/latest:access"
 )
 
-// fetchScript returns the content the golden cloud-config writes to /etc/envoy/fetch-tailnet-key.
+// fetchScript returns the content the golden cloud-config writes to /etc/envoy/fetch-secret.
 func fetchScript(t *testing.T) string {
 	t.Helper()
 	var doc gcp.CloudConfig
 	require.NoError(t, yaml.Unmarshal([]byte(readGolden(t, "cloud-config.golden")), &doc))
-	return fileOf(t, doc, "/etc/envoy/fetch-tailnet-key")
+	return fileOf(t, doc, "/etc/envoy/fetch-secret")
 }
 
 // accessResponse is Secret Manager's answer to an access call for a version holding payload.
@@ -121,7 +121,7 @@ printf '%s\n' "$1" >>"$SLEEP_LOG"
 func fetch(t *testing.T, f *fakeGCP) fetchRun {
 	t.Helper()
 	scriptDir := t.TempDir()
-	script := filepath.Join(scriptDir, "fetch-tailnet-key")
+	script := filepath.Join(scriptDir, "fetch-secret")
 	require.NoError(t, os.WriteFile(script, []byte(fetchScript(t)), 0o700))
 	binDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "sleep"), []byte(sleepStub), 0o700))
@@ -207,7 +207,7 @@ func TestFetchKeyFailsOnAPermissionDeniedAfterSixAttempts(t *testing.T) {
 	require.NotEqual(t, 0, run.exitCode)
 	require.Equal(t, int32(6), f.accessCalls.Load())
 	require.Equal(t, []string{"10", "10", "10", "10", "10"}, run.sleeps, "ten seconds between attempts")
-	require.Contains(t, run.stderr, "no key after 6 attempts")
+	require.Contains(t, run.stderr, "nothing fetched from "+fetchSecret+" after 6 attempts")
 	requireNothingSecretPrinted(t, run)
 	requireOnlyTheKeyFile(t, run, "")
 }
@@ -240,6 +240,6 @@ func TestFetchKeyRefusesAnEmptyPayload(t *testing.T) {
 	require.NotEqual(t, 0, run.exitCode)
 	require.Equal(t, int32(6), f.accessCalls.Load())
 	require.Equal(t, []string{"10", "10", "10", "10", "10"}, run.sleeps, "ten seconds between attempts")
-	require.Contains(t, run.stderr, "holds no key")
+	require.Contains(t, run.stderr, "the latest version of "+fetchSecret+" is empty")
 	requireOnlyTheKeyFile(t, run, "")
 }

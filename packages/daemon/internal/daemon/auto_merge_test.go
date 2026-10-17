@@ -20,8 +20,10 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // An auto_merge_disable row decides by the record when it runs, as the implement App: while the
@@ -462,7 +464,7 @@ func TestADelayedDisarmNeverLosesTheREADYMerge(t *testing.T) {
 	if disables, arms := github.counts(); disables != 0 || arms != 0 {
 		t.Fatalf("disables %d and arms %d while READY's arm stands, want the arm kept and none sent", disables, arms)
 	}
-	github.set(func(g *armableGitHub) { g.armed = false })
+	github.remove(manuallyDisabledEvent(implementApp))
 	run("after the earlier disable lands")
 	assertMergeRows(t, pool, 1, "merge-refused", 0)
 	if _, arms := github.counts(); arms != 1 {
@@ -473,6 +475,216 @@ func TestADelayedDisarmNeverLosesTheREADYMerge(t *testing.T) {
 	assertMergeRows(t, pool, 0, "merge-refused", 0)
 	if _, arms := github.counts(); arms != 1 {
 		t.Fatalf("arms %d after GitHub merged READY's head, want no other arm", arms)
+	}
+}
+
+// A merge the merge queue fails is the transition back to implementing, never a second submission
+// (LEGION-800): once the row has seen READY's head in the queue, GitHub taking it out for
+// failed_checks, its merge_group run red on the commit the queue built, sends the issue from
+// awaiting_merge to implementing as a red head does. The implementer's task and the architect's
+// checks-red name the failing run, the READY's withdrawal is posted with its disarm, and the row
+// ends without enqueueing the head again, which would rebuild every entry queued behind it and fail
+// the same way.
+func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
+	github := newQueueGitHub(t, "CLEAN")
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	clock := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
+	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	run := func(step string) {
+		t.Helper()
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce %s: %v", step, err)
+		}
+		clock = clock.Add(time.Minute)
+	}
+	run("READY's submission")
+	if _, arms := github.counts(); arms != 1 {
+		t.Fatalf("enables %d, want READY's head enqueued once", arms)
+	}
+	github.remove(dequeuedEvent("failed_checks", "github-merge-queue", failedMergeGroup))
+	run("the retry after the merge queue failed the merge")
+	if _, arms := github.counts(); arms != 1 {
+		t.Fatalf("enables %d after the merge queue failed READY's merge, want no second submission", arms)
+	}
+	assertMergeRows(t, pool, 0, "merge-removed", 0)
+	var at string
+	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.Implementing) {
+		t.Fatalf("LEGION-208 in %q (%v), want implementing", at, err)
+	}
+	var task string
+	if err := pool.QueryRow(context.Background(), `select payload->>'task' from outbox where kind = 'supervise'
+		and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task); err != nil {
+		t.Fatalf("read the implementer's start: %v", err)
+	}
+	for _, want := range []string{failedMergeGroupRun, "integration", "failed_checks", "#42"} {
+		if !strings.Contains(task, want) {
+			t.Fatalf("the implementer's task %q, want it to name %q", task, want)
+		}
+	}
+	if strings.Contains(task, "lint") {
+		t.Fatalf("the implementer's task %q names the merge_group job that passed", task)
+	}
+	var reason string
+	if err := pool.QueryRow(context.Background(), `select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'`).Scan(&reason); err != nil || !strings.Contains(reason, failedMergeGroupRun) {
+		t.Fatalf("the architect's checks-red reason %q (%v), want it to name the failing run", reason, err)
+	}
+	var disarms int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'auto_merge_disable'`).Scan(&disarms); err != nil || disarms != 1 {
+		t.Fatalf("auto_merge_disable rows %d (%v), want the withdrawal's one", disarms, err)
+	}
+}
+
+// A merge failure whose fact the workflow already applied (intake.ApplyFact's Duplicate) changes
+// nothing, and the row's log says so rather than that the issue goes back to implementing.
+func TestAMergeFailureAlreadyAppliedIsNotLoggedAsSendingTheIssueBack(t *testing.T) {
+	github := newQueueGitHub(t, "CLEAN")
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	clock := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
+	var logged bytes.Buffer
+	runner := mergeRunner(pool, records, github.url, slog.New(slog.NewJSONHandler(&logged, nil)), func() time.Time { return clock })
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce READY's submission: %v", err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		_, err := records.MarkProcessed(context.Background(), tx, "outbox", "merge-failed:LEGION-208:ready-head:RFMQE_1")
+		return err
+	}); err != nil {
+		t.Fatalf("record the merge failure's fact as applied: %v", err)
+	}
+	github.remove(dequeuedEvent("failed_checks", "github-merge-queue", failedMergeGroup))
+	clock = clock.Add(time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce after the merge queue failed the merge: %v", err)
+	}
+	var at string
+	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.AwaitingMerge) {
+		t.Fatalf("LEGION-208 in %q (%v), want awaiting_merge: the fact was already applied", at, err)
+	}
+	told := false
+	for line := range strings.Lines(logged.String()) {
+		var entry struct{ Msg string }
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if strings.Contains(entry.Msg, "goes back to implementing") {
+			t.Fatalf("the row logged %q for a merge failure already applied", entry.Msg)
+		}
+		told = told || strings.Contains(entry.Msg, "already applied")
+	}
+	if !told {
+		t.Fatalf("the row's log %s, want a line saying the merge failure was already applied", logged.String())
+	}
+}
+
+// Any other removal of an arm or queue entry the row saw at READY's head (a person dequeuing the
+// pull request, a person turning its auto-merge off) is not the row's to undo (LEGION-800): the row
+// ends, submitting nothing more, and tells the architect once (merge-removed), naming what was
+// removed, GitHub's reason and who removed it. The issue stays in awaiting_merge.
+func TestARemovalByAPersonEndsTheREADYMergeAndTellsTheArchitect(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		github  func(*testing.T) *armableGitHub
+		removal string
+		names   []string
+	}{
+		{"a person dequeues it", func(t *testing.T) *armableGitHub { return newQueueGitHub(t, "CLEAN") },
+			dequeuedEvent("manual", "a-maintainer", "null"), []string{"#42", "merge queue", "manual", "a-maintainer", "ready-head"}},
+		{"a person turns its auto-merge off", func(t *testing.T) *armableGitHub {
+			g := newArmableGitHub(t)
+			g.set(func(g *armableGitHub) { g.armed, g.timeline = false, nil })
+			return g
+		}, manuallyDisabledEvent("a-maintainer"), []string{"#42", "auto-merge", "manually_disabled", "a-maintainer", "ready-head"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := tc.github(t)
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+			clock := time.Now().UTC()
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
+			runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+			run := func(step string) {
+				t.Helper()
+				if err := runner.RunOnce(context.Background()); err != nil {
+					t.Fatalf("RunOnce %s: %v", step, err)
+				}
+				clock = clock.Add(time.Minute)
+			}
+			run("READY's submission")
+			github.remove(tc.removal)
+			run("the retry after the removal")
+			run("a later drain")
+			if _, arms := github.counts(); arms != 1 {
+				t.Fatalf("enables %d after a person's removal, want READY's one submission and no other", arms)
+			}
+			reasons := assertMergeRows(t, pool, 0, "merge-removed", 1)
+			for _, want := range tc.names {
+				if !strings.Contains(reasons[0], want) {
+					t.Fatalf("merge-removed reason %q, want it to name %q", reasons[0], want)
+				}
+			}
+			var at string
+			if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.AwaitingMerge) {
+				t.Fatalf("LEGION-208 in %q (%v), want awaiting_merge", at, err)
+			}
+		})
+	}
+}
+
+// On a base with a merge queue, enabling auto-merge before GitHub reports the pull request mergeable
+// arms it rather than enqueueing it, and an armed pull request fails a required check that judges
+// the arm (LEGION-800). The row waits instead, quietly at debug however long, while a required check
+// runs (BLOCKED), and enters the queue once GitHub reports the pull request mergeable: auto-merge is
+// never armed.
+func TestAREADYMergeOnAMergeQueueBaseNeverArmsAutoMerge(t *testing.T) {
+	github := newQueueGitHub(t, "BLOCKED")
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	clock := time.Now().UTC()
+	row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock)
+	row.Attempts = waitWarnAttempts
+	enqueueOutbox(t, pool, records, row)
+	var logged bytes.Buffer
+	log := slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	runner := mergeRunner(pool, records, github.url, log, func() time.Time { return clock })
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce with a required check running: %v", err)
+	}
+	if _, arms := github.counts(); arms != 0 {
+		t.Fatalf("enables %d while a required check runs on a merge-queue base, want none: GitHub would arm auto-merge", arms)
+	}
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	var levels []string
+	for line := range strings.Lines(logged.String()) {
+		var entry struct{ Level, Kind string }
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if entry.Kind == string(record.OutboxKindReadyMerge) {
+			levels = append(levels, entry.Level)
+		}
+	}
+	if len(levels) != 1 || levels[0] != "DEBUG" {
+		t.Fatalf("the waiting row logged at %v, want one line at DEBUG", levels)
+	}
+	github.set(func(g *armableGitHub) { g.mergeState = "CLEAN" })
+	clock = clock.Add(time.Hour)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce once the required checks passed: %v", err)
+	}
+	github.mu.Lock()
+	defer github.mu.Unlock()
+	if github.arms != 1 || !github.queued || github.armed {
+		t.Fatalf("enables %d, queued %t, armed %t once GitHub reports the pull request mergeable; want one enable that enqueues it and never an arm", github.arms, github.queued, github.armed)
 	}
 }
 
@@ -504,21 +716,44 @@ func TestAREADYMergeRowWaitingOnAnArmEndsOnceTheMergeMovesTheRecord(t *testing.T
 	}
 }
 
-// armableGitHub is GitHub's GraphQL API for acme/widgets#42 at ready-head in a repository that allows
-// auto-merge, the pull request open, armed and BLOCKED on its required checks: it answers a read
-// with the pull request's state and arm, arms it on an enablePullRequestAutoMerge at ready-head,
-// disarms it on a disablePullRequestAutoMerge, and counts both.
+// armableGitHub is GitHub's GraphQL API for acme/widgets#42 at ready-head as a ready_merge row and a
+// disarm read and change it: the pull request's state and merge state, whether its base requires a
+// merge queue (its repository allowing auto-merge either way), whether it is armed for auto-merge or
+// sits in the merge queue, and its timeline of arms and removals. An enablePullRequestAutoMerge at
+// ready-head enqueues it on a merge-queue base GitHub reports mergeable now and arms auto-merge
+// otherwise, as GitHub does, and a disablePullRequestAutoMerge turns auto-merge off; each lands on
+// the timeline as the implement App's (implementApp), and both are counted (arms counts every
+// enable). A removal outside the daemon is remove's.
 type armableGitHub struct {
-	url            string
-	mu             sync.Mutex
-	state          string
-	armed          bool
-	disables, arms int
+	url               string
+	mu                sync.Mutex
+	state, mergeState string
+	queueRequired     bool
+	armed, queued     bool
+	timeline          []string
+	disables, arms    int
 }
 
+// implementApp is the implement App's login as GitHub's timeline names an actor: its bot login
+// without the [bot] suffix that GraphQL's viewer gives it.
+const implementApp = "legion-implementer"
+
+// newArmableGitHub is armableGitHub for a repository that allows auto-merge and has no merge queue,
+// the pull request open, armed and BLOCKED on its required checks.
 func newArmableGitHub(t *testing.T) *armableGitHub {
 	t.Helper()
-	g := &armableGitHub{state: "OPEN", armed: true}
+	return serveArmable(t, &armableGitHub{state: "OPEN", mergeState: "BLOCKED", armed: true, timeline: []string{timelineEvent("AutoMergeEnabledEvent")}})
+}
+
+// newQueueGitHub is armableGitHub for a base that requires a merge queue, the pull request open in
+// mergeState with nothing armed.
+func newQueueGitHub(t *testing.T, mergeState string) *armableGitHub {
+	t.Helper()
+	return serveArmable(t, &armableGitHub{state: "OPEN", mergeState: mergeState, queueRequired: true})
+}
+
+func serveArmable(t *testing.T, g *armableGitHub) *armableGitHub {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		g.mu.Lock()
@@ -528,23 +763,36 @@ func newArmableGitHub(t *testing.T) *armableGitHub {
 		case strings.Contains(string(body), "disablePullRequestAutoMerge"):
 			g.disables++
 			g.armed = false
+			g.timeline = append(g.timeline, manuallyDisabledEvent(implementApp))
 			_, _ = io.WriteString(w, `{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`)
 		case strings.Contains(string(body), "enablePullRequestAutoMerge"):
 			if !strings.Contains(string(body), `"head":"ready-head"`) {
 				t.Errorf("arm request %s, want READY's expected head", body)
 			}
 			g.arms++
-			g.armed = true
+			if g.queueRequired && (g.mergeState == "CLEAN" || g.mergeState == "HAS_HOOKS" || g.mergeState == "UNSTABLE") {
+				g.queued = true
+				g.timeline = append(g.timeline, timelineEvent("AddedToMergeQueueEvent"))
+			} else {
+				g.armed = true
+				g.timeline = append(g.timeline, timelineEvent("AutoMergeEnabledEvent"))
+			}
 			_, _ = io.WriteString(w, `{"data":{}}`)
-		case strings.Contains(string(body), "mergePullRequest"):
-			t.Errorf("merge request %s, want an arm: GitHub reports the pull request BLOCKED", body)
+		case strings.Contains(string(body), "mergePullRequest"), strings.Contains(string(body), "dequeuePullRequest"):
+			t.Errorf("request %s, want only an enable: GitHub merges an armed or queued pull request itself", body)
+		case strings.Contains(string(body), "timelineItems"):
+			_, _ = fmt.Fprintf(w, `{"data":{"viewer":{"login":%q},"repository":{"pullRequest":{"timelineItems":{"nodes":[%s]}}}}}`,
+				implementApp+"[bot]", strings.Join(g.timeline, ","))
 		default:
-			autoMerge := "null"
+			autoMerge, entry := "null", "null"
 			if g.armed {
 				autoMerge = `{"enabledAt":"2026-10-11T00:00:00Z"}`
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":"ready-head","mergeStateStatus":"BLOCKED","updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":%s,"mergeQueueEntry":null}}}}`,
-				g.state, time.Now().UTC().Format(time.RFC3339), autoMerge)
+			if g.queued {
+				entry = `{"enqueuedAt":"2026-10-11T00:05:00Z"}`
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":"ready-head","mergeStateStatus":%q,"updatedAt":%q,"isMergeQueueEnabled":%t,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`,
+				g.state, g.mergeState, time.Now().UTC().Format(time.RFC3339), g.queueRequired, autoMerge, entry)
 		}
 	}))
 	t.Cleanup(server.Close)
@@ -559,17 +807,59 @@ func (g *armableGitHub) set(change func(*armableGitHub)) {
 	change(g)
 }
 
+// remove takes the pull request out of the merge queue and turns its auto-merge off without a merge,
+// as someone other than the daemon's submission does, leaving event, GitHub's record of it, on the
+// timeline.
+func (g *armableGitHub) remove(event string) {
+	g.set(func(g *armableGitHub) {
+		g.armed, g.queued = false, false
+		g.timeline = append(g.timeline, event)
+	})
+}
+
 func (g *armableGitHub) counts() (disables, arms int) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.disables, g.arms
 }
 
+// timelineEvent is a timeline item of kind (AddedToMergeQueueEvent or AutoMergeEnabledEvent) as
+// GitHub lists it.
+func timelineEvent(kind string) string {
+	return fmt.Sprintf(`{"__typename":%q,"createdAt":"2026-10-16T05:00:00Z"}`, kind)
+}
+
+// manuallyDisabledEvent is GitHub's record of the pull request's auto-merge turned off by actor, a
+// person or the implement App's disarm: reason code manually_disabled, with GitHub's sentence for it.
+func manuallyDisabledEvent(actor string) string {
+	return fmt.Sprintf(`{"__typename":"AutoMergeDisabledEvent","id":"AMDE_1","createdAt":"2026-10-16T05:10:00Z","reason":"Manually disabled by user","reasonCode":"manually_disabled","actor":{"login":%q}}`,
+		actor)
+}
+
+// dequeuedEvent is GitHub's record of the pull request taken out of the merge queue by actor for
+// reason, the merge group commit the queue built for it (failedMergeGroup) or null.
+func dequeuedEvent(reason, actor, commit string) string {
+	return fmt.Sprintf(`{"__typename":"RemovedFromMergeQueueEvent","id":"RFMQE_1","createdAt":"2026-10-16T05:10:00Z","reason":%q,"actor":{"login":%q},"beforeCommit":%s}`,
+		reason, actor, commit)
+}
+
+// failedMergeGroupRun is the URL of the merge_group run that failed on the commit the merge queue
+// built for #42 (failedMergeGroup).
+const failedMergeGroupRun = "https://github.com/acme/widgets/actions/runs/7"
+
+// failedMergeGroup is the commit the merge queue built for #42, on which its merge_group run's
+// integration job failed and its lint job passed.
+const failedMergeGroup = `{"oid":"group-sha","statusCheckRollup":{"contexts":{"nodes":[` +
+	`{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"` + failedMergeGroupRun + `/job/1","checkSuite":{"workflowRun":{"url":"` + failedMergeGroupRun + `"}}},` +
+	`{"__typename":"CheckRun","name":"integration","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"` + failedMergeGroupRun + `/job/2","checkSuite":{"workflowRun":{"url":"` + failedMergeGroupRun + `"}}}]}}}`
+
 // A reopen at READY's head that lands while a worker is recording GitHub's permanent refusal takes
 // the row from that worker: the worker's notice rolls back with its finish, and the run that holds
-// the row afterwards tells the architect, so the refusal is told once.
+// the row afterwards tells the architect, so the refusal is told once. The worker whose finish
+// rolled back logs the refusal it could not record beside its finish's failure.
 func TestAReopenDuringAPermanentRefusalTellsTheArchitectOnce(t *testing.T) {
-	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer("Squash merges are not allowed on this repository."))
+	const squash = "Squash merges are not allowed on this repository."
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer(squash))
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
@@ -577,13 +867,25 @@ func TestAReopenDuringAPermanentRefusalTellsTheArchitectOnce(t *testing.T) {
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
 	clock := now
 	reopening := &reopensBeforeFinish{Store: records, t: t, pool: pool}
-	if err := mergeRunner(pool, reopening, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
+	var logged bytes.Buffer
+	if err := mergeRunner(pool, reopening, github.url, slog.New(slog.NewJSONHandler(&logged, nil)), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
 		t.Fatalf("first RunOnce: %v", err)
 	}
 	if !reopening.reopened {
 		t.Fatal("the refusal finished without the reopen landing first")
 	}
 	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	logsCause := false
+	for line := range strings.Lines(logged.String()) {
+		var entry struct{ Level, Msg, Cause string }
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		logsCause = logsCause || entry.Level == "ERROR" && strings.Contains(entry.Msg, "finish not recorded") && strings.Contains(entry.Cause, squash)
+	}
+	if !logsCause {
+		t.Fatalf("the worker whose finish rolled back logged %s, want its failed finish logged at ERROR with the refusal as its cause", logged.String())
+	}
 	clock = clock.Add(time.Minute)
 	if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
 		t.Fatalf("second RunOnce: %v", err)

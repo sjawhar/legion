@@ -83,7 +83,7 @@ const architectureComponentsGuidance =
   'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
 const createdIssueLine =
-  "Created LEGION-216: Architecture work (not subscribed to LEGION-216; envoy_subscribe notifications.dispatch.issue.LEGION-216.> for every event on it)";
+  "Created LEGION-216: Architecture work → http://dispatch.test/issues/LEGION-216 (not subscribed to LEGION-216; envoy_subscribe notifications.dispatch.issue.LEGION-216.> for every event on it)";
 
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
@@ -2422,11 +2422,52 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Created LEGION-13: New global search work (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)"
+      "Created LEGION-13: New global search work → http://dispatch.test/issues/LEGION-13 (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)"
     );
     expect(result.details).toEqual({ issue: "LEGION-13" });
     expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
+  });
+
+  // A pod reaches Dispatch at its in-cluster address, which nobody outside the cluster can open:
+  // the link the command prints is Dispatch's public dashboard (DISPATCH_PUBLIC_URL) whenever the
+  // session has one, and the line names the assignee Dispatch answered, so an agent repeats
+  // Dispatch's state rather than assuming it.
+  test.each([
+    ["ada@example.com", "; assigned to ada@example.com"],
+    [null, "; unassigned"],
+  ] as const)("dispatch_issue links the public dashboard and names the assignee %p", async (assignee, said) => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return sourceNull();
+      }
+      return response({
+        key: "LEGION-13",
+        title: "New global search work",
+        project: "LEGION",
+        assignee,
+        components: issueComponents("inherit", []),
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "New global search work" },
+      cwd: "/workspace",
+      host: "omp",
+      config: {
+        ...config,
+        url: "http://dispatch.example-ns.svc.cluster.local:8766",
+        publicUrl: "https://dispatch.example.org",
+      },
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      `Created LEGION-13: New global search work → https://dispatch.example.org/issues/LEGION-13${said} (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)`
+    );
   });
 
   test("guides an unassigned new issue to architecture components when its project has a source", async () => {
@@ -7290,6 +7331,51 @@ describe("executeDispatchTool", () => {
     expect(result.details).toEqual({ issue: "DSP-42" });
   });
 
+  // An agent asked about an issue answers with its link, so the summary names the issue's page:
+  // on the public dashboard when DISPATCH_PUBLIC_URL is set, on the API's address otherwise.
+  test.each([
+    [undefined, "Link: http://dispatch.test/issues/DSP-42"],
+    ["https://dispatch.example.org", "Link: https://dispatch.example.org/issues/DSP-42"],
+  ] as const)("an issue summary names the issue's page (public URL %p)", async (publicUrl, link) => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      if (pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          priority: null,
+          assignee: null,
+          claim: null,
+          components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+          route: null,
+          open_asks: [],
+          last_seq: 0,
+          external_links: [],
+          labels: [],
+        });
+      }
+      if (pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      return new Response(JSON.stringify({ error: "missing", code: "NOT_FOUND" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config: publicUrl === undefined ? config : { ...config, publicUrl },
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(`Title: Dispatch issue\nKey: DSP-42\n${link}\nStatus: open`);
+  });
+
   // A bare "unavailable" means Dispatch has no such section (a server without the route). A
   // gateway's 404 page in its place is a failure the agent can act on, so the section says what
   // answered, as it does for every other failure.
@@ -7551,6 +7637,52 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe("Key: DSP-42\nEvents:\n- none");
     expect(requested).toEqual(["/api/v1/issues/DSP-42", "/api/v1/issues/DSP-42/events"]);
+  });
+
+  // The links this command prints are on the public dashboard when DISPATCH_PUBLIC_URL is set, so
+  // a ref pasted from one resolves as one on the API's own address does.
+  test("reads an issue from its URL on the public dashboard", async () => {
+    const requested: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requested.push(`${target.origin}${target.pathname}`);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 0,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    for (const ref of [
+      "https://dispatch.example.org/issues/DSP-42/log",
+      "http://dispatch.test/issues/DSP-42/log",
+    ]) {
+      requested.length = 0;
+      const result = await executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config: { ...config, publicUrl: "https://dispatch.example.org" },
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+      expect(result.text).toBe("Key: DSP-42\nEvents:\n- none");
+      expect(requested).toEqual([
+        "http://dispatch.test/api/v1/issues/DSP-42",
+        "http://dispatch.test/api/v1/issues/DSP-42/events",
+      ]);
+    }
   });
 
   test("maps the SPA's version selector on dashboard URLs to a named-version read", async () => {

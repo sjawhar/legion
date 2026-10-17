@@ -19314,8 +19314,8 @@ var require_utils = __commonJS((exports, module) => {
   var HOST_DELIMS = { "@": "%40", "/": "%2F", "?": "%3F", "#": "%23", ":": "%3A" };
   var HOST_DELIM_RE = /[@/?#:]/g;
   var HOST_DELIM_NO_COLON_RE = /[@/?#]/g;
-  function reescapeHostDelimiters(host, isIP) {
-    const re = isIP ? HOST_DELIM_NO_COLON_RE : HOST_DELIM_RE;
+  function reescapeHostDelimiters(host, isIP2) {
+    const re = isIP2 ? HOST_DELIM_NO_COLON_RE : HOST_DELIM_RE;
     re.lastIndex = 0;
     return host.replace(re, (ch) => HOST_DELIMS[ch]);
   }
@@ -19764,7 +19764,7 @@ var require_fast_uri = __commonJS((exports, module) => {
       fragment: undefined
     };
     let malformedAuthorityOrPort = false;
-    let isIP = false;
+    let isIP2 = false;
     if (options.reference === "suffix") {
       if (options.scheme) {
         uri = options.scheme + ":" + uri;
@@ -19813,9 +19813,9 @@ var require_fast_uri = __commonJS((exports, module) => {
         if (ipv4result === false) {
           const ipv6result = normalizeIPv6(parsed.host);
           parsed.host = ipv6result.host.toLowerCase();
-          isIP = ipv6result.isIPV6;
+          isIP2 = ipv6result.isIPV6;
         } else {
-          isIP = true;
+          isIP2 = true;
         }
       }
       if (parsed.scheme === undefined && parsed.userinfo === undefined && parsed.host === undefined && parsed.port === undefined && parsed.query === undefined && !parsed.path) {
@@ -19832,7 +19832,7 @@ var require_fast_uri = __commonJS((exports, module) => {
       }
       const schemeHandler = getSchemeHandler(options.scheme || parsed.scheme);
       if (!options.unicodeSupport && (!schemeHandler || !schemeHandler.unicodeSupport)) {
-        if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP === false && nonSimpleDomain(parsed.host)) {
+        if (parsed.host && (options.domainHost || schemeHandler && schemeHandler.domainHost) && isIP2 === false && nonSimpleDomain(parsed.host)) {
           try {
             parsed.host = new URL("http://" + parsed.host).hostname;
           } catch (e) {
@@ -19846,7 +19846,7 @@ var require_fast_uri = __commonJS((exports, module) => {
             parsed.scheme = unescape(parsed.scheme);
           }
           if (parsed.host !== undefined) {
-            parsed.host = reescapeHostDelimiters(unescape(parsed.host), isIP);
+            parsed.host = reescapeHostDelimiters(unescape(parsed.host), isIP2);
           }
         }
         if (parsed.path) {
@@ -37167,6 +37167,8 @@ function agentSubject(session) {
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
 }
+// ../contracts/src/slack.ts
+var SLACK_POST_TEXT_MAX = 4000;
 // ../contracts/src/tool-schema.ts
 function overCapMessage(length, max) {
   return `is ${length - max} characters over the ${max}-character limit (${length}/${max})`;
@@ -39590,7 +39592,17 @@ function dispatchSettings(env, config2) {
     }
     const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
     const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env);
-    return { enabled: true, url: url2, token };
+    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+    }
+    return {
+      enabled: true,
+      url: url2,
+      token,
+      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+    };
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
@@ -39766,6 +39778,293 @@ function sessionDispatchSettings(file2, env, options) {
     warnings: config2.kind === "read" ? config2.warnings : [],
     missing: config2.kind === "read" ? config2.missing : null
   };
+}
+
+// ../envoy-client/src/slack-post.ts
+import { BlockList, isIP } from "net";
+var SLACK_BOT_TOKEN_SECRET = "LEGION_SLACK_BOT_TOKEN";
+var SLACK_POST_API_URL_VARIABLE = "SLACK_POST_API_URL";
+var POST_TIMEOUT_MS = 30000;
+var SLACK_ERROR_CODES = [
+  "access_denied",
+  "accesslimited",
+  "account_inactive",
+  "agent_prompt_display_not_allowed",
+  "app_access_restricted",
+  "as_user_not_supported",
+  "attachment_payload_limit_exceeded",
+  "cannot_reply_to_message",
+  "channel_not_found",
+  "deprecated_endpoint",
+  "draft_already_deleted",
+  "draft_already_sent",
+  "draft_has_conflict",
+  "draft_not_found",
+  "duplicate_channel_not_found",
+  "duplicate_message_not_found",
+  "ekm_access_denied",
+  "enterprise_is_restricted",
+  "fatal_error",
+  "internal_error",
+  "invalid_arg_name",
+  "invalid_arguments",
+  "invalid_array_arg",
+  "invalid_auth",
+  "invalid_blocks",
+  "invalid_blocks_format",
+  "invalid_charset",
+  "invalid_form_data",
+  "invalid_metadata_format",
+  "invalid_metadata_schema",
+  "invalid_post_type",
+  "is_archived",
+  "markdown_text_conflict",
+  "message_limit_exceeded",
+  "messages_tab_disabled",
+  "metadata_must_be_sent_from_app",
+  "metadata_too_large",
+  "method_deprecated",
+  "missing_file_data",
+  "missing_post_type",
+  "missing_scope",
+  "msg_blocks_too_long",
+  "no_permission",
+  "no_text",
+  "not_allowed_token_type",
+  "not_authed",
+  "not_in_channel",
+  "org_login_required",
+  "rate_limited",
+  "ratelimited",
+  "request_timeout",
+  "restricted_action",
+  "restricted_action_non_threadable_channel",
+  "restricted_action_read_only_channel",
+  "restricted_action_thread_locked",
+  "restricted_action_thread_only_channel",
+  "send_on_behalf_not_allowed",
+  "service_unavailable",
+  "slack_connect_canvas_sharing_blocked",
+  "slack_connect_file_link_sharing_blocked",
+  "slack_connect_lists_sharing_blocked",
+  "team_access_not_granted",
+  "team_added_to_org",
+  "team_not_found",
+  "token_expired",
+  "token_revoked",
+  "too_many_attachments",
+  "too_many_contact_cards",
+  "two_factor_setup_required"
+];
+var POSTER = `
+const codes = ${JSON.stringify(Object.fromEntries(SLACK_ERROR_CODES.map((code) => [code, true])))};
+const token = process.env.LEGION_SLACK_BOT_TOKEN || "";
+const out = (value) => {
+  let line = JSON.stringify(value);
+  if (token !== "") line = line.split(token).join("[redacted]");
+  process.stdout.write(line + "\\n");
+};
+let sent = false;
+try {
+  const input = JSON.parse(await Bun.stdin.text());
+  if (token === "") {
+    out({ invalid: "the poster's environment carries no LEGION_SLACK_BOT_TOKEN" });
+    process.exit(0);
+  }
+  const base = (process.env.SLACK_POST_API_URL || "https://slack.com/api").replace(/\\/+$/, "");
+  let status = 0;
+  let raw = "";
+  try {
+    sent = true;
+    const response = await fetch(base + "/chat.postMessage", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify({ channel: input.channel, thread_ts: input.thread_ts, text: input.text }),
+      signal: AbortSignal.timeout(10000),
+    });
+    status = response.status;
+    raw = await response.text();
+  } catch {
+    out({ unanswered: true });
+    process.exit(0);
+  }
+  let answer;
+  try {
+    answer = JSON.parse(raw);
+  } catch {}
+  if (!answer || typeof answer !== "object" || typeof answer.ok !== "boolean") {
+    out({ invalid: "HTTP " + Number(status) + " with a body that is not Slack's JSON" });
+  } else if (!answer.ok) {
+    out({ refused: typeof answer.error === "string" && Object.hasOwn(codes, answer.error) ? answer.error : null });
+  } else if (
+    typeof answer.ts !== "string" || !/^[0-9]{1,12}\\.[0-9]{1,8}$/.test(answer.ts) ||
+    (answer.channel !== undefined && (typeof answer.channel !== "string" || !/^[CDG][A-Z0-9]{1,30}$/.test(answer.channel)))
+  ) {
+    out({ invalid: "ok with a ts or channel that is not Slack's" });
+  } else {
+    out({ ts: answer.ts, channel: answer.channel === undefined ? input.channel : answer.channel });
+  }
+} catch {
+  out(sent ? { unanswered: true } : { invalid: "a reply the poster could not read" });
+}
+`;
+var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
+var URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
+var WEB_SCHEME = /^https?:\/\//i;
+var BARE_HOST = /(?<![\w@./:%-])((?:[a-z0-9-]{1,63}\.)*[a-z0-9-]{1,63})\.?(:\d{1,5})?(?![\w-])/gi;
+var BARE_IPV6 = /(?<![\w@./:%-])\[([0-9a-f:.]{2,45})(?:%[\w.-]{1,32})?\](?::\d{1,5})?/gi;
+var TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
+var CLUSTER_ADDRESSES = new BlockList;
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.168.0.0", 16]
+]) {
+  CLUSTER_ADDRESSES.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+  ["::", 96],
+  ["fc00::", 7],
+  ["fe80::", 10]
+]) {
+  CLUSTER_ADDRESSES.addSubnet(network, prefix, "ipv6");
+}
+function linkInsideCluster(text, env) {
+  const { DISPATCH_URL: apiUrl, DISPATCH_PUBLIC_URL: publicUrl } = env;
+  const apiHost = hostOf(apiUrl);
+  const publicHost = hostOf(publicUrl);
+  const dispatchHost = apiHost !== undefined && publicHost !== undefined && apiHost !== publicHost ? apiHost : undefined;
+  const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  for (const match of decoded.matchAll(URL_CANDIDATE)) {
+    if (!WEB_SCHEME.test(match[0]))
+      continue;
+    for (const written of new Set([match[0], match[0].replace(TRAILING_PUNCTUATION, "")])) {
+      const host = hostOf(written);
+      if (host !== undefined && insideCluster(host, dispatchHost, true))
+        return written;
+    }
+  }
+  const prose = decoded.replace(URL_CANDIDATE, (url2) => " ".repeat(url2.length));
+  for (const match of prose.matchAll(BARE_IPV6)) {
+    if (insideCluster(`[${match[1]}]`, dispatchHost, false))
+      return match[0];
+  }
+  for (const match of prose.matchAll(BARE_HOST)) {
+    const host = (match[1] ?? "").toLowerCase();
+    if (!host.includes(".") && match[2] === undefined)
+      continue;
+    if (insideCluster(host, dispatchHost, false))
+      return match[0];
+  }
+  return;
+}
+function hostOf(value) {
+  if (value === undefined || value === "")
+    return;
+  try {
+    return new URL(value).hostname.toLowerCase().replace(/\.$/, "") || undefined;
+  } catch {
+    return;
+  }
+}
+function insideCluster(host, dispatchHost, fromUrl) {
+  if (host === dispatchHost)
+    return true;
+  if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
+    return true;
+  const address = host.startsWith("[") ? host.slice(1, -1) : host;
+  const family = isIP(address);
+  if (family !== 0)
+    return CLUSTER_ADDRESSES.check(address, family === 4 ? "ipv4" : "ipv6");
+  return fromUrl && !host.includes(".");
+}
+async function postSlackReply(reply, options = {}) {
+  const env = options.env ?? process.env;
+  const internal = linkInsideCluster(reply.text, env);
+  if (internal !== undefined) {
+    throw new Error(`the reply links ${internal}, an address inside the cluster nobody in Slack can open; link Dispatch's dashboard instead (dispatch prints it when DISPATCH_PUBLIC_URL is set); nothing was posted`);
+  }
+  const override = env[SLACK_POST_API_URL_VARIABLE];
+  if (override !== undefined && override !== "" && !allowedAPIURL(override)) {
+    throw new Error(`${SLACK_POST_API_URL_VARIABLE} must be an https URL, or http on a loopback host (got ${override}); nothing was posted`);
+  }
+  const { PATH: searchPath = "" } = env;
+  const client = Bun.which("agent-secrets", { PATH: searchPath });
+  if (client === null) {
+    throw new Error("agent-secrets is not on PATH: slack_post takes the bot token from the secrets broker, which this session is not enrolled with; nothing was posted");
+  }
+  const reason = `slack_post: reply in Slack channel ${reply.channel}, thread ${reply.threadTs}`;
+  const child = Bun.spawn([client, SLACK_BOT_TOKEN_SECRET, "--reason", reason, "--wait", "0s", "--", "bun", "-e", POSTER], {
+    env,
+    stdin: new Blob([
+      JSON.stringify({ channel: reply.channel, thread_ts: reply.threadTs, text: reply.text })
+    ]),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const timer = setTimeout(() => child.kill("SIGKILL"), POST_TIMEOUT_MS);
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited
+  ]).finally(() => clearTimeout(timer));
+  const said = stderr.trim().split(`
+`).filter(Boolean).join(" ");
+  const line = posterLine(stdout);
+  if (line === undefined) {
+    if (child.signalCode === "SIGKILL") {
+      throw new Error(`slack_post got no answer within ${POST_TIMEOUT_MS / 1000} s: ${MAY_HAVE_POSTED}`);
+    }
+    if (said.startsWith("agent-secrets:")) {
+      if (code === 75) {
+        throw new Error(`the secrets broker has not granted ${SLACK_BOT_TOKEN_SECRET}: its request is waiting for approval (${said}); nothing was posted`);
+      }
+      if (code === 77) {
+        throw new Error(`the secrets broker denied ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
+      }
+      throw new Error(`the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
+    }
+    throw new Error(`slack_post's poster exited ${code} without an answer: ${MAY_HAVE_POSTED}`);
+  }
+  if (line.refused === null) {
+    throw new Error("Slack refused chat.postMessage with an error code slack_post does not pass on");
+  }
+  if (line.refused !== undefined)
+    throw new Error(`Slack refused chat.postMessage: ${line.refused}`);
+  if (line.unanswered !== undefined) {
+    throw new Error(`Slack did not answer chat.postMessage: ${MAY_HAVE_POSTED}`);
+  }
+  if (line.ts === undefined) {
+    throw new Error(`chat.postMessage answered ${line.invalid ?? "nothing"}: ${MAY_HAVE_POSTED}`);
+  }
+  return { channel: line.channel ?? reply.channel, threadTs: reply.threadTs, ts: line.ts };
+}
+function posterLine(stdout) {
+  const last = stdout.trim().split(`
+`).at(-1);
+  if (last === undefined || last === "")
+    return;
+  try {
+    const parsed = JSON.parse(last);
+    return typeof parsed === "object" && parsed !== null ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+function allowedAPIURL(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url2.protocol === "https:")
+    return true;
+  return url2.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url2.hostname);
 }
 
 // ../envoy-client/src/tool-input-errors.ts
@@ -39947,7 +40246,8 @@ var EnvoyToolOperation = {
   setRole: "setRole",
   getRole: "getRole",
   whoami: "whoami",
-  listSessions: "listSessions"
+  listSessions: "listSessions",
+  slackPost: "slackPost"
 };
 var envoyToolSpecs = [
   {
@@ -40018,6 +40318,16 @@ var envoyToolSpecs = [
       title: schema.string().optional()
     }),
     operation: EnvoyToolOperation.listSessions
+  },
+  {
+    name: "slack_post",
+    description: "Reply in a Slack thread as the Legion Slack app, with the bot token the secrets broker grants this session (LEGION_SLACK_BOT_TOKEN); the session never holds it. channel is the Slack channel id (a mention's channel_id); thread_ts is the thread's root ts: the mention's thread_ts, or its own ts when it has none. Answers the new message's ts. A refusal carries Slack's own error code (not_in_channel: the app is not in that channel) or the broker's state (waiting for approval, denied). Sent once and never retried: after 'Slack did not answer' the reply may already be in the thread, so do not post it again.",
+    arguments: (schema) => ({
+      channel: schema.string({ min: 1 }).describe("Slack channel id, such as C0123ABCD."),
+      thread_ts: schema.string({ min: 1 }).describe("The thread's root ts, which keeps the reply in the mention's thread."),
+      text: schema.string({ min: 1, max: SLACK_POST_TEXT_MAX }).describe(`The reply, in Slack mrkdwn, at most ${SLACK_POST_TEXT_MAX} characters.`)
+    }),
+    operation: EnvoyToolOperation.slackPost
   }
 ];
 function sendConfirmationText(result) {
@@ -43354,6 +43664,15 @@ async function executeEnvoyTool(runtime, name, input) {
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input);
       return runtime.session.delivery.inbox();
+    case EnvoyToolOperation.slackPost: {
+      const args = parseArguments(spec, input);
+      const posted = await postSlackReply({
+        channel: args.channel,
+        threadTs: args.thread_ts,
+        text: args.text
+      });
+      return { channel: posted.channel, thread_ts: posted.threadTs, ts: posted.ts };
+    }
   }
 }
 function pluginStateDirectory() {

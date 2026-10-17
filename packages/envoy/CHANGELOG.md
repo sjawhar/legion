@@ -4,6 +4,21 @@
 
 ### Added
 
+- The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
+  Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
+  unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is
+  `projects/<project number>/secrets/<id prefix>-`, `BROKER_SECRETS_KMS_KEY_NAME` names the
+  agent-secrets Cloud KMS key in place of `BROKER_SECRETS_KMS_KEY_ARN`, and a secret's owner and
+  tier are its annotations. The broker signs in under Application Default Credentials (on GKE,
+  Workload Identity for its ServiceAccount; no key file) and needs only `roles/secretmanager.viewer`
+  on the project and `roles/secretmanager.secretAccessor` on the namespace's secrets. `GET
+  /v1/settings` names the store (`store`) and answers each store's own fields (`kms_key_name` and
+  `gcp_project` for GCP), the other store's omitted. `secrets.Store` is the one interface the
+  policy and the value release read through, with `secrets.AWS` and `secrets.GCP` behind it;
+  `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
+  `agent-secrets secret` manages both stores: against a GCP broker it reads and writes Secret
+  Manager itself under the person's own Application Default Credentials, refusing a service
+  account's.
 - `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
   `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
   dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the
@@ -369,6 +384,24 @@
   tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
+
+- An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
+  a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,
+  a loopback address (`127.0.0.0/8`, `::1`) or a name in the new `ENVOY_ALLOWED_HOSTS`
+  (comma-separated names or addresses, no port; an entry that is not a host name or an address,
+  such as one with a port, scheme or path, refuses startup naming it).
+  Any other `Host`, an empty one included, is answered 421 with a JSON error naming it, so a
+  DNS-rebinding page can no longer drive the bearer-free API through a loopback port or a forward
+  that reaches it. A listener that requires a bearer checks no `Host`. `/healthz`, `/metrics` and
+  the webhook routes are unaffected. An unauthenticated listener clients reach by another name (a
+  tailnet forward to it) must list that name in `ENVOY_ALLOWED_HOSTS`, or those clients get the 421.
+
+- The secrets broker's policy keeps a single-name reread against a lagging listing only when the
+  reread changed the live answer; a reread that confirms what the policy serves costs the next
+  reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret
+  from (a secret deleted and recreated under its name on AWS, or a move between stores) answers
+  `403 GRANT_NOT_LIVE` and is not reused, where it answered `404 SECRET_NOT_IN_STORE`; the session
+  asks again.
 
 - **Breaking:** every listener `/v1` request with a body must set `Content-Type: application/json`;
   parameters such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is

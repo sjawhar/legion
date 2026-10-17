@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test"
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { delimiter, join } from "node:path"
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract"
 import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport"
 import {
@@ -79,6 +82,70 @@ test("sends Envoy messages through the shared transport", async () => {
     recipient: "ses_receiver",
     confirmed: true,
   })
+})
+
+test("replies in a Slack thread with slack_post, with the token the broker grants", async () => {
+  // The broker's client on PATH, standing in for the exec form once LEGION_SLACK_BOT_TOKEN is
+  // granted, and a fake Slack Web API at SLACK_POST_API_URL.
+  const dir = mkdtempSync(join(tmpdir(), "claude-envoy-slack-"))
+  writeFileSync(
+    join(dir, "agent-secrets"),
+    '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nLEGION_SLACK_BOT_TOKEN=xoxb-granted exec "$@"\n',
+  )
+  chmodSync(join(dir, "agent-secrets"), 0o755)
+  const posts: unknown[] = []
+  const slack = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      posts.push({
+        authorization: request.headers.get("authorization"),
+        body: await request.json(),
+      })
+      return Response.json({ ok: true, channel: "C00000000", ts: "1700000000.000200" })
+    },
+  })
+  const previous = {
+    PATH: process.env["PATH"],
+    SLACK_POST_API_URL: process.env["SLACK_POST_API_URL"],
+  }
+  process.env["PATH"] = `${dir}${delimiter}${previous.PATH ?? ""}`
+  process.env["SLACK_POST_API_URL"] = `http://127.0.0.1:${slack.port}/api`
+  const runtime: ChannelToolRuntime = {
+    identity,
+    client: createEnvoyClient({
+      baseUrl: "http://envoy.test",
+      fetch: async () => Response.json({}),
+    }),
+    session: sessionWith([]),
+  }
+
+  try {
+    const result = await executeEnvoyTool(runtime, "slack_post", {
+      channel: "C00000000",
+      thread_ts: "1700000000.000100",
+      text: "Filed as ACME-12.",
+    })
+
+    expect(posts).toEqual([
+      {
+        authorization: "Bearer xoxb-granted",
+        body: { channel: "C00000000", thread_ts: "1700000000.000100", text: "Filed as ACME-12." },
+      },
+    ])
+    expect(result).toEqual({
+      channel: "C00000000",
+      thread_ts: "1700000000.000100",
+      ts: "1700000000.000200",
+    })
+  } finally {
+    slack.stop(true)
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test("a dispatch_* call is an unknown tool even with Dispatch configured, and reaches no Dispatch", async () => {

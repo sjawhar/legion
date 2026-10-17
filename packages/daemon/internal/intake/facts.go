@@ -287,6 +287,19 @@ type PullRequestClosed struct {
 
 func (PullRequestClosed) isFact() {}
 
+// MergeFailed is the merge queue taking issue's pull request Number out at Head, the head its
+// accepted READY named, because the merge failed (ghautomerge.MergeFailed), as the issue's
+// ready_merge outbox row read it from GitHub: never decoded from an event. Reason names the removal
+// and each failing run of the merge_group CI on the commit the queue built.
+type MergeFailed struct {
+	Issue  string
+	Number int
+	Head   string
+	Reason string
+}
+
+func (MergeFailed) isFact() {}
+
 // Push records a branch push. Nil ChangedPaths and Truncated preserve an omitted normalized field.
 type Push struct {
 	Repo   string

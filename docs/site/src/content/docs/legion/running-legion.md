@@ -142,7 +142,15 @@ What each part is for:
   changed path, so anchor one (`^migrations/versions/`) to mean a directory. A pull request whose
   change touches one is `READY` with a `MANUAL_MERGE_REQUIRED:` note: the merger does not auto-arm
   it, the packet the daemon tells starts with the note, and a person merges it under the
-  repository's rules.
+  repository's rules. Its optional `slack_channels` lists Slack channel ids (`C…` or `G…`) whose
+  mentions of the Legion Slack app reach the project's controller, which answers in the thread. It
+  needs `controller: daemon` and `runtime.kubernetes.agent_secrets`, and the loader refuses it
+  otherwise: the controller replies with the Slack bot token the secrets broker grants only to the
+  Legion daemon service's own pods
+  ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive-and-how-an-agent-replies) says how
+  the mentions arrive and where the controller's reply token is stored). A channel belongs to one
+  project: the loader refuses one named twice. A daemon restarted with a changed list relaunches the
+  controller, which resumes its session hearing the new list.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes

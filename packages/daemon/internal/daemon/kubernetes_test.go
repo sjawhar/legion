@@ -604,6 +604,15 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			},
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO",
 		},
+		{
+			// Every agent reads it, and the dispatch command turns Dispatch off over a value that is
+			// not a URL, so the daemon refuses it here rather than leave each agent to find out.
+			name: "a public Dispatch dashboard that is not a URL",
+			change: func(cfg *config.Config) {
+				cfg.Runtime.Kubernetes.Pod = config.PodConfig{Env: map[string]string{"DISPATCH_PUBLIC_URL": "dispatch.example.org"}}
+			},
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
@@ -760,6 +769,28 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	opts, _ = sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if opts.AgentSecrets != nil {
 		t.Fatalf("AgentSecrets = %+v without the block", opts.AgentSecrets)
+	}
+}
+
+// sandboxOptions hands the runtime the project's slack_channels, which it tells the controller it
+// launches as LEGION_SLACK_CHANNELS and compares with the list a running controller was launched
+// under (sandbox's address record), so a changed list relaunches it; no channel is no list.
+func TestSandboxOptionsCarryTheProjectsSlackChannels(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	project := cfg.Projects[cfg.Project]
+	project.SlackChannels = []string{"C00000000", "G00000001"}
+	cfg.Projects = map[string]config.Project{cfg.Project: project}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"C00000000", "G00000001"}; !slices.Equal(opts.ControllerSlackChannels, want) {
+		t.Fatalf("ControllerSlackChannels = %q, want %q", opts.ControllerSlackChannels, want)
+	}
+	project.SlackChannels = nil
+	cfg.Projects[cfg.Project] = project
+	if opts, _ = sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger()); len(opts.ControllerSlackChannels) != 0 {
+		t.Fatalf("ControllerSlackChannels = %q with no channel, want none", opts.ControllerSlackChannels)
 	}
 }
 

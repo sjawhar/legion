@@ -1,0 +1,177 @@
+#cloud-config
+bootcmd:
+  - test -c /dev/net/tun || modprobe tun
+  - mkdir -p /mnt/disks/data
+  - |-
+    d=/dev/disk/by-id/google-data
+    data_disk() {
+      blkid -p "$d" >/dev/null; s=$?
+      if [ "$s" -eq 2 ]; then
+        size=$(blockdev --getsize64 "$d") || { why="blkid finds no filesystem on it, and blockdev --getsize64 exited $?"; return 1; }
+        cmp -s -n "$size" /dev/zero "$d"; s=$?
+        if [ "$s" -eq 1 ]; then why="blkid finds no filesystem on it, and it does not read as zeros to its end"; return 1; fi
+        if [ "$s" -ne 0 ]; then why="blkid finds no filesystem on it, and cmp exited $s reading it"; return 1; fi
+        mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$d" || { why="mkfs.ext4 exited $?"; return 1; }
+      elif [ "$s" -ne 0 ]; then
+        why="blkid -p exited $s"; return 1
+      fi
+      fsck.ext4 -p "$d"; s=$?
+      if [ "$s" -ge 4 ]; then why="fsck.ext4 -p exited $s"; return 1; fi
+      mount -o discard,defaults "$d" /mnt/disks/data || { why="mount exited $?"; return 1; }
+    }
+    data_disk || echo "envoy-hub: data disk $d left unmounted: $why; see docs/nats-hub.md, \"Repairing the data disk\"" >&2
+  - mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale
+  - mkdir -p -m 0700 /run/envoy
+  - install -m 0600 /dev/null /run/envoy/tailnet-auth-key
+write_files:
+  - path: /etc/nats/nats-server.conf
+    permissions: "0644"
+    content: |
+      # Rendered by envoy-infra. Public keys only.
+      authorization {
+        users: [
+          # example-host-a
+          {"nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "permissions": {"publish": {"allow": ["notifications.agent.>", "notifications.dispatch.>", "notifications.github.>", "notifications.slack.>", "notifications.legion.>", "notifications.ghostwispr.>", "notifications.whatsapp.>", "notifications.envoy.exceptions.notifications.agent.>", "notifications.role.>", "notifications.envoy.exceptions.notifications.>", "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", "$JS.API.STREAM.CREATE.ENVOY_NOTIFICATIONS", "$JS.API.STREAM.UPDATE.ENVOY_NOTIFICATIONS", "$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.listener-example-host-a", "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.listener-example-host-a", "$JS.ACK.ENVOY_NOTIFICATIONS.listener-example-host-a.>", "$JS.API.INFO", "$JS.API.STREAM.INFO.KV_envoy_interests", "$JS.API.STREAM.CREATE.KV_envoy_interests", "$JS.API.DIRECT.GET.KV_envoy_interests.>", "$JS.API.STREAM.MSG.GET.KV_envoy_interests", "$KV.envoy_interests.>", "$JS.API.CONSUMER.CREATE.KV_envoy_interests.>", "$JS.API.CONSUMER.DELETE.KV_envoy_interests.>", "$JS.FC.KV_envoy_interests.>", "$JS.API.STREAM.INFO.KV_envoy_roles", "$JS.API.STREAM.CREATE.KV_envoy_roles", "$JS.API.DIRECT.GET.KV_envoy_roles.>", "$JS.API.STREAM.MSG.GET.KV_envoy_roles", "$KV.envoy_roles.>", "$JS.API.CONSUMER.CREATE.KV_envoy_roles.>", "$JS.API.CONSUMER.DELETE.KV_envoy_roles.>", "$JS.FC.KV_envoy_roles.>", "$JS.API.STREAM.INFO.KV_envoy_sessions", "$JS.API.STREAM.CREATE.KV_envoy_sessions", "$JS.API.DIRECT.GET.KV_envoy_sessions.>", "$JS.API.STREAM.MSG.GET.KV_envoy_sessions", "$KV.envoy_sessions.>", "$JS.API.CONSUMER.CREATE.KV_envoy_sessions.>", "$JS.API.CONSUMER.DELETE.KV_envoy_sessions.>", "$JS.FC.KV_envoy_sessions.>", "$JS.API.STREAM.INFO.KV_envoy_ci_state", "$JS.API.STREAM.CREATE.KV_envoy_ci_state", "$JS.API.DIRECT.GET.KV_envoy_ci_state.>", "$JS.API.STREAM.MSG.GET.KV_envoy_ci_state", "$KV.envoy_ci_state.>", "$JS.API.CONSUMER.CREATE.KV_envoy_ci_state.>", "$JS.API.CONSUMER.DELETE.KV_envoy_ci_state.>", "$JS.FC.KV_envoy_ci_state.>", "$JS.API.STREAM.PURGE.KV_envoy_interests", "_INBOX.>", "agentstream.*.frames"]}, "subscribe": {"allow": ["_INBOX.>", "notifications.role.> envoy-listener-example-host-a", "notifications.>", "agentstream.*.control"]}}}
+          # example-operator
+          {"nkey": "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG", "permissions": {"publish": {"allow": [">"]}, "subscribe": {"allow": [">"], "deny": ["$SYS.>"]}}}
+        ]
+      }
+  - path: /etc/envoy/fetch-secret
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # fetch-secret OUT SECRET writes the latest version of the Secret Manager secret SECRET, in this
+      # VM's project, to the file OUT, readable by root alone. It authenticates as the VM's service
+      # account, with a token from the metadata server, and tries six times, ten seconds apart: a new
+      # grant on the secret can take a while to reach Secret Manager.
+      # GCE_METADATA_HOST and SECRET_MANAGER_ENDPOINT replace the metadata server's host and Secret
+      # Manager's base URL. Nothing of the value or the token is printed or passed in a command's
+      # arguments.
+      set -u
+      out=$1
+      secret=$2
+      metadata=http://${GCE_METADATA_HOST:-metadata.google.internal}/computeMetadata/v1
+      endpoint=${SECRET_MANAGER_ENDPOINT:-https://secretmanager.googleapis.com}
+
+      fetch() {
+        project=$(curl -fsS --max-time 30 -H 'Metadata-Flavor: Google' "$metadata/project/project-id") || return 1
+        token=$(curl -fsS --max-time 30 -H 'Metadata-Flavor: Google' "$metadata/instance/service-accounts/default/token") || return 1
+        token=$(printf '%s' "$token" | jq -er .access_token) || return 1
+        response=$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+          curl -fsS --max-time 30 --config - "$endpoint/v1/projects/$project/secrets/$secret/versions/latest:access") || return 1
+        data=$(printf '%s' "$response" | jq -er .payload.data) || return 1
+        tmp=$(mktemp "$out.XXXXXX") || return 1
+        if printf '%s' "$data" | base64 -d >"$tmp" && [ -s "$tmp" ] && mv -f "$tmp" "$out"; then
+          return 0
+        fi
+        rm -f "$tmp"
+        echo "fetch-secret: the latest version of $secret is empty" >&2
+        return 1
+      }
+
+      attempt=1
+      until fetch; do
+        if [ "$attempt" -ge 6 ]; then
+          echo "fetch-secret: nothing fetched from $secret after $attempt attempts" >&2
+          exit 1
+        fi
+        attempt=$((attempt + 1))
+        sleep 10
+      done
+  - path: /etc/envoy/tailnet-joined
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # tailnet-joined MARKER KEY_FILE
+      set -u
+      marker=$1
+      key=$2
+      until docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null |
+        jq -e '.BackendState == "Running"' >/dev/null; do
+        sleep 5
+      done
+      : >"$key" && touch "$marker"
+  - path: /etc/tailscale-serve/serve.json
+    permissions: "0644"
+    content: |
+      {}
+  - path: /etc/systemd/system/fetch-tailnet-key.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Fetch the tailnet auth key from Secret Manager
+      Wants=network-online.target
+      After=network-online.target
+      ConditionPathExists=!/mnt/disks/data/tailnet-joined
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/etc/envoy/fetch-secret /run/envoy/tailnet-auth-key example-hub-tailnet-auth-key
+  - path: /etc/systemd/system/tailscaled.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Tailscale, which joins this hub to the tailnet
+      Requires=docker.service
+      Wants=network-online.target fetch-tailnet-key.service
+      After=docker.service network-online.target fetch-tailnet-key.service
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      ExecStart=/usr/bin/docker run --rm --name tailscaled --network host --cap-add NET_ADMIN --device /dev/net/tun -v /mnt/disks/data/tailscale:/var/lib/tailscale -v /run/envoy/tailnet-auth-key:/run/envoy/tailnet-auth-key:ro -v /etc/tailscale-serve:/etc/tailscale-serve:ro -e TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json -e TS_AUTHKEY=file:/run/envoy/tailnet-auth-key -e TS_AUTH_ONCE=true -e TS_STATE_DIR=/var/lib/tailscale -e TS_USERSPACE=false -e TS_HOSTNAME=example-hub -e TS_EXTRA_ARGS=--advertise-tags=tag:example-host example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+      Restart=always
+      RestartSec=10
+  - path: /etc/systemd/system/tailnet-joined.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Mark this hub joined to the tailnet once Tailscale runs, and drop the tailnet auth key
+      After=tailscaled.service
+      ConditionPathExists=!/mnt/disks/data/tailnet-joined
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      ExecStart=/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key
+      Restart=on-failure
+      RestartSec=10
+  - path: /etc/systemd/system/nats-firewall.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Open the host firewall to Google's health checks on NATS's monitoring port, and to the tailnet on its client port
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/bin/sh -c '/sbin/iptables -w -C INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT || /sbin/iptables -w -A INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT'
+      ExecStart=/bin/sh -c '/sbin/iptables -w -C INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT || /sbin/iptables -w -A INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT'
+  - path: /etc/systemd/system/nats.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=NATS with JetStream
+      Requires=docker.service
+      Wants=network-online.target nats-firewall.service
+      After=docker.service network-online.target nats-firewall.service
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      ExecStart=/usr/bin/docker run --rm --name nats --network host -v /mnt/disks/data/nats:/data -v /etc/nats/nats-server.conf:/etc/nats/nats-server.conf:ro example.invalid/nats@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef -c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name example-hub
+      ExecStop=/usr/bin/docker stop -t 30 nats
+      Restart=always
+      RestartSec=10
+runcmd:
+  - systemctl daemon-reload
+  - systemctl start fetch-tailnet-key.service
+  - systemctl start tailscaled.service
+  - systemctl start tailnet-joined.service
+  - systemctl start nats-firewall.service
+  - systemctl start nats.service

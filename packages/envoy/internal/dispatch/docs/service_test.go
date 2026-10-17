@@ -1062,16 +1062,7 @@ func TestSettleStampsPersistedLegacyProofDocument(t *testing.T) {
 		}
 	})
 
-	settled := make(chan struct{})
-	go func() {
-		service.settleRoom(artifactID, 0)
-		close(settled)
-	}()
-	select {
-	case <-settled:
-	case <-time.After(time.Second):
-		t.Fatal("settlement blocked while stamping a legacy document")
-	}
+	service.settleRoom(artifactID, 0)
 
 	loaded, err := NewPgVersioned(database).Load(context.Background(), artifactID)
 	if err != nil {

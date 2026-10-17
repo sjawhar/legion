@@ -4,11 +4,25 @@
 
 ### Changed
 
+- `dispatch read`'s issue summary names the issue's page (`Link:`), on `DISPATCH_PUBLIC_URL` when
+  it is set, so an agent asked about an issue repeats a link rather than building one.
+- `slack_post` refuses a reply linking an address inside the cluster before it asks the broker
+  anything, naming it: a Service name (`.svc`, a custom cluster domain after `.svc.`,
+  `.cluster.local`, a single label in a URL), a private, loopback or link-local IP address (an
+  IPv4-mapped one included), or, while `DISPATCH_PUBLIC_URL` names another host,
+  `DISPATCH_URL`'s host. An http(s) URL, Slack's `<url|text>` form included, is read as a browser
+  reads it; text with no scheme is judged as written, where an address is only a four-octet dotted
+  quad or a bracketed IPv6 literal and a single label only `DISPATCH_URL`'s before a port, so a
+  decimal, a version, `dispatch://ACME-12` and the word "Dispatch" are prose.
+- `dispatch issue`'s `Created` line names the assignee Dispatch answered (`; assigned to <email>`
+  or `; unassigned`): Dispatch picks one when the call names none, so an agent reports it rather
+  than assuming.
+- `dispatch issue`'s `Created <KEY>: <title>` line names the new issue's dashboard link
+  (`→ <Dispatch URL>/issues/<KEY>`), so an agent can hand a person the issue it filed.
 - `subscribe` sends `host` (`machineID()`: `ENVOY_MACHINE_ID`, falling back to the kernel
   hostname) on every call, including the registration heartbeat's re-subscribe: where the
   session process actually runs, which the listener now stores separately from the registering
   listener's own `machine_id`. `SessionInfo` and `RoleInfo` gain an optional `host`.
-
 - Every text that says when to request approval again states the carried approval (LEGION-573):
   a human's own answer to a decision block carries their approval to the version it writes when
   that answer is the whole change since the version they approved, so nothing is requested for
@@ -100,6 +114,19 @@
 
 ### Added
 
+- `DISPATCH_PUBLIC_URL`, Dispatch's dashboard as people open it (sjawhar/legion#1998): every link
+  the `dispatch` command prints is resolved against it when it is set, so an agent that reaches
+  Dispatch at an in-cluster address prints links people can open, and a pasted dashboard link on
+  either address resolves. One that is not an http or https URL turns Dispatch off, naming it.
+- `slack_post` joins `envoyToolSpecs` after the ten `envoy_*` tools (`channel`, `thread_ts`,
+  `text` at most `SLACK_POST_TEXT_MAX`), and `postSlackReply` (`@legion/envoy-client/slack-post`)
+  posts it with Slack's `chat.postMessage` (sjawhar/legion#1998). The bot token is the secrets
+  broker's agent secret `LEGION_SLACK_BOT_TOKEN`, released through the broker's exec form,
+  `agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- bun -e <poster>`, so it is in the
+  environment of the process that posts and never the session's. A request waiting for approval,
+  a denial or any other broker refusal posts nothing and names the state; a post is sent once and
+  never retried, since a post whose answer was lost may already be in the thread.
+  `SLACK_POST_API_URL` (https, or http on a loopback host) moves the Web API for a stand-in.
 - `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
   else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a script, harness `command`, tries
   `ENVOY_CONFIG_FILE` and then each harness's directory first, Claude Code's only under

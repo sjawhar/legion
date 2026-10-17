@@ -147,8 +147,9 @@ export interface ExecuteDispatchToolInput {
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
-  /** The resolved Dispatch (`activeDispatchSettings`): the server and the bearer it takes. */
-  readonly config: Pick<ActiveDispatchConfig, "url" | "token">;
+  /** The resolved Dispatch (`activeDispatchSettings`): the server, the bearer it takes, and the
+   *  public dashboard its printed links point at when there is one. */
+  readonly config: Pick<ActiveDispatchConfig, "url" | "token" | "publicUrl">;
   /** Host cancellation for the currently executing tool call. */
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
@@ -874,7 +875,8 @@ interface OwnerResolution {
 /**
  * Fills the owner (issue or project) from the arguments, the ref, or LEGION_ISSUE, pushing
  * every defect onto `problems` and continuing so the caller reports them all at once.
- * A `ref` given as a dashboard URL on `serverUrl` is rewritten to its dispatch:// form.
+ * A `ref` given as a dashboard URL on any of `dashboardUrls` (the API's own address, then the
+ * public dashboard when there is one) is rewritten to its dispatch:// form.
  */
 async function resolveOwnerArguments(
   tool: string,
@@ -882,7 +884,7 @@ async function resolveOwnerArguments(
   cwd: string,
   env: ExecutorEnvironment,
   exec: ExecFn,
-  serverUrl: string,
+  dashboardUrls: readonly string[],
   problems: string[]
 ): Promise<OwnerResolution> {
   if (issueFreeTools[tool] === true) return { args: input, ref: null, owner: null };
@@ -890,7 +892,10 @@ async function resolveOwnerArguments(
   let ref: ParsedDispatchRef | null = null;
   let args = input;
   if (typeof refArgument === "string") {
-    const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
+    const refText =
+      dashboardUrls
+        .map((dashboard) => dispatchRefFromUrl(refArgument, dashboard))
+        .find((ref) => ref !== undefined) ?? refArgument;
     if (refText !== refArgument) args = { ...input, ref: refText };
     const agentArtifact = parseAgentArtifactRef(refText);
     if (agentArtifact !== null) {
@@ -1335,6 +1340,7 @@ function issueSummary(
   events: readonly Event[],
   references: IssueReferences | string,
   graph: readonly string[],
+  linkBase: string,
   titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
@@ -1350,6 +1356,9 @@ function issueSummary(
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
+    // The issue's page, on the dashboard people open (DISPATCH_PUBLIC_URL when set), so an agent
+    // asked about the issue repeats a link rather than building one.
+    `Link: ${new URL(`/issues/${encodeURIComponent(issue.key)}`, linkBase).toString()}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
     `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
@@ -2108,6 +2117,10 @@ export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
   const { url: configUrl, token: configToken } = input.config;
+  // Every link the command prints is to Dispatch's dashboard as people open it: the public URL when
+  // the session has one (a pod reaches Dispatch at an in-cluster address nobody else can open), and
+  // the API's URL otherwise.
+  const linkBase = input.config.publicUrl ?? configUrl;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(
     async (...args: Parameters<typeof fetch>): Promise<Response> => {
@@ -2137,7 +2150,7 @@ export async function executeDispatchTool(
     input.cwd,
     env,
     exec,
-    configUrl,
+    input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl],
     problems
   );
   // Every owner-missing exit (no issue, bad LEGION_ISSUE, no repo in cwd) leaves owner null;
@@ -2179,12 +2192,12 @@ export async function executeDispatchTool(
     const project = optionalString(ownerArguments.args, "project");
     if (project !== undefined) {
       const response = await client.openAsksForProject(project);
-      return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
+      return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
     }
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
-    return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
+    return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -2299,11 +2312,20 @@ export async function executeDispatchTool(
             isPrimarySpec: spec !== undefined,
           }),
           ...(componentGuidance === undefined ? [] : [componentGuidance]),
-          ...renderSuggestions(created.advice?.suggestions, configUrl),
+          ...renderSuggestions(created.advice?.suggestions, linkBase),
         ];
+        const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
+        // Dispatch picks the assignee when the call names none (the creating person, the personal
+        // token's owner, or the parent's), so the line says whom it answered.
+        const assigned =
+          created.assignee === undefined
+            ? ""
+            : created.assignee === null
+              ? "; unassigned"
+              : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} → ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -2320,7 +2342,7 @@ export async function executeDispatchTool(
           text: [
             `Not created: "${title}" looks like a duplicate.`,
             ...candidates.map((candidate) => {
-              const href = new URL(candidate.href, configUrl).toString();
+              const href = new URL(candidate.href, linkBase).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
             }),
             "Reference the existing issue, or run dispatch issue again with --force after reading it.",
@@ -2517,7 +2539,7 @@ export async function executeDispatchTool(
         ...(limit === undefined ? {} : { limit }),
         ...(offset === undefined ? {} : { offset }),
       });
-      return searchAnswer(search, query, offset, configUrl);
+      return searchAnswer(search, query, offset, linkBase);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -2611,7 +2633,7 @@ export async function executeDispatchTool(
         // both by code.
         throw refusalWithCode(error);
       }
-      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, linkBase).toString();
       return {
         text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
         details: { project: project.key, name: project.name, created_at: project.created_at },
@@ -2733,7 +2755,7 @@ export async function executeDispatchTool(
             : documentTopic(resolved.artifact);
       const adviceLines = [
         ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
-        ...renderSuggestions(ask.advice?.suggestions, configUrl),
+        ...renderSuggestions(ask.advice?.suggestions, linkBase),
       ];
       return {
         text: [
@@ -3413,6 +3435,7 @@ export async function executeDispatchTool(
           read.events,
           references,
           [...pictures.lines, ...graph],
+          linkBase,
           titles
         ),
         details: { issue: read.issue.key },

@@ -170,6 +170,7 @@ const environmentKeys = [
   "LEGION_ISSUE",
   "LEGION_WORKSPACE",
   "LEGION_STATE_DIR",
+  "LEGION_SLACK_CHANNELS",
   "HOME",
   "DISPATCH_URL",
   "DISPATCH_TOKEN",
@@ -306,6 +307,8 @@ function createPi(
     nullable: property,
     describe: property,
     int: property,
+    min: property,
+    max: property,
   });
   const optional = property;
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
@@ -865,7 +868,12 @@ describe("Legion OMP extension", () => {
     const foreignInterface = (version: number, from: string): EnvoyPluginInterface => ({
       version,
       publishers: [from],
-      roleClaim: { instances: [], managedSessions: new Set(), regained: undefined },
+      roleClaim: {
+        instances: [],
+        managedSessions: new Set(),
+        regained: undefined,
+        slackRoleOwned: false,
+      },
       injectedUserTurns: new Map(),
       bootstrappedSession: { file: undefined },
     });
@@ -2210,6 +2218,27 @@ describe("Legion OMP extension", () => {
   });
 });
 
+/** What `launchedController` hands a test: the controller's fixture and its daemon and Envoy. */
+interface LaunchedController {
+  readonly token: string;
+  readonly registration: Record<string, unknown>;
+  /** The 0700 secrets directory the controller's capability file sits in. */
+  readonly secretsDir: string;
+  readonly requests: DaemonRequest[];
+  readonly sentUserMessages: string[];
+  readonly exits: number[];
+  readonly tools: RegisteredTool[];
+  readonly commands: RegisteredCommand[];
+  readonly title: HostTitle;
+  readonly handlers: Map<string, Handler>;
+  readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
+  /** The listener lost the role's claim: its role read names no holder until the next claim. */
+  readonly listener: { lost: boolean };
+  readonly holder: () => string;
+  /** Settles at the next soft claim the listener grants after the call. */
+  readonly nextSoftClaim: () => Promise<void>;
+}
+
 /** The session `legion controller start` launches against the daemon: the `LEGION_CONTROLLER`
  * marker, and the controller capability as a 0600 file behind `LEGION_CONTROLLER_SECRET_FILE`
  * (`packages/daemon/cmd/legion/controller.go`). The stub answers the claim registration with
@@ -2239,25 +2268,7 @@ async function launchedController(options: {
   /** The Go-written state document the daemon's `GET /legion/v1/state` answers with, its project
    * replaced by `daemonProject`: `state.json` unless a test names another. */
   readonly stateFixture?: string;
-}): Promise<{
-  readonly token: string;
-  readonly registration: Record<string, unknown>;
-  /** The 0700 secrets directory the controller's capability file sits in. */
-  readonly secretsDir: string;
-  readonly requests: DaemonRequest[];
-  readonly sentUserMessages: string[];
-  readonly exits: number[];
-  readonly tools: RegisteredTool[];
-  readonly commands: RegisteredCommand[];
-  readonly title: HostTitle;
-  readonly handlers: Map<string, Handler>;
-  readonly context: (sessionId: string, sessionFile?: string) => SessionContext;
-  /** The listener lost the role's claim: its role read names no holder until the next claim. */
-  readonly listener: { lost: boolean };
-  readonly holder: () => string;
-  /** Settles at the next soft claim the listener grants after the call. */
-  readonly nextSoftClaim: () => Promise<void>;
-}> {
+}): Promise<LaunchedController> {
   const project = options.project ?? "omp";
   const token = `legion-${project}-controller`;
   const registration = {
@@ -2599,6 +2610,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
     delete process.env.LEGION_CONTROLLER_START_MESSAGE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    // The daemon always names its controller's Slack channels; this project has none.
+    process.env.LEGION_SLACK_CHANNELS = "";
     try {
       await controller.handlers.get("session_start")?.(
         {},
@@ -2646,6 +2659,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await writeFile(bootFile, "stale-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    process.env.LEGION_SLACK_CHANNELS = "";
     try {
       // The test's exit hook throws in place of exiting; the throw ends the handler.
       await controller.handlers.get("session_start")?.(
@@ -3001,6 +3015,260 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       "notifications.agent.ses_controller_first"
     );
     expect(resumedConnections.flatMap((connection) => connection.subjects)).not.toContain(topic);
+  });
+
+  // The daemon tells the controller it launches the project's Slack channels as
+  // LEGION_SLACK_CHANNELS, always set, empty for none. That session subscribes to each channel's
+  // mention topic for as long as it holds the controller role and registers none with the listener,
+  // and a resume drops any Slack topic an earlier session registered for a channel the list does
+  // not name before it restores the rest. So a resumed controller hears the list it is launched
+  // with and no other: a channel taken off the project, or given to another project's controller,
+  // is not heard here again. Any other controller hears no Slack channel at all, whatever it
+  // inherited: only the daemon's can reply in Slack.
+  describe("the project's Slack channels", () => {
+    const mention = (channel: string) => `notifications.slack.*.${channel}.mention`;
+    const slackSubjects = (connections: typeof natsConnections) =>
+      connections.flatMap((connection) =>
+        connection.subjects.filter(
+          (subject) =>
+            subject.startsWith("notifications.slack.") && !connection.unsubscribed.includes(subject)
+        )
+      );
+    const registeredSlack = (requests: DaemonRequest[]) =>
+      requests.filter(
+        (request) =>
+          request.path === "/v1/interests/subscribe" &&
+          JSON.stringify(request.body).includes("notifications.slack.")
+      );
+    /** The controller the daemon launched: its boot token in place of the operator's capability,
+     * no start message, and `channels` as the daemon names them. The environment is set before
+     * the extensions load, as a pod's is. */
+    const daemonController = async (sessionId: string, channels: string | undefined) => {
+      const secrets = await mkdtemp(path.join(os.tmpdir(), "legion-controller-boot-"));
+      temporaryPaths.push(secrets);
+      const bootFile = path.join(secrets, "LEGION_BOOT_TOKEN");
+      await writeFile(bootFile, "launch-boot-token\n", { mode: 0o600 });
+      process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+      if (channels === undefined) delete process.env.LEGION_SLACK_CHANNELS;
+      else process.env.LEGION_SLACK_CHANNELS = channels;
+      const controller = await launchedController({
+        sessionId,
+        stateFixture: "state-controller-claim.json",
+      });
+      delete process.env.LEGION_CONTROLLER_SECRET_FILE;
+      delete process.env.LEGION_CONTROLLER_START_MESSAGE;
+      return controller;
+    };
+    /** A new Oh My Pi process resuming `sessionId`, whose transcript records the role claim, under
+     * the channels its launch names. */
+    const resume = async (first: LaunchedController, sessionId: string, channels: string) => {
+      envoyPluginInterface().bootstrappedSession.file = undefined;
+      process.env.LEGION_SLACK_CHANNELS = channels;
+      const resumed = createPi();
+      legionExtension(resumed.pi);
+      const context = first.context(sessionId);
+      await resumed.handlers.get("session_start")?.(
+        {},
+        {
+          ...context,
+          sessionManager: {
+            ...context.sessionManager,
+            getBranch: () => [
+              { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+            ],
+          },
+        }
+      );
+      return resumed;
+    };
+
+    test("the daemon's controller subscribes to each channel's mentions while it holds its role, and registers none", async () => {
+      const before = natsConnections.length;
+      const controller = await daemonController("ses_controller_slack", "C00000000,G00000001");
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_slack")
+      );
+
+      expect(controller.exits).toEqual([]);
+      expect(slackSubjects(natsConnections.slice(before))).toEqual([
+        mention("C00000000"),
+        mention("G00000001"),
+      ]);
+      expect(registeredSlack(controller.requests)).toEqual([]);
+    });
+
+    test("a resumed controller takes the list it is launched with: a removed channel, and every channel of an emptied list, are no longer heard", async () => {
+      const first = await daemonController("ses_controller_slack_resume", "C00000000,G00000001");
+      await first.handlers.get("session_start")?.({}, first.context("ses_controller_slack_resume"));
+
+      for (const [channels, want] of [
+        ["G00000001", [mention("G00000001")]],
+        ["", []],
+      ] as const) {
+        const before = natsConnections.length;
+        await resume(first, "ses_controller_slack_resume", channels);
+        expect(slackSubjects(natsConnections.slice(before))).toEqual([...want]);
+      }
+      expect(registeredSlack(first.requests)).toEqual([]);
+    });
+
+    // A Slack topic subscribed by hand is registered with the listener, which restores it at every
+    // resume. The resumed controller drops one whose channel its list does not name before it
+    // restores anything, so it is never delivered; the session's other interests come back.
+    test("a resume unregisters a Slack topic an earlier session subscribed to by hand for a channel its list does not name, and never hears it", async () => {
+      const old = mention("COLD00001");
+      const kept = "notifications.dispatch.issue.LEGION-1.>";
+      const first = await daemonController("ses_controller_slack_old", "");
+      await first.handlers.get("session_start")?.({}, first.context("ses_controller_slack_old"));
+      const subscribe = first.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribe === undefined) throw new Error("envoy_subscribe was not registered");
+      await subscribe.execute(
+        "subscribe-by-hand",
+        { topics: [old, kept] },
+        undefined,
+        undefined,
+        first.context("ses_controller_slack_old")
+      );
+      expect(registeredSlack(first.requests)).toHaveLength(1);
+
+      const before = natsConnections.length;
+      const requestsBefore = first.requests.length;
+      await resume(first, "ses_controller_slack_old", "");
+
+      const resumedSubjects = natsConnections
+        .slice(before)
+        .flatMap((connection) => connection.subjects);
+      expect(resumedSubjects).not.toContain(old);
+      expect(resumedSubjects).toContain(kept);
+      const unsubscribed = first.requests
+        .slice(requestsBefore)
+        .filter((request) => request.path === "/v1/interests/unsubscribe");
+      expect(unsubscribed).toEqual([
+        {
+          path: "/v1/interests/unsubscribe",
+          body: { session_id: "ses_controller_slack_old", topics: [old] },
+        },
+      ]);
+    });
+
+    // A Slack topic the listener restores is a plain subscription, which outlives the controller
+    // role, so a resumed controller drops every one, a listed channel's team-qualified topic
+    // included, and hears its channels only through the subscriptions its role owns: once another
+    // session takes the role, no Slack subscription of the old session stays open.
+    test("a resume drops a listed channel's persisted Slack interest too, so losing the role leaves no Slack subscription", async () => {
+      const persisted = "notifications.slack.T00000000.C00000000.mention";
+      const first = await daemonController("ses_controller_slack_owned", "");
+      await first.handlers.get("session_start")?.({}, first.context("ses_controller_slack_owned"));
+      const subscribe = first.tools.find((tool) => tool.name === "envoy_subscribe");
+      if (subscribe === undefined) throw new Error("envoy_subscribe was not registered");
+      await subscribe.execute(
+        "subscribe-by-hand",
+        { topics: [persisted] },
+        undefined,
+        undefined,
+        first.context("ses_controller_slack_owned")
+      );
+
+      envoyPluginInterface().bootstrappedSession.file = undefined;
+      process.env.LEGION_SLACK_CHANNELS = "C00000000";
+      const requestsBefore = first.requests.length;
+      const before = natsConnections.length;
+      const ticks: (() => void)[] = [];
+      const refused = Promise.withResolvers<void>();
+      const resumed = createPi();
+      legionExtension(resumed.pi);
+      const context = first.context("ses_controller_slack_owned");
+      await resumed.handlers.get("session_start")?.(
+        {},
+        {
+          ...context,
+          setInterval: (callback) => ticks.push(callback),
+          ui: {
+            notify: (message) => {
+              if (message.includes("this session no longer holds it")) refused.resolve();
+            },
+          },
+          sessionManager: {
+            ...context.sessionManager,
+            getBranch: () => [
+              { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+            ],
+          },
+        }
+      );
+      // The resumed process's own connections, not the first process's, which a test keeps open.
+      const owned = natsConnections
+        .slice(before)
+        .filter((connection) => connection.name === "omp-ses_controller_slack_owned");
+      expect(slackSubjects(owned)).toEqual([mention("C00000000")]);
+      expect(
+        first.requests
+          .slice(requestsBefore)
+          .filter((request) => request.path === "/v1/interests/unsubscribe")
+      ).toEqual([
+        {
+          path: "/v1/interests/unsubscribe",
+          body: { session_id: "ses_controller_slack_owned", topics: [persisted] },
+        },
+      ]);
+
+      envoyPluginInterface().bootstrappedSession.file = undefined;
+      const second = createPi();
+      legionExtension(second.pi);
+      await second.handlers.get("session_start")?.({}, first.context("ses_controller_slack_other"));
+      for (const tick of ticks) tick();
+      await refused.promise;
+
+      expect(slackSubjects(owned)).toEqual([]);
+    });
+
+    test("an operator's controller hears no Slack channel, whatever LEGION_SLACK_CHANNELS it inherited", async () => {
+      process.env.LEGION_SLACK_CHANNELS = "C00000001";
+      const before = natsConnections.length;
+      const controller = await launchedController({ sessionId: "ses_controller_operator_slack" });
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_operator_slack")
+      );
+
+      expect(controller.exits).toEqual([]);
+      expect(slackSubjects(natsConnections.slice(before))).toEqual([]);
+    });
+
+    for (const [name, channels, why] of [
+      [
+        "without the variable",
+        undefined,
+        "LEGION_SLACK_CHANNELS is required for the controller the daemon launches",
+      ],
+      [
+        "with an entry that is not a channel id",
+        "C00000000,general",
+        'LEGION_SLACK_CHANNELS entry "general" is not a Slack channel id (C or G, then capital letters and digits)',
+      ],
+    ] as const) {
+      test(`the daemon's controller ${name} refuses its claim and exits`, async () => {
+        const controller = await daemonController("ses_controller_slack_bad", channels);
+        const errors = spyOn(console, "error").mockImplementation(() => undefined);
+        try {
+          // The test's exit hook throws in place of exiting; the throw ends the handler.
+          await Promise.resolve(
+            controller.handlers.get("session_start")?.(
+              {},
+              controller.context("ses_controller_slack_bad")
+            )
+          ).catch(() => undefined);
+          expect(errors.mock.calls.flat().join("\n")).toContain(why);
+        } finally {
+          errors.mockRestore();
+        }
+        expect(controller.exits).toEqual([1]);
+        expect(controller.requests.map((request) => request.path)).not.toContain(
+          "/legion/v1/claims/register"
+        );
+      });
+    }
   });
 
   test("a controller whose role ends while its topic subscription is opening does not keep it", async () => {

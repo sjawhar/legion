@@ -41,6 +41,22 @@ closed: reported for a person to close or decide).
 
 Do not label child issues: a child runs under its tree once the root is admitted.
 
+## Ask Legion in Slack
+
+In a Slack channel your operator connected to the project, mention the Legion app (`@Legion`) and
+the project's controller answers in that thread:
+
+- A question about what Legion is doing ("what are you working on?", "where is ACME-12?") is
+  answered from the daemon's state and Dispatch.
+- A request for work is filed as a Dispatch issue in the project, and the reply names it with its
+  link. The issue carries the `legion` label, so Legion takes it, only when you ask Legion to do the
+  work; otherwise it waits for a person to hand it over.
+- A question an issue's architect owns is passed to that architect, and the reply says so; its
+  answer comes on the issue.
+
+The controller answers only the channels the operator listed, and not while it is stopped: a
+mention made then gets no reply, so ask again once it runs.
+
 ## Answer the questions and approve the spec
 
 Shortly after admission the architect claims the issue (the issue shows **Claimed by** Legion's

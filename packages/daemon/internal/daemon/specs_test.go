@@ -159,6 +159,42 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	}
 }
 
+// The daemon's controller is told the project's Slack channels after its design gate policy, as the
+// list its skill answers mentions from; a project with no channel gets no prompt line. Its
+// environment's LEGION_SLACK_CHANNELS is the runtime's to set (sandbox.Options.ControllerSlackChannels),
+// never the spec's, which the runtime would refuse.
+func TestTheControllersLaunchNamesTheProjectsSlackChannels(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	launch := func(channels []string) runtime.SpawnSpec {
+		t.Helper()
+		s := specs{
+			stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateRootIssues,
+			slackChannels: channels,
+		}
+		spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+		if err != nil {
+			t.Fatalf("SpawnSpec: %v", err)
+		}
+		return spec
+	}
+	spec := launch([]string{"C00000000", "G00000001"})
+	if _, set := spec.Env["LEGION_SLACK_CHANNELS"]; set {
+		t.Errorf("the spec sets LEGION_SLACK_CHANNELS (%v), the runtime's variable", spec.Env)
+	}
+	want := "Design gate policy: `gates.design: root-issues`. Slack channels: `C00000000`, `G00000001`: " +
+		"your session hears each one's app mentions while it holds the controller role; answer each in its thread, " +
+		"and nothing from any other channel (skill://legion-controller/references/slack-mentions.md)."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
+	}
+	if none := launch(nil); none.Prompt.Addressing != DesignGateFragment(config.DesignGateRootIssues) {
+		t.Errorf("with no channel: addressing %q, want the design gate policy alone", none.Prompt.Addressing)
+	}
+}
+
 // A launch on the project's repository names that repository's default branch as GitHub names it,
 // which each runtime provisions the issue's workspace at; a read that fails refuses the launch,
 // naming the repository, and a daemon with no repository asks for none.

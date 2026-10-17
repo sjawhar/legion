@@ -20,6 +20,17 @@ type User struct {
 	Publish   *Rules `json:"publish"`   // required with NKey, refused without
 	Subscribe *Rules `json:"subscribe"` // required with NKey, refused without
 	HasSeed   bool   `json:"hasSeed"`   // the consumer stores a seed for this user
+	// Label, when set, is how a refusal names the user in place of users[<index>]: the input it
+	// came from, for a user a component adds itself. It is never rendered.
+	Label string `json:"-"`
+}
+
+// label is how a refusal names the user at index i of an authorization's users.
+func (u User) label(i int) string {
+	if u.Label != "" {
+		return u.Label
+	}
+	return fmt.Sprintf("users[%d]", i)
 }
 
 // Rules are one direction's permissions. Each entry is a subject pattern; a subscribe entry may
@@ -60,7 +71,7 @@ func (a Authorization) Validate() error {
 	keyed := 0
 	for i, u := range a.Users {
 		if err := u.validate(); err != nil {
-			return fmt.Errorf("users[%d] %q: %w", i, u.Name, err)
+			return fmt.Errorf("%s %q: %w", u.label(i), u.Name, err)
 		}
 		if u.NKey != "" {
 			keyed++
@@ -72,10 +83,10 @@ func (a Authorization) Validate() error {
 	for i, u := range a.Users {
 		for j := range i {
 			if a.Users[j].Name == u.Name {
-				return fmt.Errorf("users[%d] %q: name repeats users[%d]", i, u.Name, j)
+				return fmt.Errorf("%s %q: name repeats %s", u.label(i), u.Name, a.Users[j].label(j))
 			}
 			if u.NKey != "" && a.Users[j].NKey == u.NKey {
-				return fmt.Errorf("users[%d] %q: nkey repeats users[%d] %q", i, u.Name, j, a.Users[j].Name)
+				return fmt.Errorf("%s %q: nkey repeats %s %q", u.label(i), u.Name, a.Users[j].label(j), a.Users[j].Name)
 			}
 		}
 	}
@@ -109,7 +120,7 @@ func (a Authorization) user(name string) (User, bool) {
 func (a Authorization) seedField() string {
 	for i, u := range a.Users {
 		if bus.HoldsSeed(u.Name) {
-			return fmt.Sprintf("users[%d]: name", i)
+			return u.label(i) + ": name"
 		}
 	}
 	for i, u := range a.Users {
@@ -125,7 +136,7 @@ func (a Authorization) seedField() string {
 				entries []string
 			}{{d.field + ".allow", d.rules.Allow}, {d.field + ".deny", d.rules.Deny}} {
 				if j := slices.IndexFunc(list.entries, bus.HoldsSeed); j >= 0 {
-					return fmt.Sprintf("users[%d] %q: %s[%d]", i, u.Name, list.field, j)
+					return fmt.Sprintf("%s %q: %s[%d]", u.label(i), u.Name, list.field, j)
 				}
 			}
 		}
