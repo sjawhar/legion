@@ -135,7 +135,7 @@ func (v vm) document() cloudConfig {
 // a filesystem whose first MiB or primary superblock was zeroed, which still holds its files'
 // blocks for mkfs.ext4's discard to destroy (a damaged superblock alone, e2fsck repairs from a
 // backup). The entry then prints one line naming the device and the reason and nothing the disk
-// holds, at every boot that refuses it; an unmounted disk keeps both containers down, since their
+// holds, at every boot that refuses it; an unmounted disk keeps every container down, since their
 // units refuse to start without it.
 const dataDiskEntry = `d=` + dataDevice + `
 data_disk() {
@@ -245,7 +245,7 @@ done
 // is refused, since each further line would be another variable of the listener's environment.
 const seedEnvScript = `#!/bin/sh
 # listener-seed-env ENV_FILE SECRET writes the latest version of the Secret Manager secret SECRET,
-# an nkey seed, to ENV_FILE as the one line NATS_NKEY_SEED=<seed>, readable by root alone. It
+# an nkey seed, to ENV_FILE as the one line ` + core.EnvNATSSeed + `=<seed>, readable by root alone. It
 # fetches with the fetch-secret beside it, and so retries as that does. Nothing of the seed is
 # printed or passed in a command's arguments.
 set -u
@@ -264,7 +264,7 @@ case $seed in
   ;;
 esac
 tmp=$(mktemp "$env_file.XXXXXX") || exit 1
-if printf 'NATS_NKEY_SEED=%s\n' "$seed" >"$tmp" && mv -f "$tmp" "$env_file"; then
+if printf '` + core.EnvNATSSeed + `=%s\n' "$seed" >"$tmp" && mv -f "$tmp" "$env_file"; then
   exit 0
 fi
 rm -f "$tmp"
@@ -356,17 +356,15 @@ func (v vm) tailscaledUnit() string {
 		"--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
 		"-v", dataMount + "/tailscale:/var/lib/tailscale",
 		"-v", keyPath + ":" + keyPath + ":ro",
-	}
-	run = append(run, "-v", serveDir+":"+serveDir+":ro", "-e", "TS_SERVE_CONFIG="+servePath)
-	run = append(run,
-		"-e", "TS_AUTHKEY=file:"+keyPath,
+		"-v", serveDir + ":" + serveDir + ":ro", "-e", "TS_SERVE_CONFIG=" + servePath,
+		"-e", "TS_AUTHKEY=file:" + keyPath,
 		"-e", "TS_AUTH_ONCE=true",
 		"-e", "TS_STATE_DIR=/var/lib/tailscale",
 		"-e", "TS_USERSPACE=false",
-		"-e", "TS_HOSTNAME="+v.hostname,
-		"-e", "TS_EXTRA_ARGS=--advertise-tags="+strings.Join(v.tags, ","),
+		"-e", "TS_HOSTNAME=" + v.hostname,
+		"-e", "TS_EXTRA_ARGS=--advertise-tags=" + strings.Join(v.tags, ","),
 		v.tailscaleImage,
-	)
+	}
 	return containerUnit("Tailscale, which joins this hub to the tailnet", fetchKeyService, "tailscaled", run)
 }
 

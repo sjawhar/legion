@@ -238,15 +238,13 @@ under `/bin/sh` against `httptest` fakes of the metadata server and Secret Manag
 stub first on its `PATH` that records each wait (`gcp/fetch_key_test.go`, which needs `curl`,
 `jq`, `base64` and `mktemp` on this machine and fails, never skips, without one), the listener's
 seed script with the fetcher beside it against the same fakes (`gcp/listener_seed_env_test.go`),
-the joined script
-under `/bin/sh` with `docker` and `sleep` stubbed (`gcp/tailnet_joined_test.go`, which needs
+the joined script under `/bin/sh` with `docker` and `sleep` stubbed (`gcp/tailnet_joined_test.go`, which needs
 `jq`), the data disk's entry under `/bin/sh` against zeroed, ext4, zeroed-first-MiB, last-MiB,
 damaged-superblock and missing disk images, and twice on one it refuses, with `blockdev`,
 `mkfs.ext4`, `fsck.ext4` and `mount` stubbed and `cmp` recorded (`gcp/data_disk_test.go`, which
 needs util-linux's `blkid`, GNU `cmp` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
-skips, without one), each under `/bin/sh` or the shell `ENVOY_TEST_SHELL` names, as `bash` or
-`busybox sh` (`gcp/shell_test.go`; busybox's shell runs its own `sleep`, `cmp`, `blockdev` and
-`mount` ahead of `PATH`, so rows that stub or record those fail under it), the seed command
+skips, without one), each under `/bin/sh` or the shell `ENVOY_TEST_SHELL` names, as `bash` (`gcp/shell_test.go`),
+the seed command
 against a fake `Store` (`seed/seed_test.go`), the AWS SDK
 against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which
 fails a test on any request it does not expect (`seed/awsfake_test.go`, the store's tests in

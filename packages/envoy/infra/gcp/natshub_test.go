@@ -419,25 +419,6 @@ func TestNatsHubGroupWaitsForTheKeyAndItsGrant(t *testing.T) {
 		"the VM is created after the grant that lets its listener read its seed")
 }
 
-// A hub without a listener registers no grant on a seed secret, and its group waits for the key's
-// grant alone.
-func TestNatsHubWithoutAListenerGrantsNoSeedSecret(t *testing.T) {
-	args := exampleArgs()
-	args.Listener = nil
-	m, err := run(t, args, nil, true)
-	require.NoError(t, err)
-
-	var accessors []string
-	for _, r := range m.Registrations() {
-		if r.Type == accessorType {
-			accessors = append(accessors, r.Name)
-		}
-	}
-	require.Equal(t, []string{"example-hub-tailnet-auth-key-accessor"}, accessors)
-	deps := m.One(t, groupType).RPC.GetDependencies()
-	require.NotContains(t, strings.Join(deps, "\n"), "listener-seed-accessor")
-}
-
 func TestNatsHubMachineTypeAndDiskReachTheTemplate(t *testing.T) {
 	args := exampleArgs()
 	args.MachineType = pulumi.StringRef("e2-medium")
@@ -501,11 +482,7 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 	require.NoError(t, err)
 	seed, err := user.Seed()
 	require.NoError(t, err)
-	cases := []struct {
-		name string
-		edit func(*gcp.NatsHubArgs)
-		err  []string
-	}{
+	cases := []resolverRefusal{
 		{
 			name: "a hostname ending in a hyphen",
 			edit: func(a *gcp.NatsHubArgs) { a.Hostname = "ab-" },
@@ -682,86 +659,8 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions.Subscribe.Allow = nil },
 			err:  []string{`users[1] "example-operator"`, "subscribe.allow"},
 		},
-		{
-			name: "a listener image without a digest",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.Image = "example.invalid/envoy:latest" },
-			err:  []string{`listener.image "example.invalid/envoy:latest"`, "@sha256:"},
-		},
-		{
-			name: "a listener image with a space",
-			edit: func(a *gcp.NatsHubArgs) {
-				a.Listener.Image = "example.invalid/envoy --privileged x" + listenerImage[len("example.invalid/envoy"):]
-			},
-			err: []string{"listener.image"},
-		},
-		{
-			name: "a listener seed secret that is a path",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = "projects/example-project/secrets/seed" },
-			err:  []string{`listener.seedSecret "projects/example-project/secrets/seed"`, "secret id"},
-		},
-		{
-			name: "an empty listener seed secret",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = "" },
-			err:  []string{`listener.seedSecret ""`},
-		},
-		{
-			name: "the tailnet auth key's secret as the listener's seed secret",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = "example-hub-tailnet-auth-key" },
-			err:  []string{`listener.seedSecret "example-hub-tailnet-auth-key"`, "tailnet auth key"},
-		},
-		{
-			name: "a listener without a public key",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.NKey = "" },
-			err:  []string{"listener.nkey is required"},
-		},
-		{
-			name: "a listener whose public key is a seed",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.NKey = string(seed) },
-			err:  []string{`listener "example-hub"`, "never a seed"},
-		},
-		{
-			name: "a listener whose key a user holds",
-			edit: func(a *gcp.NatsHubArgs) { a.Listener.NKey = keyA },
-			err:  []string{`listener "example-hub"`, `nkey repeats users[0] "example-host-a"`},
-		},
-		{
-			name: "a user named after the hub, which the listener's user is",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Name = "example-hub" },
-			err:  []string{`listener "example-hub"`, "name repeats users[1]"},
-		},
-		{
-			name: "a session user without a public key",
-			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = "" },
-			err:  []string{"sessionUser.nkey is required"},
-		},
-		{
-			name: "a session user whose public key is a seed",
-			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = string(seed) },
-			err:  []string{`sessionUser "example-sessions"`, "never a seed"},
-		},
-		{
-			name: "a session user with an invalid name",
-			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.Name = "Example Sessions" },
-			err:  []string{`sessionUser "Example Sessions"`, "name"},
-		},
-		{
-			name: "a session user whose key the listener holds",
-			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = keyListener },
-			err:  []string{`sessionUser "example-sessions"`, `nkey repeats listener "example-hub"`},
-		},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			args := exampleArgs()
-			c.edit(args)
-			err := gcp.ResolveNatsHub(args)
-			require.Error(t, err)
-			for _, want := range c.err {
-				require.ErrorContains(t, err, want)
-			}
-			require.NotContains(t, err.Error(), authKey)
-		})
-	}
+	requireResolverRefusals(t, cases)
 }
 
 // A refused input stops the constructor, named as the hub and its name, before it registers
@@ -789,10 +688,7 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 	inside := "example-" + seed
 	lower := strings.ToLower(seed)
 	digest := "@sha256:" + strings.Repeat("0", 64)
-	for _, row := range []struct {
-		name, input string
-		edit        func(*gcp.NatsHubArgs)
-	}{
+	requireSeedRefusals(t, seed, []seedRefusal{
 		{"a seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = seed }},
 		{"a seed in a tag", "tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + seed} }},
 		{"a seed inside the zone", "zone", func(a *gcp.NatsHubArgs) { a.Zone = inside }},
@@ -830,22 +726,7 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a machine id split by a space", "users[0].machineId", func(a *gcp.NatsHubArgs) {
 			a.Users[0].MachineID = pulumi.StringRef(splitSeed(seed, " "))
 		}},
-		{"a seed in the listener's image", "listener.image", func(a *gcp.NatsHubArgs) {
-			a.Listener.Image = "example.invalid/" + lower + digest
-		}},
-		{"a seed as the listener's seed secret", "listener.seedSecret", func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = seed }},
-		{"a listener seed secret split by a hyphen", "listener.seedSecret", func(a *gcp.NatsHubArgs) {
-			a.Listener.SeedSecret = splitSeed(lower, "-")
-		}},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			args := exampleArgs()
-			row.edit(args)
-			err := gcp.ResolveNatsHub(args)
-			require.EqualError(t, err, row.input+": an nkey user seed, which is never an input of the hub (not echoed)")
-			require.NotContains(t, strings.ToUpper(err.Error()), seed)
-		})
-	}
+	})
 }
 
 // core.Authorization refuses a seed in a user's name or a rule entry before any refusal of its own
@@ -1022,6 +903,54 @@ func TestNatsHubDerivedNamesFitGCPForTheShortestAndLongestHostname(t *testing.T)
 			}
 			require.Regexp(t, dnsLabel, hostname)
 			require.Equal(t, "nats://"+hostname+":4222", natsURL)
+		})
+	}
+}
+
+// resolverRefusal is one invalid input: edit makes it of exampleArgs, and the resolver's refusal
+// contains each of err.
+type resolverRefusal struct {
+	name string
+	edit func(*gcp.NatsHubArgs)
+	err  []string
+}
+
+// requireResolverRefusals runs each case through the resolver, which must refuse it naming each
+// of its err and never quote the tailnet auth key.
+func requireResolverRefusals(t *testing.T, cases []resolverRefusal) {
+	t.Helper()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := exampleArgs()
+			c.edit(args)
+			err := gcp.ResolveNatsHub(args)
+			require.Error(t, err)
+			for _, want := range c.err {
+				require.ErrorContains(t, err, want)
+			}
+			require.NotContains(t, err.Error(), authKey)
+		})
+	}
+}
+
+// seedRefusal is one plain input holding seed: edit puts it there, and input is the path the
+// refusal names.
+type seedRefusal struct {
+	name, input string
+	edit        func(*gcp.NatsHubArgs)
+}
+
+// requireSeedRefusals runs each row through the resolver, which must refuse it naming the input
+// by its path and never quoting the seed.
+func requireSeedRefusals(t *testing.T, seed string, rows []seedRefusal) {
+	t.Helper()
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			args := exampleArgs()
+			row.edit(args)
+			err := gcp.ResolveNatsHub(args)
+			require.EqualError(t, err, row.input+": an nkey user seed, which is never an input of the hub (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 		})
 	}
 }

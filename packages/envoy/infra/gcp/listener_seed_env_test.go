@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -72,7 +73,7 @@ func TestListenerSeedEnvWritesTheSeedAsOneVariableReadableByRootAlone(t *testing
 	require.Empty(t, run.stderr)
 	got, err := os.ReadFile(run.envFile)
 	require.NoError(t, err)
-	require.Equal(t, "NATS_NKEY_SEED="+seed+"\n", string(got))
+	require.Equal(t, core.EnvNATSSeed+"="+seed+"\n", string(got))
 	info, err := os.Stat(run.envFile)
 	require.NoError(t, err)
 	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())

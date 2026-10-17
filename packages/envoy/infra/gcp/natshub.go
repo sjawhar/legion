@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/compute"
@@ -275,7 +274,7 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	}
 	conf, err := auth.Render([]string{confHeader})
 	if err != nil {
-		return settings{}, nameAddedUsers(err, len(args.Users), args.Listener != nil, args.SessionUser != nil)
+		return settings{}, err
 	}
 	s.vm = vm{
 		hostname:       args.Hostname,
@@ -439,6 +438,7 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		perms := core.ListenerPermissions(hostname)
 		auth.Users = append(auth.Users, core.User{
 			Name: hostname, NKey: l.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
+			Label: "listener",
 		})
 	}
 	if session != nil {
@@ -448,65 +448,11 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		perms := core.SessionPermissions()
 		auth.Users = append(auth.Users, core.User{
 			Name: session.Name, NKey: session.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe,
+			Label: "sessionUser",
 		})
 		auth.NoAuthUser = session.Name
 	}
 	return auth, nil
-}
-
-// nameAddedUsers is core's refusal of the authorization authorization built from n users, with the
-// listener's user and the session user, when given, named by their own inputs rather than by the
-// index core gives each after users, which no input of the hub has.
-type addedUser struct {
-	index int
-	name  string
-}
-
-func nameAddedUsers(err error, n int, withListener, withSession bool) error {
-	text := err.Error()
-	var added [2]addedUser
-	count := 0
-	if withListener {
-		added[count] = addedUser{index: n, name: "listener"}
-		count++
-		n++
-	}
-	if withSession {
-		added[count] = addedUser{index: n, name: "sessionUser"}
-		count++
-	}
-	for _, user := range added[:count] {
-		quotedPrefix := fmt.Sprintf(`users[%d] "`, user.index)
-		if strings.HasPrefix(text, quotedPrefix) {
-			text = user.name + ` "` + strings.TrimPrefix(text, quotedPrefix)
-			return errors.New(nameAddedUserReference(text, added[:count]))
-		}
-		seedPrefix := fmt.Sprintf("users[%d]:", user.index)
-		if strings.HasPrefix(text, seedPrefix) {
-			return errors.New(user.name + ":" + strings.TrimPrefix(text, seedPrefix))
-		}
-	}
-	return err
-}
-
-// nameAddedUserReference replaces an added user's index only when core emits it as the target of
-// the leading user's name or nkey duplicate refusal. It leaves quoted rule entries untouched.
-func nameAddedUserReference(text string, added []addedUser) string {
-	head, detail, found := strings.Cut(text, ": ")
-	if !found {
-		return text
-	}
-	for _, user := range added {
-		nkeyPrefix := fmt.Sprintf(`nkey repeats users[%d] "`, user.index)
-		if strings.HasPrefix(detail, nkeyPrefix) {
-			return head + ": nkey repeats " + user.name + ` "` + strings.TrimPrefix(detail, nkeyPrefix)
-		}
-		namePrefix := fmt.Sprintf("name repeats users[%d]", user.index)
-		if strings.HasPrefix(detail, namePrefix) {
-			return head + ": name repeats " + user.name + strings.TrimPrefix(detail, namePrefix)
-		}
-	}
-	return text
 }
 
 // NewNatsHub registers a hub: its service account, the secret holding the tailnet auth key and

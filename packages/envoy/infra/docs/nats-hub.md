@@ -123,7 +123,9 @@ VM's metadata holds it in the clear.
 
 A session user lets anything that reaches 4222 publish and subscribe as `SessionPermissions()`
 allows, which includes reading every notification topic, so with one the tailnet's policy is the
-bus's only gate: which devices it lets reach the hub's 4222 decides who is on it.
+gate on 4222: which devices it lets reach the hub's 4222 decides who is on the bus. A `listener`
+opens a second door, port 9020, with or without a session user, and it grants far more
+([The hub's listener](#the-hubs-listener)).
 
 A user is refused when it names both `machineId` and `permissions` or neither, or when its
 `machineId` or `nkey` is empty, named by its index alone, as `users[1]: nkey is required`, since
@@ -150,7 +152,12 @@ that registers a serving port, including the OpenCode plugin, cannot receive del
 hub listener: its registration is the hub's machine, and the hub has no host bridge to reach the
 client's port. Run a listener beside that client instead. The listener's `/v1` API takes no bearer,
 which the listener allows only on a loopback address (`packages/envoy/cmd/listener/apiauth.go`), so
-the tailnet's policy for port 9020 decides who may call it.
+the tailnet's policy for port 9020 is the only thing that decides who may call it, and a caller
+gets the whole API with no credential: it can publish to any topic outside the agent topics with
+a `source` of its choosing, under the listener's user's publish grant (Dispatch, GitHub, Slack,
+Legion and role notifications included), claim a role, list every session and delete one. That
+holds whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for
+any device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
 
 The listener connects as the listener's user (see [The hub's users](#the-hubs-users)) with the
 seed `listener.seedSecret` holds. The hub's service account gets
