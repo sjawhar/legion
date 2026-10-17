@@ -167,30 +167,26 @@ func byHandShare(mergeNote string) string {
 	return ", with the by-hand note the daemon tells above it,"
 }
 
-// readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub for a
-// merger's ready: true, and is what they leave (readyAnswer). Every refusal is written before the
-// fact is applied, so nothing is recorded under the completion's key and the corrected retry at the
-// same commit is applied:
+// readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub, in
+// the repository issue's record names, for a merger's ready: true, and is what they leave
+// (readyAnswer). Every refusal is written before the fact is applied, so nothing is recorded under
+// the completion's key and the corrected retry at the same commit is applied:
 //
-//   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
-//     requires one).
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED,
 //     READY_DISARM_PENDING, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
-// The reads are made as the implement App, whose token never leaves the daemon; a runtime that
-// boots without Apps publishes no READY (leaseForGrant).
+// The reads are made as the implement App, minted for the repository's owner, whose token never
+// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
-	var repository ghrepo.Repository
-	if s.repository != nil {
-		repository, ok = s.repository(issue.Project)
-	}
-	if !ok || repository.IsZero() {
-		writeFailure(w, http.StatusConflict, "NO_REPOSITORY", fmt.Sprintf("the project %s of %s has no repository configured, so its pull request cannot be read", issue.Project, issue.Key))
+	repository, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+	if err != nil {
+		s.log.Error("api: read the repository of a completing issue", "issue", issue.Key, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))
 		return readyAnswer{}, false
 	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
+	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {
 		return readyAnswer{}, false
 	}

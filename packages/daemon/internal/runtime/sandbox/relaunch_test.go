@@ -95,11 +95,16 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 		t.Fatalf("provision secret data %v", provision.Data)
 	}
 	secret := g.secret(roleSecretName(name, spec.Role))
-	if len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 || string(secret.Data[GitHubConfigKey]) != ghconfig.Config {
-		t.Fatalf("role secret keys %v, want the launcher token and the role's two gh files", slices.Sorted(maps.Keys(secret.Data)))
+	wantKeys := []string{LauncherTokenFile, GitHubConfigKey("acme"), GitHubConfigKey("sjawhar"), GitHubDefaultKey, GitHubHostsKey("acme"), GitHubHostsKey("sjawhar")}
+	slices.Sort(wantKeys)
+	if keys := slices.Sorted(maps.Keys(secret.Data)); !slices.Equal(keys, wantKeys) || len(secret.Data[LauncherTokenFile]) == 0 ||
+		string(secret.Data[GitHubConfigKey("sjawhar")]) != ghconfig.Config || string(secret.Data[GitHubDefaultKey]) != "sjawhar" {
+		t.Fatalf("role secret keys %v, want the launcher token, the default owner sjawhar and each owner's two gh files %v", keys, wantKeys)
 	}
-	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey]); err != nil || token != staticCredentialToken(spec.Role) {
-		t.Fatalf("the tester's hosts.yml holds token %q (%v), want its App's %q", token, err, staticCredentialToken(spec.Role))
+	for owner, want := range map[string]string{"sjawhar": staticCredentialToken(spec.Role), "acme": staticReadToken(spec.Role, "acme")} {
+		if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey(owner)]); err != nil || token != want {
+			t.Fatalf("the tester's %s hosts.yml holds token %q (%v), want %q", owner, token, err, want)
+		}
 	}
 	var start shimwire.LauncherStart
 	for _, frame := range g.sent(workerToken) {
@@ -115,7 +120,7 @@ func TestSpawnCreatesTheIssueSandboxAndRoleLocator(t *testing.T) {
 	}
 }
 
-// The controller's one Secret holds the review App's gh files beside its launcher token: the
+// The controller's one Secret holds the review App's gh bundle beside its launcher token: the
 // controller acts as the review App (appauth.AppRoleFor), so its launch mints a credential and its
 // pod projects it at a gh volume like a workflow role's.
 func TestTheControllersSecretHoldsTheReviewAppsGhFilesBesideTheLauncherToken(t *testing.T) {
@@ -123,8 +128,9 @@ func TestTheControllersSecretHoldsTheReviewAppsGhFilesBesideTheLauncherToken(t *
 	g.spawn(controllerSpec(t))
 	name := SandboxName(controllerToken)
 	secret := g.secret(roleSecretName(name, claim.RoleController))
-	if secret == nil || len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 || len(secret.Data[GitHubHostsKey]) == 0 || len(secret.Data[GitHubConfigKey]) == 0 {
-		t.Fatalf("the controller's Secret holds %v, want the launcher token and the review App's two gh files", secret)
+	if secret == nil || len(secret.Data) != 6 || len(secret.Data[LauncherTokenFile]) == 0 || string(secret.Data[GitHubDefaultKey]) != "sjawhar" ||
+		len(secret.Data[GitHubHostsKey("sjawhar")]) == 0 || len(secret.Data[GitHubConfigKey("acme")]) == 0 {
+		t.Fatalf("the controller's Secret holds %v, want the launcher token, the default and the review App's gh files of each owner", secret)
 	}
 	found := false
 	for _, volume := range g.pod(name).Spec.Volumes {
@@ -839,11 +845,11 @@ func TestAFailedStepOfAnIssuePodsProvisioningReleasesThePodsTurn(t *testing.T) {
 		},
 		"a role's github credential mint": {
 			fail: func(t *testing.T, failed *atomic.Bool) (rigOption, func(g *rig) runtime.SpawnSpec) {
-				credential := func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
+				credential := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
 					if failed.CompareAndSwap(false, true) {
-						return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+						return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 					}
-					return staticCredential(ctx, role)
+					return staticCredential(ctx, role, owner)
 				}
 				return withOptions(func(o *Options) { o.GitHubCredential = credential }), func(*rig) runtime.SpawnSpec { return rootSpec(t) }
 			},

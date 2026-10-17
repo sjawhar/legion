@@ -8,6 +8,7 @@ const readText = (path: string): string => readFileSync(path === "-" ? 0 : path,
 process.exit(
   await runDispatchCli(Bun.argv.slice(2), process.env, {
     stdout: (text) => process.stdout.write(text),
+    stderr: (text) => process.stderr.write(text),
     readText,
     cwd: process.cwd(),
   })

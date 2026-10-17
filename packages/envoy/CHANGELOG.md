@@ -4,6 +4,17 @@
 
 ### Added
 
+- Dispatch records which repository each issue targets. A repository mapping
+  (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the
+  Settings page's Default radio; an issue carries its own `repo`, which must be a mapping of its
+  project (`400 REPO_NOT_MAPPED`), set from the issue page's repository picker; and every issue
+  read and issue event carries `repo` and `resolved_repo`: its own, else its nearest ancestor's,
+  else the project's default, else null. A mapping issues name is neither deleted nor moved
+  (`409 REPO_PROJECT_IN_USE`), and a moved mapping emits `settings.repo_project.updated` on the
+  project it left as well as the one it joined. Every mapping write, the `DISPATCH_REPO_PROJECTS`
+  boot seed included, takes one set of locks in one order, so concurrent writes neither lose an
+  event nor fail, and the seed now announces each mapping it adds. Migration `0113` adds
+  `repo_projects.is_default` and `issues.repo`.
 - The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
   Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
   unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is

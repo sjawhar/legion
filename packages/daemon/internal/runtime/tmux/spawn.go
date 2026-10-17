@@ -50,6 +50,7 @@ var runtimeOwned = map[string]bool{
 	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true,
 	"XDG_STATE_HOME": true, "LEGION_BOOT_TOKEN_FILE": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true,
 	"GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
+	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
 }
 
@@ -150,23 +151,27 @@ func secretFiles(stateDir string, spec runtime.SpawnSpec) []runtime.SecretFile {
 type PaneInputs struct {
 	StateDir, Workspace, DaemonURL, EnvoyURL, DispatchURL, DispatchTokenFile string
 	NATSURLs                                                                 []string
-	// GHConfigDir is the claim's directory of gh files (runtime.GHConfigDir), the pane's
-	// GH_CONFIG_DIR; "" is none, and the pane is then told no gh variable at all: every pane of a
-	// runtime whose GitHubCredential function is nil.
-	GHConfigDir string
+	// GHOwnersDir is the claim's gh bundle root (runtime.GHConfigDir), the pane's
+	// LEGION_GH_OWNERS_DIR, GHDefault the bundle's default owner, whose directory is the pane's
+	// GH_CONFIG_DIR, and GH the real gh the pane's `legion gh` runs, its LEGION_GH_PATH; an empty
+	// GHOwnersDir is none, and the pane is then told no gh variable at all: every pane of a runtime
+	// whose GitHubCredential function is nil.
+	GHOwnersDir, GHDefault, GH string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// identity, daemon, state, workspace, Envoy and Dispatch variables; for a pane with a GHConfigDir,
-// GH_CONFIG_DIR, the claim's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST set to
-// the empty string, which gh ignores, so no token in the daemon's environment outranks the file — a
-// non-empty GH_TOKEN would; PI_SHELL_PREFIX, which keeps this daemon's legion launcher first in
-// the agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay
-// writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets
-// at all), the four XDG base directories under `<state_dir>/home`, the spec's own variables
-// sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among them — tmux would
-// replace it (LEGION-91) — and neither is any secret's value. No tool path is told: a pane's gh,
-// git and jj are whatever its PATH, the daemon's, gives.
+// identity, daemon, state, workspace, Envoy and Dispatch variables; for a pane with a GHOwnersDir,
+// GH_CONFIG_DIR, its default owner's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST
+// set to the empty string, which gh ignores, so no token in the daemon's environment outranks the
+// file — a non-empty GH_TOKEN would — then LEGION_GH_OWNERS_DIR, the bundle's root, and
+// LEGION_GH_PATH, the real gh the `legion gh` wrapper first on the pane's PATH runs;
+// PI_SHELL_PREFIX, which keeps this daemon's launcher directory (its legion and gh) first in the
+// agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay writeTurnScopeOverlay
+// writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets at all), the four XDG
+// base directories under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE`
+// pointer per secret file. PATH is never among them — tmux would replace it (LEGION-91) — and
+// neither is any secret's value. No other tool path is told: a pane's git and jj are whatever its
+// PATH, the daemon's, gives.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -186,11 +191,13 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("DISPATCH_URL", in.DispatchURL)
 		add("DISPATCH_TOKEN_FILE", in.DispatchTokenFile)
 	}
-	if in.GHConfigDir != "" {
-		add("GH_CONFIG_DIR", in.GHConfigDir)
+	if in.GHOwnersDir != "" {
+		add("GH_CONFIG_DIR", ghconfig.OwnerDir(in.GHOwnersDir, in.GHDefault))
 		add("GH_TOKEN", "")
 		add("GITHUB_TOKEN", "")
 		add("GH_HOST", "")
+		add("LEGION_GH_OWNERS_DIR", in.GHOwnersDir)
+		add("LEGION_GH_PATH", in.GH)
 	}
 	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
 	add("PI_CONFIG_FILES", filepath.Join(in.StateDir, podsafety.TurnScopeFile))
@@ -343,7 +350,7 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 }
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// the claim's gh files, then the pane.
+// the claim's gh bundle, then the pane.
 func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys); err != nil {
 		return runtime.Locator{}, err
@@ -384,17 +391,20 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
-	ghConfigDir := ""
+	ghRoot, ghDefault, ghWriter := "", "", strings.ToLower(spec.Repository.Owner())
 	if r.gitHubCredential != nil {
-		ghConfigDir = runtime.GHConfigDir(r.stateDir, spec.Claim)
-		rendered, err := r.gitHubCredential(ctx, spec.Role)
+		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
+		bundle, err := r.gitHubCredential(ctx, spec.Role, ghWriter)
 		if err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
-		if _, err := ghconfig.Write(ghConfigDir, rendered); err != nil {
+		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
-		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
+		ghDefault = bundle.Default
+		written := bundle.Owners[ghDefault]
+		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", written.App,
+			"expiresAt", written.ExpiresAt, "owners", bundle.OwnerNames())
 	}
 	path := r.paneEnv["PATH"]
 	if spec.Env["PATH"] != "" {
@@ -405,16 +415,17 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
-		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHConfigDir: ghConfigDir,
+		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
 	}, files)
-	return r.openPane(ctx, spec, paneCommand(pairs, command))
+	return r.openPane(ctx, spec, ghWriter, paneCommand(pairs, command))
 }
 
 // openPane puts the pane on the server under the launch lock: into the window of a pane of the
 // same issue that still verifies as its recorded process, else into a new window for the issue.
-// The pane is recorded — its incarnation read, the process watched — before the lock is released,
-// so the next spawn on the issue can share its window and no orphan sweep mistakes it for one.
-func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []string) (runtime.Locator, error) {
+// The pane is recorded — its incarnation read, the process watched with ghWriter, the owner its
+// launch minted the gh bundle's write token for ("" for none) — before the lock is released, so the
+// next spawn on the issue can share its window and no orphan sweep mistakes it for one.
+func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter string, pane []string) (runtime.Locator, error) {
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
 
@@ -452,7 +463,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 		Incarnation: incarnation{pid: report.pid, ticks: ticks}.String(),
 		Tmux:        &runtime.TmuxLocator{Window: report.window, Pane: report.pane},
 	}
-	r.track(loc, spec.Issue)
+	r.track(loc, spec.Issue, ghWriter)
 	return loc, nil
 }
 

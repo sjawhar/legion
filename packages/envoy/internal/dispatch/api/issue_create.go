@@ -50,6 +50,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		Priority   json.RawMessage `json:"priority"`
 		Assignee   json.RawMessage `json:"assignee"`
 		Components json.RawMessage `json:"components"`
+		Repo       json.RawMessage `json:"repo"`
 		Actor      *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -178,6 +179,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	repo, _, err := parseIssueRepo(input.Repo)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if input.External == "" && !input.Force {
 		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
 		if err != nil {
@@ -239,6 +245,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The project row is locked from here; the mapping check takes its key-share lock only now, in
+	// the project-then-mapping order every mapping write follows (lockRepoProjectWrite).
+	if repo != nil {
+		if err := checkIssueRepoMapped(r.Context(), tx, *repo, input.Project); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	key := fmt.Sprintf("%s-%d", input.Project, number)
 	actorJSON, err := encodeJSON(actor)
 	if err != nil {
@@ -262,9 +276,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	issueRank := rank.Between(lastRank, "")
 
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

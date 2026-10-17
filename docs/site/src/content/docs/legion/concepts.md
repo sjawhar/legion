@@ -21,13 +21,18 @@ section can use the words without stopping to explain them.
 - **[Dispatch](/legion/dispatch/)** is where people and agents meet: the issue, its spec, the
   questions an agent asks you, the approvals, the messages and the status everyone reads. Legion
   never reads or writes a GitHub issue.
-- **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue. Legion acts
-  there through two GitHub Apps, so the account that reviews a change is never the one that wrote
-  it. The daemon creates a root's branch at the repository's default branch, as GitHub names it
-  (`main`, `develop` or `release/v7.1` alike), when it admits the root, before its architect
-  starts, and a child's when the child starts planning in its tree, so no agent's push is the one
-  that creates a branch: GitHub can refuse that push on a large repository. An issue's workspace
-  with no branch to start from starts at that default branch too.
+- **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue, in the
+  issue's repository. A project spans every repository Dispatch maps to it (Settings →
+  Repositories → Projects); each issue targets one of them, the one Dispatch resolves for it (its
+  own, else its nearest ancestor's, else the project's default), which Legion records, with that
+  repository's default branch as GitHub names it, when it first records the issue, and keeps.
+  Legion acts there through two GitHub Apps, so the account that reviews a change is never the one
+  that wrote it. The daemon creates a root's branch at the recorded default branch (`main`,
+  `develop` or `release/v7.1` alike) when it admits the root, before its architect starts, and a
+  child's when the child starts planning in its tree, so no agent's push is the one that creates a
+  branch: GitHub can refuse that push on a large repository. An issue's workspace with no branch to
+  start from starts at that default branch too. A pull request or push names its repository, and
+  counts for an issue only in the issue's own.
 
 ## The controller
 

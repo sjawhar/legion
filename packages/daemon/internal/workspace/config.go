@@ -595,31 +595,39 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	return err
 }
 
-// GitHubCredentialHelper is the `credential.helper` every shared clone gets: `gh auth
-// git-credential`, the helper `gh auth setup-git` itself writes, which answers git from the
-// hosts.yml under the process's GH_CONFIG_DIR (ghconfig.HostsFile). The `gh` in it is resolved on
-// PATH when git runs it, so the one it reaches is the process's own, and the value names no path
-// of this machine's that the clone would carry to another.
-const GitHubCredentialHelper = "!gh auth git-credential"
+// GitHubCredentialHelper is the `credential.helper` every shared clone gets: `legion
+// git-credential`, which answers git from the hosts.yml of the owner the repository's path names
+// (the owner's directory of LEGION_GH_OWNERS_DIR, and nothing else; ghconfig.HostsFile), since
+// every shared clone also sets credential.useHttpPath so git passes that path. The `legion` in it
+// is resolved on PATH when git runs it, so the one it reaches is the process's own (a pane's
+// launcher directory, the image's /opt/legion/bin), and the value names no path of this machine's
+// that the clone would carry to another.
+const GitHubCredentialHelper = "!legion git-credential"
 
-// ConfigureRepositoryCredential brings the shared clone's helper to GitHubCredentialHelper
-// (configureRepositoryCredential) and reports whether it wrote anything: the daemon runs it at
-// every boot over a clone an earlier daemon provisioned, whose helper may still name that daemon's
-// `legion credential`, so a pane's git answers from its GH_CONFIG_DIR as a clone provisioned now
-// does. A clone whose two helper keys already end in GitHubCredentialHelper is left as it is, so
-// the ordinary boot runs one read per key rather than five writes, and logs no rewrite.
+// ConfigureRepositoryCredential brings the shared clone's helper to GitHubCredentialHelper and its
+// credential.useHttpPath to true (configureRepositoryCredential) and reports whether it wrote
+// anything: the daemon runs it at every boot over a clone an earlier daemon provisioned, whose
+// helper may still name that daemon's (`legion credential`, or `gh auth git-credential`, which
+// answers every repository from one owner's files), so a pane's git answers from the owner's gh
+// files as a clone provisioned now does. A clone whose two helper keys already end in
+// GitHubCredentialHelper and whose useHttpPath is true is left as it is, so the ordinary boot runs
+// one read per key rather than six writes, and logs no rewrite.
 func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir string) (bool, error) {
 	gitDir := cloneDir + "/.git"
 	current := true
-	for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
+	for _, check := range []struct{ key, want string }{
+		{"credential.helper", GitHubCredentialHelper},
+		{"credential.https://github.com.helper", GitHubCredentialHelper},
+		{"credential.useHttpPath", "true"},
+	} {
 		// `git config --get-all` exits 1 for a key the clone never set, which is as stale as an old
 		// helper; a run that failed to start is an error.
-		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", key}, nil, "")
+		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", check.key}, nil, "")
 		if err != nil {
-			return false, fmt.Errorf("read the shared clone's %s: %w", key, err)
+			return false, fmt.Errorf("read the shared clone's %s: %w", check.key, err)
 		}
 		values := strings.Split(strings.TrimRight(result.Stdout, "\n"), "\n")
-		if result.ExitCode != 0 || values[len(values)-1] != GitHubCredentialHelper {
+		if result.ExitCode != 0 || values[len(values)-1] != check.want {
 			current = false
 		}
 	}
@@ -632,8 +640,9 @@ func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir str
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
 // one-shot clone/fetch environment has been removed: the clone's own credential.helper, and the
 // one for github.com, each reset and then set to credentialHelper, with credential.interactive
-// off so a helper that answers nothing fails rather than prompts. This ports the helper writes in
-// workspace.ts's provisionIssueWorkspace.
+// off so a helper that answers nothing fails rather than prompts, and credential.useHttpPath on so
+// git tells the helper which repository it asks for, whose owner picks the token. This ports the
+// helper writes in workspace.ts's provisionIssueWorkspace.
 func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, credentialHelper string) error {
 	gitDir := cloneDir + "/.git"
 	for _, argv := range [][]string{
@@ -642,6 +651,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 		{"git", "--git-dir=" + gitDir, "config", "--replace-all", "credential.https://github.com.helper", ""},
 		{"git", "--git-dir=" + gitDir, "config", "--add", "credential.https://github.com.helper", credentialHelper},
 		{"git", "--git-dir=" + gitDir, "config", "credential.interactive", "false"},
+		{"git", "--git-dir=" + gitDir, "config", "credential.useHttpPath", "true"},
 	} {
 		if _, err := RunChecked(ctx, run, argv, nil, ""); err != nil {
 			return err

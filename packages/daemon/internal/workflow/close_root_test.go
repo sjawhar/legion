@@ -24,7 +24,7 @@ import (
 // daemon's own write brings back changes nothing and logs nothing more.
 func TestAnArchitectClosesItsAdmittedRootBeforeItsFirstPhase(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 2, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 2, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))
 	apply := func(id string, fact intake.Fact) intake.Result {
@@ -66,7 +66,7 @@ func TestAnArchitectClosesItsAdmittedRootBeforeItsFirstPhase(t *testing.T) {
 		t.Fatalf("suspend reasons %q, %v; want the linger's", reasons, err)
 	}
 
-	apply("done-event", intake.DispatchIssue{Key: "LEGION-1", Seq: 2, Type: "issue.closed", Status: "done", Title: "Root", Rank: "U"})
+	apply("done-event", intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.closed", Status: "done", Title: "Root", Rank: "U"})
 	apply("linger", intake.LingerExpired{Issue: "LEGION-1", Generation: 2})
 	want := []string{
 		`msg="workflow: issue left the workflow" issue=LEGION-1 tree=LEGION-1 status=done`,
@@ -90,15 +90,15 @@ func TestCloseRootIsRefusedOnceATreeHasStartedOrForAChild(t *testing.T) {
 		issue record.Issue
 		code  string
 	}{
-		{"a root in planning", record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Phase: phase.Planning, Status: "in_progress"}, "CLOSE_AFTER_PHASE_STARTED"},
-		{"a root already lingering", record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Phase: phase.Admitted, Status: "done", LingerUntil: new(time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC))}, "CLOSE_AFTER_PHASE_STARTED"},
-		{"a root moved to backlog", record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Phase: phase.Admitted, Status: "backlog"}, "CLOSE_AFTER_PHASE_STARTED"},
-		{"a child", record.Issue{Key: "LEGION-2", Tree: "LEGION-1", Parent: new("LEGION-1"), Phase: phase.Admitted, Status: "in_progress"}, "ROOT_REQUIRED"},
+		{"a root in planning", record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Phase: phase.Planning, Status: "in_progress"}, "CLOSE_AFTER_PHASE_STARTED"},
+		{"a root already lingering", record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Phase: phase.Admitted, Status: "done", LingerUntil: new(time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC))}, "CLOSE_AFTER_PHASE_STARTED"},
+		{"a root moved to backlog", record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Phase: phase.Admitted, Status: "backlog"}, "CLOSE_AFTER_PHASE_STARTED"},
+		{"a child", record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Parent: new("LEGION-1"), Phase: phase.Admitted, Status: "in_progress"}, "ROOT_REQUIRED"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			if tc.issue.Key != "LEGION-1" {
-				seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
+				seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
 			}
 			tc.issue.Project, tc.issue.Title, tc.issue.Generation, tc.issue.Rank = "LEGION", tc.issue.Key, 1, "V"
 			seedIssue(t, pool, tc.issue)
@@ -117,7 +117,7 @@ func TestCloseRootIsRefusedOnceATreeHasStartedOrForAChild(t *testing.T) {
 // architect's registration opens it and the admitted root moves to planning.
 func TestAPhaseChangeIsOneJournalLine(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"})
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateOff, slog.New(slog.NewTextHandler(&logged, nil)))
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "gate", intake.GateRegistered{Issue: "LEGION-1", ArtifactID: "art-1", Version: 1}, engine, admissionStub{}); err != nil {

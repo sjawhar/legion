@@ -22,6 +22,8 @@
       "generation": 3,
       "phase": "implementing",
       "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
       "architect": {
         "session": "ses_architect_208",
         "state": "ready",
@@ -94,6 +96,7 @@
         }
       },
       "pullRequest": {
+        "repo": "acme/widgets",
         "number": 1247,
         "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
         "checksVerdict": "pending",
@@ -115,6 +118,8 @@
       "generation": 1,
       "phase": "held",
       "status": "in_progress",
+      "repo": "zeta/tools",
+      "defaultBranch": "release/v7.1",
       "holdReason": "escalated",
       "workers": {
         "implementer": {
@@ -262,5 +267,27 @@
       "status": "withheld",
       "detail": "dispatch://LEGION-551, dispatch://LEGION-205: acts under a production identity of its own"
     }
-  ]
+  ],
+  "repositories": {
+    "owners": [
+      "acme",
+      "zeta"
+    ],
+    "mapped": [
+      {
+        "repo": "acme/widgets",
+        "default": true
+      },
+      {
+        "repo": "zeta/tools",
+        "default": false
+      }
+    ],
+    "refused": [
+      {
+        "repo": "acme/gadgets",
+        "reason": "the review App is not installed on acme/gadgets"
+      }
+    ]
+  }
 }

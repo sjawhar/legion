@@ -2,6 +2,7 @@
 package appauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -90,7 +91,16 @@ func readBody(response *http.Response, what string) ([]byte, error) {
 // Tokens mints a GitHub installation token for an App and repository owner.
 type Tokens interface {
 	Token(ctx context.Context, role AppRole, owner string) (Lease, error)
+	// ReadToken is the App's installation token for owner narrowed to reading: contents, pull
+	// requests and metadata read. A pane holds one for every owner of the project but its issue's.
+	ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error)
 }
+
+// readPermissions narrows an installation token to reading a repository's contents, its pull
+// requests and its metadata: what a role needs of every repository of the project but its own
+// issue's. GitHub mints a token with the permissions a request names, each at most what the
+// installation holds.
+var readPermissions = map[string]string{"contents": "read", "pull_requests": "read", "metadata": "read"}
 
 // Options makes a token manager testable. The zero value uses api.github.com, http.DefaultClient,
 // and the wall clock.
@@ -161,11 +171,24 @@ func New(apps config.GitHubApps, options Options) *Manager {
 // minting a fresh installation token. Concurrent requests for the same App and owner share that
 // one exchange.
 func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease, error) {
+	return m.lease(ctx, role, owner, "", nil)
+}
+
+// ReadToken is Token for a token narrowed to readPermissions, cached under a key of its own, so an
+// owner's write and read tokens never stand in for each other.
+func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Lease, error) {
+	return m.lease(ctx, role, owner, "read:", readPermissions)
+}
+
+// lease serves the cached lease under prefix+role+owner while more than refreshWindow remains, and
+// otherwise mints one with permissions (nil: the installation's own), sharing one exchange among
+// concurrent callers.
+func (m *Manager) lease(ctx context.Context, role AppRole, owner, prefix string, permissions map[string]string) (Lease, error) {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {
 		return Lease{}, fmt.Errorf("GitHub App owner must not be empty")
 	}
-	cacheKey := string(role) + ":" + strings.ToLower(owner)
+	cacheKey := prefix + string(role) + ":" + strings.ToLower(owner)
 	now := m.now()
 
 	m.mu.Lock()
@@ -186,7 +209,7 @@ func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease,
 	m.pending[cacheKey] = waiting
 	m.mu.Unlock()
 
-	lease, err := m.mint(ctx, role, owner)
+	lease, err := m.mint(ctx, role, owner, permissions)
 	m.mu.Lock()
 	if err == nil {
 		m.leases[cacheKey] = lease
@@ -198,7 +221,7 @@ func (m *Manager) Token(ctx context.Context, role AppRole, owner string) (Lease,
 	return lease, err
 }
 
-func (m *Manager) mint(ctx context.Context, role AppRole, owner string) (Lease, error) {
+func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissions map[string]string) (Lease, error) {
 	app, err := m.app(role)
 	if err != nil {
 		return Lease{}, err
@@ -211,7 +234,7 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string) (Lease, 
 	if err != nil {
 		return Lease{}, err
 	}
-	lease, err := m.exchange(ctx, jwt, installation)
+	lease, err := m.exchange(ctx, jwt, installation, permissions)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -334,13 +357,24 @@ func installationID(raw json.RawMessage) (string, error) {
 	return "", fmt.Errorf("invalid installation id")
 }
 
-func (m *Manager) exchange(ctx context.Context, jwt, installation string) (Lease, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.baseURL+"/app/installations/"+url.PathEscape(installation)+"/access_tokens", nil)
+func (m *Manager) exchange(ctx context.Context, jwt, installation string, permissions map[string]string) (Lease, error) {
+	var requestBody io.Reader
+	if permissions != nil {
+		encoded, err := json.Marshal(map[string]map[string]string{"permissions": permissions})
+		if err != nil {
+			return Lease{}, err
+		}
+		requestBody = bytes.NewReader(encoded)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, m.baseURL+"/app/installations/"+url.PathEscape(installation)+"/access_tokens", requestBody)
 	if err != nil {
 		return Lease{}, err
 	}
 	m.appHeaders(request, jwt)
 	request.Header.Set("Accept", "application/vnd.github+v3+json")
+	if requestBody != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	response, err := m.client.Do(request)
 	if err != nil {
 		return Lease{}, &TransientError{Err: fmt.Errorf("GitHub App token exchange: %w", err)}
@@ -399,45 +433,26 @@ func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken st
 }
 
 func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken string) (GitIdentity, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app", nil)
+	slug, err := m.appSlug(ctx, jwt)
 	if err != nil {
 		return GitIdentity{}, err
 	}
-	m.appHeaders(request, jwt)
-	response, err := m.client.Do(request)
-	if err != nil {
-		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
-	}
-	body, err := readBody(response, "GitHub App identity lookup")
-	if err != nil {
-		return GitIdentity{}, err
-	}
-	var app struct {
-		Slug string `json:"slug"`
-	}
-	if err := json.Unmarshal(body, &app); err != nil || app.Slug == "" {
-		return GitIdentity{}, fmt.Errorf("GitHub App identity lookup returned an invalid app slug")
-	}
-
-	login := app.Slug + "[bot]"
-	request, err = http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
+	login := slug + "[bot]"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
 	if err != nil {
 		return GitIdentity{}, err
 	}
 	request.Header.Set("Authorization", "token "+installationToken)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "legion-daemon")
-	response, err = m.client.Do(request)
+	response, err := m.client.Do(request)
 	if err != nil {
 		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App bot identity lookup: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode))
 	}
-	body, err = readBody(response, "GitHub App bot identity lookup")
+	body, err := readBody(response, "GitHub App bot identity lookup")
 	if err != nil {
 		return GitIdentity{}, err
 	}
@@ -455,6 +470,34 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 		Name:  login,
 		Email: id + "+" + login + "@users.noreply.github.com",
 	}, nil
+}
+
+// appSlug is the slug of the App jwt signs for, read from GET /app: its bot login is the slug's,
+// "<slug>[bot]".
+func (m *Manager) appSlug(ctx context.Context, jwt string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app", nil)
+	if err != nil {
+		return "", err
+	}
+	m.appHeaders(request, jwt)
+	response, err := m.client.Do(request)
+	if err != nil {
+		return "", &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
+	}
+	body, err := readBody(response, "GitHub App identity lookup")
+	if err != nil {
+		return "", err
+	}
+	var app struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(body, &app); err != nil || app.Slug == "" {
+		return "", fmt.Errorf("GitHub App identity lookup returned an invalid app slug")
+	}
+	return app.Slug, nil
 }
 
 func (m *Manager) appHeaders(request *http.Request, jwt string) {

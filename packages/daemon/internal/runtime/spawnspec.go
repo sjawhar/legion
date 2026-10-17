@@ -33,16 +33,27 @@ func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secret
 func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
 
 // GitHubCredential is the daemon's one function a runtime calls for a role's GitHub credential
-// files: the gh `hosts.yml` and `config.yml` rendered from the role's App token (ghconfig.Render),
-// which the runtime puts under the agent's GH_CONFIG_DIR and rewrites from the same function as the
-// lease nears its expiry. The controller is a role like any other here: it acts as the review App
-// (appauth.AppRoleFor).
-type GitHubCredential func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error)
+// files: a gh bundle (ghconfig.Bundle), one directory of gh files per GitHub owner of the project
+// — the role's App token for owner, the one the agent writes to (its issue's repository's owner),
+// and a token of the same App narrowed to reading for every other owner — with owner's directory
+// the bundle's default, which GH_CONFIG_DIR names. The runtime writes it under the agent's bundle
+// root (LEGION_GH_OWNERS_DIR) and rewrites it from the same function, asked for the same owner, as
+// the leases near their expiry. The controller writes to no owner and acts as the review App
+// (appauth.AppRoleFor): its bundle holds every owner read-only, the owner it is asked for its
+// default, or the first owner when it is asked for none. A project with no GitHub owner at all to
+// mint for is ErrNoGitHubOwner.
+type GitHubCredential func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error)
 
-// GHConfigDir is the tmux pane's GH_CONFIG_DIR: `<state_dir>/secrets/<claim>-gh`, the directory
-// holding the claim's gh files (ghconfig.HostsFile and ghconfig.ConfigFile), named for its claim
-// token so the daemon prunes it with the claim's other secret files. A pod has no use for it:
-// there the files are a Secret volume the manifest mounts.
+// ErrNoGitHubOwner is a GitHubCredential's refusal when there is no GitHub owner to mint for: a
+// project whose repositories none of the Apps can act on, and a caller that names no owner. A
+// controller then runs with gh acting as nobody, its gh directory empty.
+var ErrNoGitHubOwner = errors.New("no GitHub owner to mint an App lease for")
+
+// GHConfigDir is the tmux pane's bundle root (LEGION_GH_OWNERS_DIR): `<state_dir>/secrets/<claim>-gh`,
+// the directory holding the claim's gh bundle (ghconfig.WriteBundle), named for its claim token so
+// the daemon prunes it with the claim's other secret files. Its default owner's directory
+// (ghconfig.OwnerDir) is the pane's GH_CONFIG_DIR. A pod has no use for it: there the files are a
+// Secret volume the manifest mounts.
 func GHConfigDir(stateDir string, token claim.Token) string {
 	return SecretFilePath(stateDir, string(token)+"-gh")
 }

@@ -222,9 +222,9 @@ func TestProviderKeysMayNotNameAnAgentSecretsVariable(t *testing.T) {
 // file under either runtime rather than the deployment stopping on every pane's shim; a key of
 // another name passes.
 func TestProviderKeysMayNotNameAGhVariableEveryPaneSets(t *testing.T) {
-	for _, name := range []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"} {
+	for _, name := range []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"} {
 		t.Run(name, func(t *testing.T) {
-			want := "provider_keys names " + name + ", which the daemon sets on every pane and pod (the role's GitHub App token is the gh files under GH_CONFIG_DIR; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name"
+			want := "provider_keys names " + name + ", which the daemon sets on every pane and pod (the role's GitHub App tokens are the gh files under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's owner's and LEGION_GH_PATH the real gh `legion gh` runs; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name"
 			_, err := LoadForValidation(writeConfigFile(t, minimalFile+"provider_keys:\n  "+name+": "+name+"_TESTS\n"), noEnv)
 			if err == nil || err.Error() != want {
 				t.Fatalf("LoadForValidation = %v, want %q", err, want)

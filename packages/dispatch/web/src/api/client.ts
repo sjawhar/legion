@@ -323,7 +323,10 @@ export class DispatchApiClient {
     return this.json<RepoProject[]>("/api/v1/settings/repo-projects");
   }
 
-  putRepoProject(repo: string, input: { project: string }): Promise<RepoProject> {
+  putRepoProject(
+    repo: string,
+    input: { project: string; default?: boolean }
+  ): Promise<RepoProject> {
     return this.send<RepoProject>("PUT", `/api/v1/settings/repo-projects/${repoPath(repo)}`, input);
   }
 

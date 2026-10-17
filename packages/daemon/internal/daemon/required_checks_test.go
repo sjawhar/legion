@@ -84,7 +84,7 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 	records := record.NewStore()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		ctx := context.Background()
-		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
+		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
 			Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"}); err != nil {
 			return err
 		}
@@ -107,7 +107,7 @@ func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
 // to log.
 func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
@@ -228,7 +228,7 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 			seedUnjudgedRound(t, pool)
 			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 				records := record.NewStore()
-				if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
+				if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
 					Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}); err != nil {
 					return err
 				}
@@ -309,7 +309,7 @@ func seedCapture(t *testing.T, pool *pgxpool.Pool, from phase.Phase, status stri
 	records := record.NewStore()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		ctx := context.Background()
-		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
+		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
 			Phase: from, Generation: 1, Status: status, Rank: "U"}); err != nil {
 			return err
 		}

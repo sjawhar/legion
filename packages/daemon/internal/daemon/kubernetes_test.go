@@ -214,7 +214,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	tokens := &workflowTokenRecorder{}
 	record := &built{}
 	o := fakeRuntime(fake.NewRuntime(), record)
-	o.workflowTokens = tokens
+	o.workflowTokens, o.githubAPI = tokens, repositoriesGitHub(t)
 	var logged syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -351,7 +351,7 @@ func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) 
 	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
 	record := &built{}
 	o := fakeRuntime(fake.NewRuntime(), record)
-	o.workflowTokens = &workflowTokenRecorder{}
+	o.workflowTokens, o.githubAPI = &workflowTokenRecorder{}, repositoriesGitHub(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, cfg, quietLogger(), o) }()
@@ -496,7 +496,7 @@ dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 controller: daemon
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }

@@ -57,6 +57,47 @@ type State struct {
 	// — each open deployment row with the legion.yaml line that records a decision. Never null; a
 	// gap is reported here, never refused (contract 16).
 	Capabilities []CapabilityState `json:"capabilities"`
+	// Repositories is the project's repository mapping as the daemon serves it: the owners its
+	// roles' credentials span, each repository it serves, and each mapped repository it leaves out
+	// with why (a GitHub App not installed on it). Never null: a daemon with no workflow serves none.
+	Repositories RepositoriesView `json:"repositories"`
+}
+
+// RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped and
+// Refused are sorted, and never null.
+type RepositoriesView struct {
+	Owners  []string                `json:"owners"`
+	Mapped  []MappedRepositoryView  `json:"mapped"`
+	Refused []RefusedRepositoryView `json:"refused"`
+}
+
+// MappedRepositoryView is a repository the daemon serves, as GitHub names it, and whether it is the
+// project's default in Dispatch.
+type MappedRepositoryView struct {
+	Repo    string `json:"repo"`
+	Default bool   `json:"default"`
+}
+
+// RefusedRepositoryView is a mapped repository the daemon leaves out, as Dispatch maps it, and why.
+type RefusedRepositoryView struct {
+	Repo   string `json:"repo"`
+	Reason string `json:"reason"`
+}
+
+// MarshalJSON keeps the three lists arrays on the wire.
+func (r RepositoriesView) MarshalJSON() ([]byte, error) {
+	type wire RepositoriesView
+	out := wire(r)
+	if out.Owners == nil {
+		out.Owners = []string{}
+	}
+	if out.Mapped == nil {
+		out.Mapped = []MappedRepositoryView{}
+	}
+	if out.Refused == nil {
+		out.Refused = []RefusedRepositoryView{}
+	}
+	return json.Marshal(out)
 }
 
 // CapabilityState is one row of that report. Status is "present", "unchecked", "withheld",
@@ -179,6 +220,11 @@ type Issue struct {
 	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
 	Status string `json:"status"`
+	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
+	// default branch, both taken when the daemon first recorded the issue and never changed after.
+	// Both are absent on an issue the workflow does not record (an operator's claim, Unrecorded).
+	Repo          string `json:"repo,omitempty"`
+	DefaultBranch string `json:"defaultBranch,omitempty"`
 	// HoldReason is why a held issue is held, when its hold has one: `escalated` once its architect
 	// sent it to the controller. Absent otherwise, and absent while the issue's tree lingers or is
 	// closed: the record keeps the reason, and the view shows it again once the tree is re-admitted.
@@ -272,6 +318,8 @@ type PhaseView struct {
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
 type PullRequestView struct {
+	// Repo is the repository (owner/name) the pull request is in, its issue's.
+	Repo           string `json:"repo"`
 	Number         int    `json:"number"`
 	Head           string `json:"head"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`

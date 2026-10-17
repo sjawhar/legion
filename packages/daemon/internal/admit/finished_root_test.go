@@ -61,8 +61,8 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 			}
 		}},
 		{name: "parked, then closed by a person", close: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
-			apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
-			apply(t, pool, admission, "root-closed", intake.DispatchIssue{Key: finishedRoot, Seq: 3, Type: "issue.closed", Status: "done", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+			apply(t, pool, admission, "root-parked", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+			apply(t, pool, admission, "root-closed", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.closed", Status: "done", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,7 +82,7 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 
 			// The write's event carries the todo and label. The hand-over fence identifies it as a
 			// state-carrying root promotion, rather than the ordinary child re-entry path.
-			apply(t, pool, admission, "planning-handed-over", intake.DispatchIssue{Key: planning, Seq: 4, Type: "issue.updated", Status: "todo", Title: planning, Parent: finishedRoot, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			apply(t, pool, admission, "planning-handed-over", intake.DispatchIssue{Key: planning, ResolvedRepo: "acme/widgets", Seq: 4, Type: "issue.updated", Status: "todo", Title: planning, Parent: finishedRoot, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 			got := issue(t, pool, planning)
 			if got.Tree != planning || got.Phase != phase.Planning || got.Generation != 2 || got.Status != "in_progress" || architectStarts(t, pool, planning) != 1 {
 				t.Fatalf("the handed-over child = %#v with %d architect starts, want its own planning root, generation 2, with its architect started once", got, architectStarts(t, pool, planning))
@@ -123,15 +123,15 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child, artifact = "LEGION-208", "LEGION-209", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
 			until := fixedNow.Add(time.Hour)
 			parent := root
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
 				for _, put := range []error{
-					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.phase, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.phase, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
 					records.PutGate(context.Background(), tx, record.DesignGate{Issue: root, ArtifactID: artifact, LatestVersion: 2, ApprovedVersion: new(2)}),
 					records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head-42", Generation: 1, State: tc.prState}),
 					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
@@ -142,7 +142,7 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 				}
 			})
 
-			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 			got := issue(t, pool, child)
 			if got.Tree != child || got.Generation != 2 || got.Phase != tc.resumes || got.Status != "in_progress" {
 				t.Fatalf("handed-over child = %#v, want own tree, generation 2, phase %s, in_progress", got, tc.resumes)
@@ -180,15 +180,15 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-208", "LEGION-209"
 	until := fixedNow.Add(time.Hour)
 	parent := root
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		for _, put := range []error{
-			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
-			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
 			records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head-42", Generation: 1, State: record.PullRequestOpen}),
 			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 2}),
 		} {
@@ -198,7 +198,7 @@ func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
 		}
 	})
 
-	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 	got := issue(t, pool, child)
 	if got.Tree != child || got.Generation != 2 || got.Phase != phase.Merging {
 		t.Fatalf("handed-over child = %#v, want its own tree at generation 2, still merging", got)
@@ -238,15 +238,15 @@ func TestAHandedOverRootsCatchUpSaysHandedOverAndWhetherItCarriedAGate(t *testin
 			ctx := context.Background()
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child = "LEGION-208", "LEGION-209"
 			until := fixedNow.Add(time.Hour)
 			parent := root
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
 				puts := []error{
-					records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-					records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+					records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
 					records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 				}
 				if tc.gate {
@@ -259,7 +259,7 @@ func TestAHandedOverRootsCatchUpSaysHandedOverAndWhetherItCarriedAGate(t *testin
 				}
 			})
 
-			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 			if _, err := intake.ApplyFact(ctx, pool, "supervise", "supervise:architect-of-"+child+":1:ready",
 				intake.ClaimReady{Issue: child, Role: claim.RoleArchitect, Launch: 1}, engine, admission); err != nil {
 				t.Fatalf("apply the architect's ready: %v", err)
@@ -284,7 +284,7 @@ func TestTheOutboxsConsumptionOfAHandOverIsLogged(t *testing.T) {
 	pool := migratedPool(t)
 	var logged bytes.Buffer
 	admission := newAdmission(t, 1, slog.New(slog.NewJSONHandler(&logged, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedLingeringHandovers(t, pool, "LEGION-208", "LEGION-209")
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "outbox", "handover", intake.Handover{Issue: "LEGION-209", Tree: "LEGION-208", Generation: 1}, engine, admission); err != nil {
@@ -323,15 +323,15 @@ func TestACarriedRootResumesFromTheApprovedHeadAndTheHold(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			const root, child = "LEGION-208", "LEGION-209"
 			until := fixedNow.Add(time.Hour)
 			parent := root
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
 				for _, put := range []error{
-					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.at, Hold: tc.hold, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.at, Hold: tc.hold, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
 					records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: child, Role: claim.RoleReviewer, Claim: "reviewer-claim", Decision: &record.ReviewDecision{State: "approved", Head: "approved-head"}}),
 					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 				} {
@@ -341,7 +341,7 @@ func TestACarriedRootResumesFromTheApprovedHeadAndTheHold(t *testing.T) {
 				}
 			})
 
-			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 			var mergerTasks []string
 			var held []record.Notice
 			for _, effect := range effects(t, pool) {
@@ -387,15 +387,15 @@ func phaseStarts(t *testing.T, pool *pgxpool.Pool, issue string, role claim.Role
 func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-208", "LEGION-209"
 	parent := root
 	until := fixedNow.Add(time.Hour)
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		for _, put := range []error{
-			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
 			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 		} {
 			if put != nil {
@@ -406,8 +406,8 @@ func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
 
 	// The reopen is an intake fact serialized before the child PATCH's daemon event, and it cancels
 	// the durable hand-over fence instead of deleting it. The next event sees that cancellation.
-	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: root, Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "A", HandedOver: true}, engine)
-	apply(t, pool, admission, "late-handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "late-handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 	got := issue(t, pool, child)
 	if got.Tree != root || got.Phase != phase.Planning || got.Generation != 1 || got.Status != "in_progress" || got.LastDispatchSeq != 2 {
 		t.Fatalf("child after a stale hand-over = %#v, want it unchanged in %s's live tree with its event sequence fenced", got, root)
@@ -435,18 +435,18 @@ func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
 func TestADaemonTodoWithoutTheLabelLeavesTheHandOverFence(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, child = "LEGION-208", "LEGION-209"
 	seedLingeringHandovers(t, pool, root, child)
 
-	apply(t, pool, admission, "plain-echo", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", DaemonActor: true}, engine)
+	apply(t, pool, admission, "plain-echo", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", DaemonActor: true}, engine)
 	if got := issue(t, pool, child); got.Tree != root || got.Generation != 1 {
 		t.Fatalf("child after an unlabelled daemon todo = %#v, want it still in %s's tree", got, root)
 	}
 	if fence := handoverOf(t, pool, child); fence == nil || fence.Cancelled {
 		t.Fatalf("fence after an unlabelled daemon todo = %#v, want it standing", fence)
 	}
-	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 3, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 	if got := issue(t, pool, child); got.Tree != child || got.Phase != phase.Planning {
 		t.Fatalf("child after its hand-over event = %#v, want its own planning root", got)
 	}
@@ -457,11 +457,11 @@ func TestADaemonTodoWithoutTheLabelLeavesTheHandOverFence(t *testing.T) {
 func TestAnOrphanAdmittedByAPersonLeavesItsSiblingsFences(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	const root, first, second = "LEGION-208", "LEGION-209", "LEGION-210"
 	seedLingeringHandovers(t, pool, root, first, second)
 
-	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: first, Seq: 2, Type: "issue.updated", Status: "todo", Title: first, Parent: root, Rank: "B", HandedOver: true}, engine)
+	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: first, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: first, Parent: root, Rank: "B", HandedOver: true}, engine)
 	if got := issue(t, pool, first); got.Tree != first {
 		t.Fatalf("labelled child = %#v, want an orphan root of its own", got)
 	}
@@ -476,11 +476,11 @@ func seedLingeringHandovers(t *testing.T, pool *pgxpool.Pool, root string, child
 	parent := root
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}); err != nil {
 			t.Fatalf("seed root: %v", err)
 		}
 		for _, child := range children {
-			if err := records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}); err != nil {
+			if err := records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}); err != nil {
 				t.Fatalf("seed child: %v", err)
 			}
 			if err := records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}); err != nil {
@@ -514,12 +514,12 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 	ctx := context.Background()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
-	root := record.Issue{Key: "LEGION-208", Project: testProject, Title: "finished root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "finished root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
 	parent := root.Key
-	child := record.Issue{Key: "LEGION-209", Project: testProject, Title: "merged child", Tree: root.Key, Parent: &parent,
+	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "merged child", Tree: root.Key, Parent: &parent,
 		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}
-	unstarted := record.Issue{Key: "LEGION-210", Project: testProject, Title: "unstarted child", Tree: root.Key, Parent: &parent,
+	unstarted := record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "unstarted child", Tree: root.Key, Parent: &parent,
 		Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "C", LastDispatchSeq: 1}
 	putIssue(t, pool, root)
 	putIssue(t, pool, child)
@@ -545,7 +545,7 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 		}
 	})
 
-	apply(t, pool, admission, "person-hands-over", intake.DispatchIssue{Key: child.Key, Seq: 2, Type: "issue.updated",
+	apply(t, pool, admission, "person-hands-over", intake.DispatchIssue{Key: child.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated",
 		Status: "todo", Title: child.Title, Parent: root.Key, Rank: child.Rank, HandedOver: handed}, engine)
 
 	got := issue(t, pool, child.Key)
@@ -570,7 +570,7 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 		t.Fatalf("production-check implementer starts = %d, want one", starts)
 	}
 
-	apply(t, pool, admission, "person-hands-over-unstarted", intake.DispatchIssue{Key: unstarted.Key, Seq: 2, Type: "issue.updated",
+	apply(t, pool, admission, "person-hands-over-unstarted", intake.DispatchIssue{Key: unstarted.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated",
 		Status: "todo", Title: unstarted.Title, Parent: root.Key, Rank: unstarted.Rank, HandedOver: handed}, engine)
 	fresh := issue(t, pool, unstarted.Key)
 	if fresh.Tree != unstarted.Key || fresh.Generation != 2 || fresh.Phase != phase.Admitted {
@@ -600,7 +600,7 @@ func TestARootReopenedInItsLingerKeepsItsChildren(t *testing.T) {
 	if result, err := intake.ApplyFact(context.Background(), pool, "api", "signoff", intake.SignOff{Issue: finishedRoot}, engine, admission); err != nil || result.Refusal != nil {
 		t.Fatalf("sign off %s = %+v, %v", finishedRoot, result.Refusal, err)
 	}
-	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: finishedRoot, Seq: 2, Type: "issue.updated", Status: "todo", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: finishedRoot, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: finishedRoot, Rank: "A", HandedOver: true}, engine)
 	if root := issue(t, pool, finishedRoot); root.Generation != 2 || root.Lingers() {
 		t.Fatalf("the reopened root = %#v, want generation 2, no longer lingering", root)
 	}
@@ -617,11 +617,11 @@ func seedFinishingTree(t *testing.T) (*pgxpool.Pool, *Admission, intake.Handler)
 	t.Helper()
 	pool := migratedPool(t)
 	admission := newAdmission(t, 3, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedSlotted(t, pool, finishedRoot, "A")
 	parent := finishedRoot
 	child := func(key string, at phase.Phase, status string) record.Issue {
-		return record.Issue{Key: key, Tree: finishedRoot, Project: testProject, Title: key, Parent: &parent, Phase: at, Generation: 1, Status: status, DispatchStatus: status, Rank: "B", LastDispatchSeq: 3}
+		return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: finishedRoot, Project: testProject, Title: key, Parent: &parent, Phase: at, Generation: 1, Status: status, DispatchStatus: status, Rank: "B", LastDispatchSeq: 3}
 	}
 	held := child(heldTesting, phase.Held, "testing")
 	held.Hold = &record.Hold{From: phase.Testing}
@@ -711,7 +711,7 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 		consume func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler)
 	}{
 		{name: "its hand-over event", consume: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
-			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 		}},
 		{name: "the outbox's direct consumption", consume: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
 			if _, err := intake.ApplyFact(context.Background(), pool, "outbox", "handover", intake.Handover{Issue: "LEGION-209", Tree: "LEGION-208", Generation: 1}, engine, admission); err != nil {
@@ -723,7 +723,7 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 			ctx := context.Background()
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedFinishedChildUnderLingeringRoot(t, pool, "LEGION-208", "LEGION-209")
 
 			tc.consume(t, pool, admission, engine)
@@ -756,10 +756,10 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 func TestAFreshOrphanAdmissionDeletesTheChildsFence(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedFinishedChildUnderLingeringRoot(t, pool, "LEGION-208", "LEGION-209")
 
-	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true}, engine)
+	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true}, engine)
 	if got := issue(t, pool, "LEGION-209"); got.Tree != "LEGION-209" || got.Phase != phase.Admitted {
 		t.Fatalf("labelled finished child = %#v, want its own admitted root", got)
 	}
@@ -778,8 +778,8 @@ func seedFinishedChildUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool, root,
 	inTx(t, pool, func(tx pgx.Tx) {
 		records, ctx := record.NewStore(), context.Background()
 		for _, put := range []error{
-			records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "B", LastDispatchSeq: 1}),
+			records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "B", LastDispatchSeq: 1}),
 			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1, ApprovedVersion: new(1)}),
 			records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 		} {
@@ -804,10 +804,10 @@ const (
 func TestAHandedOverChildKeepsItsMergersByHandNote(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedByHandREADYUnderLingeringRoot(t, pool)
 
-	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 	got := issue(t, pool, "LEGION-209")
 	if got.Tree != "LEGION-209" || got.Generation != 2 || got.Phase != phase.Merging || got.ReadyPendingVersion == nil || *got.ReadyPendingVersion != 2 {
 		t.Fatalf("handed-over child = %#v, want its own tree at generation 2, merging, its READY pending version 2", got)
@@ -835,10 +835,10 @@ func TestAHandedOverChildKeepsItsMergersByHandNote(t *testing.T) {
 func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	seedByHandREADYUnderLingeringRoot(t, pool)
 
-	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", Kind: intake.DispatchArtifactApproved, Version: 2}, engine, admission); err != nil {
 		t.Fatalf("apply the old document's approval: %v", err)
 	}
@@ -877,8 +877,8 @@ func seedByHandREADYUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool) {
 	inTx(t, pool, func(tx pgx.Tx) {
 		records, ctx := record.NewStore(), context.Background()
 		for _, put := range []error{
-			records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending}),
+			records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending}),
 			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 2, ApprovedVersion: new(1)}),
 			records.PutPullRequest(ctx, tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", Generation: 1, State: record.PullRequestOpen}),
 			records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger-claim", HandoffCommit: "head", Summary: carriedPacket, MergeNote: byHandNote}),

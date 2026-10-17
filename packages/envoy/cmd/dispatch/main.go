@@ -203,10 +203,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := seedRepoProjects(ctx, database, boot.RepoProjects); err != nil {
-		slog.Error("dispatch: seed repository projects", "error", err)
-		os.Exit(1)
-	}
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
 		slog.Error("dispatch: validate default project", "error", err)
 		os.Exit(1)
@@ -267,6 +263,12 @@ func main() {
 		Settle:    boot.SettleDelay,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
+	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
+	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
+		slog.Error("dispatch: seed repository projects", "error", err)
+		os.Exit(1)
+	}
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
 	if err != nil {
@@ -847,25 +849,6 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 	}
 	if !exists {
 		return fmt.Errorf("DISPATCH_DEFAULT_PROJECT %q does not exist", project)
-	}
-	return nil
-}
-
-func seedRepoProjects(ctx context.Context, database *store.Store, raw string) error {
-	ctx = store.WithTransactionTracking(ctx)
-	mappings, err := api.ParseRepoProjects(raw)
-	if err != nil {
-		return err
-	}
-	createdBy := []byte(`{"kind":"session","id":"environment"}`)
-	for repo, project := range mappings {
-		if _, err := database.Pool.Exec(ctx, `
-			insert into repo_projects (repo, project, created_by)
-			values ($1, $2, $3)
-			on conflict (repo) do nothing
-		`, repo, project, createdBy); err != nil {
-			return fmt.Errorf("seed repository project %q: %w", repo, err)
-		}
 	}
 	return nil
 }

@@ -275,13 +275,19 @@ func (t *transientOnceTokens) Token(context.Context, appauth.AppRole, string) (a
 	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
+func (t *transientOnceTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // reviewPermissionPool is a store recording acme/widgets#42 for LEGION-208, and no other pull
 // request.
 func reviewPermissionPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"})
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", State: record.PullRequestOpen})
 	}); err != nil {

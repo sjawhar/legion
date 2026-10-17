@@ -76,6 +76,8 @@ const STALL_STATE = {
       generation: 1,
       phase: "implementing",
       status: "in_progress",
+      repo: "acme/widgets",
+      defaultBranch: "main",
       workers: {},
     },
   },
@@ -83,6 +85,11 @@ const STALL_STATE = {
   heldOutboxRows: [],
   strandedClaims: [],
   capabilities: [],
+  repositories: {
+    owners: ["acme"],
+    mapped: [{ repo: "acme/widgets", default: true }],
+    refused: [],
+  },
 };
 
 const cleanup: Cleanup = [];

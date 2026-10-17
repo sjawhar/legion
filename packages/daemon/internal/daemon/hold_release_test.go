@@ -52,11 +52,11 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
@@ -65,7 +65,7 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 	// target is far past anything an ack floor on this empty stream will ever reach: only idle —
 	// a fresh consumer with nothing ever published to it — can close this hold.
 	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
 	}, 1000, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
@@ -93,18 +93,18 @@ func TestPollHoldReleaseClosesAHeldRootOnAQuietStreamWithinABound(t *testing.T) 
 func TestPollHoldReleaseRetriesAFailedPositionRead(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
 	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
 	}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
@@ -141,18 +141,18 @@ func TestPollHoldReleaseRetriesAFailedPositionRead(t *testing.T) {
 func TestPollHoldReleaseRetriesAFailedApplyOfAnUnchangedPosition(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
 	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
 	}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
@@ -221,6 +221,9 @@ func (d *pilotDispatch) MessageBodiesSince(context.Context, string, time.Time) (
 func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *pilotDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
 
 // filteringDispatch honors the statuses argument exactly as the real HTTPClient does: only
 // summaries whose status is in the requested set, or every summary when the caller asks for none.
@@ -259,6 +262,9 @@ func (d *filteringDispatch) MessageBodiesSince(context.Context, string, time.Tim
 func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *filteringDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
 
 // reconcile's boot listing read only todo through retro, so a root moved to
 // backlog while the daemon was down fell out of the window entirely — nothing held its key. The
@@ -294,12 +300,12 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 		t.Fatalf("publish LEGION-EDGE's own pending event: %v", err)
 	}
 
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission},
+		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
 		dispatch: &filteringDispatch{summaries: []dispatch.IssueSummary{
-			{Key: "LEGION-EDGE", Title: "edge", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
+			{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "backlog", Rank: "A", HandedOver: true, LastSeq: 2},
 		}},
 		dispatchProject: "CAPTURE", bootID: "test-boot", log: log, consumers: consumers,
 	}
@@ -311,7 +317,7 @@ func TestReconcileHoldsAKeyTheBootListingShowsOutOfTheWorkflowStatusWindow(t *te
 	}
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "seq1-created", intake.DispatchIssue{
-		Key: "LEGION-EDGE", Seq: 1, Type: "issue.created", Status: "todo", Title: "edge", Rank: "A", HandedOver: true,
+		Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Seq: 1, Type: "issue.created", Status: "todo", Title: "edge", Rank: "A", HandedOver: true,
 	}, w.handlers...); err != nil {
 		t.Fatalf("apply the replayed todo-created event: %v", err)
 	}
@@ -355,13 +361,13 @@ func TestReconcileOnThePilotsShapeAdmitsOnlyTheLabeledTodoRootQuickly(t *testing
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
-		pool: pool, admission: admission, engine: engine, handlers: []intake.Handler{engine, admission},
+		pool: pool, records: record.NewStore(), admission: admission, engine: engine, handlers: []intake.Handler{engine, admission}, repositories: newRepositories("CAPTURE"),
 		dispatch: &pilotDispatch{summaries: []dispatch.IssueSummary{
-			{Key: "CAPTURE-1", Title: "todo root", Status: "todo", Rank: "A", HandedOver: true},
-			{Key: "CAPTURE-2", Title: "backlog root", Status: "backlog", Rank: "B", HandedOver: true},
+			{Key: "CAPTURE-1", ResolvedRepo: "sjawhar/legion", Title: "todo root", Status: "todo", Rank: "A", HandedOver: true},
+			{Key: "CAPTURE-2", ResolvedRepo: "sjawhar/legion", Title: "backlog root", Status: "backlog", Rank: "B", HandedOver: true},
 		}},
 		dispatchProject: "CAPTURE", consumers: consumers, bootID: "pilot-boot", log: log,
 		holdPollInterval: 10 * time.Millisecond,
@@ -418,18 +424,18 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	var logBuf syncBuffer
 	log := slog.New(slog.NewTextHandler(&logBuf, nil))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: "LEGION-EDGE", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
+			Key: "LEGION-EDGE", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: "CAPTURE", Title: "edge", Tree: "LEGION-EDGE", Phase: phase.Admitted,
 			Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1,
 		})
 	}); err != nil {
 		t.Fatalf("seed root: %v", err)
 	}
 	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-EDGE", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
+		{Key: "LEGION-EDGE", ResolvedRepo: "sjawhar/legion", Title: "edge", Status: "todo", Rank: "A", HandedOver: true, LastSeq: 2},
 	}, 5, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind record, want it held")
@@ -474,11 +480,11 @@ func TestPollHoldReleaseWarnsWhenAHoldPersistsPastItsBound(t *testing.T) {
 func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsCommitHookIsRecordedThenPromoted(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 
 	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+		{Key: "LEGION-RACE", ResolvedRepo: "sjawhar/legion", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
 	}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
@@ -520,7 +526,7 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsCommitHookIsRec
 
 	// The newer labeled todo event lands in that window: LEGION-RACE is still in pending.
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "label-added-in-race-window", intake.DispatchIssue{
-		Key: "LEGION-RACE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "race", Rank: "A", HandedOver: true,
+		Key: "LEGION-RACE", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "todo", Title: "race", Rank: "A", HandedOver: true,
 	}, engine, admission); err != nil {
 		t.Fatalf("apply the racing event: %v", err)
 	}
@@ -568,11 +574,11 @@ func TestANewerLabeledEventInTheWindowBetweenReleasesCommitAndItsCommitHookIsRec
 func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 
 	reconcileAdmission(t, pool, admission, []dispatch.IssueSummary{
-		{Key: "LEGION-RACE", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
+		{Key: "LEGION-RACE", ResolvedRepo: "sjawhar/legion", Title: "race", Status: "todo", Rank: "A", HandedOver: false, LastSeq: 1},
 	}, 10, intake.DispatchConsumerPosition{AckFloorStream: 0, Idle: false})
 	if !admission.Held() {
 		t.Fatal("Held() = false after seeding a behind unlabeled record, want it held")
@@ -610,7 +616,7 @@ func TestPollHoldReleaseRetriesAFailedClosingPass(t *testing.T) {
 		t.Fatalf("commit release tx: %v", err)
 	}
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "label-added-in-race-window", intake.DispatchIssue{
-		Key: "LEGION-RACE", Seq: 2, Type: "issue.updated", Status: "todo", Title: "race", Rank: "A", HandedOver: true,
+		Key: "LEGION-RACE", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "todo", Title: "race", Rank: "A", HandedOver: true,
 	}, engine, admission); err != nil {
 		t.Fatalf("apply the racing event: %v", err)
 	}

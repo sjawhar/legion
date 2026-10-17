@@ -758,6 +758,8 @@ const coreIssue: IssueSummary = {
   priority: null,
   rank: "U",
   route: null,
+  repo: null,
+  resolved_repo: null,
   route_holder: null,
   route_status: null,
   status: "todo",

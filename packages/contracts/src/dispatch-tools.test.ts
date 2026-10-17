@@ -117,7 +117,7 @@ function schemaFor(name: keyof typeof validCalls) {
 }
 
 const ISSUE_UPDATE_RULES =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, or components. " +
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo. " +
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.";
 
 describe("zodSchemaApi", () => {
@@ -387,6 +387,18 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  test("dispatch_issue takes the repository the issue targets", () => {
+    const result = schemaFor("dispatch_issue").safeParse({
+      project: "DSP",
+      title: "T",
+      repo: "acme/widgets",
+    });
+    expect(result).toMatchObject({ data: { repo: "acme/widgets" }, success: true });
+    expect(
+      schemaFor("dispatch_issue").safeParse({ project: "DSP", title: "T", repo: 42 }).success
+    ).toBe(false);
+  });
+
   test("dispatch_issue preserves force", () => {
     const result = schemaFor("dispatch_issue").safeParse({
       project: "DSP",
@@ -450,6 +462,8 @@ describe("dispatchToolSpecs", () => {
       { issue: "DSP-1", components: { mode: "inherit" } },
       { issue: "DSP-1", components: { mode: "explicit", ids: ["web", "dispatch-server"] } },
       { issue: "DSP-1", components: { mode: "none", reason: "hiring" } },
+      { issue: "DSP-1", repo: "acme/widgets" },
+      { issue: "DSP-1", repo: "" },
     ]) {
       expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(true);
     }
@@ -465,6 +479,7 @@ describe("dispatchToolSpecs", () => {
         JSON.stringify(components)
       ).toBe(false);
     }
+    expect(schema.safeParse({ issue: "DSP-1", repo: 42 }).success).toBe(false);
   });
 
   test("dispatch_issue_update accepts only Legion lifecycle statuses", () => {

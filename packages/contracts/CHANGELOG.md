@@ -4,6 +4,11 @@
 
 ### Added
 
+- The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
+  `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
+  (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
+  clears).
+
 - `Agent.host`: the session's real machine, as its own Envoy plugin reported it, kept separate
   from `machine_id` (the listener that owns the session's delivery). The Envoy listener falls
   back to `machine_id` for a session whose plugin predates the field, so `host` is never empty.
