@@ -152,6 +152,32 @@ fail() {
   echo "CHECK $check: FAIL: $*"
   exit 1
 }
+
+# diagnose_leftover NAME: namespace_clean's own LIST still sees an object a GET by name may
+# disagree with — captures the facts needed to tell a genuinely Terminating object (deletionTimestamp
+# set, finalizers holding it) from a stale LIST (same query via the raw API, with and without
+# resourceVersion=0, and a verbose trace of the exact LIST kubectl issues) into the evidence dir,
+# never trusted or acted on by the run itself.
+diagnose_leftover() {
+  local name=$1
+  local out="$evidence/leftover-diagnostics-$name.txt"
+  {
+    echo "=== $(date -u +%FT%TZ) GET pod/$name (jsonpath) ==="
+    op get pod "$name" -o jsonpath='{.metadata.uid} deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} phase={.status.phase} node={.spec.nodeName} resourceVersion={.metadata.resourceVersion}{"\n"}' 2>&1
+    echo "=== GET pod/$name (full json) ==="
+    op get pod "$name" -o json 2>&1
+    echo "=== LIST pod -l legion.dev/project=$run_label (namespace-rig's own query, json) ==="
+    op get pod -l "legion.dev/project=$run_label" -o json 2>&1
+    echo "=== raw LIST, no resourceVersion ==="
+    kubectl --context "$operator" get --raw "/api/v1/namespaces/$namespace/pods?labelSelector=legion.dev%2Fproject%3D$run_label" 2>&1
+    echo "=== raw LIST, resourceVersion=0 (cache-served) ==="
+    kubectl --context "$operator" get --raw "/api/v1/namespaces/$namespace/pods?labelSelector=legion.dev%2Fproject%3D$run_label&resourceVersion=0" 2>&1
+    echo "=== verbose (-v=8) LIST via kubectl, to see the resourceVersion it requests ==="
+    kubectl --context "$operator" -n "$namespace" get pod -l "legion.dev/project=$run_label" --v=8 2>&1
+  } >"$out" 2>&1
+  echo "   [operator] leftover diagnostics for $name written to $out"
+}
+
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/bridge-tunnel.sh
@@ -192,6 +218,9 @@ cleanup() {
     fi
     [ "$(date +%s)" -lt "$settle_deadline" ] || {
       echo "   [operator] namespace-clean's own listing still shows $settle_left after 60s; proceeding to the snapshot anyway"
+      while IFS= read -r leftover_name; do
+        case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
+      done <<<"$settle_left"
       break
     }
     sleep 2

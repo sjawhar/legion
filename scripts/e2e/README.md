@@ -773,7 +773,7 @@ deletes by the same exact label any Secret or PVC still left after 90
 listings, and runs `namespace-clean` when the harness did not get to it. Nothing outside `legion`
 is touched.
 
-What the run had to learn about production:
+What the run had to learn about production (AWS, `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role`):
 
 - **Nothing ties a pod to a node.** Every issue pod owns its volume and carries no affinity, so the
   scheduler bin-packs it wherever the pool has room for its reservation, and Karpenter adds a node
@@ -784,6 +784,54 @@ What the run had to learn about production:
   decides the smallest node the pool adds.
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
+
+What the run had to learn about GKE (`LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account`,
+Theorem's production cluster), each confirmed against a real, already-running production issue
+pod as well as this run's own:
+
+- **gVisor floors a lone small Sandbox's cpu to 500m.** A single-container Sandbox (the image
+  probe, 250m configured) is admitted with its container's cpu request and limit both raised to
+  500m, request and limit together so it stays Guaranteed; every multi-container issue pod, whose
+  containers already sum well past that, is admitted at exactly its configured per-container cpu,
+  unchanged. The harness floors only the probe's expectation to match
+  (`gvisorCPUFloor`, `live_lifecycle_test.go`).
+- **Every container's ephemeral-storage limit is clamped to its request.** Confirmed on both a bare
+  debug pod and a real production pod's six role containers: all request = limit = 1Gi (the
+  configured `EphemeralStorageRequest`), though `config.DefaultResources()` and `liveOverrides` ask
+  several roles for limits of 10–30Gi. A gVisor-sandboxed pod's ephemeral storage is never
+  burstable here; the harness checks the request's value in place of the configured limit
+  (`gkeEphemeralStorageClamped`).
+- **GKE Autopilot adds its own NodeAffinity to every issue pod.** Any pod carrying
+  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` (every issue pod's annotation; the
+  image probe omits it) is given a `cloud.google.com/extended-duration-pods` NodeAffinity on
+  admission, protecting it from disruption for up to seven days. It is GKE's own addition, not a
+  pod or anti-affinity the pod spec asks for, and still admits the pod to any node whose pool
+  carries that label — the reservation rule tolerates exactly this one shape, never any other
+  affinity (`isGKEExtendedDurationAffinity`).
+- **`nproc` inside a gVisor sandbox reflects a host-vCPU presentation, not the pod's own cgroup
+  quota.** Two debug pods summing to 2.5 and to exactly 3.0 cores (one container each at 1 and 2
+  cores) both reported `nproc=2` on an 8-vCPU node with 7.91 allocatable — far more than either
+  sum, ruling out node capacity — a known gap (kubernetes/kubernetes#91665). The pod's cgroup cpu
+  quota, read from every container's identically-presented `/sys/fs/cgroup/cpu/cpu.cfs_quota_us`
+  and `cpu.cfs_period_us` (one gVisor sandbox covers the whole pod), tracked the configured sum
+  exactly in both debug pods and is what `resources` now asserts on GKE; `nproc` is logged, never
+  asserted, there. AWS keeps the original `nproc` assertion, proven reliable there.
+- **A pod's own node is worth reading as a fact in its own right.** `resources` reads the pod's
+  node's allocatable cpu and fails loudly, by name, if it is under the pod's own summed
+  reservation — a Node-Auto-Provisioning shortfall, never something the reservation check above
+  should quietly explain away.
+- **The harness's own direct Postgres connection needs the bind host, not the advertise host.**
+  `postgres-resume`'s `writeSession` dials the scratch database directly from the devbox; under
+  `bridge` mode the pod-facing advertise host is the bridge's cluster-DNS name, which the devbox
+  itself cannot resolve. A second DSN file, at the bind host (loopback under `bridge`), is written
+  for the harness alone; pods and the providers Secret still get the original.
+- **This cluster's bridge pod can take much longer than ordinary pod termination to leave the
+  operator context's label-based listing**, well past when a direct `kubectl get` by name already
+  confirms it `NotFound` — anywhere from under a minute to, on one run, over an hour. The pod is
+  never actually left behind (every post-run check eventually found it gone), but `namespace-clean`
+  compares a label-based listing, which this cluster's API view can disagree with a same-moment
+  GET on for an unpredictable span. This remains open: see the PR for the live evidence and the
+  options under discussion.
 
 ## stage4b-sandbox-tree.sh
 

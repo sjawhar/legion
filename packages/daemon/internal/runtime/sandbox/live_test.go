@@ -946,18 +946,31 @@ func (r *liveRig) recordSandbox(name string) error {
 
 // ---- operator steps ----------------------------------------------------------------------------
 
-// kubectl runs one operator step in the namespace through the admin context.
+// kubectl runs one operator step in the namespace through the admin context. A single retry
+// absorbs the one failure mode confirmed transient here (live, 2026-10-17): the operator's
+// gke-gcloud-auth-plugin hitting a one-off "internal_failure" refreshing its token mid-run, this
+// devbox's own intermittent reach to Google's OAuth endpoint, not a cluster or RBAC problem —
+// every other kubectl failure (a real RBAC refusal, a missing object, a context error) is
+// returned as before, on the first try.
 func (r *liveRig) kubectl(args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(r.ctx, 2*time.Minute)
-	defer cancel()
-	full := append([]string{"--context", r.env.operatorContext, "-n", r.env.namespace}, args...)
-	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, "kubectl", full...)
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("kubectl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	run := func() (string, error) {
+		ctx, cancel := context.WithTimeout(r.ctx, 2*time.Minute)
+		defer cancel()
+		full := append([]string{"--context", r.env.operatorContext, "-n", r.env.namespace}, args...)
+		var stdout, stderr bytes.Buffer
+		cmd := exec.CommandContext(ctx, "kubectl", full...)
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			return stdout.String(), fmt.Errorf("kubectl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		}
+		return stdout.String(), nil
 	}
-	return stdout.String(), nil
+	out, err := run()
+	if err != nil && strings.Contains(err.Error(), "gke-gcloud-auth-plugin") {
+		time.Sleep(2 * time.Second)
+		out, err = run()
+	}
+	return out, err
 }
 
 // exec runs a command in a claim's main container, through the admin context.
