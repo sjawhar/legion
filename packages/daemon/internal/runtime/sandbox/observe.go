@@ -308,20 +308,11 @@ func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName str
 
 // fetchCacheState is what a failed workspace-fetch's detail says of the repository cache it fills
 // a fresh feed from: that cache's state, with the kubelet's reason while it is failing, or that the
-// repository has none. The repository is the one the pod's fetch container names (--repo), which
-// the runtime wrote there; a pod whose fetch names none says nothing.
+// repository has none. The repository is the one the pod's fetch container names
+// (fetchRepository); a pod whose fetch names none says nothing.
 func (r *Runtime) fetchCacheState(pod *corev1.Pod) string {
-	var repo ghrepo.Repository
-	for _, c := range pod.Spec.InitContainers {
-		if at := slices.Index(c.Command, "--repo"); c.Name == fetchContainer && at >= 0 && at+1 < len(c.Command) {
-			parsed, err := ghrepo.Parse("--repo", c.Command[at+1])
-			if err != nil {
-				return ""
-			}
-			repo = parsed
-		}
-	}
-	if repo.IsZero() {
+	repo, ok := fetchRepository(pod)
+	if !ok {
 		return ""
 	}
 	status, found := r.RepositoryCache(repo)
@@ -333,6 +324,18 @@ func (r *Runtime) fetchCacheState(pod *corev1.Pod) string {
 		state += ": " + status.Reason
 	}
 	return state
+}
+
+// fetchRepository is the repository pod's fetch container names (--repo), which the runtime wrote
+// there; false for a pod whose fetch names none that parses.
+func fetchRepository(pod *corev1.Pod) (ghrepo.Repository, bool) {
+	for _, c := range pod.Spec.InitContainers {
+		if at := slices.Index(c.Command, "--repo"); c.Name == fetchContainer && at >= 0 && at+1 < len(c.Command) {
+			repo, err := ghrepo.Parse("--repo", c.Command[at+1])
+			return repo, err == nil
+		}
+	}
+	return ghrepo.Repository{}, false
 }
 
 // failedInit includes a failed attempt the kubelet is restarting under restartPolicy Always.

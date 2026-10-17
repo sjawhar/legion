@@ -57,7 +57,9 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // refresh until its next pod; a write that conflicts is retried once on a fresh read. Nothing
 // of the Secret but the rewritten owners' gh keys changes: the launcher token, whose hash binds the
 // launcher (credentialFromSecret), the default, the annotations, and the keys of an owner the
-// render no longer holds, which the pod's projection may still name, stay as they are.
+// render no longer holds, which the pod's projection may still name, stay as they are. An issue
+// pod whose workspace-fetch has yet to finish has its provisioning Secret refreshed too
+// (refreshProvisioningToken).
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	for _, obj := range r.pods.GetStore().List() {
 		pod := obj.(*corev1.Pod)
@@ -74,6 +76,74 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		}
 		for _, role := range kind.roles() {
 			r.refreshGitHubCredential(ctx, pod.Name, owner.UID, role)
+		}
+		if _, issue := kind.(issuePod); issue && fetchUnfinished(pod) {
+			r.refreshProvisioningToken(ctx, pod, owner.UID)
+		}
+	}
+}
+
+// fetchUnfinished is whether pod's workspace-fetch has yet to finish: the pod is Pending, since a
+// Running pod's init containers have all finished, and its fetch container has not exited
+// successfully — it is waiting to start, running, or about to run again after a failed attempt.
+func fetchUnfinished(pod *corev1.Pod) bool {
+	if pod.Status.Phase != corev1.PodPending {
+		return false
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if status.Name == fetchContainer {
+			return status.State.Terminated == nil || status.State.Terminated.ExitCode != 0
+		}
+	}
+	return true
+}
+
+// refreshProvisioningToken brings the provisioning Secret of pod, owned by the Sandbox with uid, to
+// the implement App's current lease for the owner of the repository its fetch names
+// (fetchRepository): the fetch reads the token's file anew before every transfer from GitHub
+// (workspace.Fetch), and the kubelet rewrites the projected file within its sync period, so a fetch
+// that waits long on its repository's cache never presents an expired token. Only the token is
+// written; the cache's token beside it stays. A Secret another Sandbox owns, or one that already
+// holds the lease, is left; a mint or write that fails is logged and tried at the next tick, and a
+// write that conflicts is retried once on a fresh read.
+func (r *Runtime) refreshProvisioningToken(ctx context.Context, pod *corev1.Pod, uid types.UID) {
+	repo, ok := fetchRepository(pod)
+	if !ok {
+		return
+	}
+	name := secretName(pod.Name)
+	failed := func(err error) {
+		r.log.Warn("sandbox runtime: provisioning token refresh failed", "sandbox", pod.Name, "repo", repo.String(), "err", err)
+	}
+	minting, cancel := call(ctx)
+	token, err := r.tokens.Token(minting, repo.Owner())
+	cancel()
+	if err != nil {
+		failed(err)
+		return
+	}
+	secrets := r.kube.CoreV1().Secrets(r.namespace)
+	for retried := false; ; retried = true {
+		secret, err := secrets.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			failed(err)
+			return
+		}
+		if !ownedBySandbox(secret.OwnerReferences, uid) || string(secret.Data[provisionTokenKey]) == token {
+			return
+		}
+		if secret.Data == nil {
+			secret.Data = map[string][]byte{}
+		}
+		secret.Data[provisionTokenKey] = []byte(token)
+		_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
+		if err == nil {
+			r.log.Info("sandbox runtime: provisioning token refreshed", "sandbox", pod.Name, "repo", repo.String())
+			return
+		}
+		if !apierrors.IsConflict(err) || retried {
+			failed(err)
+			return
 		}
 	}
 }

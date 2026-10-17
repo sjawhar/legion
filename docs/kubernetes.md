@@ -1751,7 +1751,7 @@ owns one volume, `cache-<sandbox>`, of `runtime.kubernetes.repository_cache.volu
 default), holding a bare clone of the repository at `/legion/cache/<owner>/<repo>.git`, and a
 headless Service of its own name, whose DNS name resolves to the pod only while it is Ready. Its
 Secret, `<sandbox>-token`, holds the implement App's installation token for the repository's
-owner, read again before every fetch and brought to the current lease on the gh refresher's
+owner, read again as every transfer from GitHub starts and brought to the current lease on the gh refresher's
 minute, and the cache's own bearer token, 32 random bytes made with the Secret and kept while it
 stands; the issue pods of that repository are given the same bearer token in their provisioning
 Secret, and no other pod has it.
@@ -2355,12 +2355,15 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   pod's launchers while either init container runs, up to the same 70 minutes plus its boot timeout
   from when it first sees one running (above, "Liveness rules"), so the fetch, its wait and retries
   included, spends no launch failure, and `workspace-init` has at least the boot timeout after a
-  fetch that ran its whole budget. The fetch reads the token once, and the daemon hands a pod the
-  implement App's cached lease while more than 20 minutes of it remain
-  (`internal/appauth/appauth.go`), so a delta after a long wait on the repository cache, or a retry
-  late in a long fetch, can outlast the token: an attempt that starts after it expired fails with
-  `Authentication failed`, which the fetch reads as permanent, and the launch's next pod is handed
-  a token afresh, its cache by then ready.
+  fetch that ran its whole budget. The fetch reads the token from its file anew as every transfer
+  attempt from GitHub starts, taking the file as it stands then, and while the pod's
+  `workspace-fetch` has yet to finish, the gh refresher's minute brings its provisioning Secret to
+  the implement App's current lease (`refreshProvisioningToken`,
+  `internal/runtime/sandbox/ghcredential.go`), the cache's token beside it kept, logging `sandbox
+  runtime: provisioning token refreshed`; the daemon re-mints a lease once less than 20 minutes of
+  it remain (`internal/appauth/appauth.go`) and the kubelet rewrites the projected file within its
+  sync period, so a delta after a long wait on the repository cache, or a retry late in a long
+  fetch, presents a token that is still good. A pod past its fetch keeps its Secret as it is.
 - **`workspace-init`** mounts the issue's volume, the feed read-only over it, and the config home —
   never the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
   --default-branch <name> --root /legion --credential-helper '!legion git-credential' --feed
