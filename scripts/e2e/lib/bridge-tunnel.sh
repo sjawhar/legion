@@ -16,12 +16,14 @@
 # name, never by broader selection — consistent with namespace-rig's own rule that a shared
 # namespace's teardown only ever acts on the run's own objects.
 #
-# No retry of its own holds either leg up: the chisel client runs with --max-retry-count 0 (give up
-# on the first disconnection rather than chisel's default of retrying forever), and `kubectl
-# port-forward` already never retries. Either process dying is a torn bridge, and bridge_watchdog
-# fails the whole run loudly (SIGTERM to the script's own pid) the moment it notices, rather than
-# let a silent reconnect leave pods dialing into a gap mid-run. A run that cannot keep the bridge up
-# for its whole length (up to 150 minutes) is not the proof.
+# A dropped `kubectl port-forward` is not treated as a dead bridge: the watchdog restarts it, on
+# the same local port, and the chisel client's own bounded reconnect (--max-retry-count 30,
+# --max-retry-interval 2s — finite, not chisel's default of forever) picks the tunnel back up once
+# the new port-forward is in place, since the client, its auth and its reverse listeners never
+# needed to change. Only two things fail the whole run loudly (SIGTERM to the script's own pid):
+# a port-forward that cannot be restarted within 60s of dropping, or the chisel client itself
+# exiting (its own retry budget exhausted) — two earlier runs died outright to this exact drop,
+# live, 2026-10-17, before this fix.
 #
 # Sourced after lib/namespace-rig.sh (stage4a-sandbox-runtime.sh sources both), whose `op` this
 # file reuses for every operator-context read and write. The caller sets (beside begin/note/fail/
@@ -45,10 +47,44 @@ bridge_chisel_version=v1.11.8
 bridge_control_port=8080
 bridge_started=
 bridge_host=
+bridge_local_control_port=
 bridge_portforward_pid=
+bridge_portforward_attempt=0
 bridge_client_pid=
 bridge_watchdog_pid=
 
+# bridge_portforward_start (re)starts kubectl port-forward to the bridge pod's control port, on
+# the one local port bridge_start picked (bridge_local_control_port), so the chisel client's
+# already-configured target URL keeps working across a restart — the watchdog below calls this
+# again, on the same port, when a dropped port-forward needs recovering, rather than tearing the
+# whole run down for a transient connection loss (confirmed live, 2026-10-17: two full-length runs
+# died to a dropped port-forward with no sign the cluster or the bridge pod itself was unhealthy).
+# Each attempt gets its own log file so a recovered run's evidence still shows the whole history.
+# Returns failure (never calls fail itself) if this one attempt never starts forwarding within
+# 30s; the caller — bridge_start synchronously, the watchdog's own bounded retry loop otherwise —
+# decides what that means.
+bridge_portforward_start() {
+  bridge_portforward_attempt=$((bridge_portforward_attempt + 1))
+  local log="$work/bridge-portforward-$bridge_portforward_attempt.log"
+  timeout --foreground 86400 kubectl --context "$operator" -n "$namespace" port-forward "pod/$bridge_name" \
+    "$bridge_local_control_port:$bridge_control_port" >"$log" 2>&1 &
+  bridge_portforward_pid=$!
+  local waited=0
+  until grep -q "Forwarding from" "$log" 2>/dev/null; do
+    kill -0 "$bridge_portforward_pid" 2>/dev/null || {
+      echo "   [harness] kubectl port-forward attempt $bridge_portforward_attempt exited before it started forwarding: $(cat "$log")" >&2
+      return 1
+    }
+    waited=$((waited + 1))
+    if [ "$waited" -gt 30 ]; then
+      echo "   [harness] kubectl port-forward attempt $bridge_portforward_attempt never reported it was forwarding within 30s: $(cat "$log")" >&2
+      kill "$bridge_portforward_pid" 2>/dev/null
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
 # bridge_start stands up the pod, the Service, the port-forward, the chisel client and the
 # watchdog, in that order, and fails loudly (via the caller's fail) the moment any of them does not
 # come up within its own bound. It never retries a failed step itself.
@@ -101,24 +137,16 @@ YAML
     fail "the bridge pod $bridge_name did not become Ready within 120s: $(op get pod "$bridge_name" -o wide 2>&1)"
   note "[operator] bridge pod/Service $bridge_name: chisel server on :$bridge_control_port (control, never exposed by the Service), reverse-forwarding :$stream_port and :$sessiondb_port, label legion.dev/project=$run_label"
 
-  local local_control_port
-  local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$stream_port" "$sessiondb_port") ||
+  bridge_local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$stream_port" "$sessiondb_port") ||
     fail "no free devbox port for the bridge's kubectl port-forward"
-  timeout --foreground 86400 kubectl --context "$operator" -n "$namespace" port-forward "pod/$bridge_name" \
-    "$local_control_port:$bridge_control_port" >"$work/bridge-portforward.log" 2>&1 &
-  bridge_portforward_pid=$!
-  local waited=0
-  until grep -q "Forwarding from" "$work/bridge-portforward.log" 2>/dev/null; do
-    kill -0 "$bridge_portforward_pid" 2>/dev/null ||
-      fail "kubectl port-forward to $bridge_name exited before it started forwarding: $(cat "$work/bridge-portforward.log")"
-    waited=$((waited + 1))
-    [ "$waited" -le 30 ] ||
-      fail "kubectl port-forward to $bridge_name never reported it was forwarding within 30s: $(cat "$work/bridge-portforward.log")"
-    sleep 1
-  done
-  note "[operator] kubectl port-forward pod/$bridge_name $local_control_port:$bridge_control_port: forwarding"
+  bridge_portforward_start ||
+    fail "the bridge's kubectl port-forward never came up: $(cat "$work/bridge-portforward-$bridge_portforward_attempt.log")"
+  note "[operator] kubectl port-forward pod/$bridge_name $bridge_local_control_port:$bridge_control_port: forwarding"
 
-  "$chisel_bin" client --max-retry-count 0 --auth "$auth_user:$auth_token" "http://127.0.0.1:$local_control_port" \
+  # A bounded retry count and a short max interval, not chisel's default of retrying forever: the
+  # client gives up and exits if the port-forward it dials stays down past its own budget, which
+  # the watchdog below trusts as "this bridge is really gone" rather than restarting indefinitely.
+  "$chisel_bin" client --max-retry-count 30 --max-retry-interval 2s --auth "$auth_user:$auth_token" "http://127.0.0.1:$bridge_local_control_port" \
     "R:0.0.0.0:$stream_port:127.0.0.1:$stream_port" \
     "R:0.0.0.0:$sessiondb_port:127.0.0.1:$sessiondb_port" \
     >"$work/bridge-chisel-client.log" 2>&1 &
@@ -137,18 +165,40 @@ YAML
   done
   [ -n "$ready" ] ||
     fail "the bridge's reverse listeners for :$stream_port and :$sessiondb_port never came up within 30s; bridge pod log: $log; chisel client log: $(cat "$work/bridge-chisel-client.log")"
-  note "[harness] chisel client (pid $bridge_client_pid, max-retry-count 0): reverse listeners for :$stream_port and :$sessiondb_port confirmed in the bridge pod's log"
+  note "[harness] chisel client (pid $bridge_client_pid, max-retry-count 30, max-retry-interval 2s): reverse listeners for :$stream_port and :$sessiondb_port confirmed in the bridge pod's log"
 
+  # The watchdog owns every port-forward restart from here: kubectl port-forward never retries
+  # itself, but a dropped one is not necessarily a dead bridge — the chisel client, auth and
+  # reverse listeners it already set up survive a port-forward restart on the same local port
+  # unchanged, and chisel's own bounded reconnect (above) picks the tunnel back up once the new
+  # port-forward is in place. The run only fails if a restart can't be gotten up within 60s of
+  # the drop, or the chisel client itself exits (it already gave up on its own budget). Confirmed
+  # live, 2026-10-17: killing the port-forward process mid-run let the watchdog restart it and the
+  # run continue past the point it would otherwise have died.
   (
-    trap 'exit 0' TERM
+    trap 'kill "$pf_pid" 2>/dev/null; exit 0' TERM
+    pf_pid=$bridge_portforward_pid
+    down_since=
     while :; do
-      if ! kill -0 "$bridge_portforward_pid" 2>/dev/null; then
-        echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name exited" >&2
-        kill -TERM "$$" 2>/dev/null
-        exit 1
+      if kill -0 "$pf_pid" 2>/dev/null; then
+        down_since=
+      else
+        if [ -z "$down_since" ]; then
+          down_since=$(date +%s)
+          echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name exited; restarting" >&2
+        fi
+        if bridge_portforward_start; then
+          pf_pid=$bridge_portforward_pid
+          echo "   [harness] kubectl port-forward to $bridge_name recovered after $(($(date +%s) - down_since))s" >&2
+          down_since=
+        elif [ $(($(date +%s) - down_since)) -ge 60 ]; then
+          echo "   BRIDGE TUNNEL DOWN: kubectl port-forward to $bridge_name could not be restarted within 60s" >&2
+          kill -TERM "$$" 2>/dev/null
+          exit 1
+        fi
       fi
       if ! kill -0 "$bridge_client_pid" 2>/dev/null; then
-        echo "   BRIDGE TUNNEL DOWN: the chisel client exited" >&2
+        echo "   BRIDGE TUNNEL DOWN: the chisel client exited (its own retry budget, max-retry-count 30, is exhausted): $(cat "$work/bridge-chisel-client.log")" >&2
         kill -TERM "$$" 2>/dev/null
         exit 1
       fi
@@ -156,7 +206,7 @@ YAML
     done
   ) &
   bridge_watchdog_pid=$!
-  note "[harness] bridge watchdog (pid $bridge_watchdog_pid): polling the port-forward and chisel client every 5s; either dying fails the run"
+  note "[harness] bridge watchdog (pid $bridge_watchdog_pid): restarts a dropped port-forward (up to 60s) and watches the chisel client; the client exiting (budget exhausted) or a port-forward that cannot be restarted in time fails the run"
 }
 
 # bridge_stop tears down everything bridge_start may have started, in reverse order, and never
@@ -185,14 +235,11 @@ bridge_stop() {
   op delete pod "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   op delete service "$bridge_name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
   local i pod_read svc_read
-  # 300 iterations at 2s (10 minutes): a bare chisel pod deleted by hand elsewhere on this
-  # cluster took under 6s, but this pod — alone on a Node-Auto-Provisioned node, which NAP may
-  # reclaim along with it — took up to 7 minutes to leave both a direct GET and every LIST
-  # variant (the namespace-rig query, the raw API with and without resourceVersion=0, and a
-  # verbose kubectl trace), confirmed live, 2026-10-17, by diagnose_leftover's own capture: every
-  # one agreed NotFound/empty once checked a few minutes later, ruling out an API or cache
-  # inconsistency — the pod is simply slow to finish. 10 minutes gives margin over the observed
-  # worst case; namespace-clean and diagnose_leftover still catch an actual leftover past that.
+  # 300 iterations at 2s (10 minutes): this pod is alone on a Node-Auto-Provisioned node, which
+  # NAP may reclaim along with it, and a GET-by-name confirmation (not a LIST, which this run no
+  # longer depends on bridge_stop for — see teardown_sequence's own ordering fix) is the reliable
+  # way to know it is actually gone: a lone chisel pod deleted by hand elsewhere on this cluster
+  # took under 6s, well inside this budget.
   for i in $(seq 1 300); do
     pod_read=$(op get pod "$bridge_name" -o name 2>&1)
     svc_read=$(op get service "$bridge_name" -o name 2>&1)

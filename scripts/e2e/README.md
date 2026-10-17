@@ -641,19 +641,23 @@ that reachability with a reverse tunnel, entirely of the run's own:
    to open the two reverse listeners that proxy back to 127.0.0.1 on the devbox, where the worker
    stream listener and the scratch Postgres already bind. The harness waits for both listeners'
    `tun: proxy#R:<port>=>` lines in the bridge pod's log before any pod under test is started.
-3. **No retry of its own holds either leg up**: the chisel client runs with `--max-retry-count 0`
-   (chisel's default is unlimited retries, which would reconnect silently through a gap pods could
-   dial into mid-run), and `kubectl port-forward` already never retries. A background watchdog
-   polls both processes every 5s; either dying sends the script itself `SIGTERM`, failing the whole
-   run loudly rather than leaving it to time out against a dead tunnel.
+3. **A dropped `kubectl port-forward` is recovered, not fatal**: the watchdog that polls both
+   processes every 5s restarts a dead port-forward itself, on the same local port, so the chisel
+   client's own bounded reconnect (`--max-retry-count 30 --max-retry-interval 2s`, finite rather
+   than chisel's default of forever) can pick the tunnel back up without reconfiguring anything.
+   Only two things still send the script itself `SIGTERM`, failing the run loudly: a port-forward
+   that cannot be restarted within 60s of dropping, or the chisel client exiting because its own
+   retry budget is exhausted.
 4. Pods dial `tcp://bridge-<project>.legion.svc.cluster.local:<port>` for the worker stream and the
    same host at the session-database port — the advertised host
    (`LEGION_E2E_STREAM_ADVERTISE_HOST`, internal to the harness) the Go runtime hands every launch,
    distinct from the host its own listener binds (`LEGION_E2E_STREAM_HOST`, loopback in this mode).
-5. **Teardown** (`bridge_stop`, called from `cleanup` before `namespace_clean`): stops the
-   watchdog, the chisel client and the port-forward, then deletes the bridge's pod and Service by
-   their one exact name — never by broader selection, the same discipline
-   [`lib/namespace-rig.sh`](#libnamespace-rigsh) holds every other object the run creates to.
+5. **Teardown** (`bridge_stop`, the first step of `teardown_sequence`, the one function both a
+   passing run's own flow and `cleanup`'s fallback call, so it always runs before `namespace_clean`
+   takes its snapshot): stops the watchdog, the chisel client and the port-forward, then deletes
+   the bridge's pod and Service by their one exact name — never by broader selection, the same
+   discipline [`lib/namespace-rig.sh`](#libnamespace-rigsh) holds every other object the run
+   creates to.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -825,13 +829,22 @@ production issue pod as well as this run's own:
   `bridge` mode the pod-facing advertise host is the bridge's cluster-DNS name, which the devbox
   itself cannot resolve. A second DSN file, at the bind host (loopback under `bridge`), is written
   for the harness alone; pods and the providers Secret still get the original.
-- **This cluster's bridge pod can take much longer than ordinary pod termination to leave the
-  operator context's label-based listing**, well past when a direct `kubectl get` by name already
-  confirms it `NotFound` — anywhere from under a minute to, on one run, over an hour. The pod is
-  never actually left behind (every post-run check eventually found it gone), but `namespace-clean`
-  compares a label-based listing, which this cluster's API view can disagree with a same-moment
-  GET on for an unpredictable span. This remains open: see the PR for the live evidence and the
-  options under discussion.
+- **A passing run's own teardown order matters.** The main flow's passing path called `teardown;
+  namespace_clean` directly, never `bridge_stop` — that only ran from the script's EXIT trap,
+  which fires after a passing run's own calls, so `namespace-clean`'s snapshot was always taken
+  with the bridge pod still live. Mistaken for a GKE API-consistency quirk at first (a direct
+  `kubectl get` by name and every kind of `LIST` query agreed the pod was gone within seconds of
+  `namespace_clean` reporting it present — because `bridge_stop` ran, and deleted it, moments
+  later, in the trap): the real fix is one `teardown_sequence` function, `bridge_stop` first, run
+  from both the passing path and the trap's fallback, idempotent either way.
+- **A dropped `kubectl port-forward` does not have to end the run.** Two full-length runs died
+  outright to a transient drop during this lane's work. `kubectl port-forward` never retries
+  itself, but nothing about a drop invalidates the chisel client's tunnel state (its auth, its
+  reverse listeners) if the port-forward comes back on the same local port — so the bridge's
+  watchdog now restarts a dropped port-forward itself (confirmed live: killing the process mid-run
+  let it recover and the run continue), only failing the run if a restart can't land within 60s,
+  or the chisel client's own bounded reconnect (`--max-retry-count 30 --max-retry-interval 2s`,
+  not chisel's default of forever) gives up first.
 
 ## stage4b-sandbox-tree.sh
 

@@ -153,35 +153,36 @@ fail() {
   exit 1
 }
 
-# diagnose_leftover NAME: namespace_clean's own LIST still sees an object a GET by name may
-# disagree with — captures the facts needed to tell a genuinely Terminating object (deletionTimestamp
-# set, finalizers holding it) from a stale LIST (same query via the raw API, with and without
-# resourceVersion=0, and a verbose trace of the exact LIST kubectl issues) into the evidence dir,
-# never trusted or acted on by the run itself.
-diagnose_leftover() {
-  local name=$1
-  local out="$evidence/leftover-diagnostics-$name.txt"
-  {
-    echo "=== $(date -u +%FT%TZ) GET pod/$name (jsonpath) ==="
-    op get pod "$name" -o jsonpath='{.metadata.uid} deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} phase={.status.phase} node={.spec.nodeName} resourceVersion={.metadata.resourceVersion}{"\n"}' 2>&1
-    echo "=== GET pod/$name (full json) ==="
-    op get pod "$name" -o json 2>&1
-    echo "=== LIST pod -l legion.dev/project=$run_label (namespace-rig's own query, json) ==="
-    op get pod -l "legion.dev/project=$run_label" -o json 2>&1
-    echo "=== raw LIST, no resourceVersion ==="
-    kubectl --context "$operator" get --raw "/api/v1/namespaces/$namespace/pods?labelSelector=legion.dev%2Fproject%3D$run_label" 2>&1
-    echo "=== raw LIST, resourceVersion=0 (cache-served) ==="
-    kubectl --context "$operator" get --raw "/api/v1/namespaces/$namespace/pods?labelSelector=legion.dev%2Fproject%3D$run_label&resourceVersion=0" 2>&1
-    echo "=== verbose (-v=8) LIST via kubectl, to see the resourceVersion it requests ==="
-    kubectl --context "$operator" -n "$namespace" get pod -l "legion.dev/project=$run_label" --v=8 2>&1
-  } >"$out" 2>&1
-  echo "   [operator] leftover diagnostics for $name written to $out"
-}
-
 # shellcheck source-path=SCRIPTDIR source=lib/namespace-rig.sh
 . "$root/scripts/e2e/lib/namespace-rig.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/bridge-tunnel.sh
 . "$root/scripts/e2e/lib/bridge-tunnel.sh"
+
+# teardown_sequence runs every step that must happen once, in order, whether the run passed or
+# failed partway: bridge_stop (the reverse tunnel's pod/Service, by exact name), teardown (the
+# issue pods, PVCs, Secrets and ConfigMaps this run's own Sandboxes own, by label), the scratch
+# session database container, the agent-secrets re-minter if one is running, and finally
+# namespace_clean's own before/after comparison. A root cause this lane first misdiagnosed as a
+# GKE API-consistency quirk (confirmed live, 2026-10-17, three separate full passes, each with a
+# dedicated diagnostic: a direct GET and every kind of LIST query all agreeing the bridge pod was
+# gone within seconds of namespace_clean reporting it present) was actually this ordering bug: the
+# main flow's own passing path called `teardown; namespace_clean` directly, never `bridge_stop` —
+# that only ran from cleanup()'s EXIT trap, which fires AFTER the main flow's own calls on a
+# passing run, so namespace_clean's snapshot was always taken with the bridge pod still live. One
+# function, called from both places, fixes it: `teardown_sequence_done` makes a second call from
+# cleanup() (after the main flow's own, on a passing run) a no-op, so the sequence still runs
+# exactly once either way.
+teardown_sequence_done=
+teardown_sequence() {
+  [ -z "$teardown_sequence_done" ] || return 0
+  teardown_sequence_done=1
+  bridge_stop
+  teardown
+  [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
+  [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
+  [ -z "$compared" ] && [ -n "$snapshotted" ] || return 0
+  namespace_clean
+}
 
 cleanup() {
   local status=$?
@@ -189,69 +190,7 @@ cleanup() {
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
   set +e
-  # bridge_stop runs first: teardown() below never deletes the bridge pod itself (it is not a
-  # Sandbox), only waits to see it gone via its generic label sweep, and deleting five real
-  # Sandboxes' many child objects first leaves the API server too busy for the bridge pod's own
-  # delete to land inside its budget (confirmed live, 2026-10-17: a full pass still failed
-  # namespace-clean on a bridge pod stuck mid-termination, gone moments later). Running it first
-  # removes the contention; namespace-clean still catches a bridge_stop that actually fails.
-  bridge_stop
-  teardown
-  [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
-  [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
-  # namespace_clean's snapshot is a LIST by label, served from this cluster's watch cache — a
-  # direct GET by name (bridge_stop's own check, now reliable) can confirm the bridge pod and
-  # Service NotFound while the SAME-NAMESPACE LIST this settle loop and namespace_clean both issue
-  # still returns the pod, for many minutes, under the churn of deleting five real Sandboxes and
-  # their many child objects at once. Confirmed live, 2026-10-17, by diagnose_leftover's own
-  # capture, twice: the raw API LIST (both with and without resourceVersion=0) and a verbose
-  # kubectl trace all agreed empty within seconds of the leftover being diagnosed, each time well
-  # after teardown's own 300s LIST-based wait had already given up still seeing it. A transient
-  # gcloud auth-plugin failure explained one earlier run's symptom, not this one's: this is the
-  # cluster's own watch cache lagging a real deletion, not a devbox network blip, and no amount of
-  # LIST-based waiting under 15 minutes has cleared it live. Five consecutive empty LIST reads, 2s
-  # apart (a non-empty read resets the count), over up to 15 minutes. Never a retry loop around
-  # namespace_clean itself, shared with Stage 4b.
-  local settle_deadline settle_left settle_streak=0
-  settle_deadline=$(($(date +%s) + 900))
-  while :; do
-    settle_left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>/dev/null) || settle_left=unknown
-    if [ -z "$settle_left" ]; then
-      settle_streak=$((settle_streak + 1))
-      [ "$settle_streak" -lt 5 ] || break
-    else
-      settle_streak=0
-    fi
-    [ "$(date +%s)" -lt "$settle_deadline" ] || {
-      echo "   [operator] namespace-clean's own listing still shows $settle_left after 15 minutes; proceeding to the snapshot anyway"
-      while IFS= read -r leftover_name; do
-        case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
-      done <<<"$settle_left"
-      break
-    }
-    sleep 2
-  done
-  if [ -z "$compared" ] && [ -n "$snapshotted" ]; then
-    (namespace_clean) || status=1
-  fi
-  # namespace_clean (namespace-rig.sh) sets compared=1 as its own first action, whichever of the
-  # two places calls it: the main flow's own call on a passing run (teardown; namespace_clean,
-  # before this trap ever runs), or the call just above when an early exit skipped that call. So
-  # this diagnostic, on an actual mismatch, must not sit inside the `if` above — it would never
-  # see the main flow's own call, only this trap's fallback one, and never fired, live,
-  # 2026-10-17, because every run that reached namespace-clean took the main flow's call.
-  # Un-nested here, it runs after either path, keyed only on the files namespace_clean itself
-  # wrote (both always exist once compared is set at all).
-  if [ -n "$compared" ] && [ -f "$evidence/namespace-before.txt" ] && [ -f "$evidence/namespace-after.txt" ]; then
-    # A `while read` fed by `< <(comm ...)` piping two more process substitutions hung forever
-    # here, live, 2026-10-17 — nested process substitution, not a cluster quirk, confirmed in
-    # isolation the same way (a bare repro of this exact line hung past a 5-minute timeout). comm's
-    # own output goes to a plain file first; the loop reads that file directly, no substitution.
-    comm -13 <(sort "$evidence/namespace-before.txt") <(sort "$evidence/namespace-after.txt") >"$evidence/namespace-leftover-pods.txt"
-    while IFS= read -r leftover_name; do
-      case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
-    done <"$evidence/namespace-leftover-pods.txt"
-  fi
+  (teardown_sequence) || status=1
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
   echo "evidence: $evidence (transcript.log, runtime.log, the namespace snapshots)"
@@ -526,8 +465,7 @@ fi
 check=harness
 [ -n "$harness_ok" ] || fail "a harness check failed (above)"
 
-teardown
-namespace_clean
+teardown_sequence
 if [ -n "$from" ]; then
   echo "stage 4a e2e: every check from $from passed — a development run, never the proof"
 else
