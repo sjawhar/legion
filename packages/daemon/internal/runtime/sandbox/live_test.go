@@ -246,10 +246,14 @@ type liveEnv struct {
 	// person approving it. Every field here is read with os.Getenv, unlike the rest of liveEnv: unset
 	// is a blocked run of the secrets-* checks, never a refusal to start (secretsBlocked).
 	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin, agentSecretsTokenFile string
-	// The scratch Postgres the script started for postgres-resume: the file holding its URL, which
-	// the script also wrote into the providers Secret under liveSessionsSecretKey, and the address it
-	// listens on, which every pod must reach as it reaches the worker stream.
-	sessionDSNFile, sessionDBAddress string
+	// The scratch Postgres the script started for postgres-resume: the file holding its URL at
+	// streamAdvertiseHost, which the script also wrote into the providers Secret under
+	// liveSessionsSecretKey for every pod to dial as it dials the worker stream, and the address it
+	// listens on there. sessionDSNLocalFile holds the same database's URL at streamHost instead —
+	// loopback under bridge, where the script's own docker container actually binds, reachable from
+	// the devbox the harness runs on even though streamAdvertiseHost (the bridge's cluster-DNS
+	// name) is not — for the harness's own direct connection in writeSession, never handed to a pod.
+	sessionDSNFile, sessionDBAddress, sessionDSNLocalFile string
 	// The stale-plugin-install checkpoint's own inputs: the devbox paths of this checkout's packed
 	// pi-legion and pi-envoy and their versions. Its negative control names the published
 	// pi-legion@9.6.1 by exact version — no devbox path of its own — so bun resolves it from the
@@ -296,6 +300,7 @@ func readLiveEnv(t *testing.T) liveEnv {
 		agentSecretsTokenFile: os.Getenv("LEGION_E2E_AGENT_SECRETS_TOKEN_FILE"),
 		sessionDSNFile:        get("LEGION_E2E_SESSION_DSN_FILE"),
 		sessionDBAddress:      get("LEGION_E2E_SESSION_DB_ADDRESS"),
+		sessionDSNLocalFile:   get("LEGION_E2E_SESSION_DSN_LOCAL_FILE"),
 		piLegionTarball:       os.Getenv("LEGION_E2E_PI_LEGION_TARBALL"),
 		piEnvoyTarball:        os.Getenv("LEGION_E2E_PI_ENVOY_TARBALL"),
 		piLegionVersion:       os.Getenv("LEGION_E2E_PI_LEGION_VERSION"),

@@ -136,7 +136,7 @@ func (r *liveRig) checkResources() error {
 		byContainer[c.Name] = want[claim.Role(c.Name)]
 	}
 	init := want[root.role]
-	if err := guaranteedPod(pod, byContainer, &init); err != nil {
+	if err := guaranteedPod(pod, byContainer, &init, resource.Quantity{}, r.gkeEphemeralStorageClamped(), r.gke()); err != nil {
 		return fmt.Errorf("pod %s: %w", name, err)
 	}
 	var cpuSum, memorySum resource.Quantity
@@ -163,49 +163,128 @@ func (r *liveRig) checkResources() error {
 	if overrides == 0 || defaults == 0 {
 		return fmt.Errorf("the root pod's reservations come from %d overrides and %d defaults; the rig must configure both paths (liveOverrides)", overrides, defaults)
 	}
-	note("operator", "pod %s: qosClass %s, no affinity; %d reservation fields from liveOverrides and %d from config.DefaultResources()", name, pod.Status.QOSClass, overrides, defaults)
+	note("operator", "pod %s: qosClass %s, no affinity but GKE's own extended-duration one when LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account; %d reservation fields from liveOverrides and %d from config.DefaultResources()", name, pod.Status.QOSClass, overrides, defaults)
 
 	wantCPUs := max(2, int(math.Ceil(cpuSum.AsApproximateFloat64())))
-	nproc, err := r.exec(root, "nproc")
-	if err != nil {
-		return err
-	}
-	cpus, err := strconv.Atoi(strings.TrimSpace(nproc))
-	if err != nil {
-		return fmt.Errorf("nproc in the pod printed %q, not a number", nproc)
-	}
-	if cpus != wantCPUs {
-		return fmt.Errorf("nproc in the pod is %d, want max(2, ceil(%s cpu)) = %d, the pod cgroup's quota as gVisor sizes the sandbox", cpus, cpuSum.String(), wantCPUs)
-	}
-	meminfo, err := r.exec(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")
-	if err != nil {
-		return err
-	}
-	fields := strings.Fields(meminfo)
-	if len(fields) != 3 || fields[2] != "kB" {
-		return fmt.Errorf("/proc/meminfo's MemTotal line is %q, want `MemTotal: <n> kB`", meminfo)
-	}
-	memTotalKB, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return fmt.Errorf("/proc/meminfo's MemTotal %q is not a number", fields[1])
-	}
-	memTotal, wantMemory := float64(memTotalKB)*1024, memorySum.AsApproximateFloat64()
-	if math.Abs(memTotal-wantMemory) > 0.03*wantMemory {
-		return fmt.Errorf("MemTotal in the pod is %d kB (%.2f GiB), not within 3%% of the containers' summed memory limits %s, the pod cgroup's limit as gVisor sizes the sandbox", memTotalKB, memTotal/(1<<30), memorySum.String())
+	wantMemory := memorySum.AsApproximateFloat64()
+	var cpus int
+	var memTotalKB int64
+	// A freshly node-auto-provisioned node (NAP; confirmed live, 2026-10-17, against the
+	// production GKE cluster: root-ready itself took 3m39s on one, pulling the worker image to a
+	// brand-new node) can leave gVisor's view of the pod's cgroup lagging the full six-container
+	// reservation for a few seconds right after root-ready returns, so nproc and MemTotal are
+	// polled rather than read once. AWS's nodes, already warm, settle immediately either way.
+	if err := r.poll(time.Minute, "the pod's gVisor sandbox to size nproc and MemTotal to the summed reservation", func() (bool, error) {
+		nproc, err := r.exec(root, "nproc")
+		if err != nil {
+			return false, err
+		}
+		cpus, err = strconv.Atoi(strings.TrimSpace(nproc))
+		if err != nil {
+			return false, fmt.Errorf("nproc in the pod printed %q, not a number", nproc)
+		}
+		if cpus != wantCPUs {
+			return false, nil
+		}
+		meminfo, err := r.exec(root, "sh", "-c", "grep '^MemTotal:' /proc/meminfo")
+		if err != nil {
+			return false, err
+		}
+		fields := strings.Fields(meminfo)
+		if len(fields) != 3 || fields[2] != "kB" {
+			return false, fmt.Errorf("/proc/meminfo's MemTotal line is %q, want `MemTotal: <n> kB`", meminfo)
+		}
+		memTotalKB, err = strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return false, fmt.Errorf("/proc/meminfo's MemTotal %q is not a number", fields[1])
+		}
+		return math.Abs(float64(memTotalKB)*1024-wantMemory) <= 0.03*wantMemory, nil
+	}); err != nil {
+		return fmt.Errorf("nproc in the pod is %d, want max(2, ceil(%s cpu)) = %d; MemTotal %d kB (%.2f GiB), want within 3%% of the containers' summed memory limits %s, the pod cgroup's quota and limit as gVisor sizes the sandbox: %w",
+			cpus, cpuSum.String(), wantCPUs, memTotalKB, float64(memTotalKB)*1024/(1<<30), memorySum.String(), err)
 	}
 	note("operator", "exec %s -- nproc: %d = max(2, ceil(%s)); MemTotal %d kB, within 3%% of the summed memory limits %s", name, cpus, cpuSum.String(), memTotalKB, memorySum.String())
 	return nil
 }
 
-// guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity, its
+// gvisorCPUFloor is the cpu reservation a lone, small Sandbox container is admitted at on GKE,
+// never under: confirmed live, 2026-10-17, against the production GKE cluster, only for the
+// single-container probe Sandbox (its one container's 250m is the pod's whole cpu sum) — every
+// multi-container issue pod in this same cluster, already summing well past it, is admitted at
+// exactly its configured per-container cpu unchanged (checked directly against a real, already-
+// running production issue pod's six role containers). So only checkImageProbe passes this;
+// checkResources passes a zero Quantity, asking for no floor. AWS carries no such floor either
+// way. guaranteedPod folds it into its comparison, not the daemon's own reservation
+// (RoleResources, config.DefaultResources(), probeReservation): those stay the production values
+// on every runtime; only this live GKE check expects what the cluster will actually admit.
+func (r *liveRig) gvisorCPUFloor() resource.Quantity {
+	if r.env.runtimeIdentityKind == "kubernetes-service-account" {
+		return resource.MustParse("500m")
+	}
+	return resource.Quantity{}
+}
+
+// gke reports whether this run's cluster is GKE (LEGION_E2E_RUNTIME_IDENTITY_KIND=
+// kubernetes-service-account), the identity gkeEphemeralStorageClamped's and
+// isGKEExtendedDurationAffinity's doc comments give the live evidence for. False means AWS, which
+// neither clamps ephemeral storage nor adds a NodeAffinity to any pod here.
+func (r *liveRig) gke() bool {
+	return r.env.runtimeIdentityKind == "kubernetes-service-account"
+}
+
+// gkeEphemeralStorageClamped reports whether this run's cluster admits a container's ephemeral-
+// storage limit equal to its request, discarding whatever limit was configured: confirmed live,
+// 2026-10-17, on both a bare debug pod and every role container of a real, already-running
+// production issue pod in this namespace (every one of its six containers carries request =
+// limit = 1Gi, its configured EphemeralStorageRequest, though config.DefaultResources() and
+// liveOverrides ask several of them for limits of 10Gi, 20Gi or 30Gi) — a gVisor-sandboxed pod's
+// ephemeral storage is never burstable on this cluster, cpu and memory floors notwithstanding.
+// AWS admits the configured limit unchanged. guaranteedPod asks for the request's value in place
+// of the configured limit when this holds, for every container, the probe's and every role's
+// alike; the daemon's own reservation is untouched, as gvisorCPUFloor's doc explains.
+func (r *liveRig) gkeEphemeralStorageClamped() bool {
+	return r.gke()
+}
+
+// isGKEExtendedDurationAffinity reports whether a carries exactly the NodeAffinity GKE Autopilot
+// adds on its own to a pod carrying `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`
+// (manifest.go's safeToEvictAnnotation, every issue pod's, never the probe's — probeManifest's
+// own doc says why) to protect it from disruption for up to seven days (confirmed live,
+// 2026-10-17: a real root issue pod on the production GKE cluster carried exactly this one
+// required NodeAffinity term, keyed `cloud.google.com/extended-duration-pods`, nothing else —
+// https://docs.cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods). It is
+// GKE's own addition, not a pod affinity or anti-affinity the pod spec asks for, and it still
+// admits the pod to any node whose pool carries that label, never a named one — so it does not
+// trip the reservation rule's intent (no pod asks for or keeps off a particular node) even though
+// it is literally a NodeAffinity. AWS adds none; a pod this doesn't match is still refused.
+func isGKEExtendedDurationAffinity(a *corev1.Affinity) bool {
+	if a == nil || a.PodAffinity != nil || a.PodAntiAffinity != nil || a.NodeAffinity == nil {
+		return false
+	}
+	na := a.NodeAffinity
+	if len(na.PreferredDuringSchedulingIgnoredDuringExecution) != 0 || na.RequiredDuringSchedulingIgnoredDuringExecution == nil {
+		return false
+	}
+	terms := na.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	if len(terms) != 1 || len(terms[0].MatchFields) != 0 || len(terms[0].MatchExpressions) != 1 {
+		return false
+	}
+	return terms[0].MatchExpressions[0].Key == "cloud.google.com/extended-duration-pods"
+}
+
+// guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity but
+// GKE's own extended-duration one when extendedDurationAffinity allows it (isGKEExtendedDuration
+// Affinity's doc has the evidence; the probe never carries it and always passes false), its
 // qosClass is Guaranteed, and every container — the init containers included — reserves cpu and
-// memory with the request equal to the limit and equal to the reservation configured for it, and
-// carries the ephemeral-storage request and limit configured for it, the request under the limit:
-// want's entry for each regular container by name, and init for every init container (nil when the
-// pod has none to hold). A container want does not name is a refusal: nothing a Legion pod runs is
-// unreserved.
-func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements, init *corev1.ResourceRequirements) error {
-	if pod.Spec.Affinity != nil {
+// memory with the request equal to the limit and at least the reservation configured for it (cpu
+// floored at cpuFloor, zero off GKE and off every multi-container pod on it), and carries the
+// ephemeral-storage request and limit configured for it, the request under the limit, except that
+// ephemeralStorageClamped asks for the limit to equal the request instead of the configured limit
+// (GKE's own admission, gkeEphemeralStorageClamped's doc has the evidence): want's entry for each
+// regular container by name, and init for every init container (nil when the pod has none to
+// hold). A container want does not name is a refusal: nothing a Legion pod runs is unreserved.
+func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements, init *corev1.ResourceRequirements, cpuFloor resource.Quantity, ephemeralStorageClamped, extendedDurationAffinity bool) error {
+	if pod.Spec.Affinity != nil && !(extendedDurationAffinity && isGKEExtendedDurationAffinity(pod.Spec.Affinity)) {
 		return fmt.Errorf("carries an affinity, which no Legion pod asks for: %+v", pod.Spec.Affinity)
 	}
 	if pod.Status.QOSClass != corev1.PodQOSGuaranteed {
@@ -215,6 +294,9 @@ func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements,
 		for _, resourceName := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
 			request, limit := c.Resources.Requests[resourceName], c.Resources.Limits[resourceName]
 			reserved := expected.Requests[resourceName]
+			if resourceName == corev1.ResourceCPU && reserved.Cmp(cpuFloor) < 0 {
+				reserved = cpuFloor
+			}
 			if request.IsZero() || limit.IsZero() {
 				return fmt.Errorf("container %s reserves no %s: requests %v, limits %v", c.Name, resourceName, c.Resources.Requests, c.Resources.Limits)
 			}
@@ -227,6 +309,9 @@ func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements,
 		}
 		request, limit := c.Resources.Requests[corev1.ResourceEphemeralStorage], c.Resources.Limits[corev1.ResourceEphemeralStorage]
 		wantRequest, wantLimit := expected.Requests[corev1.ResourceEphemeralStorage], expected.Limits[corev1.ResourceEphemeralStorage]
+		if ephemeralStorageClamped {
+			wantLimit = wantRequest
+		}
 		switch {
 		case request.IsZero() || limit.IsZero():
 			return fmt.Errorf("container %s bounds no ephemeral-storage: requests %v, limits %v", c.Name, c.Resources.Requests, c.Resources.Limits)

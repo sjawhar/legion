@@ -324,12 +324,17 @@ begin session-db
 # reach the worker stream (directly in AWS mode, through the bridge in GKE mode). Its password is
 # the run's own and reaches docker through an owner-only env file, never an argument; the URL is
 # written only to an owner-only file, which the harness and the providers Secret read, and is
-# never printed.
+# never printed. The harness's own direct connection (postgres-resume's writeSession) needs the
+# address the devbox itself can dial — bind_host, loopback under bridge — never advertise_host (a
+# bridge-mode devbox cannot resolve the bridge's cluster-DNS name), so a second file carries the
+# same database at that address, for the harness alone; the providers Secret and every pod still
+# read the advertise_host file above.
 session_db_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 (
   umask 077
   printf 'POSTGRES_USER=legion\nPOSTGRES_DB=sessions\nPOSTGRES_PASSWORD=%s\n' "$session_db_password" >"$work/session-db.env"
   printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$advertise_host" "$session_db_port" >"$work/session-dsn"
+  printf 'postgres://legion:%s@%s:%s/sessions?sslmode=disable\n' "$session_db_password" "$bind_host" "$session_db_port" >"$work/session-dsn-local"
 )
 unset session_db_password
 session_db_started=1
@@ -425,6 +430,7 @@ if env \
   LEGION_E2E_AGENT_SECRETS_BIN="$work/agent-secrets" \
   LEGION_E2E_AGENT_SECRETS_TOKEN_FILE="$agent_secrets_token_file" \
   LEGION_E2E_SESSION_DSN_FILE="$work/session-dsn" \
+  LEGION_E2E_SESSION_DSN_LOCAL_FILE="$work/session-dsn-local" \
   LEGION_E2E_SESSION_DB_ADDRESS="$advertise_host:$session_db_port" \
   LEGION_E2E_PI_LEGION_TARBALL="$pi_legion_tarball" \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \

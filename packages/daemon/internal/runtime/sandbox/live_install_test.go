@@ -347,7 +347,7 @@ func (r *liveRig) checkImageProbe() error {
 	if !ok || pod == nil {
 		return fmt.Errorf("the probe pod %s was never read while the probe ran, so its reservation and QoS are unproven", name)
 	}
-	if err := guaranteedPod(pod, map[string]corev1.ResourceRequirements{probeContainer: p.Resources}, nil); err != nil {
+	if err := guaranteedPod(pod, map[string]corev1.ResourceRequirements{probeContainer: p.Resources}, nil, r.gvisorCPUFloor(), r.gkeEphemeralStorageClamped(), false); err != nil {
 		return fmt.Errorf("probe pod %s (phase %s): %w", name, pod.Status.Phase, err)
 	}
 	container := pod.Spec.Containers[0]
@@ -357,7 +357,7 @@ func (r *liveRig) checkImageProbe() error {
 	doubled := bursting.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
 	doubled.Add(doubled)
 	bursting.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = doubled
-	err = guaranteedPod(bursting, map[string]corev1.ResourceRequirements{probeContainer: p.Resources}, nil)
+	err = guaranteedPod(bursting, map[string]corev1.ResourceRequirements{probeContainer: p.Resources}, nil, r.gvisorCPUFloor(), r.gkeEphemeralStorageClamped(), false)
 	if err == nil || !strings.Contains(err.Error(), "container "+probeContainer) {
 		return fmt.Errorf("negative control: the reservation rule accepted the probe pod with its cpu limit raised to %s, or did not name the container: %v", doubled.String(), err)
 	}

@@ -694,20 +694,28 @@ worker pod on a development slot" means here.
 Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
 the harness's own reads use the restricted one; the admin context only runs what an operator does
 beside the daemon — `kubectl exec`, PVC phases, the pod uid cross-checks, a Secret's boot token
-(hashed in process, never printed), node and EC2NodeClass reads for a network failure, and the
-namespace list. Every evidence line names which one observed it (`[runtime]`, `[operator]`, or
-`[harness]` for the listener and its resolver).
+(hashed in process, never printed), the namespace list, and, on a network-path failure, the
+diagnostic that identity kind calls for: under `aws-iam-role`, the node the pod ran on and its
+EC2NodeClass's security groups (Karpenter's CRD, meaningless off AWS); under
+`kubernetes-service-account` (GKE), the reverse-tunnel bridge's own processes and pod log instead
+— [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh)'s `chisel` client and `kubectl port-forward`,
+since there is no node mapping to read. Every evidence line names which one observed it
+(`[runtime]`, `[operator]`, or `[harness]` for the listener and its resolver).
 
-The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata, never `0.0.0.0`) and port `LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — within the
-devbox's admitted range ([Port admission](#port-admission)) — and refuses
+The harness hosts the worker stream itself, bound at `LEGION_E2E_STREAM_HOST` (the devbox's
+private address from instance metadata under `aws-private-ip`, or loopback under `bridge`) and
+advertised to pods at `LEGION_E2E_STREAM_ADVERTISE_HOST` (the same address under
+`aws-private-ip`; the bridge's ClusterIP Service DNS name under `bridge`) and port
+`LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — within the devbox's admitted range
+([Port admission](#port-admission)) under `aws-private-ip`; the bridge's own tunnel in `bridge`
+mode, so no devbox port needs admitting from the cluster — and refuses
 to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
 pod's uid to a marker file in the issue volume's sessions directory, the file a resume names, and
 sleeps, so the runtime's whole path runs with no model and no provider key. The runtime's settings:
 a 5-minute boot timeout, 3 registration intervals, a 15-second termination grace, a 10-second
-probe interval, storage class `gp2`, a 20Gi issue volume, the daemon's default reservations with
+probe interval, storage class `LEGION_E2E_STORAGE_CLASS` (AWS's `gp2`, GKE's `standard-rwo`), a 20Gi issue volume, the daemon's default reservations with
 the implementer's and tester's cpu and memory and the reviewer's memory overridden (`liveOverrides`,
 so the root's pod carries a reservation from each path the loader has and sums to 2.5 CPU and
 6 GiB), and no scheduling beyond the Legion pool the runtime selects: no pod asks for or keeps off
