@@ -3,6 +3,7 @@ package webhook
 import (
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 
 	"github.com/sjawhar/envoy/internal/contracts"
@@ -48,6 +49,13 @@ func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 			return
 		}
 		if typeName(payload["type"]) == "event_callback" && stringValue(payload["event_id"]) != "" {
+			if team, channel, bot, subtype, ok := botMention(payload); ok {
+				log.Printf("slack app_mention from a bot dropped team=%s channel=%s bot_id=%s subtype=%s event_id=%s",
+					team, channel, bot, subtype, stringValue(payload["event_id"]))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok"))
+				return
+			}
 			items := contracts.SlackEnvelopes(contracts.SlackEnvelopeInput{Body: payload, EventID: id.New(), TraceID: id.New()})
 			for _, item := range items {
 				if err := item.Validate(); err != nil {
@@ -62,4 +70,19 @@ func SlackHandler(secret string, publisher Publisher) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}
+}
+
+// botMention reports an event_callback whose event is an app_mention a bot posted (it carries
+// bot_id, or the subtype bot_message), with its team, channel, bot id and subtype. Such a mention is
+// never published: the controller answers mentions, and answering a bot that answers it never ends.
+func botMention(payload map[string]any) (team, channel, bot, subtype string, ok bool) {
+	event, _ := payload["event"].(map[string]any)
+	if typeName(event["type"]) != "app_mention" {
+		return "", "", "", "", false
+	}
+	bot, subtype = stringValue(event["bot_id"]), stringValue(event["subtype"])
+	if bot == "" && subtype != "bot_message" {
+		return "", "", "", "", false
+	}
+	return stringValue(payload["team_id"]), stringValue(event["channel"]), bot, subtype, true
 }

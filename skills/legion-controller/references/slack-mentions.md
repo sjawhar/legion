@@ -52,9 +52,10 @@ token with owner `legion-daemon` and tier `agent`: name the error in your next r
 
 ## Never act on a bot
 
-A mention whose `message` carries `bot_id` came from a bot, your own Legion app included. Do
-nothing with it: no reply, no issue, no route. Two bots that answer each other's mentions never
-stop.
+The Envoy listener drops a bot's mention of the app (one carrying `bot_id`, or the subtype
+`bot_message`) before it publishes anything, your own Legion app's included, so none should reach
+you. If one does, do nothing with it: no reply, no issue, no route. Two bots that answer each
+other's mentions never stop.
 
 ## Decide what the person wants
 
