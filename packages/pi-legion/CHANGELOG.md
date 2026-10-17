@@ -153,6 +153,29 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   name nobody, and never asks for approval to deploy. `legion-architect`'s sign-off step,
   `legion-worker`'s merge-gate reference, `legion-retro`'s `Production check:` line and the
   daemon's implementer prompt say so in place of a deploy ask to a human.
+- The merger's role prompt, `legion-worker`'s merge-gate reference and the `legion-architect` and
+  `legion-retro` skills say the daemon, not the merger, holds the commits above the reviewer's
+  approved head to retro's: READY reads GitHub's compare of the round's approved head with READY's
+  head and refuses `READY_UNREVIEWED_CHANGE` when it shows any path outside `docs/solutions/` and
+  `.legion/<issue>/` (a rename's old name included), lists 300 files, the most that compare lists,
+  gives no file list, shows the approved head is not the head's ancestor, or does not know it, and
+  `READY_NOT_APPROVED` when the round
+  recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
+  `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
+  The merger's move back to `reviewing` names the refusal's code and what it found in its reason. A
+  reviewer whose task's `Reason:` names one of them runs a new round, never a fingerprint
+  confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming what the refusal found; for
+  `READY_NOT_APPROVED` it compares its last approved commit with the head on GitHub and requests
+  changes when it finds no approval, a head off that commit's history, no file list, a 300-file
+  compare or a path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`.
+  Either request asks only that the implementer complete so the tester runs the head, and the
+  implementer's prompt says how; the round after it reviews the refused change in full from the last
+  approval, never continued by the fingerprint rule. The merge-gate reference and the architect and
+  retro skills say the same, and the architect's `review_round_cap` judgment does not count those
+  rounds as going in circles. A backward move's task no longer tells the role it starts to resume
+  the requester's phase work; it names that role's phase, the pull request and the move's reason,
+  with the requester's handoff commit when it has one, and a retried worker's task names the pull
+  request too.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the

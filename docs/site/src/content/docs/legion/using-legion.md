@@ -6,7 +6,7 @@ sidebar:
 ---
 
 This page is for the person whose issue Legion works: you write the issue, answer the architect's
-questions, approve the spec, and merge the pull request. Everything happens in
+questions, approve the spec, and review the pull request. Everything happens in
 [Dispatch](/legion/dispatch/) and on GitHub; you never need the `legion` command.
 
 ## Before you start
@@ -108,22 +108,24 @@ repository, submitted on GitHub while the issue is in `needs_review`, counts the
 the head can end the round. A review from an account without write access decides nothing, since
 any GitHub account can review a public repository's pull request, and a plain comment moves
 nothing. The approved head also carries the tree's handoff files under `.legion/<issue>/`. Retro's
-last commit removes them, so the head you merge carries none and the merge brings no handoff onto
+last commit removes them, so the head that merges carries none and the merge brings no handoff onto
 the default branch; the pull request's file list shows them only until that commit.
 
 ## Merge
 
-When the change is tested, reviewed, approved and has passed every check the repository requires,
-the merger sends **READY**, which appears on the Dispatch issue as one message:
+When the change is tested, reviewed and approved, the merger sends **READY**. The daemon accepts it
+only when no check or workflow the repository requires has failed or is missing (one still running
+refuses nothing), and posts it on the Dispatch issue as one message:
 
 ```text
 READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pull request url>)
 ```
 
-followed by the pull request's outcome and its known risks. That is your cue: read it, and merge the
-pull request on GitHub as you would any other, under the repository's branch protection and
-code-owner rules. Nothing in Legion approves a pull request on your behalf or changes who may
-merge.
+followed by the pull request's outcome and its known risks. The daemon then submits the merge
+itself, and the repository's branch protection and code-owner rules decide when it lands: a review
+only you can give is waited for. A pull request the project's `merge.by_hand` paths match is
+merged by a person instead, and its READY says so. Nothing in Legion approves a pull request on
+your behalf or changes who may merge.
 
 After the merge, the implementer checks the change in production and records what it saw on the
 pull request and the issue. The architect then signs off with a comment summarizing the evidence,
@@ -157,5 +159,5 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing. Your GitHub review counts now. |
-| `retro` | the daemon | The reviewer approved. The issue stays here through retro, `READY`, your merge, and the production check. |
+| `retro` | the daemon | The reviewer approved. The issue stays here through retro, `READY`, the merge, and the production check. |
 | `done` | the daemon at sign-off, or a person | Finished. The tree lingers, then closes. |

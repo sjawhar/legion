@@ -13,7 +13,7 @@ Open the PR from the bash tool (`gh pr create`); write the PR body from the exac
 
 ## Delegating the code
 
-You orchestrate the change; `task(agent="deep-worker")` subagents write its code, for the plan's change and for each review round's fixes alike.
+You orchestrate the change; `task(agent="deep-worker")` subagents write its code, for the plan's change and for each review round's fixes alike. A review whose body asks for no fix, only that the tester run the head (the reviewer's answer to a change READY refused above its approval), needs no code: write this round's `implement.json`, its proof at the current head, push it and complete, so the tester runs that head.
 
 1. Plan the change as todos, one per coding task.
 2. Hand each coding task to `task(agent="deep-worker")`, one at a time, since the workers edit your one working copy and a check one worker runs would see another's half-made edits. Give it a goal and done-criteria, not steps: the behavior the task must produce; the absolute path `LEGION_WORKSPACE` names and the files in scope; the plan handoff's `requiredSkills` for your role; and the exact commands of the checks the plan names for the task (where it names none, the repository's own checks for those files). When the tester handed you a red test, that test passing unmodified is a done-criterion only of the todo whose change makes it pass, or of the last todo when it passes only once they are all done, and that todo runs it unfiltered. It stays red until then, so you write each earlier todo's check commands with that test left out by name (for example `go test -skip`, `pytest --deselect`, or a `bun test` filter), and the worker runs them as given. Tell it that it makes no commit, no push, and no GitHub write.

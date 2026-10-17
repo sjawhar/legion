@@ -521,6 +521,24 @@ func TreeLingers(ctx context.Context, store Store, tx pgx.Tx, tree string) (bool
 	return root != nil && root.Lingers(), err
 }
 
+// ApprovedHead is the head issue's review round approved: its reviewer row's recorded decision
+// when that is an approval naming a head, "" when the round recorded none. The row keeps the
+// decision until the reviewer starts again, and a re-admission clears it with the generation
+// (ClearTreeGeneration), so a re-admitted tree's round has no approved head until it is reviewed
+// again; a hand-over keeps it.
+func ApprovedHead(ctx context.Context, store Store, tx pgx.Tx, issue string) (string, error) {
+	rows, err := store.Phases(ctx, tx, issue)
+	if err != nil {
+		return "", err
+	}
+	for _, row := range rows {
+		if row.Role == claim.RoleReviewer && row.Decision != nil && row.Decision.State == "approved" {
+			return row.Decision.Head, nil
+		}
+	}
+	return "", nil
+}
+
 // Lingers says whether the root lingers after its close: its linger deadline is set, and
 // re-admission clears it.
 func (i Issue) Lingers() bool { return i.LingerUntil != nil }
