@@ -60,11 +60,39 @@ type fakeSecretManager struct {
 	secrets map[string]*fakeSecret // keyed by the secret's resource name
 	// failList, when set, is what ListSecrets answers.
 	failList error
+	// calls counts each method's calls, and unavailable is how many calls of each method still
+	// answer UNAVAILABLE first, as a transient outage does.
+	calls, unavailable map[string]int
+}
+
+// call counts one call of method and answers UNAVAILABLE while unavailable holds some for it.
+// f.mu is held.
+func (f *fakeSecretManager) call(method string) error {
+	if f.calls == nil {
+		f.calls = map[string]int{}
+	}
+	f.calls[method]++
+	if f.unavailable[method] > 0 {
+		f.unavailable[method]--
+		return status.Error(codes.Unavailable, "transient")
+	}
+	return nil
+}
+
+// reads is the calls made so far that Secret Manager counts against its 600-per-minute read
+// quota: every call but AccessSecretVersion.
+func (f *fakeSecretManager) reads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls["ListSecrets"] + f.calls["GetSecret"] + f.calls["GetSecretVersion"]
 }
 
 func (f *fakeSecretManager) ListSecrets(_ context.Context, req *secretmanagerpb.ListSecretsRequest) (*secretmanagerpb.ListSecretsResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.call("ListSecrets"); err != nil {
+		return nil, err
+	}
 	if f.failList != nil {
 		return nil, f.failList
 	}
@@ -104,6 +132,9 @@ func (f *fakeSecretManager) secretProto(name string, s *fakeSecret) *secretmanag
 func (f *fakeSecretManager) GetSecret(_ context.Context, req *secretmanagerpb.GetSecretRequest) (*secretmanagerpb.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.call("GetSecret"); err != nil {
+		return nil, err
+	}
 	s, ok := f.secrets[req.GetName()]
 	if !ok {
 		return nil, status.Errorf(codes.NotFound, "Secret [%s] not found", req.GetName())
@@ -127,6 +158,9 @@ func (f *fakeSecretManager) latest(name string) (*fakeSecret, string, error) {
 func (f *fakeSecretManager) GetSecretVersion(_ context.Context, req *secretmanagerpb.GetSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.call("GetSecretVersion"); err != nil {
+		return nil, err
+	}
 	s, secret, err := f.latest(req.GetName())
 	if err != nil {
 		return nil, err
@@ -146,6 +180,9 @@ func (f *fakeSecretManager) GetSecretVersion(_ context.Context, req *secretmanag
 func (f *fakeSecretManager) AccessSecretVersion(_ context.Context, req *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.call("AccessSecretVersion"); err != nil {
+		return nil, err
+	}
 	s, secret, err := f.latest(req.GetName())
 	if err != nil {
 		return nil, err
@@ -156,8 +193,8 @@ func (f *fakeSecretManager) AccessSecretVersion(_ context.Context, req *secretma
 	return &secretmanagerpb.AccessSecretVersionResponse{Name: secret + "/versions/1", Payload: &secretmanagerpb.SecretPayload{Data: s.value}}, nil
 }
 
-// startFake serves f over TLS on a loopback port and answers a Secret Manager client dialled to it
-// with no credentials, as the broker's client would be built against the real service.
+// startFake serves f over TLS on a loopback port and answers the broker's own Secret Manager
+// client (NewGCPClient, its retries included) dialled to it with no credentials.
 func startFake(t *testing.T, f *fakeSecretManager) *secretmanager.Client {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -192,7 +229,7 @@ func startFake(t *testing.T, f *fakeSecretManager) *secretmanager.Client {
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := secretmanager.NewClient(context.Background(), option.WithGRPCConn(conn), option.WithoutAuthentication())
+	client, err := NewGCPClient(context.Background(), option.WithGRPCConn(conn), option.WithoutAuthentication())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,5 +384,56 @@ func TestGCPValidNameAndPrefix(t *testing.T) {
 	}
 	if err := ValidGCPKeyName("projects/p/locations/us-west1/keyRings/r/cryptoKeys/k"); err == nil {
 		t.Fatal("ValidGCPKeyName accepted a regional key")
+	}
+}
+
+// TestGCPReadQuotaCost pins what each operation costs against Secret Manager's 600-per-minute read
+// quota, which the whole project shares (AccessSecretVersion has its own, 90,000 per minute): a
+// List of N secrets under the prefix is one ListSecrets and N GetSecretVersion, a Describe is one
+// GetSecret and one GetSecretVersion, and a Read is one GetSecret and one AccessSecretVersion.
+func TestGCPReadQuotaCost(t *testing.T) {
+	f := &fakeSecretManager{secrets: map[string]*fakeSecret{
+		fakePrefix + "a": servedSecret("v"),
+		fakePrefix + "b": servedSecret("v"),
+		fakePrefix + "c": servedSecret("v"),
+	}}
+	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	ctx := context.Background()
+	cost := func(op func() error) int {
+		t.Helper()
+		before := f.reads()
+		if err := op(); err != nil {
+			t.Fatal(err)
+		}
+		return f.reads() - before
+	}
+	if got := cost(func() error { _, err := store.List(ctx, fakePrefix); return err }); got != 1+3 {
+		t.Fatalf("List of 3 secrets cost %d reads, want 4", got)
+	}
+	if got := cost(func() error { _, err := store.Describe(ctx, fakePrefix+"a"); return err }); got != 2 {
+		t.Fatalf("Describe cost %d reads, want 2", got)
+	}
+	if got := cost(func() error { _, err := store.Read(ctx, fakePrefix+"a"); return err }); got != 1 {
+		t.Fatalf("Read cost %d reads, want 1 (its value access is the separate quota)", got)
+	}
+}
+
+// TestGCPRetriesAnUnavailableMetadataCall pins NewGCPClient's retry: a transient UNAVAILABLE on
+// ListSecrets, GetSecret or GetSecretVersion is retried, so it fails neither a reload nor a reread.
+func TestGCPRetriesAnUnavailableMetadataCall(t *testing.T) {
+	f := &fakeSecretManager{
+		secrets:     map[string]*fakeSecret{fakePrefix + "a": servedSecret("v")},
+		unavailable: map[string]int{"ListSecrets": 1, "GetSecret": 1, "GetSecretVersion": 2},
+	}
+	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
+	ctx := context.Background()
+	if ls, err := store.List(ctx, fakePrefix); err != nil || len(ls) != 1 {
+		t.Fatalf("List through one UNAVAILABLE each = %d secrets, %v; want 1 after retries", len(ls), err)
+	}
+	if _, err := store.Describe(ctx, fakePrefix+"a"); err != nil {
+		t.Fatalf("Describe through one UNAVAILABLE each = %v; want it to succeed after retries", err)
+	}
+	if f.calls["ListSecrets"] != 2 || f.calls["GetSecret"] != 2 || f.calls["GetSecretVersion"] != 4 {
+		t.Fatalf("calls = %v; want each failed call made again once", f.calls)
 	}
 }

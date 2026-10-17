@@ -198,16 +198,16 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 
 // TestAReloadThatCatchesAChangeKeepsItForListLag pins that a reload which, rereading a recent
 // name, finds an answer the live policy did not hold re-anchors that name: a secret deleted after
-// a reread served it, with no reread of its own, is dropped by the next reload's re-describe, and a
-// reload listLag after the reread, from a listing that still predates the delete, keeps it out
-// rather than serving it again.
+// a reread changed its answer, with no reread of its own, is dropped by the next reload's
+// re-describe, and a reload listLag after the reread, from a listing that still predates the
+// delete, keeps it out rather than serving it again.
 func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
 	stale, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{Local: store, page: stale} // lists OLD_KEY throughout
+	lister := &slowLister{Local: store, page: stale} // lists OLD_KEY, agent tier, throughout
 	loader := policytest.Loader(store)
 	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
@@ -217,8 +217,9 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	reread := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	now := reread
 	policy.SetNow(cur, func() time.Time { return now })
-	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); !lk.Served {
-		t.Fatal("reread must serve OLD_KEY")
+	store.Put(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierHuman, "v1"))
+	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); lk.Secret.Tier != policy.TierHuman {
+		t.Fatalf("reread = %+v; want OLD_KEY served at human tier", lk)
 	}
 
 	// Deleted (from the console, say) while the next reload lists: its listing still shows OLD_KEY,
@@ -265,6 +266,32 @@ func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 	}
 	if got := count.Calls.Load() - before; got != 0 {
 		t.Fatalf("the reload after a reread of a name that exists nowhere made %d DescribeSecret calls; want 0", got)
+	}
+}
+
+// TestARereadThatConfirmsTheLiveAnswerCostsNoReload pins that a reread finding a served secret as
+// the live policy already serves it records nothing: anyone may reread an existing name, and on a
+// store whose ListLag is hours each anchor would cost every reload in it a describe.
+func TestARereadThatConfirmsTheLiveAnswerCostsNoReload(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
+	loader := policytest.Loader(store)
+	loader.Store = policytest.StoreThrough(store, count)
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if lk, err := cur.RefreshOne(context.Background(), "OLD_KEY"); err != nil || !lk.Served {
+			t.Fatalf("RefreshOne(OLD_KEY) = %+v, %v; want served", lk, err)
+		}
+	}
+	before := count.Calls.Load()
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count.Calls.Load() - before; got != 0 {
+		t.Fatalf("the reload after rereads that confirmed the live answer made %d DescribeSecret calls; want 0", got)
 	}
 }
 

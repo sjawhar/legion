@@ -11,6 +11,7 @@ import (
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	gax "github.com/googleapis/gax-go/v2"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -72,12 +73,23 @@ type GCP struct {
 // NewGCPClient opens Secret Manager under Application Default Credentials: on GKE the metadata
 // server and Workload Identity Federation for the pod's ServiceAccount, with no key file. The
 // client library's logging is off whatever GOOGLE_SDK_GO_LOGGING_LEVEL says: at debug it prints
-// every request and response, and a Read's response carries the value.
-func NewGCPClient(ctx context.Context) (*secretmanager.Client, error) {
-	client, err := secretmanager.NewClient(ctx, option.WithLogger(slog.New(slog.DiscardHandler)))
+// every request and response, and a Read's response carries the value. opts are the tests' dial
+// to a fake Secret Manager.
+func NewGCPClient(ctx context.Context, opts ...option.ClientOption) (*secretmanager.Client, error) {
+	client, err := secretmanager.NewClient(ctx, append([]option.ClientOption{option.WithLogger(slog.New(slog.DiscardHandler))}, opts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("open Secret Manager: %w", err)
 	}
+	// The library retries only AccessSecretVersion; the metadata calls a reload and a reread make
+	// get the same retry of UNAVAILABLE, so one transient failure neither fails a reload (and its
+	// alarm) nor a value release. RESOURCE_EXHAUSTED is not retried: the read quota is shared by
+	// the whole project, and retrying into it only spends more of it.
+	retry := gax.WithRetry(func() gax.Retryer {
+		return gax.OnCodes([]codes.Code{codes.Unavailable}, gax.Backoff{Initial: 200 * time.Millisecond, Max: 5 * time.Second, Multiplier: 2})
+	})
+	client.CallOptions.ListSecrets = append(client.CallOptions.ListSecrets, retry)
+	client.CallOptions.GetSecret = append(client.CallOptions.GetSecret, retry)
+	client.CallOptions.GetSecretVersion = append(client.CallOptions.GetSecretVersion, retry)
 	return client, nil
 }
 

@@ -2286,6 +2286,10 @@ an owner tag naming a service is refused as malformed unless `Loader.Services` l
 `cmd/broker` fills with `BROKER_SERVICES`' names; and `Loader.secretName` asks `Store.ValidName`
 whether a name can exist in the store at all (Secrets Manager's 512-character limit; Secret
 Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
+`secrets.GCP` counts against Secret Manager's 600-a-minute per-project read quota for every call but
+`AccessSecretVersion` (`TestGCPReadQuotaCost` pins a `List` at 1+N, a `Describe` at 2, a `Read` at 1), so
+`Current.RefreshOne` anchors a reread only when it changed the live answer, and `NewGCPClient` retries
+`UNAVAILABLE` (not `RESOURCE_EXHAUSTED`) on `ListSecrets`, `GetSecret` and `GetSecretVersion`.
 `secrets.GCP` opens Secret Manager under Application Default Credentials (`NewGCPClient`: on GKE,
 Workload Identity for the pod's ServiceAccount, no key file), with the client library's logger
 off, since at debug it prints response bodies, a value among them, and logs a failed call's gRPC
@@ -2319,12 +2323,13 @@ that begins (its clock read before its listing is fetched) within the store's `L
 (five minutes for `secrets.AWS`, how far AWS documents `ListSecrets` may lag; six hours for
 `secrets.GCP`, the bound Google documents for Secret Manager's eventually consistent metadata) reads that name again alone, so a lagging
 listing neither drops a secret the reread served nor brings back one it found gone; a name is
-anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
-the answer differed from what the live set held, so a change no reread caught (a console delete, a
+anchored by a reread or a reload's own re-describe that found the answer differed from what the
+live set held, so a change no reread caught (a console delete, a
 tag that now refuses the secret) is kept for `ListLag` from the reload that caught it rather than
-flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
-a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
-invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no
+flipping back when the first anchor runs out. `RefreshOne` keeps no record of a reread that matched
+the live set (a name it already served as found, or an absent name it did not serve): that changed
+nothing, and anyone can ask for a reread, so each would otherwise cost every reload in `ListLag` a
+describe under the lock. A name no
 secret under the prefix can carry - not `namePattern`'s form, or one the store's `ValidName`
 refuses - is `policy.ErrNameInvalid` before any store call,
 before the writer lock and before a miss-path reread token (`Loader.secretName`, which
