@@ -133,7 +133,6 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 	return found[0], nil
 }
 
-
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
 // podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,
 // ahead of the operator's; PI_CONFIG_DIR and OMP_SESSION_STORAGE, which the operator left unset,
@@ -283,7 +282,10 @@ func (r *liveRig) procCmdline(c *liveClaim, pid string) ([]string, error) {
 
 // provider-key: the root's shim hands its agent the providers Secret's key (--provider-env-dir) and
 // never holds it: the agent's environment carries the Secret's value under the variable
-// provider_keys names, and the shim's (the agent's parent) carries no such variable.
+// provider_keys names, and the shim's (the agent's parent) carries no such variable. Under
+// LEGION_E2E_MODEL_ROUTE=key-file, the same holds for ANTHROPIC_API_KEY (liveAnthropicKeyVariable,
+// runtimeOptions's doc comment), the providers Secret's own second key in that mode: the agent's
+// environment carries the Secret's value under that exact name, and the shim's does not.
 func (r *liveRig) checkProviderKey() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -322,6 +324,25 @@ func (r *liveRig) checkProviderKey() error {
 		return fmt.Errorf("the shim (pid %s) holds %s (%d bytes), want the agent's environment alone to", shimPid, liveProviderKey, len(held))
 	}
 	note("operator", "/proc/%s/environ (the shim): no %s", shimPid, liveProviderKey)
+	if r.env.modelRoute != "key-file" {
+		return nil
+	}
+	anthropicEncoded, err := r.kubectl("get", "secret", secret, "-o", "jsonpath={.data."+liveAnthropicKeyVariable+"}")
+	if err != nil {
+		return err
+	}
+	anthropicValue, err := base64.StdEncoding.DecodeString(anthropicEncoded)
+	if err != nil || len(anthropicValue) == 0 {
+		return fmt.Errorf("secret %s's key %s reads %q (%v), want the placeholder the script wrote", secret, liveAnthropicKeyVariable, anthropicEncoded, err)
+	}
+	if agent[liveAnthropicKeyVariable] != string(anthropicValue) {
+		return fmt.Errorf("the agent (pid %s) has %s of %d bytes, want secret %s's key %s (%d bytes)", pid, liveAnthropicKeyVariable, len(agent[liveAnthropicKeyVariable]), secret, liveAnthropicKeyVariable, len(anthropicValue))
+	}
+	note("operator", "/proc/%s/environ (the agent): %s equals secret %s's key %s (%d bytes, not printed)", pid, liveAnthropicKeyVariable, secret, liveAnthropicKeyVariable, len(anthropicValue))
+	if held, ok := shim[liveAnthropicKeyVariable]; ok {
+		return fmt.Errorf("the shim (pid %s) holds %s (%d bytes), want the agent's environment alone to", shimPid, liveAnthropicKeyVariable, len(held))
+	}
+	note("operator", "/proc/%s/environ (the shim): no %s", shimPid, liveAnthropicKeyVariable)
 	return nil
 }
 

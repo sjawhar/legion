@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -344,7 +345,21 @@ func isGKEExtendedDurationAffinity(a *corev1.Affinity) bool {
 	if len(terms) != 1 || len(terms[0].MatchFields) != 0 || len(terms[0].MatchExpressions) != 1 {
 		return false
 	}
-	return terms[0].MatchExpressions[0].Key == "cloud.google.com/extended-duration-pods"
+	// The key alone is not enough: a NotIn or DoesNotExist on this same key would be a refusal
+	// GKE itself would still admit, wearing the one shape this function is meant to tolerate, but
+	// meaning something opposite — the operator and its values matter as much as the key.
+	expr := terms[0].MatchExpressions[0]
+	if expr.Key != "cloud.google.com/extended-duration-pods" {
+		return false
+	}
+	switch expr.Operator {
+	case corev1.NodeSelectorOpIn:
+		return len(expr.Values) == 1 && expr.Values[0] == "true"
+	case corev1.NodeSelectorOpExists:
+		return len(expr.Values) == 0
+	default:
+		return false
+	}
 }
 
 // guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity but
@@ -1451,4 +1466,105 @@ func (r *liveRig) checkReleasePreservesIssue() error {
 	note("runtime", "Release(%s) ended only that role; issue Sandbox %s and root %s stayed Alive", worker.name, name, root.token)
 	note("operator", "PVC %s: Bound", pvc)
 	return nil
+}
+
+// TestIsGKEExtendedDurationAffinity covers the matcher's whole class of mistake: checking only the
+// key of the one tolerated NodeAffinity shape, not its operator or values, would accept a refusal
+// (NotIn/DoesNotExist on the same key) wearing the one shape meant to be tolerated.
+func TestIsGKEExtendedDurationAffinity(t *testing.T) {
+	key := "cloud.google.com/extended-duration-pods"
+	required := func(exprs ...corev1.NodeSelectorRequirement) *corev1.Affinity {
+		return &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+				NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: exprs}},
+			},
+		}}
+	}
+	for _, tc := range []struct {
+		name string
+		a    *corev1.Affinity
+		want bool
+	}{
+		{"nil affinity", nil, false},
+		{"In [true], the real GKE shape", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}), true},
+		{"Exists, no values", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpExists}), true},
+		{"NotIn [true] on the same key is a refusal, not a tolerance", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpNotIn, Values: []string{"true"}}), false},
+		{"DoesNotExist on the same key is a refusal, not a tolerance", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpDoesNotExist}), false},
+		{"In [false] on the same key is not the tolerated value", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"false"}}), false},
+		{"In [true, other] is not exactly one value", required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true", "other"}}), false},
+		{"a different key entirely", required(corev1.NodeSelectorRequirement{Key: "some.other/key", Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}), false},
+		{"a second term is not the one tolerated shape", &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{
+				{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}}},
+				{MatchExpressions: []corev1.NodeSelectorRequirement{{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}}},
+			}},
+		}}, false},
+		{"a pod affinity alongside is not the one tolerated shape", &corev1.Affinity{
+			NodeAffinity: required(corev1.NodeSelectorRequirement{Key: key, Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}}).NodeAffinity,
+			PodAffinity:  &corev1.PodAffinity{},
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isGKEExtendedDurationAffinity(tc.a); got != tc.want {
+				t.Errorf("isGKEExtendedDurationAffinity(%+v) = %v, want %v", tc.a, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGuaranteedPodAffinity covers guaranteedPod's own use of the matcher above: the
+// extendedDurationAffinity parameter must gate on the matcher's real verdict, not merely on
+// whether the pod carries any NodeAffinity at all.
+func TestGuaranteedPodAffinity(t *testing.T) {
+	extended := &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "cloud.google.com/extended-duration-pods", Operator: corev1.NodeSelectorOpIn, Values: []string{"true"}},
+			}}},
+		},
+	}}
+	refusal := &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchExpressions: []corev1.NodeSelectorRequirement{
+				{Key: "cloud.google.com/extended-duration-pods", Operator: corev1.NodeSelectorOpNotIn, Values: []string{"true"}},
+			}}},
+		},
+	}}
+	quantity := resource.MustParse("1")
+	podWith := func(affinity *corev1.Affinity) *corev1.Pod {
+		return &corev1.Pod{
+			Spec: corev1.PodSpec{
+				Affinity: affinity,
+				Containers: []corev1.Container{{Name: "only", Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: quantity, corev1.ResourceMemory: quantity, corev1.ResourceEphemeralStorage: quantity},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: quantity, corev1.ResourceMemory: quantity, corev1.ResourceEphemeralStorage: quantity},
+				}}},
+			},
+			Status: corev1.PodStatus{QOSClass: corev1.PodQOSGuaranteed},
+		}
+	}
+	want := map[string]corev1.ResourceRequirements{"only": {
+		Requests: corev1.ResourceList{corev1.ResourceCPU: quantity, corev1.ResourceMemory: quantity, corev1.ResourceEphemeralStorage: quantity},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: quantity, corev1.ResourceMemory: quantity, corev1.ResourceEphemeralStorage: quantity},
+	}}
+	for _, tc := range []struct {
+		name                     string
+		affinity                 *corev1.Affinity
+		extendedDurationAffinity bool
+		wantErr                  bool
+	}{
+		{"no affinity, flag false: fine", nil, false, false},
+		{"no affinity, flag true: still fine", nil, true, false},
+		{"the real shape, flag true: tolerated", extended, true, false},
+		{"the real shape, flag false: refused — the probe's own call site passes false", extended, false, true},
+		{"a refusal wearing the same key, flag true: still refused, the matcher's own job", refusal, true, true},
+		{"some other affinity entirely, flag true: refused", &corev1.Affinity{PodAffinity: &corev1.PodAffinity{}}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := guaranteedPod(podWith(tc.affinity), want, nil, resource.Quantity{}, false, tc.extendedDurationAffinity)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("guaranteedPod(affinity=%+v, extendedDurationAffinity=%v) = %v, wantErr %v", tc.affinity, tc.extendedDurationAffinity, err, tc.wantErr)
+			}
+		})
+	}
 }
