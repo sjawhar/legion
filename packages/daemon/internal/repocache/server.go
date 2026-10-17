@@ -192,18 +192,16 @@ type cache struct {
 }
 
 // refresh fetches the clone from GitHub under the write lock (cloning it the first time), repacks
-// it when a repack is due, and publishes what it then holds. A repack that fails is logged and
-// tried again at the next fetch; the fetch it followed still counts.
+// it when a repack is due, and publishes what it then holds. The token is read from its file again
+// before every transfer (workspace.Fetch), as the file stands then. A repack that fails is logged
+// and tried again at the next fetch; the fetch it followed still counts.
 func (c *cache) refresh(ctx context.Context) error {
 	c.lock.Lock()
 	defer c.lock.Unlock()
-	token, err := config.ReadSecretPointer(tokenFileEnv, c.opts.TokenFile)
-	if err != nil {
-		return err
-	}
 	if _, err := workspace.Fetch(ctx, c.opts.Run, workspace.FetchRequest{
-		Repo: c.opts.Repo, Token: token, CredentialDir: c.opts.CredentialDir, Feed: c.opts.Root,
-		Log: c.opts.Log, Clock: workspace.WallClock{},
+		Repo: c.opts.Repo, CredentialDir: c.opts.CredentialDir, Feed: c.opts.Root,
+		Token: func() (string, error) { return config.ReadSecretPointer(tokenFileEnv, c.opts.TokenFile) },
+		Log:   c.opts.Log, Clock: workspace.WallClock{},
 	}); err != nil {
 		return err
 	}

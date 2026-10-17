@@ -66,7 +66,7 @@ func newProvisioningCredential(parent, token string) (remote, error) {
 		}
 		return remote{}, cause
 	}
-	tokenFile := filepath.Join(directory, "token")
+	tokenFile := filepath.Join(directory, provisioningTokenName)
 	if err := os.WriteFile(tokenFile, []byte(token), 0o600); err != nil {
 		return cleanup(fmt.Errorf("write provisioning token: %w", err))
 	}
@@ -90,6 +90,21 @@ func newProvisioningCredential(parent, token string) (remote, error) {
 			"GIT_CONFIG_VALUE_1=!" + shellprefix.Literal(helper),
 		},
 	}, nil
+}
+
+// provisioningTokenName is the one-shot credential's token file, in its directory.
+const provisioningTokenName = "token"
+
+// setToken writes token over the one-shot credential's, which git's helper reads at each request
+// for it: Fetch's, before each transfer from GitHub, with the token as it stands then.
+func (r remote) setToken(token string) error {
+	if token == "" {
+		return errors.New("workspace provisioning token is required")
+	}
+	if err := os.WriteFile(filepath.Join(r.dir, provisioningTokenName), []byte(token), 0o600); err != nil {
+		return fmt.Errorf("write provisioning token: %w", err)
+	}
+	return nil
 }
 
 func (r remote) remove() error {

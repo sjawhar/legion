@@ -589,9 +589,17 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 func fetchRequest(t *testing.T) FetchRequest {
 	t.Helper()
 	return FetchRequest{
-		Repo: ghrepo.MustParse("acme/widgets"), Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Repo: ghrepo.MustParse("acme/widgets"), Token: staticToken(testInstallationToken), CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 		Log: func(line string) { t.Logf("fetch logged: %s", line) }, Clock: WallClock{},
 	}
+}
+
+// testInstallationToken is the provisioning token a test's fetch reads.
+const testInstallationToken = "test-installation-token"
+
+// staticToken is a FetchRequest.Token that always answers token.
+func staticToken(token string) func() (string, error) {
+	return func() (string, error) { return token, nil }
 }
 
 // readOnly takes every write permission away from dir's tree, as a read-only mount does, until

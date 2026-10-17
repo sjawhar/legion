@@ -26,14 +26,17 @@ import (
 // inherits (config.go).
 var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
 
-// FetchRequest is a pod's first init container's: the repository, the provisioning token, the
-// directory its one-shot credential goes under, the feed directory, the log each retried transfer
-// and each wait on the cache are told to, the clock the retries and that wait read and wait on, and
-// the repository cache's address and the bearer token it takes (an issue pod's, under the
-// Kubernetes runtime), both empty for the cache's own process, which fills its clone from GitHub.
+// FetchRequest is a pod's first init container's: the repository, how to read the provisioning
+// token (Token), the directory its one-shot credential goes under, the feed directory, the log each
+// retried transfer and each wait on the cache are told to, the clock the retries and that wait read
+// and wait on, and the repository cache's address and the bearer token it takes (an issue pod's,
+// under the Kubernetes runtime), both empty for the cache's own process, which fills its clone from
+// GitHub.
 type FetchRequest struct {
-	Repo          ghrepo.Repository
-	Token         string
+	Repo ghrepo.Repository
+	// Token answers the provisioning token as it stands when called, never a copy kept from an
+	// earlier call: the file a pod mounts it at, which the daemon keeps fresh while the fetch runs.
+	Token         func() (string, error)
 	CredentialDir string
 	Feed          string
 	Log           func(line string)
@@ -83,18 +86,28 @@ type FetchReport struct {
 // What the fetch does once it may start — at once, or once the cache is ready — shares one
 // FetchTimeout: the cache's stream, its verification and the delta from GitHub, or a clone or fetch
 // from GitHub, each bounded by what remains of it, and none started past it. So a fetch ends within
-// FetchBudget, however long it waited on the cache. A transfer from GitHub that fails transiently
-// (transientCloneFailure) is run again after the next of fetchBackoff's waits, once per wait, its
-// failure logged and whatever a failed clone left removed first, and no retry starts past the
-// bound. A transfer still failing after the last wait, and every other failure, is the answer at
-// once. Each attempt's stderr has the token replaced by *** as soon as the attempt returns, so
-// nothing Fetch logs or returns carries it, wherever git echoed it.
+// FetchBudget, however long it waited on the cache. Every attempt of a transfer from GitHub reads
+// the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
+// presents the token as its file stands then, not as it stood when the fetch began. A transfer
+// from GitHub that fails transiently (transientCloneFailure) is run again after the next of
+// fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left removed
+// first, and no retry starts past the bound. A transfer still failing after the last wait, and
+// every other failure, is the answer at once. Each attempt's stderr has every token the fetch has
+// read replaced by *** as soon as the attempt returns, so nothing Fetch logs or returns carries
+// one, wherever git echoed it.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, error) {
 	feed, err := FeedRepository(request.Feed, request.Repo)
 	if err != nil {
 		return FetchReport{}, err
 	}
-	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
+	if request.Token == nil {
+		return FetchReport{}, errors.New("workspace fetch token is required")
+	}
+	token, err := request.Token()
+	if err != nil {
+		return FetchReport{}, err
+	}
+	github := gitHubSource{token: token, credentialDir: request.CredentialDir}
 	if err := github.check(request.Repo); err != nil {
 		return FetchReport{}, err
 	}
@@ -121,14 +134,14 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if err != nil {
 		return FetchReport{}, err
 	}
-	env := merge(credential.env, isolatedGitConfig)
+	held := &fetchCredential{remote: credential, env: merge(credential.env, isolatedGitConfig), read: request.Token, held: []string{token}}
 	report := FetchReport{Feed: feed}
 	if present {
 		if err := RemoveStaleFeedLocks(feed, request.Clock.Now(), request.Log); err != nil {
 			return FetchReport{}, err
 		}
 		deadline := request.Clock.Now().Add(FetchTimeout)
-		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, env, deadline); err != nil {
+		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, held, deadline); err != nil {
 			return FetchReport{}, err
 		}
 		return report, credential.remove()
@@ -162,7 +175,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		transfer = fetchInto(staging, request.Repo)
 	}
 	report.Cloned = transfer.verb == "clone"
-	if err := report.fromGitHub(ctx, run, request, transfer, staging, env, deadline); err != nil {
+	if err := report.fromGitHub(ctx, run, request, transfer, staging, held, deadline); err != nil {
 		return FetchReport{}, err
 	}
 	if err := feedConfiguration(ctx, run, staging); err != nil {
@@ -174,11 +187,11 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	return report, credential.remove()
 }
 
-// fromGitHub runs transfer into the bare repository gitDir under env, with Fetch's retries, all
-// before deadline, and records how much the repository's objects grew across it and how many refs
-// it made, moved or deleted. A clone's gitDir holds no repository before it runs: nothing, and no
-// ref.
-func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, env []string, deadline time.Time) error {
+// fromGitHub runs transfer into the bare repository gitDir under the one-shot credential held,
+// with Fetch's retries, all before deadline, and records how much the repository's objects grew
+// across it and how many refs it made, moved or deleted. A clone's gitDir holds no repository
+// before it runs: nothing, and no ref.
+func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, held *fetchCredential, deadline time.Time) error {
 	refsBefore, err := feedRefs(ctx, run, gitDir, transfer.verb == "fetch")
 	if err != nil {
 		return err
@@ -187,7 +200,7 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 	if err != nil {
 		return err
 	}
-	if err := transferWithRetries(ctx, run, request, transfer, env, deadline); err != nil {
+	if err := transferWithRetries(ctx, run, request, transfer, held, deadline); err != nil {
 		return err
 	}
 	refsAfter, err := feedRefs(ctx, run, gitDir, true)
@@ -564,17 +577,20 @@ func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Re
 	return RunChecked(ctx, run, append([]string{"git", "--git-dir=" + gitDir}, args...), isolatedGitConfig, "")
 }
 
-// transferWithRetries runs transfer under env until it succeeds, retrying a transient failure as
-// Fetch says, each attempt bounded by what remains before deadline.
-func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, env []string, deadline time.Time) error {
-	scrub := strings.NewReplacer(request.Token, "***")
+// transferWithRetries runs transfer under the one-shot credential held until it succeeds, retrying
+// a transient failure as Fetch says, each attempt bounded by what remains before deadline and run
+// on the provisioning token as it stands when the attempt starts (renew).
+func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, held *fetchCredential, deadline time.Time) error {
 	now := request.Clock.Now()
 	if _, err := remaining(request, deadline, "the "+transfer.verb+" from GitHub"); err != nil {
 		return err
 	}
 	for attempt := 1; ; attempt++ {
-		result, runErr := runCommandTimeout(ctx, run, transfer.argv, env, "", deadline.Sub(now))
-		result.Stderr = scrub.Replace(result.Stderr)
+		if err := held.renew(); err != nil {
+			return fmt.Errorf("%s attempt %d: %w", transfer.verb, attempt, err)
+		}
+		result, runErr := runCommandTimeout(ctx, run, transfer.argv, held.env, "", deadline.Sub(now))
+		result.Stderr = held.scrub(result.Stderr)
 		_, failed := checkedResult(transfer.argv, result, runErr)
 		if failed == nil {
 			return nil
@@ -603,6 +619,43 @@ func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, 
 			return fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
 		}
 	}
+}
+
+// fetchCredential is the one-shot credential a fetch's transfers from GitHub run under (remote,
+// with env the environment that names it), the way to read the provisioning token
+// (FetchRequest.Token), and every token it has held, none of which anything Fetch logs or returns
+// carries.
+type fetchCredential struct {
+	remote remote
+	env    []string
+	read   func() (string, error)
+	held   []string
+}
+
+// renew reads the provisioning token as it stands now and writes it over the credential's, so the
+// transfer about to start presents it: a token file the daemon refreshed during a long wait on the
+// repository cache, or a retry's backoff, is the one git is given, never the token the fetch began
+// with.
+func (c *fetchCredential) renew() error {
+	token, err := c.read()
+	if err != nil {
+		return fmt.Errorf("read the provisioning token: %w", err)
+	}
+	if err := c.remote.setToken(token); err != nil {
+		return err
+	}
+	if !slices.Contains(c.held, token) {
+		c.held = append(c.held, token)
+	}
+	return nil
+}
+
+// scrub is text with every token the credential has held replaced by ***.
+func (c *fetchCredential) scrub(text string) string {
+	for _, token := range c.held {
+		text = strings.ReplaceAll(text, token, "***")
+	}
+	return text
 }
 
 // Clock is the time Fetch's retries read and wait on: WallClock, or a test's own.

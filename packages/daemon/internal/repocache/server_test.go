@@ -783,7 +783,7 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 	moved := advance(t, remote, "moved")
 	var logged []string
 	report, err := workspace.Fetch(context.Background(), run, workspace.FetchRequest{
-		Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Repo: ghrepo.MustParse("acme/widgets"), Token: func() (string, error) { return "ghs_pod", nil }, CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 		Log: func(line string) { logged = append(logged, line) }, Clock: workspace.WallClock{}, CacheURL: c.url, CacheToken: testCacheToken,
 	})
 	if err != nil {
@@ -861,7 +861,7 @@ func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	otherCache.ready(t)
 	fetch := func(cache *running, bearer string) (workspace.FetchReport, string, error) {
 		request := workspace.FetchRequest{
-			Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+			Repo: ghrepo.MustParse("acme/widgets"), Token: func() (string, error) { return "ghs_pod", nil }, CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
 			Log: func(string) {}, Clock: workspace.WallClock{}, CacheURL: cache.url, CacheToken: bearer,
 		}
 		report, err := workspace.Fetch(context.Background(), run, request)

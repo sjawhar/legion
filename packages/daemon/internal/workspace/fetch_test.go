@@ -337,6 +337,7 @@ type gitHubStandIn struct {
 	remote string
 
 	mu        sync.Mutex
+	tokens    []string
 	failures  []packFailure
 	attempts  int
 	passwords []string
@@ -349,7 +350,7 @@ func newGitHubStandIn(t *testing.T, http2 bool, token string, failures ...packFa
 		t.Fatalf("the stand-in runs a real git http-backend: %v", err)
 	}
 	root := t.TempDir()
-	s := &gitHubStandIn{remote: localBareRemote(t), failures: failures}
+	s := &gitHubStandIn{remote: localBareRemote(t), tokens: []string{token}, failures: failures}
 	if err := os.Mkdir(filepath.Join(root, "acme"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -366,8 +367,9 @@ func newGitHubStandIn(t *testing.T, http2 bool, token string, failures ...packFa
 				s.attempts++
 			}
 		}
+		accepted := slices.Contains(s.tokens, password)
 		s.mu.Unlock()
-		if !ok || user != "x-access-token" || password != token {
+		if !ok || user != "x-access-token" || !accepted {
 			w.Header().Set("WWW-Authenticate", `Basic realm="GitHub"`)
 			http.Error(w, "Invalid username or token.", http.StatusUnauthorized)
 			return
@@ -527,6 +529,20 @@ func (s *gitHubStandIn) attemptCount() int {
 	return s.attempts
 }
 
+// accept has the stand-in take token as well as the one it was made with.
+func (s *gitHubStandIn) accept(token string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.tokens = append(s.tokens, token)
+}
+
+// presented is every password git presented, in order.
+func (s *gitHubStandIn) presented() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.passwords)
+}
+
 // tokensPresented fails the test unless git presented the one-shot credential's token on every
 // authenticated request, and on at least one per attempt.
 func (s *gitHubStandIn) tokensPresented(t *testing.T, token string) {
@@ -563,7 +579,7 @@ func TestFetchRetriesWhatARealGitPrintsForATransientFailure(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := fetchRequest(t)
-			github := newGitHubStandIn(t, tc.http2, req.Token, tc.failures...)
+			github := newGitHubStandIn(t, tc.http2, testInstallationToken, tc.failures...)
 			clock := newTestClock()
 			req.Clock = clock
 			var logged []string
@@ -593,7 +609,7 @@ func TestFetchRetriesWhatARealGitPrintsForATransientFailure(t *testing.T) {
 			if attempts := github.attemptCount(); attempts != len(tc.logged)+1 {
 				t.Fatalf("git made %d attempts, want %d", attempts, len(tc.logged)+1)
 			}
-			github.tokensPresented(t, req.Token)
+			github.tokensPresented(t, testInstallationToken)
 			if main := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")); main != strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+github.remote, "rev-parse", "main")) {
 				t.Errorf("the feed's main is %s, not the remote's", main)
 			}
@@ -614,7 +630,7 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := fetchRequest(t)
-			accepts := req.Token
+			accepts := testInstallationToken
 			if tc.accepts != "" {
 				accepts = tc.accepts
 			}
@@ -634,9 +650,94 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 			if attempts := github.attemptCount(); attempts != 1 || len(clock.waits) != 0 || len(logged) != 0 {
 				t.Fatalf("git made %d attempts, Fetch waited %v and logged %q; want one attempt, no wait, nothing logged", attempts, clock.waits, logged)
 			}
-			github.tokensPresented(t, req.Token)
+			github.tokensPresented(t, testInstallationToken)
 		})
 	}
+}
+
+// The provisioning token is read as its file stands before every transfer from GitHub, never kept
+// from the fetch's start: the daemon keeps a provisioning pod's Secret fresh while its fetch runs,
+// and the kubelet rewrites the file projected from it in place. Against a real git reaching the
+// stand-in as github.com: a token file rewritten while the fetch waits on the repository cache is
+// the one the delta presents, the stand-in taking that token alone; and one rewritten during a
+// retry's backoff is the one the retry presents.
+func TestFetchReadsTheProvisioningTokenAsItsFileStandsBeforeEveryTransfer(t *testing.T) {
+	t.Run("rewritten during the wait on the repository cache", func(t *testing.T) {
+		github := newGitHubStandIn(t, false, "ghs_fresh")
+		served := &fakeCache{body: cacheTar(t, cacheOf(t, github.remote)), notReady: 2}
+		pushRemoteBranch(t, github.remote, "release/v7.1", "newer.txt")
+		req := fetchRequest(t)
+		file := tokenFile(t, "ghs_stale")
+		req.Token = tokenFrom(file)
+		req.CacheURL, req.CacheToken = served.serve(t), testCacheToken
+		req.Clock = &rewritingClock{testClock: newTestClock(), file: file, token: "ghs_fresh"}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+
+		report, err := Fetch(ctx, NewRunner(testTimeout, testTools(t)), req)
+		if err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		if report.Cloned || report.CacheBytes == 0 || served.healthAsked != 3 {
+			t.Fatalf("Fetch reported %+v after %d health polls, want the cache streamed after the wait", report, served.healthAsked)
+		}
+		github.tokensPresented(t, "ghs_fresh")
+	})
+	t.Run("rewritten during a retry's backoff", func(t *testing.T) {
+		github := newGitHubStandIn(t, false, "ghs_stale", http.StatusRequestTimeout)
+		github.accept("ghs_fresh")
+		req := fetchRequest(t)
+		file := tokenFile(t, "ghs_stale")
+		req.Token = tokenFrom(file)
+		req.Clock = &rewritingClock{testClock: newTestClock(), file: file, token: "ghs_fresh"}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+
+		if _, err := Fetch(ctx, NewRunner(testTimeout, testTools(t)), req); err != nil {
+			t.Fatalf("Fetch: %v", err)
+		}
+		presented := github.presented()
+		fresh := slices.Index(presented, "ghs_fresh")
+		if github.attemptCount() != 2 || fresh <= 0 || slices.Contains(presented[:fresh], "ghs_fresh") || slices.Contains(presented[fresh:], "ghs_stale") {
+			t.Fatalf("git presented %q over %d attempts, want the first attempt's token, then the rewritten one alone", presented, github.attemptCount())
+		}
+	})
+}
+
+// tokenFile is a provisioning token file holding token, as a pod mounts one.
+func tokenFile(t *testing.T, token string) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "LEGION_PROVISION_TOKEN")
+	if err := os.WriteFile(file, []byte(token), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+// tokenFrom is a FetchRequest.Token that reads file each time it is called.
+func tokenFrom(file string) func() (string, error) {
+	return func() (string, error) {
+		contents, err := os.ReadFile(file)
+		return strings.TrimSpace(string(contents)), err
+	}
+}
+
+// rewritingClock is the test clock that, at its first wait, rewrites file to hold token: what the
+// daemon's refresh and the kubelet do to a pod's token file while the fetch waits.
+type rewritingClock struct {
+	*testClock
+	file, token string
+	rewritten   bool
+}
+
+func (c *rewritingClock) Sleep(ctx context.Context, d time.Duration) error {
+	if !c.rewritten {
+		c.rewritten = true
+		if err := os.WriteFile(c.file, []byte(c.token), 0o600); err != nil {
+			return err
+		}
+	}
+	return c.testClock.Sleep(ctx, d)
 }
 
 // A fetch killed mid-update leaves git's lock files in the feed, which outlives it on the issue's
