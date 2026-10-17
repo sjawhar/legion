@@ -123,10 +123,12 @@ client holding its seed would only be the same session user. The rendered file, 
 VM's metadata holds it in the clear.
 
 A session user lets anything that reaches 4222 publish and subscribe as `SessionPermissions()`
-allows, which includes reading every notification topic, so with one the tailnet's policy is the
-gate on 4222: which devices it lets reach the hub's 4222 decides who is on the bus. A `listener`
-opens a second door, port 9020, with or without a session user, and it grants far more
-([The hub's listener](#the-hubs-listener)).
+allows: it reads every notification topic, answers any reply inbox it sees there (a role
+delivery's receipt included), and publishes agent stream frames and answers stream replay requests
+for any session id, so it can fake any agent's live stream in Dispatch. With one, the tailnet's
+policy is the gate on 4222: which devices it lets reach the hub's 4222 decides who is on the bus.
+A `listener` opens a second door, port 9020, with or without a session user, and it grants far
+more ([The hub's listener](#the-hubs-listener)).
 
 A user is refused when it names both `machineId` and `permissions` or neither, or when its
 `machineId` or `nkey` is empty, named by its index alone, as `users[1]: nkey is required`, since
@@ -165,7 +167,12 @@ otherwise post to it: a browser sends a cross-site form without asking. The list
 request body whose `Content-Type` is not `application/json`, which a page can send cross-site only
 after a CORS preflight the listener never grants (`apiauth.go`). That refusal shipped in
 legion-envoy-v13.9.0, so pin `listener.image` to that release or a later one; an older image
-leaves 9020 open to any page a tailnet user visits.
+leaves 9020 open to any page a tailnet user visits. The refusal does not stop DNS rebinding: a
+page whose own name an attacker repoints at the hub's tailnet address is same-origin with it, so
+it sends JSON with no preflight, reads the replies, and has the whole API, since the listener does
+not check the request's `Host`. A browser that asks before a public page reaches a private or
+tailnet address (Chrome's Local Network Access) blocks that; any other browser on a device the
+policy admits to 9020 is a way in, which is one more reason to grant 9020 narrowly.
 
 The listener connects as the listener's user (see [The hub's users](#the-hubs-users)) with the
 seed `listener.seedSecret` holds. The hub's service account gets
