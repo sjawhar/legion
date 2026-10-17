@@ -1,25 +1,70 @@
 # Slack mentions
 
-A person who mentions the Legion Slack app in one of the project's Slack channels is talking to
-you, and you answer in that thread. The `Slack channels:` line of your system prompt names each
-channel `legion.yaml` gives the project (`projects.<KEY>.slack_channels`). Only the controller the
-daemon launches has one: the Slack bot token is the Legion daemon service's, which the secrets
-broker grants to that service's own pods alone. With no such line the project has no channel, and
-nothing here applies.
+A person who mentions the Legion Slack app in a Slack channel is talking to you, and you answer in
+that thread, but only once your session itself watches that channel: there is no deployment-wide
+`slack_channels` list any more, and no daemon-side subscription. You watch a channel because a
+person asked you to (in Dispatch or in a thread of a channel you already watch), and you hold that
+watch for as long as your session stays live.
 
-## Your session subscribes for you
+## Watching a channel
 
-Your session hears each listed channel's mentions by itself, on
-`notifications.slack.*.<channel>.mention`, for as long as it holds the controller role: a resumed or
-relaunched session hears the channels its launch names and no others, and drops every Slack topic an
-earlier session subscribed to by hand. Never `envoy_subscribe` a Slack topic yourself.
+The channel is its Slack id (e.g. `C01234567`), which the person names or you resolve yourself.
+Two different Legion controllers — different projects, maybe different Slack teams — could be
+asked to watch the same channel id, so a watch request needs a lock before it subscribes:
 
-A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it.
+1. Search for an existing lock: `dispatch search --query "Slack channel lock <channel>"`.
+2. **Found:** `dispatch read --issue <KEY>`. A `Claimed by:` line naming a session that does not
+   end `· not running` is a live holder: tell the requester this channel is already watched by
+   that session (name it, and its project if the issue says) and stop. Otherwise (unclaimed, or
+   `· not running`) claim it: `dispatch claim --issue <KEY>`. A `409 ISSUE_CLAIMED` here means
+   another controller's request won the race a moment ago: read the issue again and refuse the
+   same way.
+3. **Not found:** file it first, in your own project, with a body that says plainly that the issue
+   exists only to coordinate exclusive Slack-channel watching among controllers and is never real
+   work:
+
+   ```text
+   dispatch issue --project <PROJECT> --title 'Slack channel lock <channel>' --spec-file - <<'EOF'
+   ## Summary
+
+   Coordination lock for Slack channel <channel>: whichever Legion controller holds the claim on
+   this issue is the one watching the channel for mentions. Not a work item.
+   EOF
+   ```
+
+   Then claim it exactly as in step 2 (the same `409 ISSUE_CLAIMED` race handling applies: someone
+   else may have filed and claimed one in between).
+4. Once claimed, subscribe yourself: `envoy_subscribe(["notifications.slack.*.<channel>.mention"])`
+   — the team segment is a wildcard, matching the deleted daemon helper's own convention, so a
+   mention from any Slack team on that channel id reaches you. Confirm to the requester that you
+   are now watching the channel.
+
+Never call `envoy_role_set` for this. It is the one Envoy tool your session must never use for
+anything but your own `legion-<project>-controller` role: your session holds exactly one Envoy
+role at a time, so claiming a second one ends the first — not just its local bookkeeping, but the
+underlying claim itself, releasing `legion-<project>-controller` outright and leaving you deaf to
+every wake the daemon sends on your controller topic until a human re-registers you. A `task`
+subagent cannot do it for you either: a subagent registers no Envoy session of its own, so
+`envoy_role_set` run inside one fails outright (`session_id is required`) before it claims
+anything. The Dispatch lock above is the whole mechanism; it needs no Envoy role.
+
+## Stopping a channel
+
+`envoy_unsubscribe(["notifications.slack.*.<channel>.mention"])` directly — this is always safe:
+unlike roles, an ordinary subscription is not a one-per-session singleton, and dropping one never
+touches your controller role or its topic. Then release the lock so the next controller is not
+blocked by a channel nobody watches any more: `dispatch claim --issue <KEY> --release`.
+
+## What happened before you started
 
 A mention published while no controller ran never arrives: Envoy hands a session no copy of an
-event from before it subscribed. Nothing tells you about one, so there is nothing to catch up. When
-the project's `slack_channels` change, the daemon relaunches you into this session with the new
-line.
+event from before it subscribed, so there is nothing to catch up on. A resumed or relaunched
+session keeps every channel it was subscribed to when it last ran — the subscription is recorded
+on your session, not reconstructed from a deployment setting — so resuming after a restart needs
+no re-run of the watch procedure above. Only an explicit `envoy_unsubscribe` by you drops a
+channel.
+
+A delivery whose `channel_id` you do not currently watch is not yours: do nothing with it.
 
 ## What a mention carries
 
@@ -88,6 +133,7 @@ answering. Then take the first of these that fits.
   and `thread_ts` you reply on, and reply in the thread that you passed it to the architect that
   owns `<ROOT>`, which answers on the issue. When the architect is not running (no locator), say
   that in the thread instead and what `read_state` shows for the tree. Never invent a role token.
+- **A request to watch another channel.** Follow [Watching a channel](#watching-a-channel) above.
 - **Anything else** (a greeting, a question about Legion itself): answer it briefly in the thread.
 
 A request to approve a design is answered as the skill's "Mentions" section says: a person
