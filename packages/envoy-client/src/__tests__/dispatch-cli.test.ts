@@ -151,6 +151,23 @@ const blocksIssue = {
   ],
 };
 
+/** DSP-3 as a Dispatch server from before the repository fields answers it: no repo or
+ *  resolved_repo at all. */
+const olderServerIssue = {
+  key: "DSP-3",
+  title: "Read from an older server",
+  status: "todo",
+  priority: null,
+  assignee: null,
+  claim: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+  route: null,
+  open_asks: [],
+  last_seq: 0,
+  external_links: [],
+  labels: [],
+};
+
 /** How the DSP-2 routes answer: a Dispatch older than the table listing omits `table`, and a
  *  document a browser edits between the CLI's two reads of its text answers the second with other
  *  text and another token. */
@@ -200,6 +217,15 @@ const server = Bun.serve({
           your_open_asks: [],
         },
       });
+    }
+    if (pathname === "/api/v1/issues/DSP-3" && request.method === "GET") {
+      return Response.json(olderServerIssue);
+    }
+    if (pathname === "/api/v1/issues/DSP-3/events") {
+      return Response.json([]);
+    }
+    if (pathname === "/api/v1/issues/DSP-3/references" || pathname === "/api/v1/references") {
+      return Response.json({ node: { kind: "issue", id: "DSP-3" }, edges: [], members: [] });
     }
     if (pathname === "/api/v1/issues/DSP-1" && request.method === "GET") {
       return Response.json(issue);
@@ -296,16 +322,20 @@ async function run(
   argv: readonly string[],
   extra: Record<string, string | undefined>,
   stdin = ""
-): Promise<{ code: number; stdout: string }> {
+): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";
+  let stderr = "";
   const code = await runDispatchCli(argv, environment(extra), {
     stdout: (text) => {
       stdout += text;
     },
+    stderr: (text) => {
+      stderr += text;
+    },
     readText: (path) => (path === "-" ? stdin : readFileSync(path, "utf-8")),
     cwd: stateDir,
   });
-  return { code, stdout };
+  return { code, stdout, stderr };
 }
 
 /** A fresh process for the same session: the in-memory memories are gone, the state dir stays. */
@@ -393,6 +423,17 @@ describe("the dispatch CLI", () => {
     const second = await run(message, omp);
     expect(first.stdout).toContain("DSP-1 is still in triage");
     expect(second.stdout).not.toContain("is still in triage");
+  });
+
+  test("a read from a Dispatch server older than the repository fields answers, warning on stderr", async () => {
+    const { code, stdout, stderr } = await run(["read", "--issue", "DSP-3"], omp);
+    expect(code).toBe(0);
+    expect(stdout).toContain(
+      "Repository: unknown (this Dispatch server predates repository fields; upgrade it)\n"
+    );
+    expect(stderr).toBe(
+      "dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so DSP-3's repository is unknown; upgrade the server\n"
+    );
   });
 
   test("a picture is written to a file the agent opens", async () => {

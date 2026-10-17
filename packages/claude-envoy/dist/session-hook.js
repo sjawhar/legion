@@ -16901,11 +16901,29 @@ function progressText(progress, sep) {
   return parts.join(sep);
 }
 function repositoryLine(issue2) {
+  if (issue2.resolved_repo === undefined)
+    return `Repository: ${REPOSITORY_UNKNOWN}`;
   if (issue2.resolved_repo === null)
     return "Repository: none";
-  if (issue2.repo !== null)
+  if (issue2.repo !== null && issue2.repo !== undefined)
     return `Repository: ${issue2.repo} (own)`;
   return `Repository: ${issue2.resolved_repo} (inherited or project default)`;
+}
+var REPOSITORY_UNKNOWN = "unknown (this Dispatch server predates repository fields; upgrade it)";
+function repositoryFieldsWarnings(issue2) {
+  if (issue2.resolved_repo !== undefined)
+    return {};
+  return {
+    warnings: [
+      `dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so ${issue2.key}'s repository is unknown; upgrade the server`
+    ]
+  };
+}
+function refuseUnsavedRepository(verb, issue2, repo2) {
+  if (repo2 === undefined || issue2.repo !== undefined)
+    return;
+  const lost = repo2 === "" ? "the repository was not cleared" : `${repo2} was not saved`;
+  throw new Error(`Dispatch ${verb} ${issue2.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
 function issueSummary(issue2, events, references, graph, titles) {
   const asks = issue2.open_asks;
@@ -16919,8 +16937,6 @@ function issueSummary(issue2, events, references, graph, titles) {
     throw new Error("Dispatch issue is missing components");
   if (issue2.claim === undefined)
     throw new Error("Dispatch issue is missing claim");
-  if (issue2.resolved_repo === undefined)
-    throw new Error("Dispatch issue is missing resolved_repo");
   if (issue2.external_links === undefined) {
     throw new Error("Dispatch issue is missing external_links");
   }
@@ -17508,6 +17524,7 @@ async function executeDispatchTool(input) {
           ...Array.isArray(labels) ? { labels } : {},
           actor
         });
+        refuseUnsavedRepository("created", created, repo2);
         const componentGuidance = await architectureGuidance(client, created.project, created.components);
         const adviceLines = [
           ...renderAdvice(input.tool, created.key, created.advice, {
@@ -17609,6 +17626,7 @@ async function executeDispatchTool(input) {
           throw refusalWithCode(error48, taken, landed);
         throw withAccount(error48, landed);
       }
+      refuseUnsavedRepository("updated", after, repo2);
       const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
       const changes = [
         ...closingNote === undefined ? [] : [`reason posted as message ${closingNote.id} (${closingNote.ref})`],
@@ -18322,7 +18340,8 @@ ${trailer.join(`
       return {
         text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
         details: { issue: read.issue.key },
-        ...showImages(pictures2)
+        ...showImages(pictures2),
+        ...repositoryFieldsWarnings(read.issue)
       };
     }
     default:

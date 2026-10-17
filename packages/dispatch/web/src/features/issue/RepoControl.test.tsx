@@ -103,9 +103,13 @@ function CachedControl(): ReactNode {
 
 function renderControl(
   own: { repo: string | null; resolvedRepo: string | null },
-  mapped: RepoProject[] = mappings
+  mapped: RepoProject[] = mappings,
+  { failFirstRead = false }: { failFirstRead?: boolean } = {}
 ) {
   const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue(mapped);
+  if (failFirstRead) {
+    listRepoProjects.mockRejectedValueOnce(new Error("the network dropped the read"));
+  }
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -234,6 +238,43 @@ test("RepoControl shows nothing for an issue whose project maps no repository", 
     await act(async () => {});
     expect(screen.queryByRole("combobox", { name: "Repository of CORE-1" })).toBeNull();
     expect(screen.queryByText("Repository:")).toBeNull();
+  } finally {
+    unmount();
+  }
+});
+
+// A failed mappings read is not an empty one: with nothing resolved the control cannot tell
+// whether the project maps a repository, so it says the read failed and offers it again rather
+// than hiding the item.
+test("RepoControl shows a failed mappings read with a retry instead of hiding the item", async () => {
+  const { listRepoProjects, unmount } = renderControl(
+    { repo: null, resolvedRepo: null },
+    mappings,
+    { failFirstRead: true }
+  );
+  try {
+    expect(await screen.findByText("Could not load the repositories mapped to CORE.")).toBeTruthy();
+    expect(screen.getByText("Repository:")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(listRepoProjects).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(select().options.length).toBe(3));
+    expect(screen.queryByText("Could not load the repositories mapped to CORE.")).toBeNull();
+    expect(screen.getByText("No repository", { selector: "span" })).toBeTruthy();
+  } finally {
+    unmount();
+  }
+});
+
+// With a repository resolved the picker still shows it, and a failed read says so beside it.
+test("RepoControl shows a failed mappings read beside a resolved repository", async () => {
+  const { unmount } = renderControl({ repo: null, resolvedRepo: "acme/widgets" }, mappings, {
+    failFirstRead: true,
+  });
+  try {
+    fireEvent.focus(select());
+    expect(await screen.findByText("Could not load the repositories mapped to CORE.")).toBeTruthy();
+    expect(screen.getByText("acme/widgets", { selector: "span" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     unmount();
   }

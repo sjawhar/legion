@@ -7,6 +7,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  deleteRepoProject,
   getIssue,
   getIssueEvents,
   mintAgentToken,
@@ -1104,6 +1105,75 @@ test("issue header picks the issue's repository from its project's mappings, and
     await expect(rail.getByText("Parent:")).toBeVisible();
     await expect(page.getByLabel(`Repository of ${bare.key}`)).toHaveCount(0);
     await expect(rail.getByText("Repository:")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("an open issue's header follows its project's default repository as the mappings change", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" });
+  await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  const issue = await createIssue({ project: "CORE", title: "Follows the default" });
+  expect(issue).toMatchObject({ repo: null, resolved_repo: "acme/widgets" });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    const header = page.getByTestId("issue-header");
+    const badge = (text: RegExp) => header.locator("span", { hasText: text });
+    await expect(badge(/^acme\/widgets$/)).toBeVisible();
+
+    // A new default: the page shows it without a reload.
+    await putRepoProject("acme/gadgets", { default: true, project: "CORE" });
+    await expect(badge(/^acme\/gadgets$/)).toBeVisible();
+
+    // The default removed: nothing resolves, and the project still maps acme/widgets to pick.
+    await deleteRepoProject("acme/gadgets");
+    await expect(badge(/^No repository$/)).toBeVisible();
+
+    // The default again, then moved to another project: CORE maps nothing left to pick, so the
+    // rail drops the item.
+    await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+    await expect(badge(/^acme\/widgets$/)).toBeVisible();
+    await putRepoProject("acme/widgets", { project: "OPS" });
+    await expect(page.getByLabel(`Repository of ${issue.key}`)).toHaveCount(0);
+    await expect(page.getByTestId("issue-metadata-rail").getByText("Repository:")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});
+
+test("an issue page whose mappings read fails says so and retries it, rather than hiding the repository", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await putRepoProject("acme/widgets", { project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  const issue = await createIssue({ project: "CORE", title: "No default to inherit" });
+  expect(issue.resolved_repo).toBeNull();
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    let failing = true;
+    await page.route("**/api/v1/settings/repo-projects", (route) =>
+      failing ? route.abort() : route.continue()
+    );
+    await page.goto(`/issues/${issue.key}`);
+    const rail = page.getByTestId("issue-metadata-rail");
+    await expect(rail.getByText("Could not load the repositories mapped to CORE.")).toBeVisible();
+    await expect(rail.getByText("Repository:")).toBeVisible();
+
+    failing = false;
+    await rail.getByRole("button", { name: "Retry" }).click();
+    const control = page.getByLabel(`Repository of ${issue.key}`);
+    await expect(control.locator("option")).toHaveText(["Inherit", "acme/gadgets", "acme/widgets"]);
+    await expect(rail.getByText("Could not load the repositories mapped to CORE.")).toHaveCount(0);
   } finally {
     await context.close();
   }
