@@ -287,7 +287,8 @@ func lockRepoProjectWrite(ctx context.Context, tx pgx.Tx, broker *events.Broker,
 // (lockRepoProjectWrite), so a seed racing a PUT or DELETE of the same repository waits for it and
 // then sees what it left. A mapping the seed adds emits settings.repo_project.updated on its project,
 // deleted:false, as the PUT's does, actor the environment session; a repository already mapped, in
-// the seeded project or another, gets no write and no event.
+// the seeded project or another, gets no write and no event. A project that does not exist refuses
+// the seed, naming the repository and the project.
 func SeedRepoProjects(ctx context.Context, database *store.Store, broker *events.Broker, raw string) error {
 	mappings, err := ParseRepoProjects(raw)
 	if err != nil {
@@ -317,6 +318,13 @@ func seedRepoProject(ctx context.Context, database *store.Store, broker *events.
 		return err
 	}
 	defer tx.Rollback(ctx)
+	var exists bool
+	if err := tx.QueryRow(ctx, `select exists (select 1 from projects where key = $1)`, project).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("project %s does not exist", project)
+	}
 	previous, err := lockRepoProjectWrite(ctx, tx, broker, repo, actor, project)
 	if err != nil || previous != nil {
 		return err

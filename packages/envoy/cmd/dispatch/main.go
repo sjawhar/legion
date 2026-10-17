@@ -203,12 +203,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The seed appends its events through the same broker the router serves.
-	broker := events.NewBroker()
-	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
-		slog.Error("dispatch: seed repository projects", "error", err)
-		os.Exit(1)
-	}
 	if err := validateDefaultProject(ctx, database, boot.DefaultProject); err != nil {
 		slog.Error("dispatch: validate default project", "error", err)
 		os.Exit(1)
@@ -260,6 +254,7 @@ func main() {
 	}
 	requestIdentity := requestIdentityFor(boot, signingKey, people, sessions, signIn)
 
+	broker := events.NewBroker()
 	documentService := newDocumentService(boot, docs.Deps{
 		Store:     database,
 		Events:    broker,
@@ -268,6 +263,12 @@ func main() {
 		Settle:    boot.SettleDelay,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
+	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
+	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
+		slog.Error("dispatch: seed repository projects", "error", err)
+		os.Exit(1)
+	}
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
 	if err != nil {

@@ -201,7 +201,7 @@ func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T)
 func TestSeedRepoProjectsRejectsMissingProject(t *testing.T) {
 	database := storetest.Open(t)
 	err := SeedRepoProjects(context.Background(), database, events.NewBroker(), "missing/repo=MISSING")
-	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo"`) {
+	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo": project MISSING does not exist`) {
 		t.Fatalf("seed missing project: got %v", err)
 	}
 }
