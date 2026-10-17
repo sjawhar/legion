@@ -168,7 +168,8 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 
 // `cache` serves the repository's cache until its context ends: it says where it listens, clones
 // the repository onto its root with the provisioning token handed to git as a one-shot credential
-// under its TMPDIR, answers /healthz ready at the remote's head, holds no token on the volume, and
+// under its TMPDIR, answers /healthz ready at the remote's head to a request carrying no token,
+// holds no token on the volume, and
 // exits 0 once stopped.
 func TestWorkspaceInitCacheServesTheRepositoryUntilStopped(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t, "main")
@@ -204,7 +205,6 @@ func TestWorkspaceInitCacheServesTheRepositoryUntilStopped(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request.Header.Set("Authorization", "Bearer "+cmdCacheToken)
 		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)

@@ -80,8 +80,9 @@ type MappedRepositoryView struct {
 }
 
 // CacheView is a repository cache as the Kubernetes runtime shows it: its repository and Sandbox;
-// its state — starting, cloning, ready, or failing with the kubelet's reason — and, while its pod
-// is Ready, its address; from its last health read (the runtime's minute tick) the default
+// its state — starting, cloning, ready, failing with the kubelet's reason, or refused, naming the
+// Service of its name that is not its own and why — and, while its pod is Ready behind its own
+// Service, its address; from its last health read (the runtime's minute tick) the default
 // branch's head, when it last fetched GitHub and the bytes it serves, or why its /healthz could not
 // be read; and, for a repository the mapping no longer names, until when it is kept (contract 30).
 type CacheView struct {

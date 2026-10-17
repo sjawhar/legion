@@ -113,8 +113,13 @@ type Runtime struct {
 	kube      kubernetes.Interface
 	sandboxes cache.SharedIndexInformer
 	pods      cache.SharedIndexInformer
-	// sandboxFeed and podFeed are whether each informer's latest list or watch request succeeded.
-	sandboxFeed, podFeed feed
+	// services is every Service of the namespace, whatever its labels: the Agent Sandbox controller
+	// labels a cache's Service with no project, and one it did not make carries what its maker gave
+	// it (cacheServiceRefusal).
+	services cache.SharedIndexInformer
+	// sandboxFeed, podFeed and serviceFeed are whether each informer's latest list or watch request
+	// succeeded.
+	sandboxFeed, podFeed, serviceFeed feed
 
 	mu sync.Mutex
 	// changed is closed and replaced on every informer event, waking every wait.
@@ -341,7 +346,7 @@ func checkRequirements(what string, requirements corev1.ResourceRequirements) er
 	return nil
 }
 
-// start runs both informers (startInformers) and then the GitHub credential refresher
+// start runs the informers (startInformers) and then the GitHub credential refresher
 // (refreshGitHubCredentials) on ctx, the informers' lifetime, so it stops with the informers whose
 // pod store it walks.
 func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
@@ -352,26 +357,36 @@ func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
 	return nil
 }
 
-// startInformers runs both informers over c's informers' clients, selected on the project label,
-// until ctx ends, and waits for both stores to sync; every other request of the runtime goes
-// through c's requests' clients, each read and write of them sent again while the API server
-// answers a launch's overloaded (patientDynamic, patientKube).
+// startInformers runs the three informers over c's informers' clients — the Sandboxes and pods
+// selected on the project label, every Service of the namespace — until ctx ends, and waits for the
+// three stores to sync; every other request of the runtime goes through c's requests' clients, each
+// read and write of them sent again while the API server answers a launch's overloaded
+// (patientDynamic, patientKube).
 func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 	r.dyn, r.kube, r.lifetime = patientDynamic{c.requests.dyn, r}, patientKube{c.requests.kube, r}, ctx
 	sandboxes := c.informers.dyn.Resource(sandboxGVR).Namespace(r.namespace)
 	pods := c.informers.kube.CoreV1().Pods(r.namespace)
-	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
-	r.sandboxes = r.informer(&r.sandboxFeed, c.informers.dyn, &unstructured.Unstructured{},
+	services := c.informers.kube.CoreV1().Services(r.namespace)
+	r.sandboxFeed.resource, r.podFeed.resource, r.serviceFeed.resource = "Sandbox", "pod", "Service"
+	project := labelProject + "=" + r.project
+	r.sandboxes = r.informer(&r.sandboxFeed, c.informers.dyn, &unstructured.Unstructured{}, project,
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
 			return sandboxes.List(ctx, o)
 		},
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
 			return sandboxes.Watch(ctx, o)
 		})
-	r.pods = r.informer(&r.podFeed, c.informers.kube, &corev1.Pod{},
+	r.pods = r.informer(&r.podFeed, c.informers.kube, &corev1.Pod{}, project,
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
-	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
+	r.services = r.informer(&r.serviceFeed, c.informers.kube, &corev1.Service{}, "",
+		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
+			return services.List(ctx, o)
+		},
+		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			return services.Watch(ctx, o)
+		})
+	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods, r.services} {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj any) { r.notify(obj) },
 			UpdateFunc: func(_, obj any) { r.notify(obj) },
@@ -383,6 +398,7 @@ func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 	running, stop := context.WithCancel(ctx)
 	go r.sandboxes.RunWithContext(running)
 	go r.pods.RunWithContext(running)
+	go r.services.RunWithContext(running)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	// Whether the stores are being fed is the feeds' answer, not client-go's watch-error handler:
@@ -396,9 +412,9 @@ func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 			stop()
 			return fmt.Errorf("sandbox runtime: the informers did not sync: %w", ctx.Err())
 		case <-tick.C:
-			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check()); err != nil {
+			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check(), r.serviceFeed.check()); err != nil {
 				stop()
-				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
+				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes, pods and Services failed before the stores synced: %w",
 					r.namespace, err)
 			}
 		}
@@ -407,25 +423,25 @@ func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 	return nil
 }
 
-// informer is a shared informer of the namespace's objects of the project, listed and watched
-// through list and watch, with the outcome of every request recorded in f: client-go's reflector
-// retries a refused watch itself without calling the watch-error handler, so only the requests
-// themselves say whether the store is still being fed.
-func (r *Runtime) informer(f *feed, client any, example k8sruntime.Object, list cache.ListWithContextFunc,
+// informer is a shared informer of the namespace's objects, those selector selects when it is set,
+// listed and watched through list and watch, with the outcome of every request recorded in f:
+// client-go's reflector retries a refused watch itself without calling the watch-error handler, so
+// only the requests themselves say whether the store is still being fed.
+func (r *Runtime) informer(f *feed, client any, example k8sruntime.Object, selector string, list cache.ListWithContextFunc,
 	watchFn cache.WatchFuncWithContext,
 ) cache.SharedIndexInformer {
-	project := func(o metav1.ListOptions) metav1.ListOptions {
-		o.LabelSelector = labelProject + "=" + r.project
+	selected := func(o metav1.ListOptions) metav1.ListOptions {
+		o.LabelSelector = selector
 		return o
 	}
 	lw := &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
-			object, err := list(ctx, project(o))
+			object, err := list(ctx, selected(o))
 			f.record(err, r.now())
 			return object, err
 		},
 		WatchFuncWithContext: func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
-			w, err := watchFn(ctx, project(o))
+			w, err := watchFn(ctx, selected(o))
 			f.record(err, r.now())
 			return w, err
 		},
@@ -478,7 +494,9 @@ func call(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }
 
-func (r *Runtime) synced() bool { return r.sandboxes.HasSynced() && r.pods.HasSynced() }
+func (r *Runtime) synced() bool {
+	return r.sandboxes.HasSynced() && r.pods.HasSynced() && r.services.HasSynced()
+}
 
 // notify wakes every wait and marks every watched claim whose Sandbox or pod changed for the
 // running Observe. A pod is named after its Sandbox, so one name finds both.
@@ -489,6 +507,8 @@ func (r *Runtime) notify(obj any) {
 	var name string
 	switch o := obj.(type) {
 	case *corev1.Pod:
+		name = o.Name
+	case *corev1.Service:
 		name = o.Name
 	case *unstructured.Unstructured:
 		name = o.GetName()

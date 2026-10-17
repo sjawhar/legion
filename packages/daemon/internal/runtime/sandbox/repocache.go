@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"maps"
+	"net"
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -438,7 +441,75 @@ const (
 	cacheCloning  = "cloning"
 	cacheReady    = "ready"
 	cacheFailing  = "failing"
+	cacheRefused  = "refused"
 )
+
+// sandboxNameHashLabel is the label the Agent Sandbox controller stamps on every pod and Service it
+// makes for a Sandbox, and the one key a Service it makes selects by (agent-sandbox v1.0.3,
+// controllers/sandbox_controller.go, sandboxLabel).
+const sandboxNameHashLabel = "agents.x-k8s.io/sandbox-name-hash"
+
+// sandboxNameHash is the controller's value of sandboxNameHashLabel for the Sandbox name: the
+// name's 32-bit FNV-1a hash as eight lowercase hex digits (sandbox_controller.go, NameHash).
+func sandboxNameHash(name string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(name))
+	return fmt.Sprintf("%08x", h.Sum32())
+}
+
+// cacheServiceRefusal is why the Service named name, as the store holds it, is not the cache
+// Sandbox's with uid — "" when it is — and whether a Service of the name is made at all. It is the
+// Sandbox's only when the Sandbox controls it, by uid, and it selects exactly the pods the
+// controller stamps with the hash of the Sandbox's name (sandboxNameHashLabel), which is how the
+// controller makes and adopts one: anyone who may create a Service in the namespace could make one
+// of the cache's name first, routing elsewhere, and the controller refuses to adopt such a Service
+// and leaves it as it is, so the name alone proves nothing, and an issue pod's fetch presents the
+// cache's token to whatever the name reaches.
+func (r *Runtime) cacheServiceRefusal(name string, uid types.UID) (string, bool) {
+	obj, ok, err := r.services.GetStore().GetByKey(r.namespace + "/" + name)
+	if err != nil || !ok {
+		return "", false
+	}
+	service := obj.(*corev1.Service)
+	controller := metav1.GetControllerOf(service)
+	switch want := map[string]string{sandboxNameHashLabel: sandboxNameHash(name)}; {
+	case controller == nil:
+		return "has no controller", true
+	case controller.Kind != "Sandbox" || controller.UID != uid:
+		return fmt.Sprintf("is controlled by %s %s (%s), not the cache's Sandbox (%s)", controller.Kind, controller.Name, controller.UID, uid), true
+	case !maps.Equal(service.Spec.Selector, want):
+		return fmt.Sprintf("selects %v, not the cache's pod alone (%v)", service.Spec.Selector, want), true
+	}
+	return "", true
+}
+
+// awaitCacheService waits until repo's cache has its own Service (cacheServiceRefusal), which the
+// controller makes beside the cache's pod, before an issue pod is told the cache's address and
+// token: its fetch presents that token to whatever the Service's name reaches. Each refusal is
+// logged as it changes, and the wait fails at the boot timeout naming the Service and the last.
+func (r *Runtime) awaitCacheService(ctx context.Context, repo ghrepo.Repository) error {
+	name := CacheSandboxName(r.project, repo)
+	why := "is not made yet"
+	err := r.await(ctx, r.bootTimeout, "the repository cache's Service "+name, func(context.Context) (bool, error) {
+		s, err := r.storedSandbox(name)
+		if err != nil || s == nil {
+			return false, err
+		}
+		refusal, made := r.cacheServiceRefusal(name, s.UID)
+		if made && refusal == "" {
+			return true, nil
+		}
+		if made && refusal != why {
+			why = refusal
+			r.log.Warn("sandbox runtime: the repository cache's Service is not the cache's", "service", name, "repo", repo.String(), "why", refusal)
+		}
+		return false, nil
+	})
+	if err != nil {
+		return fmt.Errorf("the repository cache's Service %s %s: %w", name, why, err)
+	}
+	return nil
+}
 
 // cacheFailures are the reasons a container waits with that make a cache failing: it is restarting
 // after exits, or cannot start at all.
@@ -446,12 +517,14 @@ var cacheFailures = []string{"CrashLoopBackOff", "ImagePullBackOff", "ErrImagePu
 
 // RepositoryCache is repo's cache as the stores show it: the Sandbox named CacheSandboxName(repo)
 // whose cacheRepository is repo (a name another repository's cache occupies is logged once and
-// answers not found); its State — starting while the Sandbox owns no live pod or the pod is not
-// yet running, failing with the kubelet's reason while its container waits on one of
-// cacheFailures or the pod has failed, ready once the pod's Ready condition is True (the readiness
-// probe passed) with its address, its Service's (cacheURL), and cloning otherwise — and
-// RetainedUntil from annotationCacheUnmappedAt plus the retention when the annotation is set. Not
-// found when no Sandbox of the name is stored.
+// answers not found); its State — refused, naming its Service and why, while a Service of its name
+// is not its own (cacheServiceRefusal), since its issue pods would hand that Service the cache's
+// token; otherwise starting while the Sandbox owns no live pod, the pod is not yet running, or the
+// controller has made no Service for it yet, failing with the kubelet's reason while its container
+// waits on one of cacheFailures or the pod has failed, ready once the pod's Ready condition is True
+// (the readiness probe passed) and its Service is made, with its address, that Service's
+// (cacheURL), and cloning otherwise — and RetainedUntil from annotationCacheUnmappedAt plus the
+// retention when the annotation is set. Not found when no Sandbox of the name is stored.
 func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 	name := CacheSandboxName(r.project, repo)
 	s, err := r.storedSandbox(name)
@@ -487,6 +560,12 @@ func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 		case pod.Status.Phase == corev1.PodRunning:
 			status.State = cacheCloning
 		}
+	}
+	switch refusal, made := r.cacheServiceRefusal(name, s.UID); {
+	case refusal != "":
+		status.State, status.Reason, status.Ready, status.Address = cacheRefused, "its Service "+name+" "+refusal, false, ""
+	case !made && status.State == cacheReady:
+		status.State, status.Ready, status.Address = cacheStarting, false, ""
 	}
 	if at, err := time.Parse(time.RFC3339, s.Annotations[annotationCacheUnmappedAt]); err == nil {
 		status.RetainedUntil = at.Add(r.cacheConfig.Retain)
@@ -531,11 +610,12 @@ type cacheHealthRead struct {
 }
 
 // readCacheHealth runs on the gh refresher's tick, after refreshCacheTokens: it asks every Ready
-// cache's /healthz with that cache's bearer token, each bounded by a call's budget, and keeps the
-// answer, or why there is none, as that cache's last health read, which RepositoryCaches serves
-// without asking again. It asks at the cache's Service (cacheURL), as the issue pods do, which
-// Kubernetes routes to the Sandbox's own Ready pod, and never at the pod address the store holds:
-// once that pod is gone, the address is any pod's to take, and the token is the cache's /tar. A
+// cache's /healthz, each bounded by a call's budget, and keeps the answer, or why there is none,
+// as that cache's last health read, which RepositoryCaches serves without asking again. It asks the
+// cache's pod at its address as the store holds it, http://<pod ip>:8418, so a daemon outside the
+// cluster that reaches pod addresses but resolves no cluster name reads it too, and it carries no
+// credential: /healthz holds nothing secret, so a pod that took the address once the cache's pod
+// was gone learns nothing, and its answer, naming another repository, is that read's failure. A
 // cache that is not Ready has no read: the store already says it is not serving.
 func (r *Runtime) readCacheHealth(ctx context.Context) {
 	reads := map[string]cacheHealthRead{}
@@ -549,11 +629,12 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 			continue
 		}
 		pod := r.storedPod(status.Sandbox)
-		if pod == nil {
+		if pod == nil || pod.Status.PodIP == "" {
 			continue
 		}
 		read := cacheHealthRead{pod: pod.UID}
-		health, err := cacheHealthOf(ctx, r.cacheHealthClient(), status.Address, r.cacheBearer(status.Sandbox), repo)
+		address := "http://" + net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(repocache.Port))
+		health, err := cacheHealthOf(ctx, r.cacheHealthClient(), address, repo)
 		if err != nil {
 			read.err = err.Error()
 		} else {
@@ -566,20 +647,16 @@ func (r *Runtime) readCacheHealth(ctx context.Context) {
 	r.mu.Unlock()
 }
 
-// cacheHealthOf is GET <address>/healthz through client with bearer, decoded, within a call's
-// budget: an error when the runtime holds no bearer for the cache yet, or the answer names a
-// repository other than repo (workspace.CacheRepositoryHeader).
-func cacheHealthOf(ctx context.Context, client *http.Client, address, bearer string, repo ghrepo.Repository) (repocache.Health, error) {
-	if bearer == "" {
-		return repocache.Health{}, errors.New("the runtime holds no token for the cache yet")
-	}
+// cacheHealthOf is GET <address>/healthz through client, carrying no credential, decoded, within a
+// call's budget: an error when the answer names a repository other than repo
+// (workspace.CacheRepositoryHeader).
+func cacheHealthOf(ctx context.Context, client *http.Client, address string, repo ghrepo.Repository) (repocache.Health, error) {
 	bounded, cancel := call(ctx)
 	defer cancel()
 	request, err := http.NewRequestWithContext(bounded, http.MethodGet, address+"/healthz", nil)
 	if err != nil {
 		return repocache.Health{}, err
 	}
-	request.Header.Set("Authorization", "Bearer "+bearer)
 	response, err := client.Do(request)
 	if err != nil {
 		return repocache.Health{}, err
@@ -595,8 +672,8 @@ func cacheHealthOf(ctx context.Context, client *http.Client, address, bearer str
 	return health, nil
 }
 
-// cacheHealthClient reaches a cache directly through cacheDial: no proxy stands between the daemon
-// and a pod of its namespace.
+// cacheHealthClient reaches a cache's pod directly through cacheDial: no proxy stands between the
+// daemon and a pod of its namespace.
 func (r *Runtime) cacheHealthClient() *http.Client {
 	return &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: r.cacheDial, DisableKeepAlives: true}}
 }

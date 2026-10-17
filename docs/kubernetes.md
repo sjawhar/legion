@@ -1766,40 +1766,55 @@ before it fetches again. It serves, on port 8418:
   readiness probe, which carries no token.
 - `GET /healthz`: `503 {"ready":false,…}` until the first clone is whole, then `200 {"ready":true,
   "repo":"<owner>/<repo>","head":"<default branch's commit>","lastFetchAt":"…","bytes":<n>}`; it
-  waits on no fetch.
+  waits on no fetch, and answers any request, since it holds nothing secret and nothing of the
+  repository's content.
 - `GET /tar`: the clone's refs and packs as a tar stream — `HEAD`, `packed-refs`, `refs/` and
   `objects/pack/pack-<id>.pack`, no pack index, loose object or configuration — which waits for a
   fetch under way to finish, so it never streams a half-written ref or pack.
 
-`/healthz` and `/tar` answer only a request whose `Authorization: Bearer` is the cache's own
-token; any other is 401 and names nothing. Each answer they give names its repository in a
-`Legion-Repository` header. A fetch that fails is logged and tried at the next tick, and the cache
+`/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
+401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
+on every answer. A fetch that fails is logged and tried at the next tick, and the cache
 stays ready on what it last fetched; a restarted cache whose volume holds its clone fetches into
 it, and serves it as it is when GitHub cannot be reached; a first clone that fails ends the
 process, and the kubelet restarts it.
 
 An issue pod's `workspace-fetch` fills a fresh feed from its repository's cache alone
-([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). It presents the cache's token and takes
-nothing from an answer that refuses it or names another repository, so a cache pod replaced and its
-address reused by another repository's cache can put nothing into the feed. It indexes each pack
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). It asks the cache's health with no
+credential, takes nothing from a cache whose answer names another repository, so a cache pod
+replaced and its address reused by another repository's cache can put nothing into the feed, and
+presents the cache's token with its request for the tar alone. It indexes each pack
 it received afresh (`git index-pack`, which checks the pack's checksum and every object in it) and
 checks every object the refs reach is there (`git fsck --connectivity-only`) before the feed is
 used, and a damaged or incomplete history fails the fetch. A cache that is not ready is waited
 for, and one that never becomes ready fails the fetch, naming its last answer; the issue pod's
 failure then names the cache's state (`the repository cache of <owner>/<repo>, which a fresh feed
-comes from alone, is failing: container cache CrashLoopBackOff: …`). The issue pods reach the cache
-on port 8418 at its Service's name, inside the namespace, and so does the daemon, which reads each
-Ready cache's `/healthz` there every minute, presenting the cache's token only at that name, which
-Kubernetes routes to the cache's own Ready pod, and never at the pod's address, which another pod
-may hold once the cache's pod is gone. A NetworkPolicy that isolates the namespace's pods must
-admit both, or every fresh feed waits on a cache it cannot reach and `legion state` shows the
-read's failure.
+comes from alone, is failing: container cache CrashLoopBackOff: …`).
+
+The issue pods reach the cache on port 8418 at its Service's name, `<cache>.<namespace>.svc`,
+the headless Service the Agent Sandbox controller makes for the cache's Sandbox. Since the fetch
+presents the cache's token to whatever that name reaches, the daemon hands an issue pod the
+cache's address and token only once the Service of that name is the cache's own: controlled by
+the cache's Sandbox, by uid, and selecting exactly the pods the controller stamps with the hash
+of the Sandbox's name (`agents.x-k8s.io/sandbox-name-hash`), as the controller makes and adopts
+one. Anyone who may create a Service in the namespace could make one of the cache's name first,
+routing elsewhere, which the controller refuses to adopt and leaves standing; a launch then waits,
+logging `the repository cache's Service is not the cache's` with the Service and why, and fails at
+the boot timeout naming them, with no pod made and no token written, and `legion state` shows the
+cache `refused` with the same reason. Delete that Service and the controller makes the cache's
+own. The daemon reads each Ready cache's `/healthz` every minute at its pod's address, as the store
+holds it, with no credential, so a daemon outside the cluster that reaches pod addresses but
+resolves no cluster name reads it too; an answer from a pod that took the address once the cache's
+pod was gone names another repository, and is that read's failure. A NetworkPolicy that isolates
+the namespace's pods must admit both, or every fresh feed waits on a cache it cannot reach and
+`legion state` shows the read's failure.
 
 `legion state --json | jq .repositories` shows them: each `mapped[]` repository carries `cache`
-(`repo`, `sandbox`, `state` — `starting`, `cloning`, `ready`, or `failing` with the kubelet's
-`reason` — `ready`, `address`, the cache's Service, while Ready, and from the last health read of
-the pod it runs now `head`, `lastFetchAt` and `bytes`, or `healthError`) once the cache exists, and
-`caches` lists the caches of repositories the mapping no longer names, each with `retainedUntil`.
+(`repo`, `sandbox`, `state` — `starting`, `cloning`, `ready`, `failing` with the kubelet's
+`reason`, or `refused` with the Service's — `ready`, `address`, the cache's Service, while Ready
+behind its own Service, and from the last health read of the pod it runs now `head`,
+`lastFetchAt` and `bytes`, or `healthError`) once the cache exists, and `caches` lists the caches
+of repositories the mapping no longer names, each with `retainedUntil`.
 
 An issue pod's launch makes its repository's cache when there is none yet, and the daemon makes
 the cache of each repository it serves at boot and on every orphan sweep after it, once a minute:
@@ -2492,6 +2507,10 @@ group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
+- `services`: get, list, watch, which the Service informer reads, so a launch hands an issue pod
+  its repository cache's address only once the Service of that name is the cache's own
+  ([The repository cache](#the-repository-cache)); without them the daemon refuses at boot,
+  naming the refused list;
 - `events`: list;
 - a cluster-scoped get on `customresourcedefinitions` named `sandboxes.agents.x-k8s.io`, and a get
   on the `agent-sandbox-controller` Deployment in `agent-sandbox-system`, for the boot refusal when
@@ -2534,7 +2553,7 @@ exits 0; a refusal is boot's own, on stderr, and exits 1.
 - **Identity.** It acts as whoever `runtime.kubernetes` resolves to in its own process: the daemon's
   identity only with the daemon's kubeconfig and context, or in a pod under the daemon's
   ServiceAccount. It uses a subset of the daemon's grants above: `sandboxes` create, get, list,
-  watch and delete; `pods` list and watch; `pods/log` get; `events` list; the get on the CRD and on
+  watch and delete; `pods` list and watch; `services` list and watch; `pods/log` get; `events` list; the get on the CRD and on
   the controller's Deployment. It reads no `secrets` and patches no Sandbox. The probe pod itself is
   created by the agent-sandbox controller with the operator's ServiceAccount, so its result is the
   daemon's boot's own when it runs as the daemon's identity; under another, an RBAC or admission

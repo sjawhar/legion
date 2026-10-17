@@ -1140,32 +1140,33 @@ func tarOf(t *testing.T, entries ...[2]string) []byte {
 // testCacheToken is the bearer the fake cache takes and fetchRequest's cache requests present.
 const testCacheToken = "cache-token-of-acme-widgets"
 
-// fakeCache stands in for the repository cache's server: every request must carry the bearer
-// testCacheToken, or it is answered 401; an answered one names the cache's repository, acme/widgets
-// unless repo or tarRepo says otherwise, in CacheRepositoryHeader. GET /healthz answers 503 for its
-// first notReady polls and then 200 ready, and GET /tar streams body. It counts each.
+// fakeCache stands in for the repository cache's server: GET /tar must carry the bearer
+// testCacheToken, or it is answered 401; GET /healthz answers any request, 503 for its first
+// notReady polls and then 200 ready, recording the Authorization each carried. An answered request
+// names the cache's repository, acme/widgets unless repo or tarRepo says otherwise, in
+// CacheRepositoryHeader. It counts each.
 type fakeCache struct {
 	body     []byte
 	notReady int
 	repo     string
 	tarRepo  string
 
-	mu          sync.Mutex
-	healthAsked int
-	tarAsked    int
+	mu                sync.Mutex
+	healthAsked       int
+	healthCredentials []string
+	tarAsked          int
 }
 
 func (c *fakeCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if r.Header.Get("Authorization") != "Bearer "+testCacheToken {
-		http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
-		return
-	}
 	repo := cmp.Or(c.repo, "acme/widgets")
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 		c.healthAsked++
+		if credential := r.Header.Get("Authorization"); credential != "" {
+			c.healthCredentials = append(c.healthCredentials, credential)
+		}
 		w.Header().Set(CacheRepositoryHeader, repo)
 		if c.healthAsked <= c.notReady {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -1175,6 +1176,10 @@ func (c *fakeCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"ready":true,"repo":"` + repo + `","bytes":1}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/tar":
 		c.tarAsked++
+		if r.Header.Get("Authorization") != "Bearer "+testCacheToken {
+			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+			return
+		}
 		w.Header().Set(CacheRepositoryHeader, cmp.Or(c.tarRepo, repo))
 		w.Header().Set("Content-Type", "application/x-tar")
 		_, _ = w.Write(c.body)
@@ -1257,7 +1262,8 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 
 // A fresh feed comes from the repository cache alone: while the cache is not ready, Fetch waits on
 // it, asking its /healthz every CachePoll and logging what it answered, then streams it once it is
-// ready. Nothing is cloned from GitHub meanwhile.
+// ready. Nothing is cloned from GitHub meanwhile. The health polls carry no credential: the cache's
+// token goes with the tar alone.
 func TestFetchWaitsForTheRepositoryCacheToBeReady(t *testing.T) {
 	run := newLocalRunner(t)
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: 3}
@@ -1277,6 +1283,9 @@ func TestFetchWaitsForTheRepositoryCacheToBeReady(t *testing.T) {
 	}
 	if want := []time.Duration{CachePoll, CachePoll, CachePoll}; !slices.Equal(clock.waits, want) {
 		t.Errorf("Fetch waited %v between polls, want %v", clock.waits, want)
+	}
+	if len(served.healthCredentials) != 0 {
+		t.Errorf("Fetch's health polls carried %q, want no credential", served.healthCredentials)
 	}
 	want := "waiting for the repository cache " + req.CacheURL + " to be ready: GET " + req.CacheURL + "/healthz answered 503 Service Unavailable"
 	if len(logged) == 0 || !strings.HasPrefix(logged[0], want) {
@@ -1483,11 +1492,11 @@ func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
 	}
 }
 
-// A fetch asks only its own repository's cache, which it proves twice: it presents that cache's
-// token, which another repository's cache refuses with 401, and it takes nothing from a cache whose
-// answer names another repository — its /healthz, or the /tar itself, read before any of the
-// tar's content. Each is refused at once, without waiting, and nothing reaches the feed. A cache
-// named without its token is refused before anything is asked.
+// A fetch asks only its own repository's cache, which it proves twice: it takes nothing from a
+// cache whose answer names another repository — its /healthz, or the /tar itself, read before any
+// of the tar's content — and it presents that cache's token for the tar, which another
+// repository's cache refuses with 401. Each is refused at once, without waiting, and nothing
+// reaches the feed. A cache named without its token is refused before anything is asked.
 func TestFetchTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -1497,7 +1506,7 @@ func TestFetchTakesNothingFromAnotherRepositorysCache(t *testing.T) {
 		health int
 		tars   int
 	}{
-		{"a cache that refuses the token", &fakeCache{}, "another-cache's-token", "/healthz answered 401 Unauthorized", 0, 0},
+		{"a cache that refuses the token", &fakeCache{}, "another-cache's-token", "/tar answered 401 Unauthorized", 1, 1},
 		{"a cache whose health names another repository", &fakeCache{repo: "acme/gadgets"}, testCacheToken,
 			"is the repository cache of acme/gadgets, not of acme/widgets", 1, 0},
 		{"a cache whose tar names another repository", &fakeCache{tarRepo: "acme/gadgets"}, testCacheToken,

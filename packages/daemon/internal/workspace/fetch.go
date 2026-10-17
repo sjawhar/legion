@@ -287,8 +287,9 @@ const FetchBudget = CacheWaitTimeout + FetchTimeout
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
 // 200 ready, logging what it answered whenever that changes and at least once a minute, and fails
 // with the last answer once a further ask would start past CacheWaitTimeout. Each ask is bounded
-// by cacheAsk, and by what remains of the wait, so the wait ends within it. An answer that refuses
-// the token, or names another repository (askCache), fails it at once: no wait makes either right.
+// by cacheAsk, and by what remains of the wait, so the wait ends within it. An answer that names
+// another repository (askCache) fails it at once: no wait makes that right. The asks carry no
+// credential (cacheNotReady).
 func waitForCache(ctx context.Context, request FetchRequest) error {
 	deadline := request.Clock.Now().Add(CacheWaitTimeout)
 	var logged string
@@ -319,11 +320,13 @@ func waitForCache(ctx context.Context, request FetchRequest) error {
 const cacheAsk = 30 * time.Second
 
 // cacheNotReady is why the repository cache is not ready to stream, or "" when its /healthz
-// answers 200 with ready set, within timeout; an answer askCache refuses is the error.
+// answers 200 with ready set, within timeout; an answer askCache refuses is the error. The ask
+// carries no credential: the cache answers its health to anyone, and its token goes with the tar
+// alone (unpackCache).
 func cacheNotReady(ctx context.Context, request FetchRequest, timeout time.Duration) (string, error) {
 	bounded, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	response, err := askCache(bounded, request, "/healthz")
+	response, err := askCache(bounded, request, "/healthz", false)
 	if response == nil {
 		return err.Error(), nil
 	}
@@ -347,22 +350,25 @@ func cacheNotReady(ctx context.Context, request FetchRequest, timeout time.Durat
 	return "", nil
 }
 
-// askCache is GET <cache><path> with the cache's bearer token. It answers (nil, the transport's
-// failure) when the cache could not be reached, which is worth another ask. An answer that refuses
-// the token (401), or whose CacheRepositoryHeader is not the request's repository, comes back with
-// the refusal as its error: the caller closes the body and takes nothing it carries.
-func askCache(ctx context.Context, request FetchRequest, path string) (*http.Response, error) {
+// askCache is GET <cache><path>, with the cache's bearer token when withToken is set. It answers
+// (nil, the transport's failure) when the cache could not be reached, which is worth another ask.
+// An answer that refuses the token (401) to a request that carried it, or whose
+// CacheRepositoryHeader is not the request's repository, comes back with the refusal as its error:
+// the caller closes the body and takes nothing it carries.
+func askCache(ctx context.Context, request FetchRequest, path string, withToken bool) (*http.Response, error) {
 	cache := strings.TrimSuffix(request.CacheURL, "/")
 	ask, err := http.NewRequestWithContext(ctx, http.MethodGet, cache+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	ask.Header.Set("Authorization", "Bearer "+request.CacheToken)
+	if withToken {
+		ask.Header.Set("Authorization", "Bearer "+request.CacheToken)
+	}
 	response, err := cacheClient.Do(ask)
 	if err != nil {
 		return nil, err
 	}
-	if response.StatusCode == http.StatusUnauthorized {
+	if withToken && response.StatusCode == http.StatusUnauthorized {
 		return response, fmt.Errorf("ask the repository cache %s: GET %s%s answered %s: it is not the cache whose token this pod holds", request.CacheURL, cache, path, response.Status)
 	}
 	if named := strings.TrimSpace(response.Header.Get(CacheRepositoryHeader)); !strings.EqualFold(named, request.Repo.String()) {
@@ -393,7 +399,7 @@ func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging 
 	}
 	bounded, cancel := context.WithTimeout(ctx, left)
 	defer cancel()
-	response, err := askCache(bounded, request, "/tar")
+	response, err := askCache(bounded, request, "/tar", true)
 	if response != nil {
 		defer response.Body.Close()
 	}

@@ -286,7 +286,7 @@ const legionCapabilityState = z.strictObject({
 const legionCacheView = z.strictObject({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
-  state: z.enum(["starting", "cloning", "ready", "failing"]),
+  state: z.enum(["starting", "cloning", "ready", "failing", "refused"]),
   reason: nonEmptyString.optional(),
   ready: z.boolean(),
   address: nonEmptyString.optional(),

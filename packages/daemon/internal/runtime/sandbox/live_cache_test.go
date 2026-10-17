@@ -30,10 +30,13 @@ import (
 var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes from the repository cache (http://\S+) in \S+, its history verified in \S+; ([0-9,]+) bytes from GitHub for the delta \(([0-9]+) refs?\)`)
 
 // repository-cache: the cache the root's launch made (root-ready) is Ready as the runtime's stores
-// show it, at its Service, and its /healthz — asked inside its own pod — refuses a request without
-// its token, 401 naming nothing, and answers its own token at the head GitHub names for the
-// repository's default branch. The token reaches curl on its standard input (`-H @-`) from the
-// file the pod mounts, never in a process's argv.
+// show it, at its Service, which the cluster holds as the controller made it — controlled by the
+// cache's Sandbox and selecting the hash of its name, the shape the launch checked before telling
+// the root's pod the cache's address. Asked inside the cache's own pod, its /healthz answers with
+// no token, ready at the head GitHub names for the repository's default branch, and its /tar
+// refuses a request without its token, 401 naming nothing, and answers its own token, which
+// reaches curl on its standard input (`-H @-`) from the file the pod mounts, never in a process's
+// argv.
 func (r *liveRig) checkRepositoryCache() error {
 	name := CacheSandboxName(r.env.project, r.env.repo)
 	status, err := r.awaitCacheReady()
@@ -43,23 +46,22 @@ func (r *liveRig) checkRepositoryCache() error {
 	if want := r.rt.cacheURL(name); status.Address != want {
 		return fmt.Errorf("the repository cache %s is Ready at %q, want its Service %s", name, status.Address, want)
 	}
-	healthz := fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d/healthz`, repocache.Port)
-	refused, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", healthz)
+	service, err := r.kubectl("get", "service", name, "-o", `jsonpath={.metadata.ownerReferences[?(@.controller==true)].kind}/{.metadata.ownerReferences[?(@.controller==true)].name} {.spec.selector}`)
 	if err != nil {
 		return err
 	}
-	if !strings.HasSuffix(strings.TrimSpace(refused), " 401") || strings.Contains(refused, r.env.repo.String()) {
-		return fmt.Errorf("the cache's /healthz without its token answered %q, want 401 naming nothing", strings.TrimSpace(refused))
+	if want := "Sandbox/" + name + ` {"` + sandboxNameHashLabel + `":"` + sandboxNameHash(name) + `"}`; strings.TrimSpace(service) != want {
+		return fmt.Errorf("the cluster holds the cache's Service as %q, want %q", strings.TrimSpace(service), want)
 	}
-	withToken := `{ printf 'Authorization: Bearer '; tr -d '\r\n' <"$` + repocache.CacheTokenFileEnv + `"; echo; } | ` + strings.Replace(healthz, "curl -s", "curl -s -H @-", 1)
-	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", withToken)
+	curl := fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d`, repocache.Port)
+	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", curl+"/healthz")
 	if err != nil {
 		return err
 	}
 	body, code, _ := strings.Cut(strings.TrimSpace(out), " ")
 	var health repocache.Health
 	if err := json.Unmarshal([]byte(body), &health); err != nil || code != "200" {
-		return fmt.Errorf("the cache's /healthz with its token answered %q, not 200 and its JSON: %v", strings.TrimSpace(out), err)
+		return fmt.Errorf("the cache's /healthz with no token answered %q, not 200 and its JSON: %v", strings.TrimSpace(out), err)
 	}
 	head, err := r.githubHead(r.defaultBranch)
 	if err != nil {
@@ -68,8 +70,24 @@ func (r *liveRig) checkRepositoryCache() error {
 	if !health.Ready || health.Repo != r.env.repo.String() || health.Head != head || health.Bytes <= 0 || health.LastFetchAt.IsZero() {
 		return fmt.Errorf("the cache's /healthz answered %+v, want ready for %s at %s's head %s", health, r.env.repo, r.defaultBranch, head)
 	}
-	note("runtime", "RepositoryCache(%s): %s at %s", r.env.repo, status.State, status.Address)
-	note("operator", "exec %s -c %s -- curl localhost:%d/healthz: %s without its token, %s with it on stdin; GitHub's %s is %s", name, cacheContainer, repocache.Port, strings.TrimSpace(refused), body, r.defaultBranch, head)
+	tar := strings.Replace(curl, "curl -s", "curl -s -o /dev/null", 1) + "/tar"
+	refused, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", strings.Replace(curl, "curl -s", "curl -s -D -", 1)+"/tar")
+	if err != nil {
+		return err
+	}
+	if !strings.HasSuffix(strings.TrimSpace(refused), " 401") || strings.Contains(refused, r.env.repo.String()) {
+		return fmt.Errorf("the cache's /tar without its token answered %q, want 401 naming nothing", strings.TrimSpace(refused))
+	}
+	withToken := `{ printf 'Authorization: Bearer '; tr -d '\r\n' <"$` + repocache.CacheTokenFileEnv + `"; echo; } | ` + strings.Replace(tar, "curl -s", "curl -s -H @-", 1)
+	served, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", withToken)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(served) != "200" {
+		return fmt.Errorf("the cache's /tar with its token answered %q, want 200", strings.TrimSpace(served))
+	}
+	note("runtime", "RepositoryCache(%s): %s at %s; its Service %s", r.env.repo, status.State, status.Address, strings.TrimSpace(service))
+	note("operator", "exec %s -c %s -- curl localhost:%d: /healthz with no token %s; /tar 401 without its token, %s with it on stdin; GitHub's %s is %s", name, cacheContainer, repocache.Port, body, strings.TrimSpace(served), r.defaultBranch, head)
 	return nil
 }
 

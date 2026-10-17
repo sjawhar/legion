@@ -110,6 +110,8 @@ and the checks that branch requires (its rulesets and its branch protection), th
   - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
   - `secrets`: create, delete, update, get (never list);
   - `pods`: get, list, watch; `pods/log`: get;
+  - `services`: get, list, watch, so a launch checks its repository cache's Service is the cache's
+    own before an issue pod is told its address;
   - `events`: list;
   - and a cluster-scoped get on the CRD `sandboxes.agents.x-k8s.io` and a get on the Deployment
     `agent-sandbox-controller` in `agent-sandbox-system`.

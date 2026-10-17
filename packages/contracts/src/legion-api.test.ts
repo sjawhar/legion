@@ -325,6 +325,16 @@ test("the state golden carries each issue's repository and the project's mapping
   const noCaches = fixture("state.json") as { repositories: Record<string, unknown> };
   delete noCaches.repositories.caches;
   expect(LegionStateResponse.safeParse(noCaches).success).toBeFalse();
+  const refused = fixture("state.json") as {
+    repositories: { caches: Array<Record<string, unknown>> };
+  };
+  Object.assign(refused.repositories.caches[0] ?? {}, {
+    state: "refused",
+    reason: "its Service legion-legion-cache-acme-legacy-0a1b2c3d has no controller",
+  });
+  expect(LegionStateResponse.parse(refused).repositories.caches[0]?.state).toBe("refused");
+  Object.assign(refused.repositories.caches[0] ?? {}, { state: "gone" });
+  expect(LegionStateResponse.safeParse(refused).success).toBeFalse();
 });
 
 // The state's capability report (contract 16): the golden carries a decided row with the operator's

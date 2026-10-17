@@ -84,10 +84,12 @@ var repackEvery = 24 * time.Hour
 //	              the read lock, so no fetch moves refs or packs while it streams; 503 before the
 //	              clone is there.
 //
-// /healthz and /tar answer only a request whose `Authorization: Bearer` is the token CacheTokenFile
-// holds now, compared in constant time; any other is 401 and names nothing. Each answer they give
-// names the repository in workspace.CacheRepositoryHeader, which an issue pod's fetch checks is its
-// own before it takes anything.
+// /tar answers only a request whose `Authorization: Bearer` is the token CacheTokenFile holds now,
+// compared in constant time; any other is 401 and names nothing. /healthz answers any request: its
+// health holds no secret and nothing of the repository's content, the same class of information as
+// /readyz, so the daemon reads it with no credential at all. Both name the repository in
+// workspace.CacheRepositoryHeader on every answer they give, which a reader checks is the
+// repository it asked for before it takes anything.
 //
 // Every fetch holds the write lock for workspace.Fetch, which reaches GitHub with the one-shot
 // credential, the isolated git configuration and the pins every holder of a provisioning token
@@ -283,14 +285,15 @@ func (c *cache) handler() http.Handler {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 	})
-	mux.HandleFunc("GET /healthz", c.authorized(func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		health := c.health.Load()
+		w.Header().Set(workspace.CacheRepositoryHeader, c.opts.Repo.String())
 		w.Header().Set("Content-Type", "application/json")
 		if !health.Ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(w).Encode(health)
-	}))
+	})
 	mux.HandleFunc("GET /tar", c.authorized(c.serveTar))
 	return mux
 }

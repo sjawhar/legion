@@ -765,26 +765,28 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 const boundaryCacheToken = "the-repository-cache-token"
 
 // newCacheStandIn is the repository cache of boundaryRepo as an issue pod's fetch reaches it at
-// the address the runtime names: it answers only the bearer boundaryCacheToken, names
-// sjawhar/legion-smoke on every answer, is ready at once, and streams as its /tar the refs and
-// packs (workspace.FeedEntry) of a bare clone of remote as it is when asked.
+// the address the runtime names: its /healthz answers any request, its /tar only the bearer
+// boundaryCacheToken, it names sjawhar/legion-smoke on every answer it gives, is ready at once, and
+// streams as its /tar the refs and packs (workspace.FeedEntry) of a bare clone of remote as it is
+// when asked.
 func newCacheStandIn(t *testing.T, remote string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+boundaryCacheToken {
-			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
-			return
-		}
-		w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
 		switch r.URL.Path {
 		case "/healthz":
+			w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
 			_, _ = w.Write([]byte(`{"ready":true,"repo":"sjawhar/legion-smoke","bytes":1}`))
 		case "/tar":
+			if r.Header.Get("Authorization") != "Bearer "+boundaryCacheToken {
+				http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+				return
+			}
 			body, err := feedTar(remote)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+			w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
 			_, _ = w.Write(body)
 		default:
 			http.NotFound(w, r)

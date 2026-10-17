@@ -223,11 +223,13 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 // find the issue's volume holding retained sessions (never under a session database, which keeps
 // none on it), mints the provisioning token for the repository's owner, makes sure the repository
 // has its cache (EnsureRepositoryCache: one a sweep has not made yet is made now), since a fresh
-// feed comes from that cache alone, and writes the token to the pod's init-only provisioning
-// Secret with the cache's bearer token, which the fetch container presents to the cache. It waits
-// on no other pod, the cache's included: the fetch waits for the cache to be ready itself, and the
-// issue's clone lives on the issue's own volume, which no other pod mounts. A cache that cannot be
-// made fails the launch: the fetch could fill no fresh feed without it.
+// feed comes from that cache alone, waits until the cache's Service is its own
+// (awaitCacheService), since the fetch presents the cache's token at that Service's name, and
+// writes the token to the pod's init-only provisioning Secret with the cache's bearer token. It
+// waits on no other pod, the cache's included: the fetch waits for the cache to be ready itself,
+// and the issue's clone lives on the issue's own volume, which no other pod mounts. A cache that
+// cannot be made, or whose Service is not its own by the boot timeout, fails the launch, with
+// nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionsInDatabase {
 		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
@@ -244,6 +246,9 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
 	}
 	if err := r.EnsureRepositoryCache(ctx, l.spec.Repository); err != nil {
+		return err
+	}
+	if err := r.awaitCacheService(ctx, l.spec.Repository); err != nil {
 		return err
 	}
 	cache := CacheSandboxName(r.project, l.spec.Repository)
