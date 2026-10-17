@@ -412,16 +412,22 @@
   ancestor that still reads has its parent set to null.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
-  optional query of `sslmode`, `connect_timeout` and `application_name`. The user, database and
-  query values are letters, digits, `.`, `_` and `-`, and the host is one name or IPv4 address.
-  The password is unreserved characters and percent-escapes, so its `@ : / ? # [ ]`, `%` and spaces
-  must be percent-encoded. Every other form is refused before anything runs: a keyword/value
-  string, a bracketed, IPv6, multi-host or socket host, any other query key, a password in the
-  query. The refusal states the accepted form and never prints the URL. In that form the deployer,
-  libpq and pgx all read the password from the same place, so its `pg_dump` and `psql` get the
-  URL without the password as their argument and the password as `PGPASSWORD` alone. They run
-  under `docker run --init` so a timeout ends them, and `psql`'s stderr, which can quote the
-  connection, is dropped.
+  optional query of `sslmode`, `connect_timeout` and `application_name`.
+  - The user, database and query values are ASCII letters, digits, `.`, `_` and `-`.
+  - The host is dot-separated labels of ASCII letters, digits and hyphens: a host name or an IPv4
+    address.
+  - The port is 1 to 65535.
+  - The password is ASCII unreserved characters and percent-escapes, so its `@ : / ? # [ ]`, `%`, a
+    space and any other character must be percent-encoded. `%00` is refused, and the decoded
+    password must be valid UTF-8.
+
+  The form is checked with ASCII ranges whatever the locale. Every other form is refused before
+  anything runs: a keyword/value string, a bracketed, IPv6, multi-host or socket host, any other
+  query key, or a password in the query. The refusal points to `deploy/README.md` and never prints
+  the URL. In that form the deployer, libpq and pgx all read the password from the same place, so
+  its `pg_dump` and `psql` get the URL without the password as their argument and the password as
+  `PGPASSWORD` alone. They run under `docker run --init` so a timeout ends them, and `psql`'s
+  stderr, which can quote the connection, is dropped.
 - The Dispatch auto-deployer no longer rolls a failed deploy back to the previous image once that
   deploy has moved the database's schema. It records the schema version the deployed tag runs
   against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys. When a deploy fails, it stops

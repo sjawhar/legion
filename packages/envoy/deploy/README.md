@@ -129,23 +129,26 @@ processes too. `psql`'s stderr is dropped, since its diagnostics can quote the
 connection, and a failed read is reported by its exit status alone.
 
 The deployer accepts `DATABASE_URL` in exactly one form, and refuses every other
-before anything runs, with a log line that states the form and never the URL:
+before anything runs, with a log line that points here and never prints the URL:
 
 ```text
 postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?<key>=<value>[&<key>=<value>]…]
 ```
 
-- `<user>` and `<database>` are letters, digits, `.`, `_` and `-`.
-- `<password>` is letters, digits, `.`, `_`, `~` and `-`, and percent-escapes. So a
-  password's `@ : / ? # [ ]`, `%`, a space and any other character must be
-  percent-encoded (`%40 %3A %2F %3F %23 %5B %5D %25 %20`).
-- `<host>` is one host name or IPv4 address: no brackets or IPv6 literal, no
-  second host, no socket path.
-- `<port>` is digits.
-- `<key>` is `sslmode`, `connect_timeout` or `application_name`, and `<value>` is
-  letters, digits, `.`, `_` and `-`. A password in the query is refused, under any
-  spelling.
+- `<user>`, `<database>` and each `<value>` are ASCII letters, digits, `.`, `_` and `-`.
+- `<password>` is ASCII letters, digits, `.`, `_`, `~` and `-`, and percent-escapes.
+  So a password's `@ : / ? # [ ]`, `%`, a space and any other character, non-ASCII
+  included, must be percent-encoded (`%40 %3A %2F %3F %23 %5B %5D %25 %20`).
+  `%00` is refused, and the decoded password must be valid UTF-8: Docker rewrites
+  other bytes on their way to the clients.
+- `<host>` is dot-separated labels of ASCII letters, digits and hyphens, none empty
+  and none starting or ending with a hyphen: a host name or an IPv4 address. No
+  brackets or IPv6 literal, no second host, no socket path.
+- `<port>` is 1 to 65535.
+- `<key>` is `sslmode`, `connect_timeout` or `application_name`. A password in the
+  query is refused, under any spelling.
 
+The deployer checks the form with the ASCII ranges whatever the machine's locale.
 In that form the deployer, libpq and Dispatch's driver (pgx) all read the same
 password from the same place, so the deployer can be sure it hands that password
 to its clients as `PGPASSWORD` alone. `compose/dispatch.env.example`'s URL is in it.

@@ -73,23 +73,48 @@ set_env_value() {
 #
 #   postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?<key>=<value>[&<key>=<value>]…]
 #
-# <user> and <database> are [A-Za-z0-9._-]+; <password> is unreserved characters
-# ([A-Za-z0-9._~-]) and %XX escapes only, so a raw @ : / ? # [ ] or space in it is refused and has
-# to be percent-encoded; <host> is one name or IPv4 address, [A-Za-z0-9.-]+ (no brackets, no
-# second host, no socket path); <port> is digits; <key> is sslmode, connect_timeout or
-# application_name and <value> is [A-Za-z0-9._-]+. In that shape every reading of the URL, the
-# deployer's, libpq's and pgx's, puts the password in the same place, and nowhere else.
+#   - <user>, <database> and each <value>: ASCII letters, digits, `.`, `_` and `-`.
+#   - <password>: ASCII letters, digits, `.`, `_`, `~` and `-`, and %XX escapes other than %00,
+#     whose decoded bytes are valid UTF-8. Any other character (@ : / ? # [ ], %, a space,
+#     non-ASCII) has to be percent-encoded.
+#   - <host>: dot-separated labels of ASCII letters, digits and hyphens, none empty and none
+#     starting or ending with a hyphen. That is a host name or an IPv4 address; no brackets, no
+#     second host, no socket path.
+#   - <port>: 1 to 65535.
+#   - <key>: sslmode, connect_timeout or application_name.
+#
+# In that shape every reading of the URL, the deployer's, libpq's and pgx's, puts the password in
+# the same place, and nowhere else. LC_ALL=C makes the ranges ASCII whatever the caller's locale:
+# under en_US.UTF-8, [a-z] and [0-9] also match letters and digits outside ASCII, and under a
+# double-byte locale such as GBK one character can hide an @.
 database_url_split() {
+  local LC_ALL=C
   local value='[A-Za-z0-9._-]+'
   local key='(sslmode|connect_timeout|application_name)'
-  local grammar="^(postgres|postgresql)://($value)(:(([A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+))?@([A-Za-z0-9.-]+)(:[0-9]+)?/($value)(\\?$key=$value(&$key=$value)*)?\$"
-  local password
+  local escape='%(0[1-9A-Fa-f]|[1-9A-Fa-f][0-9A-Fa-f])'
+  local label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+  local port='([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])'
+  local grammar="^(postgres|postgresql)://$value(:([A-Za-z0-9._~-]|$escape)+)?@$label(\\.$label)*(:$port)?/$value(\\?$key=$value(&$key=$value)*)?\$"
+  local userinfo
+  local password=""
   if [[ ! "$1" =~ $grammar ]]; then
     return 1
   fi
-  db_url="${BASH_REMATCH[1]}://${BASH_REMATCH[2]}@${BASH_REMATCH[6]}${BASH_REMATCH[7]}/${BASH_REMATCH[8]}${BASH_REMATCH[9]}"
-  password="${BASH_REMATCH[4]}"
+  # An accepted URL holds exactly one @, so the user and password are before it, and the rest of
+  # the URL, the clients' part, is after it.
+  userinfo="${1#*://}"
+  userinfo="${userinfo%%@*}"
+  if [[ "$userinfo" == *:* ]]; then
+    password="${userinfo#*:}"
+  fi
   printf -v db_password '%b' "${password//%/\\x}"
+  # Docker rewrites an environment value that is not valid UTF-8, so such a password would reach
+  # the clients as different bytes than libpq or pgx read from the URL. The check reads it from a
+  # pipe, never an argument.
+  if ! printf '%s' "$db_password" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1; then
+    return 1
+  fi
+  db_url="${1%%://*}://${userinfo%%:*}@${1#*@}"
 }
 
 # pg_client runs shell command $2 in the pg_dump image, bounded at $1 seconds (0: unbounded), with
@@ -243,7 +268,7 @@ deploy() {
     return 1
   fi
   if ! database_url_split "$databaseUrl"; then
-    log "DATABASE_URL in $COMPOSE_ENV is not the one form the deployer accepts, postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>[?sslmode=|connect_timeout=|application_name=…], with the password's reserved characters percent-encoded (packages/envoy/deploy/README.md, \"Auto-deployer\"), the one form in which it can keep the password off its database clients' process arguments; not deploying $sha"
+    log "DATABASE_URL in $COMPOSE_ENV is not in the one form the deployer accepts, the only one in which it can keep the password off its database clients' process arguments; see packages/envoy/deploy/README.md, \"Auto-deployer\", for the form; not deploying $sha"
     return 1
   fi
   dispatchPort=$(env_value DISPATCH_PORT)

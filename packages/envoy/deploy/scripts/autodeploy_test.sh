@@ -315,36 +315,58 @@ if [[ "$output" != *"could not read the schema version"*"not deploying new-image
   fail 'deployer did not stop before deploying when the schema version was unreadable'
 fi
 
+# Both URL loops below run under en_US.UTF-8, where bash's [[ =~ ]] ranges such as [a-z] and
+# [0-9] also match non-ASCII characters, so a grammar that left the locale in force would accept
+# what it should refuse. The control needs that locale installed and widening the ranges.
+if ! LC_ALL=en_US.UTF-8 bash -c '[[ "ä" =~ ^[a-z]$ ]]' 2>/dev/null; then
+  fail 'en_US.UTF-8 is not installed here (sudo locale-gen en_US.UTF-8), so the URL loops would not test the locale'
+fi
+
 # The deployer accepts one URL shape and refuses every other before any client starts, so no
 # password in a refused URL can reach a process's arguments, and the refusal never prints the URL.
-# These are every shape the review gates found getting past an earlier check, and the other shapes
-# outside the grammar: a malformed or raw-reserved password, a password in the query under any
-# spelling, a bracketed, multi-host or unix-socket host, an @ in the path or query, and a
-# keyword/value string. Most are URLs pgx or libpq would connect with; the fake is given the
-# password libpq would read, so a deployer that let one through would show it in some client's
-# arguments.
+# The cases cover each way out of the shape:
+#   - the password: a malformed escape, %00, an escape that decodes to bytes that are not UTF-8, a
+#     raw ? / @ or space, raw non-ASCII, and a double-byte character whose second byte is @;
+#   - the query: a password under any spelling (password, sslpassword, an encoded key, a space
+#     beside the key), a key outside the list, an @, and a non-ASCII value;
+#   - the user, host and port: a non-ASCII user, a bracketed, IPv6, multi-host or socket host, an
+#     empty or hyphen-edged host label, a port of 0, above 65535 or not ASCII digits;
+#   - an @ in the path, and a keyword/value string.
+# Most are URLs pgx or libpq would connect with; the fake is given the password libpq would read,
+# so a deployer that let one through would show it in some client's arguments.
 for case in \
   'review-secret|postgres://dispatch:review-secret%oops@db.test:5432/dispatch' \
+  's|postgres://dispatch:s%00cret-canary@db.test:5432/dispatch' \
+  'x|postgres://dispatch:s%FFcret-canary@db.test:5432/dispatch' \
   's?cret-canary|postgres://dispatch:s?cret-canary@db.test:5432/dispatch?sslmode=require' \
   's/cret-canary|postgres://dispatch:s/cret-canary@db.test:5432/dispatch' \
   's|postgres://dispatch:s@cret-canary@db.test:5432/dispatch' \
   's cret-canary|postgres://dispatch:s cret-canary@db.test:5432/dispatch' \
+  'pässwörd-cret-canary|postgres://dispatch:pässwörd-cret-canary@db.test:5432/dispatch' \
+  $'x|postgres://dispatch:pw\xa9@cret-canary@db.test:5432/dispatch' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require&password=review-secret' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?sslpassword=review-secret' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?pass%77ord=review-secret' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require& password=review-secret' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?password =review-secret' \
   'review-secret|postgres://dispatch@db.test:5432/dispatch?sslmode=require&sslpassword =review-secret' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?target_session_attrs=any' \
+  'review-secret|postgres://dispatch@db.test:5432/dispatch?application_name=a@b&password=review-secret' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?application_name=ｄｅｐｌｏｙ' \
+  's@cret-canary|postgres://dispätch:s%40cret-canary@db.test:5432/dispatch' \
   'review-secret|postgres://dispatch@[::1?x]:5432,db.test:5432/dispatch?password=review-secret&sslmode=require' \
   's@cret-canary|postgres://dispatch:s%40cret-canary@[::1]:5432/dispatch' \
   's@cret-canary|postgres://dispatch:s%40cret-canary@db1.test:5432,db2.test:5432/dispatch' \
   's@cret-canary|postgres://dispatch:s%40cret-canary@%2Fvar%2Frun%2Fpostgresql/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db..test:5432/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@-db.test:5432/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:0/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:65536/dispatch' \
+  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5²/dispatch' \
   's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dis@patch' \
-  'review-secret|postgres://dispatch@db.test:5432/dispatch?application_name=a@b&password=review-secret' \
-  's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?target_session_attrs=any' \
   'review-secret|host=db.test user=dispatch password=review-secret dbname=dispatch'; do
   fresh_env "${case#*|}"
-  if output=$(test_password="${case%%|*}" deploy_once); then
+  if output=$(LC_ALL=en_US.UTF-8 test_password="${case%%|*}" deploy_once); then
     fail "deployer deployed with ${case#*|}"
   fi
   no_secret "${case#*|}"
@@ -354,17 +376,19 @@ for case in \
   fi
 done
 
-# The accepted shape splits as intended: each allowed query key, a URL with no port, and one with
-# no password at all. The clients get the URL without its password as their last argument, the
+# The accepted shape splits as intended: each allowed query key, the highest port, a URL with no
+# port, escapes that decode to reserved characters or to multi-byte UTF-8, and a URL with no
+# password at all. The clients get the URL without its password as their last argument, the
 # password reaches the fake libpq only as PGPASSWORD, and the deploy goes on (here to the origin
 # check's rollback).
 for case in \
   's@cret-canary|postgres://dispatch:s%40cret-canary@db.test:5432/dispatch?sslmode=require&connect_timeout=10&application_name=dispatch-deploy|postgres://dispatch@db.test:5432/dispatch?sslmode=require&connect_timeout=10&application_name=dispatch-deploy' \
   'Az09._~-:/?#[] @|postgresql://dispatch.ro:Az09._~-%3A%2F%3F%23%5B%5D%20%40@db-1.internal.example/dispatch_prod|postgresql://dispatch.ro@db-1.internal.example/dispatch_prod' \
+  'süß-canary|postgres://dispatch:s%C3%BC%C3%9F-canary@10.0.0.7:65535/dispatch|postgres://dispatch@10.0.0.7:65535/dispatch' \
   '|postgres://dispatch@db.test/dispatch|postgres://dispatch@db.test/dispatch'; do
   IFS='|' read -r case_password case_url case_client_url <<<"$case"
   fresh_env "$case_url"
-  if output=$(test_password="$case_password" deploy_once); then
+  if output=$(LC_ALL=en_US.UTF-8 test_password="$case_password" deploy_once); then
     fail "deployer did not reach the origin check with $case_url"
   fi
   no_secret "$case_url"
