@@ -230,12 +230,17 @@ func refuseParentTooDeep(ctx context.Context, tx pgx.Tx, child, parent string) e
 	if above+below <= parentDepthCap {
 		return nil
 	}
+	depth := strconv.Itoa(above+below) + " links"
+	if above > parentDepthCap || below > parentDepthCap {
+		// A walk stopped at its bound, so the chain is deeper than it read.
+		depth = "more than " + parentDepthCapSQL + " links"
+	}
 	if child == "" {
 		return errorf(http.StatusConflict, "PARENT_INPUT",
-			"an issue under %s would sit %d links below its root; an issue sits at most %d links below its root", parent, above, parentDepthCap)
+			"an issue under %s would sit %s below its root; an issue sits at most %d links below its root", parent, depth, parentDepthCap)
 	}
 	return errorf(http.StatusConflict, "PARENT_INPUT",
-		"moving %s under %s would put the deepest issue under it %d links below its root; an issue sits at most %d links below its root", child, parent, above+below, parentDepthCap)
+		"moving %s under %s would put the deepest issue under it %s below its root; an issue sits at most %d links below its root", child, parent, depth, parentDepthCap)
 }
 
 // waitNode is one half of an issue in the dependency graph. An issue starts after its blocked_by

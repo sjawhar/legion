@@ -53,8 +53,9 @@ func checkIssueRepoMapped(ctx context.Context, tx pgx.Tx, repo, project string) 
 // issue. The walk climbs one link per step, keeping only a depth counter, and stops at the first
 // issue that names a repository or at parentDepthCap links up, which writes never let a chain pass
 // (refuseParentTooDeep): at most parentDepthCap+1 steps per issue. A walk that reaches the cap with
-// links still above it (a chain only a direct database write made, or one that loops) sets
-// `too_deep`, and repoScan.resolve refuses it rather than answer with the default.
+// links still above it sets `too_deep`, and repoScan.resolve refuses it rather than answer with the
+// default. Such a chain is a loop, or one only a direct database write made: an earlier release's
+// API could build one, and migration 0113 refuses to apply while one exists.
 var issueRepoLateral = `
 	left join lateral (
 		with recursive chain as (

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -189,9 +190,40 @@ func TestIssuePatchRefusesAReparentPastTheDepthCap(t *testing.T) {
 	}
 }
 
+// A parent already past the cap is past the walk's bound too, so the refusal says "more than 32
+// links" rather than the bound's number. An earlier release's API could build such a chain;
+// migration 0113 refuses to apply while one exists, so after it only a direct database write makes
+// one, as this test does.
+func TestIssueParentRefusalPastTheCapSaysMoreThan32Links(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "LEG", "name": "Legacy"}, "alice")
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into issues (key, project_key, number, title, parent_key, created_by, rank)
+		select 'LEG-' || n, 'LEG', n, 'Legacy ' || n, case when n = 1 then null else 'LEG-' || (n - 1) end,
+		       '{"kind":"user","id":"alice"}', lpad(n::text, 8, '0')
+		from generate_series(1, 41) n
+		order by n;
+		update projects set next_number = 42 where key = 'LEG'
+	`); err != nil {
+		t.Fatalf("insert a 41-issue chain: %v", err)
+	}
+	loose := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "LEG", "title": "Loose", "force": true}, "alice"))
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"create under LEG-41, 40 links down":     dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "LEG", "title": "Under", "parent": "LEG-41", "force": true}, "alice"),
+		"move Loose under LEG-36, 35 links down": dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+loose.Key, map[string]any{"parent": "LEG-36"}, "alice"),
+	} {
+		body := response.Body.String()
+		if response.Code != http.StatusConflict || !strings.Contains(body, "more than 32 links below its root") || strings.Contains(body, "33 links") {
+			t.Errorf("%s: status=%d body=%s, want 409 saying more than 32 links and no bound's number", name, response.Code, body)
+		}
+	}
+}
+
 // The repository walk stops at the depth cap, so a list costs at most parentDepthCap+1 steps per
-// issue however deep a chain is. A chain past the cap (only a direct database write makes one)
-// fails its issues' reads by name, never giving the project's default, and fails them fast.
+// issue however deep a chain is. A chain past the cap fails its issues' reads by name, never giving
+// the project's default, and fails them fast. An earlier release's API could build one; migration
+// 0113 refuses to apply while one exists, so after it only a direct database write makes one, as
+// this test does.
 func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
