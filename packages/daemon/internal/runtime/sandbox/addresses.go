@@ -52,33 +52,15 @@ type recordedAddress struct {
 
 // environmentAddresses are what a generation of role carries in its environment that a daemon
 // restarted under another configuration would hand otherwise: handedAddresses but the stream its
-// launcher dials, and, for the controller, the project's Slack channels (slackChannelsVariable),
-// so a changed list relaunches it, resuming its session, as a moved address does.
-func (r *Runtime) environmentAddresses(role claim.Role) []handedAddress {
-	addresses := slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
-	if role == claim.RoleController {
-		addresses = append(addresses, handedAddress{slackChannelsVariable, r.slackChannelsValue()})
-	}
-	return addresses
+// launcher dials.
+func (r *Runtime) environmentAddresses() []handedAddress {
+	return slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
 }
 
-// slackChannelsValue is LEGION_SLACK_CHANNELS as the controller is told it: the project's channels,
-// comma-joined, "" for none.
-func (r *Runtime) slackChannelsValue() string {
-	return strings.Join(r.controllerSlackChannels, ",")
-}
-
-// addressName is how an address handed now is named in a record and an observation's detail. The
-// channel list is no URL and no credential, so it is named as it is, "(none)" when empty.
+// addressName is how an address handed now is named in a record and an observation's detail.
 func (r *Runtime) addressName(a handedAddress) string {
-	switch a.name {
-	case "ENVOY_NATS_URL":
+	if a.name == "ENVOY_NATS_URL" {
 		return namedNATSURLs(r.natsURLs)
-	case slackChannelsVariable:
-		if a.value == "" {
-			return "(none)"
-		}
-		return a.value
 	}
 	return namedURL(a.value)
 }
@@ -92,7 +74,7 @@ func addressDigest(value string) string {
 // its annotation holds it.
 func (r *Runtime) recordFor(role claim.Role, generation uint64) (string, error) {
 	record := addressRecord{Generation: generation}
-	for _, a := range r.environmentAddresses(role) {
+	for _, a := range r.environmentAddresses() {
 		record.Addresses = append(record.Addresses, recordedAddress{Variable: a.name, Name: r.addressName(a), SHA256: addressDigest(a.value)})
 	}
 	encoded, err := json.Marshal(record)
@@ -163,7 +145,7 @@ func (r *Runtime) movedEnvironment(s *sandbox, role claim.Role, generation uint6
 		return nil, nil
 	}
 	var moved []movedAddress
-	for _, a := range r.environmentAddresses(role) {
+	for _, a := range r.environmentAddresses() {
 		i := slices.IndexFunc(record.Addresses, func(held recordedAddress) bool { return held.Variable == a.name })
 		switch {
 		case i < 0:

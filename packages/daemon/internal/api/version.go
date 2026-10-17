@@ -208,4 +208,18 @@ package api
 // which cites the controller skill's Slack reference. A plugin from before 29 subscribes to no
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
-const DaemonAPIVersion = 29
+//
+// 30: sjawhar/legion#PLACEHOLDER -- contract 29's Slack-channel surfaces are removed. A project's
+// `slack_channels`, the daemon's `LEGION_SLACK_CHANNELS` on the controller it launches (its place
+// in the controller's addressing, its generation's address record, and the reservation the
+// operator's pod refused), and `config.checkSlackChannels`'s refusal are all gone. The controller
+// now subscribes itself, with its own `envoy_subscribe`, to the Slack channels a person asks it to
+// watch (skill://legion-controller/references/slack-mentions.md), claiming an Envoy role per
+// channel first so two controllers never answer the same one. The daemon's only remaining Slack
+// job -- granting `slack_post` the bot token through the secrets broker enrollment contract 29
+// added under `runtime.kubernetes.agent_secrets` -- is unchanged by this bump. A plugin still at
+// 29 requires `LEGION_SLACK_CHANNELS` set and refuses its own claim the instant it finds none
+// against a daemon at 30, which sets no such variable; a plugin at 30 run against a daemon still
+// at 29 is handed a variable its own interface no longer reads at all. Either way the boot gate
+// and `legion probe-image` refuse the mixed pair before a controller session starts.
+const DaemonAPIVersion = 30

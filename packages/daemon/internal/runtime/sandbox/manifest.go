@@ -88,15 +88,10 @@ var runtimeOwned = map[string]bool{
 	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
-	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
+	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
 	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
 	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 }
-
-// slackChannelsVariable is the project's slack_channels as the runtime tells the controller it
-// launches (Options.ControllerSlackChannels): comma-joined, set even when empty, so no other value
-// stands in for the project's. The controller's plugin subscribes to each channel's app mentions.
-const slackChannelsVariable = "LEGION_SLACK_CHANNELS"
 
 // sessionStoreVariables are Oh My Pi's two variables that place a session: the runtime sets both
 // under a session database (Options.SessionDSNKey) and the pod baseline the first to file otherwise
@@ -790,9 +785,6 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	if broker := r.agentSecrets; broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
-	}
-	if spec.Role == claim.RoleController {
-		add(slackChannelsVariable, r.slackChannelsValue())
 	}
 	env = append(env, xdgEnvironment(roleStateHome(spec.Role))...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{

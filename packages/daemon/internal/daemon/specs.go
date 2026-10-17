@@ -37,9 +37,6 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
-	// slackChannels is the project's slack_channels, which the controller is told after the design
-	// gate policy (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to set.
-	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
@@ -148,14 +145,10 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part, the project's design gate policy and, when it names any, its Slack channels
-// as its addressing, the deployment instructions and the launch secrets. The operator's controller
-// is told the policy alone (`legion controller start`), since only the daemon's may have channels
-// (config.checkSlackChannels). The channels reach its environment as LEGION_SLACK_CHANNELS from the
-// runtime (sandbox.Options.ControllerSlackChannels), which compares them with the list a running
-// controller was launched under and relaunches it when they change; a spec cannot set that variable.
-// It has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing.
+// the headless part, the project's design gate policy as its addressing, the deployment
+// instructions and the launch secrets. The operator's controller is told the same policy
+// (`legion controller start`). It has no repository and no git identity: the controller works
+// Dispatch, never a checkout, and commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -165,9 +158,6 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 		return runtime.SpawnSpec{}, err
 	}
 	addressing := DesignGateFragment(s.designGate)
-	if len(s.slackChannels) > 0 {
-		addressing += " " + SlackChannelsFragment(s.slackChannels)
-	}
 	return runtime.SpawnSpec{
 		Env:     map[string]string{},
 		Secrets: maps.Clone(s.secrets),
@@ -219,20 +209,6 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 // (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
-}
-
-// SlackChannelsFragment names the project's Slack channels, the list the controller answers
-// mentions from: its plugin subscribes to each one's mention topic itself, while the session holds
-// the controller role, so the model subscribes to nothing. What the controller does with a mention,
-// and with a delivery from a channel the list does not name, is the skill's.
-func SlackChannelsFragment(channels []string) string {
-	named := make([]string, 0, len(channels))
-	for _, channel := range channels {
-		named = append(named, "`"+channel+"`")
-	}
-	return "Slack channels: " + strings.Join(named, ", ") +
-		": your session hears each one's app mentions while it holds the controller role; answer each in its thread, " +
-		"and nothing from any other channel (skill://legion-controller/references/slack-mentions.md)."
 }
 
 // MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.

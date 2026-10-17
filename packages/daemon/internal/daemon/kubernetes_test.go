@@ -772,28 +772,6 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	}
 }
 
-// sandboxOptions hands the runtime the project's slack_channels, which it tells the controller it
-// launches as LEGION_SLACK_CHANNELS and compares with the list a running controller was launched
-// under (sandbox's address record), so a changed list relaunches it; no channel is no list.
-func TestSandboxOptionsCarryTheProjectsSlackChannels(t *testing.T) {
-	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	project := cfg.Projects[cfg.Project]
-	project.SlackChannels = []string{"C00000000", "G00000001"}
-	cfg.Projects = map[string]config.Project{cfg.Project: project}
-	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := []string{"C00000000", "G00000001"}; !slices.Equal(opts.ControllerSlackChannels, want) {
-		t.Fatalf("ControllerSlackChannels = %q, want %q", opts.ControllerSlackChannels, want)
-	}
-	project.SlackChannels = nil
-	cfg.Projects[cfg.Project] = project
-	if opts, _ = sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger()); len(opts.ControllerSlackChannels) != 0 {
-		t.Fatalf("ControllerSlackChannels = %q with no channel, want none", opts.ControllerSlackChannels)
-	}
-}
-
 // No credential material — no key, no launcher credential, no bearer, no ServiceAccount token —
 // ever reaches a pod or a launch secret: the daemon's login reads its own token from token_file and
 // holds the key it wins only in the *agentsecrets.Client's process memory, which sandbox.Options
