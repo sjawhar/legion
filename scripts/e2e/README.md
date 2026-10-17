@@ -529,19 +529,38 @@ each on its own pair with nothing shared; a fourth needs the admitted range wide
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
+LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_POD_REACHABILITY=aws-private-ip \
+LEGION_E2E_MODEL_ROUTE=gateway \
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
+LEGION_E2E_STORAGE_CLASS=gp2 \
+LEGION_E2E_SESSION_DB_PORT=<port> \
+  bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
+
+# A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway:
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
+LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account \
+LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+LEGION_E2E_POD_REACHABILITY=bridge \
+LEGION_E2E_MODEL_ROUTE=key-file \
+LEGION_E2E_STORAGE_CLASS=standard-rwo \
 LEGION_E2E_SESSION_DB_PORT=<port> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 ```
 
-**Devbox only, against the production cluster; CI compiles the harness (`go vet -tags e2e ./...`
+**Devbox only, against a real cluster; CI compiles the harness (`go vet -tags e2e ./...`
 in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
-Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
-needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
+Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. Two pairs of
+explicit inputs — never auto-detected from one another or from each other — pick the cluster's
+shape: `LEGION_E2E_POD_REACHABILITY` (`aws-private-ip`, today's shape, or `bridge`, for a cluster
+whose pods cannot reach the devbox at all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge))
+and `LEGION_E2E_MODEL_ROUTE` (`gateway`, today's shape, or `key-file`, for a cluster with no model
+gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
 `diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
-and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
+`aws` only under `LEGION_E2E_POD_REACHABILITY=aws-private-ip` (the runtime kubeconfig's `aws eks
+get-token`), and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
 YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
@@ -560,43 +579,104 @@ published `@sjawhar/pi-legion@9.6.1` by exact version, which the daemon-rendered
 resolves to `@sjawhar/pi-legion@9.6.1` for `bun add` and bun fetches from the registry inside the
 pod.
 
-Every pod carries the operator route's pod,
-[`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
-own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, one projected token for
-the model gateway's audience, and a ConfigMap holding the route's `models.yml` (anthropic through
-the operator's model gateway, `LEGION_E2E_MODEL_GATEWAY_URL`, keyed by that token) and
-`overlay.yml` (every role Legion's prompts reach, `enabledModels` holding each session to
-anthropic, and each provider a pod could reach without the gateway disabled). Legion holds
-none of it. Before the harness runs, the script creates the run's own copy of that ConfigMap as the
-operator, `legion-operator-route-<project>`, labelled with the run's project, its `models.yml` with
-`LEGION_E2E_MODEL_GATEWAY_URL` put in place of the route's `${MODEL_BASE_URL}`
-placeholder; the harness points the pods at it, so another run in the namespace can neither see nor
-delete this one's route. The harness loads the run's own copy of the route's `pod.yml`, with
-`LEGION_E2E_MODEL_GATEWAY_AUDIENCE` put in place of its `${MODEL_TOKEN_AUDIENCE}` placeholder, so
-the audience is the operator's and `operator-token` checks the token against it. It
-also creates the run's providers Secret,
-`legion-<project>-providers`, with one key (`stage4a`, a random value no model route reads) that the
-harness's `provider_keys` hands every agent as `STAGE4A_PROVIDER_KEY`, so every pod and the probe run
-with the providers Secret mounted, as a deployment with `provider_keys` does, and a second key,
-`stage4a_sessions`, the scratch session database's URL, which only `postgres-resume`'s runtime
-projects (`session_dsn_secret`).
+Every pod carries the operator route's pod fixture for the chosen `LEGION_E2E_MODEL_ROUTE`, read
+through the daemon's own loader (`config.ReadPodFile`): ServiceAccount `legion-worker`, and a
+ConfigMap holding the route's `models.yml` and `overlay.yml` (every role Legion's prompts reach,
+`enabledModels` holding each session to anthropic, and each provider a pod could reach without the
+route disabled). Legion holds none of it. Before the harness runs, the script creates the run's own
+copy of that ConfigMap as the operator, `legion-operator-route-<project>`, labelled with the run's
+project, so another run in the namespace can neither see nor delete this one's route.
+
+- **`gateway`** ([`pod.yml`](../../deploy/kubernetes/operator-route/pod.yml),
+  [`models.yml`](../../deploy/kubernetes/operator-route/models.yml)): one projected token for the
+  model gateway's audience; `models.yml`'s `baseUrl` gets `LEGION_E2E_MODEL_GATEWAY_URL` in place
+  of its `${MODEL_BASE_URL}` placeholder, and `pod.yml`'s token audience gets
+  `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` in place of its `${MODEL_TOKEN_AUDIENCE}` placeholder, so
+  `operator-token` checks the token against it.
+- **`key-file`** ([`pod-key-file.yml`](../../deploy/kubernetes/operator-route/pod-key-file.yml),
+  [`models-key-file.yml`](../../deploy/kubernetes/operator-route/models-key-file.yml)): no
+  projected token at all (`operator-token` reports `SKIPPED-BLOCKED`: there is nothing for it to
+  read); `models.yml`'s `baseUrl` is Anthropic's own endpoint directly, keyed by `ANTHROPIC_API_KEY`
+  read back from a `provider_keys` entry the shim exported into the agent's environment. Neither
+  `LEGION_E2E_MODEL_GATEWAY_URL` nor `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` is read in this mode. No
+  check anywhere in the harness makes a real model round trip (the pods run a stub agent, decision
+  7; Legion's own image probe makes none either), so the script generates `ANTHROPIC_API_KEY` as a
+  local, never-printed placeholder — this proves the key-file plumbing (`provider_keys`, the shim's
+  export, `models.yml`'s command reading it back), never a working Anthropic credential.
+
+It also creates the run's providers Secret, `legion-<project>-providers`, with one key (`stage4a`,
+a random value no model route reads) that the harness's `provider_keys` hands every agent as
+`STAGE4A_PROVIDER_KEY`, so every pod and the probe run with the providers Secret mounted, as a
+deployment with `provider_keys` does; a second key, `stage4a_sessions`, the scratch session
+database's URL, which only `postgres-resume`'s runtime projects (`session_dsn_secret`); and, under
+`LEGION_E2E_MODEL_ROUTE=key-file`, the placeholder `ANTHROPIC_API_KEY` key above.
 
 For `postgres-resume` the script starts a throwaway Postgres (the pinned image CI tests against) in
-a docker container on the devbox's private address at `LEGION_E2E_SESSION_DB_PORT`, which pods reach
-as they reach the worker stream, and removes it on every exit. Its password is the run's own, reaches
-docker through an owner-only env file, and the URL is written only to an owner-only file the harness
-and the providers Secret read; neither is printed.
+a docker container on the devbox, bound to the devbox's private address under
+`LEGION_E2E_POD_REACHABILITY=aws-private-ip` or to loopback behind the bridge under `=bridge`, at
+`LEGION_E2E_SESSION_DB_PORT`, which pods reach as they reach the worker stream, and removes it on
+every exit. Its password is the run's own, reaches docker through an owner-only env file, and the
+URL (with the host every pod dials, not the devbox's own bind address) is written only to an
+owner-only file the harness and the providers Secret read; neither is printed.
+
+### The bridge (`LEGION_E2E_POD_REACHABILITY=bridge`)
+
+GKE's pods have no route to the devbox at all: no tailnet bridge, no routable private address
+(INFRA's 2026-10-17 measurement: the devbox's tailnet address timed out from a `legion` pod, which
+could reach only in-cluster Services). [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh) stands in for
+that reachability with a reverse tunnel, entirely of the run's own:
+
+1. **`begin bridge`**, right after `begin snapshot` (so a leaked bridge object shows up in
+   `namespace-clean`'s before/after diff even if its own teardown fails) and before
+   `begin session-db`: the operator context creates one pod and one ClusterIP Service, both named
+   `bridge-<project>` and labelled `legion.dev/project=<project>`, running
+   `mirror.gcr.io/jpillora/chisel` (pinned by digest) as a reverse-tunnel server — non-root,
+   read-only root filesystem, every capability dropped, tolerating the `legion` pool's taint
+   without requiring it, and carrying the same eviction-protection annotation pair every Legion
+   issue pod does (`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`,
+   `karpenter.sh/do-not-disrupt: "true"`) — without them the bridge pod, alone on its own node, is
+   fair game for GKE's node consolidation mid-run. Only the chisel server's two *data* ports (the
+   worker stream's and the session database's) are on the Service; its control port is never
+   exposed by the Service or the cluster network, reachable only through `kubectl port-forward`
+   under the operator context.
+2. The devbox holds a `kubectl port-forward` to the bridge pod's control port, and a `chisel`
+   client — built from pinned source (`go install github.com/jpillora/chisel@v1.11.8`) into the
+   run's scratch directory, never installed system-wide — asks the server, over that port-forward,
+   to open the two reverse listeners that proxy back to 127.0.0.1 on the devbox, where the worker
+   stream listener and the scratch Postgres already bind. The harness waits for both listeners'
+   `tun: proxy#R:<port>=>` lines in the bridge pod's log before any pod under test is started.
+3. **A dropped `kubectl port-forward` is recovered, not fatal**: the watchdog that polls both
+   processes every 5s restarts a dead port-forward itself, on the same local port, so the chisel
+   client's own bounded reconnect (`--max-retry-count 30 --max-retry-interval 2s`, finite rather
+   than chisel's default of forever) can pick the tunnel back up without reconfiguring anything.
+   Only two things still send the script itself `SIGTERM`, failing the run loudly: a port-forward
+   that cannot be restarted within 60s of dropping, or the chisel client exiting because its own
+   retry budget is exhausted.
+4. Pods dial `tcp://bridge-<project>.legion.svc.cluster.local:<port>` for the worker stream and the
+   same host at the session-database port — the advertised host
+   (`LEGION_E2E_STREAM_ADVERTISE_HOST`, internal to the harness) the Go runtime hands every launch,
+   distinct from the host its own listener binds (`LEGION_E2E_STREAM_HOST`, loopback in this mode).
+5. **Teardown** (`bridge_stop`, the first step of `teardown_sequence`, the one function both a
+   passing run's own flow and `cleanup`'s fallback call, so it always runs before `namespace_clean`
+   takes its snapshot): stops the watchdog, the chisel client and the port-forward, then deletes
+   the bridge's pod and Service by their one exact name — never by broader selection, the same
+   discipline [`lib/namespace-rig.sh`](#libnamespace-rigsh) holds every other object the run
+   creates to.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (an IAM role mapped to group `legion-daemon`) |
+| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity |
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
+| `LEGION_E2E_RUNTIME_IDENTITY_KIND` | required | `aws-iam-role` (an assumed IAM role mapped to RBAC group `legion-daemon`, EKS's shape) or `kubernetes-service-account` (a plain `system:serviceaccount:<namespace>:legion-daemon` with no such mapping, GKE's shape); `identity`'s assertions and a `network path` failure's diagnostics branch on it |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
-| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
-| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
-| `LEGION_E2E_WORKER_STREAM_PORT` | `13373` | the port the harness binds for the worker stream on the devbox's private address; the same name and default Stage 4b reads for its own worker-stream port, so two runs — two Stage 4a's, or a Stage 4a and a Stage 4b — collide on it by default and need distinct values to run at once |
-| `LEGION_E2E_SESSION_DB_PORT` | required | a port on the devbox's private address that the devbox's security group admits from the Legion nodes, as it admits the worker-stream port, where the scratch session database listens; refused when it is not a number, is the worker stream's port, or is taken |
+| `LEGION_E2E_POD_REACHABILITY` | required | `aws-private-ip` (the devbox's private address, directly routable) or `bridge` (a reverse tunnel through a scratch pod+Service of the run's own, for a cluster whose pods cannot reach the devbox at all; [above](#the-bridge-legion_e2e_pod_reachabilitybridge)) |
+| `LEGION_E2E_MODEL_ROUTE` | required | `gateway` (a model gateway, today's shape) or `key-file` (no gateway: `ANTHROPIC_API_KEY` reaches the agent as a provider key) |
+| `LEGION_E2E_STORAGE_CLASS` | required | the issue volumes' StorageClass — AWS's `gp2`, GKE's `standard-rwo`, or whatever else the cluster under test defaults to; the cluster has no default of its own to fall back on |
+| `LEGION_E2E_MODEL_GATEWAY_URL` | required under `LEGION_E2E_MODEL_ROUTE=gateway`, unused under `key-file` | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required under `LEGION_E2E_MODEL_ROUTE=gateway`, unused under `key-file` | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
+| `LEGION_E2E_WORKER_STREAM_PORT` | `13373` | the port the harness binds for the worker stream; the same name and default Stage 4b reads for its own worker-stream port, so two runs — two Stage 4a's, or a Stage 4a and a Stage 4b — collide on it by default and need distinct values to run at once |
+| `LEGION_E2E_SESSION_DB_PORT` | required | a port the scratch session database listens on, reachable everywhere the worker-stream port is (under `aws-private-ip`, one the devbox's security group admits from the Legion nodes; under `bridge`, forwarded through the same tunnel); refused when it is not a number, is the worker stream's port, or is taken |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-launcher`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
 | `LEGION_E2E_AGENT_SECRETS_URL` | unset (the `secrets-*` checks report `SKIPPED-BLOCKED`) | the agent-secrets broker the run enrolls pods with — the **production** broker (Plan D, the broker design's AWS deployment plan), never a development slot (below) |
@@ -622,20 +702,28 @@ worker pod on a development slot" means here.
 Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
 the harness's own reads use the restricted one; the admin context only runs what an operator does
 beside the daemon — `kubectl exec`, PVC phases, the pod uid cross-checks, a Secret's boot token
-(hashed in process, never printed), node and EC2NodeClass reads for a network failure, and the
-namespace list. Every evidence line names which one observed it (`[runtime]`, `[operator]`, or
-`[harness]` for the listener and its resolver).
+(hashed in process, never printed), the namespace list, and, on a network-path failure, the
+diagnostic that identity kind calls for: under `aws-iam-role`, the node the pod ran on and its
+EC2NodeClass's security groups (Karpenter's CRD, meaningless off AWS); under
+`kubernetes-service-account` (GKE), the reverse-tunnel bridge's own processes and pod log instead
+— [`lib/bridge-tunnel.sh`](#libbridge-tunnelsh)'s `chisel` client and `kubectl port-forward`,
+since there is no node mapping to read. Every evidence line names which one observed it
+(`[runtime]`, `[operator]`, or `[harness]` for the listener and its resolver).
 
-The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata, never `0.0.0.0`) and port `LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — within the
-devbox's admitted range ([Port admission](#port-admission)) — and refuses
+The harness hosts the worker stream itself, bound at `LEGION_E2E_STREAM_HOST` (the devbox's
+private address from instance metadata under `aws-private-ip`, or loopback under `bridge`) and
+advertised to pods at `LEGION_E2E_STREAM_ADVERTISE_HOST` (the same address under
+`aws-private-ip`; the bridge's ClusterIP Service DNS name under `bridge`) and port
+`LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — within the devbox's admitted range
+([Port admission](#port-admission)) under `aws-private-ip`; the bridge's own tunnel in `bridge`
+mode, so no devbox port needs admitting from the cluster — and refuses
 to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
 pod's uid to a marker file in the issue volume's sessions directory, the file a resume names, and
 sleeps, so the runtime's whole path runs with no model and no provider key. The runtime's settings:
 a 5-minute boot timeout, 3 registration intervals, a 15-second termination grace, a 10-second
-probe interval, storage class `gp2`, a 20Gi issue volume, the daemon's default reservations with
+probe interval, storage class `LEGION_E2E_STORAGE_CLASS` (AWS's `gp2`, GKE's `standard-rwo`), a 20Gi issue volume, the daemon's default reservations with
 the implementer's and tester's cpu and memory and the reviewer's memory overridden (`liveOverrides`,
 so the root's pod carries a reservation from each path the loader has and sums to 2.5 CPU and
 6 GiB), and no scheduling beyond the Legion pool the runtime selects: no pod asks for or keeps off
@@ -645,7 +733,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 
 | check | what it does and requires |
 | :--- | :--- |
-| `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
+| `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; under `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role` a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`, and under `=kubernetes-service-account` the bare `system:serviceaccount:<namespace>:legion-daemon` identity with no such mapping; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach the cluster's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
 | `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
 | `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
 | `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `daemon-api-version` equal to the daemon's contract, `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod) and `capabilities=checked` (every image-site capability of the list every worker is held to present, the table printed before the OK line), and the report carries the `model-fallback=<on|off>` mark the pod read; the probe pod, read while the probe runs, carries one container whose cpu and memory request equals its limit and equals the probe's own reservation (`probeReservation()`, 250m and 1Gi over a 5Gi disk bound and a 1Gi disk request, the one the daemon's `imageProbe` hands it and no role's share), `status.qosClass` `Guaranteed` and no affinity, and the same pod with its cpu limit raised past its request is refused by the reservation rule naming the container (the negative control); and the probe Sandbox is deleted |
@@ -654,7 +742,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned locator's `podUid`, role container and process incarnation, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
 | `resources` | every container of the root's pod, the two init containers included, reserves cpu and memory with request equal to limit and equal to what the rig configured for its role (`liveResources`: the implementer's and tester's both overridden, the reviewer's memory overridden, the rest `config.DefaultResources()`; the init containers carry the root's own reservation, the role whose Spawn created the pod), so the pod is `Guaranteed`; carries the ephemeral-storage limit and request configured for its role, the request under the limit (the tester's 30Gi limit from `liveOverrides`, every other role's bound the daemon's default — the node-disk bound between pods of unrelated trees, which QoS does not read); and it carries no affinity; inside the pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal` is within 3 % of Σ memory of the role containers, as gVisor sizes the sandbox from the pod cgroup (a gVisor pod exposes no cgroup files, so each container's values are read from the API) |
-| `operator-token` | the root pod runs as the fixture's ServiceAccount with `automountServiceAccountToken: false` and no API server token; the fixture's one projected token, at its mount, is a JWT for the fixture's audience, subject the pod's ServiceAccount, and exactly the fixture's lifetime, read into the harness's memory and only its claims printed |
+| `operator-token` | under `LEGION_E2E_MODEL_ROUTE=gateway`: the root pod runs as the fixture's ServiceAccount with `automountServiceAccountToken: false` and no API server token; the fixture's one projected token, at its mount, is a JWT for the fixture's audience, subject the pod's ServiceAccount, and exactly the fixture's lifetime, read into the harness's memory and only its claims printed. Under `=key-file`: `SKIPPED-BLOCKED` — `pod-key-file.yml` mounts no projected token, there being no gateway to authenticate to |
 | `pod-baseline` | the stub agent the root's shim started (read from `/proc/<pid>/environ`) has `PI_CONFIG_FILES` = the pod baseline's turn-scoping overlay on the state volume, then the operator's; `PI_CONFIG_DIR=.omp`, `OMP_SESSION_STORAGE=file`, `XDG_STATE_HOME=/home/legion/.local/state/architect` (the root claim's role: a state home per role container, so Oh My Pi's browser broker lock, an abstract unix socket named from a path under the state root, is one name per container of the pod rather than one across it), and the operator's other variables; neither `OTEL_SDK_DISABLED` nor `PI_AUTO_QA` (no baseline sets them); `/home/legion/.local/state/architect/omp/profiles/legion` is a directory in the root's container (the shim makes it before Oh My Pi starts; Oh My Pi reads the state home only where it already exists); the shim itself (the agent's parent `legion worker-shim`; the container's PID 1 is its `legion launcher`) has the operator's `PI_CONFIG_FILES` alone; the overlay is mode `444`; and the image's `omp config get`, run under the agent's environment in a repository whose `.omp/config.yml` sets both, reads `compaction.remoteEndpoint` as the repository set it and `bash.autoBackground.enabled` as `false`, and with an operator overlay setting the endpoint named after the agent's overlays reads the operator's endpoint |
 | `provider-key` | the stub agent's environment (`/proc/<pid>/environ`) carries `STAGE4A_PROVIDER_KEY` equal to the run's providers Secret's `stage4a` key, read back through the admin context and never printed; the shim's (the agent's parent) carries no such variable |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
@@ -693,7 +781,7 @@ deletes by the same exact label any Secret or PVC still left after 90
 listings, and runs `namespace-clean` when the harness did not get to it. Nothing outside `legion`
 is touched.
 
-What the run had to learn about production:
+What the run had to learn about production (AWS, `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role`):
 
 - **Nothing ties a pod to a node.** Every issue pod owns its volume and carries no affinity, so the
   scheduler bin-packs it wherever the pool has room for its reservation, and Karpenter adds a node
@@ -704,6 +792,83 @@ What the run had to learn about production:
   decides the smallest node the pool adds.
 - gVisor on production reports `4.19.0-gvisor` from `uname -r`.
 - The worker image has no `kill` binary; the exec runs the shell's builtin.
+
+What the run had to learn about GKE (`LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account`,
+a production GKE cluster the daemon deploys into), each confirmed against a real, already-running
+production issue pod as well as this run's own:
+
+- **gVisor floors a lone small Sandbox's cpu to 500m.** A single-container Sandbox (the image
+  probe, 250m configured) is admitted with its container's cpu request and limit both raised to
+  500m, request and limit together so it stays Guaranteed; every multi-container issue pod, whose
+  containers already sum well past that, is admitted at exactly its configured per-container cpu,
+  unchanged. The harness floors only the probe's expectation to match
+  (`gvisorCPUFloor`, `live_lifecycle_test.go`).
+- **Every container's ephemeral-storage limit is clamped to its request.** Confirmed on both a bare
+  debug pod and a real production pod's six role containers: all request = limit = 1Gi (the
+  configured `EphemeralStorageRequest`), though `config.DefaultResources()` and `liveOverrides` ask
+  several roles for limits of 10–30Gi. A gVisor-sandboxed pod's ephemeral storage is never
+  burstable here; the harness checks the request's value in place of the configured limit
+  (`gkeEphemeralStorageClamped`).
+- **GKE Autopilot adds its own NodeAffinity to every issue pod.** Any pod carrying
+  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` (every issue pod's annotation; the
+  image probe omits it) is given a `cloud.google.com/extended-duration-pods` NodeAffinity on
+  admission, protecting it from disruption for up to seven days. It is GKE's own addition, not a
+  pod or anti-affinity the pod spec asks for, and still admits the pod to any node whose pool
+  carries that label — the reservation rule tolerates exactly this one shape, never any other
+  affinity (`isGKEExtendedDurationAffinity`).
+- **`nproc` inside a gVisor sandbox reflects a host-vCPU presentation, not the pod's own cgroup
+  quota.** Two debug pods summing to 2.5 and to exactly 3.0 cores (one container each at 1 and 2
+  cores) both reported `nproc=2` on an 8-vCPU node with 7.91 allocatable — far more than either
+  sum, ruling out node capacity — a known gap (kubernetes/kubernetes#91665). The pod's cgroup cpu
+  quota, read from every container's identically-presented `/sys/fs/cgroup/cpu/cpu.cfs_quota_us`
+  and `cpu.cfs_period_us` (one gVisor sandbox covers the whole pod), tracked the configured sum
+  exactly in both debug pods and is what `resources` now asserts on GKE; `nproc` is logged, never
+  asserted, there. AWS keeps the original `nproc` assertion, proven reliable there.
+- **A pod's own node is worth reading as a fact in its own right.** `resources` reads the pod's
+  node's allocatable cpu and fails loudly, by name, if it is under the pod's own summed
+  reservation — a Node-Auto-Provisioning shortfall, never something the reservation check above
+  should quietly explain away.
+- **The harness's own direct Postgres connection needs the bind host, not the advertise host.**
+  `postgres-resume`'s `writeSession` dials the scratch database directly from the devbox; under
+  `bridge` mode the pod-facing advertise host is the bridge's cluster-DNS name, which the devbox
+  itself cannot resolve. A second DSN file, at the bind host (loopback under `bridge`), is written
+  for the harness alone; pods and the providers Secret still get the original.
+- **This script's own `set -e` treats `kill`, `wait` and `kubectl get` succeeding at exactly what
+  they were asked to do as a fatal error, if nothing guards them.** The actual cause of every
+  "every `CHECK` passed, then the script exits before teardown runs at all" failure this lane hit
+  (confirmed by `strace -f -e trace=kill,tkill,tgkill,execve`, after a GKE API-consistency theory,
+  this devbox's own tooling, a watchdog race, and a shared process group were each ruled out by
+  direct evidence first): three bare statements in `bridge_stop` — `wait PID` for a process it had
+  just killed (which reports 128+15=143, bash's own encoding for "killed by that signal"), a bare
+  `kubectl get` on an object that has just, correctly, become `NotFound`, and `kill PID` on a
+  process already dead (an empty-but-expected race between the watchdog's own exit and
+  `bridge_stop`'s cleanup) — each returns a nonzero status at exactly the moment its own job
+  finishes successfully, and `set -e` ends the whole script right there, having nothing to do with
+  an external signal at all. Every one of those three needs its own `|| true`; a guard around only
+  some of them still fails the same way, intermittently, since which one fires first depends on
+  timing. Confirmed in isolation (not just live) with a six-line repro before the final fix: a bare
+  `kill $pid; wait $pid` reliably exits 143 printing nothing after it; the same two lines each
+  followed by `|| true` run to completion.
+- **A dropped `kubectl port-forward` does not have to end the run.** Two full-length runs died
+  outright to a transient drop during this lane's work. `kubectl port-forward` never retries
+  itself, but nothing about a drop invalidates the chisel client's tunnel state (its auth, its
+  reverse listeners) if the port-forward comes back on the same local port — so the bridge's
+  watchdog now restarts a dropped port-forward itself (confirmed live: killing the process mid-run
+  let it recover and the run continue), only failing the run if a restart can't land within 60s,
+  or the chisel client's own bounded reconnect (`--max-retry-count 30 --max-retry-interval 2s`,
+  not chisel's default of forever) gives up first.
+- **A lone pod on its own node is fair game for node consolidation.** A bridge pod without the
+  eviction-protection annotations every issue pod carries ran fine for ten minutes, then vanished
+  outright mid-run (not a graceful shutdown: its chisel client's log shows the connection refused,
+  not closed) — consistent with GKE reclaiming the underutilized Node-Auto-Provisioned node it was
+  alone on. The watchdog's port-forward recovery is the right answer to a dropped connection, never
+  to the pod itself being gone (every restart attempt correctly failed `NotFound` once it was); the
+  actual fix is the same `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` and
+  `karpenter.sh/do-not-disrupt: "true"` pair every issue pod already carries, now on the bridge pod
+  too.
+- **This cluster's `autopilot-default-resources-mutator` admission webhook adjusts the bridge
+  pod's cpu on create**, and bringing up the fresh Node-Auto-Provisioned node it needs can take
+  close to the original 120s `Ready` wait budget; raised to 240s.
 
 ## stage4b-sandbox-tree.sh
 

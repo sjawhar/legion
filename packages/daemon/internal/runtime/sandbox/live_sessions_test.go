@@ -134,14 +134,16 @@ func (r *liveRig) agentEnviron(c *liveClaim) (map[string]string, error) {
 }
 
 // writeSession puts content in the scratch database's session table at path, last written at
-// written, as `legion sessions import` copies a session file (ompsessions.Import), through the URL
-// file the script wrote.
+// written, as `legion sessions import` copies a session file (ompsessions.Import), through the
+// URL file the script wrote for the harness's own direct use (sessionDSNLocalFile, dialable from
+// the devbox this process runs on — never sessionDSNFile, the pod-advertised address a bridge-mode
+// devbox cannot resolve; liveEnv's doc has the reasoning).
 func (r *liveRig) writeSession(path, content string, written time.Time) error {
 	ctx, cancel := context.WithTimeout(r.ctx, time.Minute)
 	defer cancel()
-	conn, err := ompsessions.Connect(ctx, r.env.sessionDSNFile)
+	conn, err := ompsessions.Connect(ctx, r.env.sessionDSNLocalFile)
 	if err != nil {
-		return fmt.Errorf("the scratch database at %s: %w", r.env.sessionDBAddress, err)
+		return fmt.Errorf("the scratch database (LEGION_E2E_SESSION_DSN_LOCAL_FILE=%s): %w", r.env.sessionDSNLocalFile, err)
 	}
 	defer conn.Close(context.Background())
 	outcome, err := ompsessions.Import(ctx, conn, path, []byte(content), written)

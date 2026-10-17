@@ -124,6 +124,17 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 	return found[0], nil
 }
 
+// operatorTokenBlocked reports why operator-token cannot run, or "" to run it: the check needs a
+// projected ServiceAccount token in the run's operator pod fixture, which LEGION_E2E_MODEL_ROUTE=
+// key-file's pod-key-file.yml carries none of (no gateway to authenticate to), unlike gateway
+// mode's pod.yml.
+func operatorTokenBlocked(r *liveRig) string {
+	if _, err := projectedToken(r.pod); err != nil {
+		return fmt.Sprintf("the operator pod fixture %s mounts no projected ServiceAccount token (%v); LEGION_E2E_MODEL_ROUTE=key-file needs none", r.env.operatorPodFile, err)
+	}
+	return ""
+}
+
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
 // podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,
 // ahead of the operator's; PI_CONFIG_DIR and OMP_SESSION_STORAGE, which the operator left unset,
