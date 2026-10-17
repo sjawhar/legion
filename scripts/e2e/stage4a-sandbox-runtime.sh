@@ -173,6 +173,15 @@ cleanup() {
   teardown
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
+  # namespace_clean's snapshot is a LIST by label, not a GET by name; on this cluster a LIST can
+  # still show an object several GETs in a row have already confirmed NotFound, for a while after
+  # a burst of deletes (five Sandboxes and the bridge pod/Service here) — confirmed live,
+  # 2026-10-17, three times: bridge_stop's own GET-based poll returned success, and teardown's own
+  # LIST-based wait gave up still seeing the same pod, both before this delay existed. A fixed
+  # settle window, not another retry loop around namespace_clean itself (shared with Stage 4b,
+  # outside this script), buys the watch cache time to catch up before the one-shot snapshot it
+  # takes is trusted.
+  sleep 20
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
   [ -n "$ok" ] || echo "stage 4a e2e: FAIL (check $check)"
