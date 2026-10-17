@@ -109,7 +109,8 @@ An issue targets one repository: its own `--repo`, else its nearest ancestor's, 
 default (set on the Settings page), else none. A repository not mapped to the issue's project is
 refused `REPO_NOT_MAPPED`, naming it. `dispatch read` prints the result as
 `Repository: owner/name (own)`, `Repository: owner/name (inherited or project default)`, or
-`Repository: none`.
+`Repository: none`. `Repository: unknown (…)` means the Dispatch server is older than repository
+fields: the read still works, and a `--repo` write there fails rather than drop the repository.
 
 Link the pull request that delivers the issue with `--external-link` when you open it; the issue page
 renders its state and checks from that link, and `dispatch read` lists it under `External links:`.
