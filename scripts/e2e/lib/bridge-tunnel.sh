@@ -172,9 +172,9 @@ bridge_stop() {
   [ -z "$bridge_portforward_pid" ] || kill "$bridge_portforward_pid" 2>/dev/null
   wait "$bridge_portforward_pid" 2>/dev/null
   if [ -n "$bridge_name" ]; then
-    op delete pod "$bridge_name" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
+    op delete pod "$bridge_name" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 ||
       echo "   [operator] could not delete bridge pod $bridge_name; it may remain"
-    op delete service "$bridge_name" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 ||
+    op delete service "$bridge_name" --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 ||
       echo "   [operator] could not delete bridge Service $bridge_name; it may remain"
   fi
 }

@@ -163,9 +163,15 @@ cleanup() {
   trap '' HUP INT TERM PIPE
   exec >&7 2>&7
   set +e
+  # bridge_stop runs first: teardown() below never deletes the bridge pod itself (it is not a
+  # Sandbox), only waits to see it gone via its generic label sweep, and deleting five real
+  # Sandboxes' many child objects first leaves the API server too busy for the bridge pod's own
+  # delete to land inside its budget (confirmed live, 2026-10-17: a full pass still failed
+  # namespace-clean on a bridge pod stuck mid-termination, gone moments later). Running it first
+  # removes the contention; namespace-clean still catches a bridge_stop that actually fails.
+  bridge_stop
   teardown
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
-  bridge_stop
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
