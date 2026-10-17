@@ -63,8 +63,8 @@ func TestDispatchPermissionsOnRealServers(t *testing.T) {
 				requireAgentStreamRelayed(t, live.conn, live.port)
 				requireWebhookRedeliveryBucket(t, live.js, live.process, live.github)
 
-				// Dispatch's own user holds no session entry: a publish to a session's frames is
-				// refused, so whoever holds its seed cannot fake a session's conversation.
+				// Dispatch's own user holds no session entry: a direct publish to a session's
+				// frames is refused.
 				frames := contracts.AgentStreamFramesSubject(dispatchSessionID)
 				require.NoError(t, live.dispatch.Publish(frames, []byte(`{"v":1,"kind":"message","seq":2}`)))
 				requireViolation(t, live.dispatch, live.dispatchErrs, `Publish to "`+frames+`"`)
