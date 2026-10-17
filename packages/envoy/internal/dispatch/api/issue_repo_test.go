@@ -190,80 +190,23 @@ func TestIssuePatchRefusesAReparentPastTheDepthCap(t *testing.T) {
 	}
 }
 
-// withoutDepthTrigger runs write with the issues_parent_depth trigger off, so a test can hold a
-// chain past the cap, or a loop, as the database held one before 0113 existed. The trigger is off
-// only inside write's transaction, so no other session ever sees it off.
-func withoutDepthTrigger(t *testing.T, database *store.Store, write string, args ...any) {
-	t.Helper()
-	ctx := context.Background()
-	tx, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin: %v", err)
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `alter table issues disable trigger issues_parent_depth`); err != nil {
-		t.Fatalf("disable issues_parent_depth: %v", err)
-	}
-	if _, err := tx.Exec(ctx, write, args...); err != nil {
-		t.Fatalf("write with issues_parent_depth off: %v", err)
-	}
-	if _, err := tx.Exec(ctx, `alter table issues enable trigger issues_parent_depth`); err != nil {
-		t.Fatalf("enable issues_parent_depth: %v", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		t.Fatalf("commit: %v", err)
-	}
-}
-
-// The issues_parent_depth trigger (migration 0113) holds the depth cap for writers that skip the
-// handlers' check, such as an earlier release during a rolling deploy. A handler that ever reaches
-// it answers as its own check does: 409 PARENT_INPUT with the trigger's reason.
-func TestDepthTriggerRefusalAnswersAsParentInput(t *testing.T) {
-	_, database := newTestHandlerWithStore(t)
-	ctx := context.Background()
-	if _, err := database.Pool.Exec(ctx, `
-		insert into projects (key, name) values ('TRIG', 'Trigger');
-		insert into issues (key, project_key, number, title, created_by, rank)
-		values ('TRIG-1', 'TRIG', 1, 'Root', '{"kind":"user","id":"alice"}', '00000001')
-	`); err != nil {
-		t.Fatalf("seed TRIG-1: %v", err)
-	}
-	var refusal error
-	for n := 2; n <= 34 && refusal == nil; n++ {
-		_, refusal = database.Pool.Exec(ctx, `
-			insert into issues (key, project_key, number, title, parent_key, created_by, rank)
-			values ('TRIG-' || $1::int, 'TRIG', $1::int, 'Link', 'TRIG-' || ($1::int - 1), '{"kind":"user","id":"alice"}', lpad($1::int::text, 8, '0'))
-		`, n)
-		if refusal != nil && n != 34 {
-			t.Fatalf("insert TRIG-%d, %d links down: %v", n, n-1, refusal)
-		}
-	}
-	if refusal == nil {
-		t.Fatal("the trigger let TRIG-34 sit 33 links below its root")
-	}
-	recorder := httptest.NewRecorder()
-	(&server{}).writeHandlerError(recorder, fmt.Errorf("create TRIG-34: %w", refusal))
-	body := recorder.Body.String()
-	if recorder.Code != http.StatusConflict || !strings.Contains(body, `"code":"PARENT_INPUT"`) || !strings.Contains(body, "TRIG-34 under TRIG-33 would put TRIG-34 more than 32 links below its root") {
-		t.Fatalf("the trigger's refusal answered %d %s, want 409 PARENT_INPUT with its reason", recorder.Code, body)
-	}
-}
-
 // A parent already past the cap is past the walk's bound too, so the refusal says "more than 32
 // links" rather than the bound's number. An earlier release's API could build such a chain;
-// migration 0113 refuses to apply while one exists, and its trigger refuses every write that would
-// make one, so this test writes its chain with the trigger off.
+// migration 0113 refuses to apply while one exists, so after it only a direct database write, or an
+// earlier release left serving against the rollout rule, makes one. This test writes one directly.
 func TestIssueParentRefusalPastTheCapSaysMoreThan32Links(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "LEG", "name": "Legacy"}, "alice")
-	withoutDepthTrigger(t, database, `
+	if _, err := database.Pool.Exec(context.Background(), `
 		insert into issues (key, project_key, number, title, parent_key, created_by, rank)
 		select 'LEG-' || n, 'LEG', n, 'Legacy ' || n, case when n = 1 then null else 'LEG-' || (n - 1) end,
 		       '{"kind":"user","id":"alice"}', lpad(n::text, 8, '0')
 		from generate_series(1, 41) n
 		order by n;
 		update projects set next_number = 42 where key = 'LEG'
-	`)
+	`); err != nil {
+		t.Fatalf("insert a 41-issue chain: %v", err)
+	}
 	loose := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "LEG", "title": "Loose", "force": true}, "alice"))
 	for name, response := range map[string]*httptest.ResponseRecorder{
 		"create under LEG-41, 40 links down":     dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "LEG", "title": "Under", "parent": "LEG-41", "force": true}, "alice"),
@@ -278,22 +221,24 @@ func TestIssueParentRefusalPastTheCapSaysMoreThan32Links(t *testing.T) {
 
 // The repository walk stops at the depth cap, so a list costs at most parentDepthCap+1 steps per
 // issue however deep a chain is. A chain past the cap fails its issues' reads by name, never giving
-// the project's default, and fails them fast. Migration 0113 refuses to apply over such a chain and
-// its trigger refuses every write that would make one, so this test writes its chain with the
-// trigger off.
+// the project's default, and fails them fast. An earlier release's API could build one; migration
+// 0113 refuses to apply while one exists, so after it only a direct database write, or an earlier
+// release left serving against the rollout rule, makes one. This test writes one directly.
 func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	ctx := context.Background()
 	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "DEEP", "name": "Deep"}, "alice")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "DEEP", "default": true}, "alice")
 	const length = 2000 // DEEP-1 is the root; DEEP-n is n-1 links below it
-	withoutDepthTrigger(t, database, `
+	if _, err := database.Pool.Exec(ctx, `
 		insert into issues (key, project_key, number, title, parent_key, created_by, rank)
 		select 'DEEP-' || n, 'DEEP', n, 'Deep ' || n, case when n = 1 then null else 'DEEP-' || (n - 1) end,
 		       '{"kind":"user","id":"alice"}', lpad(n::text, 8, '0')
 		from generate_series(1, $1::int) n
 		order by n
-	`, length)
+	`, length); err != nil {
+		t.Fatalf("insert a %d-issue chain: %v", length, err)
+	}
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
 		t.Fatalf("begin: %v", err)
@@ -339,16 +284,17 @@ func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
 	t.Logf("listed DEEP (refused) in %s", time.Since(started))
 }
 
-// A parent chain that loops has no answer: the read fails loudly rather than giving the project's
-// default. No API write makes a loop and the trigger refuses every write that would, so this test
-// writes its loop with the trigger off.
+// A parent chain that loops (which no API write can make) has no answer: the read fails loudly
+// rather than giving the project's default.
 func TestIssueRepoRefusesToResolveALoopedParentChain(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "CORE", "name": "Core"}, "alice")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE", "default": true}, "alice")
 	top := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Top"}, "alice"))
 	below := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Below", "parent": top.Key, "force": true}, "alice"))
-	withoutDepthTrigger(t, database, `update issues set parent_key = $1 where key = $2`, below.Key, top.Key)
+	if _, err := database.Pool.Exec(context.Background(), `update issues set parent_key = $1 where key = $2`, below.Key, top.Key); err != nil {
+		t.Fatalf("loop the chain: %v", err)
+	}
 	for _, target := range []string{"/api/v1/issues/" + top.Key, "/api/v1/issues?project=CORE"} {
 		if response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice"); response.Code != http.StatusInternalServerError {
 			t.Errorf("GET %s with a looped chain: status=%d body=%s, want 500", target, response.Code, response.Body.String())

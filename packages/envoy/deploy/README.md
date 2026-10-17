@@ -86,6 +86,11 @@ only the `dispatch` service. It retains the ten newest pre-deploy dumps. Its
 defaults target the devbox; set `REPO`, `COMPOSE_PROJECT`, or `BACKUPS` to run
 against another checkout, Compose project, or dump directory.
 
+Two releases of Dispatch never serve the database together here:
+`docker compose up -d --no-deps dispatch` stops and removes the old container before it starts the
+new one, which boots and migrates. A deployment that rolls Dispatch some other way must keep that
+order. Migration `0113` requires it (`../cmd/dispatch/README.md`, "Database migrations").
+
 Run it continuously in its supervised host service, or use one pass for a
 smoke check:
 

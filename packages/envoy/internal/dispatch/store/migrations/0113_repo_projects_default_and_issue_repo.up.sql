@@ -14,14 +14,19 @@
 -- counts the same issues, so the pre-deploy census refuses first.
 --
 -- It takes both tables it changes in ACCESS EXCLUSIVE before it counts, and holds them to commit,
--- so no earlier release's write commits between the count and the trigger below: a create that
--- commits while this waits for the lock is in the count. ACCESS EXCLUSIVE, not EXCLUSIVE, because
+-- so no earlier release's write commits between the count and the ALTERs: a create that commits
+-- while this waits for the lock is in the count. ACCESS EXCLUSIVE, not EXCLUSIVE, because
 -- the ALTER TABLEs below take it anyway, and taking it later would be an upgrade an old server's
 -- read-then-write transaction on issues can deadlock with (the read granted beside EXCLUSIVE, the
 -- write then queued behind it). repo_projects first, as the earlier release's mapping writes touch
 -- it alone and its one read of it outside them holds no transaction. Reads of both tables queue for
 -- as long as the count and the ALTERs take; the runner's lock_timeout (pgmigrate.LockTimeout, 5 s)
 -- bounds the wait for the lock, and fails the boot past it.
+--
+-- Only this release's API holds the cap; nothing here does. An earlier release still serving once
+-- this commits could build a chain past it again, so the earlier release stops before this one
+-- boots (cmd/dispatch/README.md, "Database migrations"). A chain built anyway, or by direct SQL,
+-- fails the reads of its issues (500) until an ancestor's parent is cleared.
 lock table repo_projects, issues in access exclusive mode;
 
 do $$
@@ -62,59 +67,3 @@ alter table issues add column repo text;
 alter table issues add constraint issues_repo_mapped_to_project
   foreign key (repo, project_key) references repo_projects (repo, project);
 create index issues_repo on issues (repo) where repo is not null;
-
--- issues_parent_depth holds the cap in the database, for every writer: this release's handlers
--- check it first (refuseParentTooDeep) and answer 409 PARENT_INPUT, and an earlier release still
--- serving during a rolling deploy, or plain SQL, is refused here. A row whose parent link would put
--- it, or the deepest issue under it, more than 32 links below its root, or that would close a parent
--- loop, is refused with check_violation and constraint issues_parent_depth, which the API answers
--- 409 PARENT_INPUT too. It runs only when the parent is set or changes. It takes the project's
--- dependency lock (api.lockProjectIssueDependencies), which this release's every parent write
--- already holds, so two parent writes of one project, at least one from an earlier release, cannot
--- each pass alone and together pass the cap: the second waits for the first and then reads its rows.
--- Each walk stops one link past the cap, so a chain already too deep or looped ends it.
-create function issues_parent_depth() returns trigger language plpgsql as $$
-declare
-	above int;
-	below int;
-	loops boolean;
-begin
-	if new.parent_key is null or (tg_op = 'UPDATE' and new.parent_key is not distinct from old.parent_key) then
-		return new;
-	end if;
-	perform pg_advisory_xact_lock(hashtext('dispatch-issue-dependencies'), hashtext(new.project_key));
-	with recursive up as (
-		select key, parent_key, 1 as depth from issues where key = new.parent_key
-		union all
-		select i.key, i.parent_key, u.depth + 1
-		from issues i join up u on i.key = u.parent_key
-		where u.depth <= 32 and u.key <> new.key
-	)
-	select coalesce(max(depth), 0), coalesce(bool_or(key = new.key), false) into above, loops from up;
-	if loops then
-		raise exception using
-			errcode = 'check_violation',
-			constraint = 'issues_parent_depth',
-			message = format('%s under %s would make a parent loop: %s is %s or under it', new.key, new.parent_key, new.parent_key, new.key);
-	end if;
-	with recursive down as (
-		select key, 0 as depth from issues where key = new.key
-		union all
-		select i.key, d.depth + 1
-		from issues i join down d on i.parent_key = d.key
-		where d.depth <= 32
-	)
-	select coalesce(max(depth), 0) into below from down;
-	if above + below > 32 then
-		raise exception using
-			errcode = 'check_violation',
-			constraint = 'issues_parent_depth',
-			message = format('%s under %s would put %s %s below its root; an issue sits at most 32 links below its root',
-				new.key, new.parent_key,
-				case when below = 0 then new.key else 'the deepest issue under ' || new.key end,
-				case when above > 32 or below > 32 then 'more than 32 links' else (above + below) || ' links' end);
-	end if;
-	return new;
-end $$;
-create trigger issues_parent_depth before insert or update of parent_key on issues
-	for each row execute function issues_parent_depth();

@@ -239,6 +239,13 @@ sizes, and any long-running transactions in the way. Run before a deploy, it is 
 that refuses, such as one counting rows a migration would rewrite, should fail the deploy before
 any server moves. Dispatch repairs rows it already holds in code, at start, for that reason.
 
+Stop the running server before you start a new version, rather than rolling one into the other
+(on Kubernetes, `strategy: Recreate`). Dispatch does not refuse to start against a schema newer
+than its own, so an older server left running keeps writing to the migrated database. Some
+releases depend on that never happening: the one that adds each issue's repository (migration
+`0113`) holds every issue to 32 links below its root in its API alone, and an issue an older server
+puts deeper fails to load until you clear an ancestor's parent.
+
 ## The HTTP API
 
 `GET /api/v1` lists every API route with its method, who may call it, and a description. The

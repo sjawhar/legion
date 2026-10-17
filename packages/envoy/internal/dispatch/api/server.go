@@ -20,7 +20,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
@@ -570,14 +569,6 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	}
 	if errors.Is(err, docs.ErrIssueClosed) {
 		writeError(w, "ISSUE_CLOSED", http.StatusConflict, err.Error())
-		return
-	}
-	// The issues_parent_depth trigger (migration 0113) holds the depth cap in the database, for
-	// writers that skip refuseParentTooDeep; a handler that ever reaches it answers as that check
-	// does.
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.ConstraintName == "issues_parent_depth" {
-		writeError(w, "PARENT_INPUT", http.StatusConflict, pgErr.Message)
 		return
 	}
 	if errors.Is(err, pgx.ErrNoRows) {

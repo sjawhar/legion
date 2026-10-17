@@ -22,10 +22,7 @@
   while any issue sits more than 32 links below its root, or in a parent loop: its census counts
   them, so the pre-deploy census refuses first, and the migration, holding `repo_projects` and
   `issues` from before its count to its commit, names up to 20 of them and the repair, `PATCH` an
-  ancestor with `{"parent": null}` on the release still running. From `0113` on, the
-  `issues_parent_depth` trigger refuses such a parent link, or a parent loop, from any writer,
-  an earlier release still serving during the deploy included; the API answers it `409
-  PARENT_INPUT`.
+  ancestor with `{"parent": null}` on the release still running.
 - The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
   Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
   unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is
@@ -406,6 +403,10 @@
 
 ### Changed
 
+- **Breaking:** deploy `0113` with no server of the earlier release running. Stop it, or scale it
+  to zero, before this release boots: a Recreate rollout, never a rolling one. Only this release's
+  API holds the depth limit, so an earlier release left serving can build a deeper chain again, and
+  every read of that chain's issues fails (500) until an ancestor's parent is set to null.
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret
