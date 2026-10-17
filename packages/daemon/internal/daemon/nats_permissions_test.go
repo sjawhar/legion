@@ -121,7 +121,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				}
 				t.Logf("server trace: the daemon published %s", strings.Join(traceSubjects(publish, inbox), ", "))
 				t.Logf("server trace: the daemon subscribed to %s", strings.Join(traceSubjects(subscribe, inbox), ", "))
-				t.Log("restarted daemon created both consumers, NAKed then acknowledged both event kinds, and received the role-lane exception without a permission refusal, using every entry of its grant")
+				t.Log("the first daemon created both consumers and the restarted one updated them, NAKed one delivery and acknowledged both event kinds, and received the role-lane exception without a permission refusal, using every entry of its grant")
 			})
 
 			// Each control removes one entry the daemon uses, and the daemon and the server then both

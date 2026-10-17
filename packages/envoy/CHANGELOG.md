@@ -405,11 +405,16 @@
      `$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>`;
      subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. A user
      still naming `daemon` is refused by this release.
-  3. Hand each daemon its own seed (`nats_daemon_nkey_seed_file`) and restart it on a Legion
-     built from this release, whose daemon takes its own reply inbox. Pair the two: an older
+  3. Hand each daemon its own seed (`nats_daemon_nkey_seed_file`) and restart it on the first
+     `legion-v` release that carries this change, whose daemon takes its own reply inbox. Pair the two: an older
      daemon under the new grant still replies on `_INBOX.` and is refused, and a new daemon
      under the old grant is refused its own inbox.
   4. Remove the restated shared user once every daemon runs on its own seed.
+
+  A daemon user written by hand (an explicit `permissions` user, `aws:NatsService`, a server
+  configuration) needs the same entries: `daemonpermissions.Grant(project)` lists them, and
+  `_INBOX_legion_daemon_<project>.>` in place of `_INBOX.>` is the one a running daemon cannot boot
+  without.
 
 - An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
   a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,

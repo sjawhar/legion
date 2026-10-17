@@ -130,12 +130,18 @@ receives everything, the daemon's replies included. What it still reaches:
   subscription receives every project's role-lane exceptions; the daemon drops the foreign ones.
 - **Delivery to subjects it may not publish to.** The server delivers a pull consumer's messages
   to the reply subject of the next-message request, which the client chooses, so the seed can have
-  the stream's messages sent to any subject, such as a role lane or `agentstream.*.control`. While
+  the stream's messages sent to a core subscriber of any subject, such as a role lane or
+  `agentstream.*.control`. On both server images the test suite runs, a reply subject under
+  `$KV.` or `$JS.API.` (a key-value write, a stream purge) took no effect when tried. While
   one of its consumer names does not exist (before the daemon's first boot, or once someone else
   deletes it), the seed can also create it as a push consumer delivering to any subject the stream
   does not itself capture. It cannot turn its existing pull consumers into push consumers; the
-  server refuses that update. Treat the daemon's seed as a credential that reads the whole stream
-  and can have its messages delivered anywhere.
+  server refuses that update.
+- **Its own project's intake.** It can update its own consumers' acknowledgement wait, delivery
+  limits or filter, stalling its project's intake until the daemon's next boot rewrites them.
+
+Treat the daemon's seed as a credential that reads the whole stream and can have its messages
+delivered to any subscriber.
 
 When `envoy-infra:gcp:NatsHub` renders this user, set its `daemonProject` field to the project
 key; that selects `core.DaemonPermissions(<project>)` instead of a host's or an explicit user's
