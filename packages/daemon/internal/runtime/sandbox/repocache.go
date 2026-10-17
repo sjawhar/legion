@@ -256,26 +256,33 @@ func nestedNames(object unstructured.Unstructured, path ...string) []string {
 // a volume being bound or an image being pulled. A cache already as it should be costs one Sandbox
 // read and one Secret read.
 func (r *Runtime) EnsureRepositoryCache(ctx context.Context, repo ghrepo.Repository) error {
+	_, err := r.ensureRepositoryCache(ctx, repo)
+	return err
+}
+
+// ensureRepositoryCache is EnsureRepositoryCache answering the cache's Sandbox as the API last
+// held it, which a launch checks the cache's Service against (awaitCacheService).
+func (r *Runtime) ensureRepositoryCache(ctx context.Context, repo ghrepo.Repository) (*sandbox, error) {
 	if repo.IsZero() {
-		return errors.New("ensure repository cache: no repository")
+		return nil, errors.New("ensure repository cache: no repository")
 	}
 	name := CacheSandboxName(r.project, repo)
 	release, err := r.lockPod(ctx, name)
 	if err != nil {
-		return fmt.Errorf("ensure the repository cache of %s: take its pod's turn: %w", repo, err)
+		return nil, fmt.Errorf("ensure the repository cache of %s: take its pod's turn: %w", repo, err)
 	}
 	defer release()
 	s, err := r.ensureCacheSandbox(ctx, name, repo)
 	if err != nil {
-		return fmt.Errorf("ensure the repository cache of %s: %w", repo, err)
+		return nil, fmt.Errorf("ensure the repository cache of %s: %w", repo, err)
 	}
 	if err := r.writeCacheSecret(ctx, s, repo); err != nil {
-		return fmt.Errorf("ensure the repository cache of %s: write its token: %w", repo, err)
+		return nil, fmt.Errorf("ensure the repository cache of %s: write its token: %w", repo, err)
 	}
 	if err := r.reconcileCachePod(ctx, s, repo); err != nil {
-		return fmt.Errorf("ensure the repository cache of %s: %w", repo, err)
+		return nil, fmt.Errorf("ensure the repository cache of %s: %w", repo, err)
 	}
-	return nil
+	return s, nil
 }
 
 // ensureCacheSandbox is the Sandbox name, read from the API: created from cacheManifest when
@@ -483,19 +490,16 @@ func (r *Runtime) cacheServiceRefusal(name string, uid types.UID) (string, bool)
 	return "", true
 }
 
-// awaitCacheService waits until repo's cache has its own Service (cacheServiceRefusal), which the
-// controller makes beside the cache's pod, before an issue pod is told the cache's address and
-// token: its fetch presents that token to whatever the Service's name reaches. Each refusal is
-// logged as it changes, and the wait fails at the boot timeout naming the Service and the last.
-func (r *Runtime) awaitCacheService(ctx context.Context, repo ghrepo.Repository) error {
-	name := CacheSandboxName(r.project, repo)
+// awaitCacheService waits until the cache Sandbox cache, as the API last held it, has its own
+// Service (cacheServiceRefusal), which the controller makes beside the cache's pod, before an
+// issue pod is told the cache's address and token: its fetch presents that token to whatever the
+// Service's name reaches. Each refusal is logged as it changes, and the wait fails at the boot
+// timeout naming the Service and the last.
+func (r *Runtime) awaitCacheService(ctx context.Context, repo ghrepo.Repository, cache *sandbox) error {
+	name := cache.Name
 	why := "is not made yet"
 	err := r.await(ctx, r.bootTimeout, "the repository cache's Service "+name, func(context.Context) (bool, error) {
-		s, err := r.storedSandbox(name)
-		if err != nil || s == nil {
-			return false, err
-		}
-		refusal, made := r.cacheServiceRefusal(name, s.UID)
+		refusal, made := r.cacheServiceRefusal(name, cache.UID)
 		if made && refusal == "" {
 			return true, nil
 		}

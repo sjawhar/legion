@@ -245,16 +245,16 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 	if err != nil {
 		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
 	}
-	if err := r.EnsureRepositoryCache(ctx, l.spec.Repository); err != nil {
+	cache, err := r.ensureRepositoryCache(ctx, l.spec.Repository)
+	if err != nil {
 		return err
 	}
-	if err := r.awaitCacheService(ctx, l.spec.Repository); err != nil {
+	if err := r.awaitCacheService(ctx, l.spec.Repository, cache); err != nil {
 		return err
 	}
-	cache := CacheSandboxName(r.project, l.spec.Repository)
-	bearer := r.cacheBearer(cache)
+	bearer := r.cacheBearer(cache.Name)
 	if bearer == "" {
-		return fmt.Errorf("the repository cache %s of %s holds no token", cache, l.spec.Repository)
+		return fmt.Errorf("the repository cache %s of %s holds no token", cache.Name, l.spec.Repository)
 	}
 	if err := r.upsertSecret(ctx, corev1.Secret{
 		ObjectMeta: r.secretMeta(s, *l, secretName(s.Name)),

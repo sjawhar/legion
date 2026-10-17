@@ -47,9 +47,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 - Daemon API contract 30 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
   repository gets a repository cache pod running the image's `legion workspace-init cache`, and
-  an issue pod's `workspace-init fetch` fills its feed from that cache while it is ready and
-  fetches only the delta from GitHub; `legion state`'s `repositories` carries each mapped
-  repository's `cache` and the `caches` of repositories no longer mapped. An image built before it
+  an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only
+  the delta from GitHub; `legion state`'s `repositories` carries each mapped repository's `cache`
+  (its `state`: `starting`, `cloning`, `ready`, `failing`, or `refused` while a Service of its
+  name is not its own) and the `caches` of repositories no longer mapped. An image built before it
   is refused by the daemon's image probe. Install this release with a `legion` built from the same
   commit.
 - Daemon API contract 29 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
