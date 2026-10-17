@@ -149,7 +149,8 @@ digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
-`deletionProtection` to `true`. `allowedNamespaces` (optional, each a DNS label) names the
+`deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
+`deletionProtectionEnabled`, which refuses a delete from the API or the console too. `allowedNamespaces` (optional, each a DNS label) names the
 Kubernetes namespaces, in the Dispatch pod's own cluster, whose pods the NetworkPolicy admits on
 port 8766; unset or empty, the policy admits no ingress at all.
 
