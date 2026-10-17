@@ -17,8 +17,8 @@ Instead:
 - `packages/envoy/infra/go.work` (`use (. ..)`) binds this module and `packages/envoy`. A go
   command run inside `packages/envoy/infra` finds it first: `go env GOWORK` there names it.
 - `go.mod` replaces `github.com/sjawhar/envoy` with `../`, so the plugin compiles the Envoy
-  packages it uses (`internal/bus`'s remote-NATS rule, and the `internal/bus` and
-  `internal/contracts` names the permission sets are built from) from this checkout.
+  packages it uses (`daemonpermissions`, `internal/bus`'s remote-NATS rule, and the
+  `internal/bus` and `internal/contracts` names the permission sets are built from) from this checkout.
 - Both being workspace modules keeps `scripts/go-third-party-notices.sh`, which ignores every
   module `go list -m` names, from listing Envoy's own packages as third-party code.
 
@@ -34,7 +34,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions`, `HostPermissions` and `DaemonPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), the error naming and version paging both share (`errors.go`), and the contract every store's tests run (`store_contract_test.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -164,11 +164,14 @@ versions. Never add the module to the root `go.work`.
   `gcp/tailnet_joined_test.go` and `gcp/data_disk_test.go` run the secret fetcher, the listener's
   seed script, the joined script and the data disk's bootcmd entry as the golden holds them, so a
   change to any of them is tested there.
-- **Permission sets.** `core/permissions.go` builds each set from names that
-  `packages/envoy/internal/bus` and `internal/contracts` export, and the plugin and the command
-  compile no other Envoy package (`go list -deps ./cmd/...`), so a change to Envoy's stores cuts no
-  plugin release. A subject Envoy's code sends that has no exported name gets one in `bus`, and
-  the code that sends it moves onto that name, so the client and its grant share one spelling.
+- **Permission sets.** `core/permissions.go` builds the listener, session and host sets from names
+  that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
+  `packages/envoy/daemonpermissions.Grant`, which builds the daemon's shared grant from those same
+  names so its real-NATS proof and the hub cannot diverge. The plugin and the command compile only
+  `daemonpermissions`, `internal/bus` and `internal/contracts` from Envoy (`go list -deps ./cmd/...`),
+  so a change to Envoy's stores cuts no plugin release. A subject Envoy's code sends that has no
+  exported name gets one in `bus`, and the code that sends it moves onto that name, so the client
+  and its grant share one spelling.
   `core/permissions_test.go` writes each set out by hand, as a check independent of those names. A
   change to a set changes every hub's rendered authorization, and so replaces every hub's VM.
 - **One source for a rendering.** What an AWS component writes into a resource and a program may
