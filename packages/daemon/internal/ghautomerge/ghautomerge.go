@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/wait"
@@ -628,8 +629,9 @@ func (t *timelineItem) removalReason() string {
 }
 
 // failingRuns is each check that failed on the commit the merge queue built for a queue removal,
-// named with how it ended and its run: a check run that completed with any conclusion but success,
-// neutral or skipped, and a commit status in failure or error.
+// named with how it ended and its run: a check run that completed with a conclusion Legion's rule
+// for a required check counts as failed (classify.RunResult), and a commit status in failure or
+// error.
 func (t *timelineItem) failingRuns() []string {
 	if t.BeforeCommit == nil || t.BeforeCommit.StatusCheckRollup == nil {
 		return nil
@@ -637,13 +639,16 @@ func (t *timelineItem) failingRuns() []string {
 	var runs []string
 	for _, check := range t.BeforeCommit.StatusCheckRollup.Contexts.Nodes {
 		switch {
-		case check.Type == "CheckRun" && check.Status == "COMPLETED" && check.Conclusion != "" &&
-			check.Conclusion != "SUCCESS" && check.Conclusion != "NEUTRAL" && check.Conclusion != "SKIPPED":
+		case check.Type == "CheckRun":
+			result := classify.RunResult(strings.ToLower(check.Status), strings.ToLower(check.Conclusion))
+			if result == classify.Pending || result == classify.Success || result == "" {
+				continue
+			}
 			url := check.DetailsURL
 			if check.CheckSuite != nil && check.CheckSuite.WorkflowRun != nil && check.CheckSuite.WorkflowRun.URL != "" {
 				url = check.CheckSuite.WorkflowRun.URL
 			}
-			runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Name, strings.ToLower(check.Conclusion), url))
+			runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Name, result, url))
 		case check.Type == "StatusContext" && (check.State == "FAILURE" || check.State == "ERROR"):
 			runs = append(runs, fmt.Sprintf("%s (%s, %s)", check.Context, strings.ToLower(check.State), check.TargetURL))
 		}
