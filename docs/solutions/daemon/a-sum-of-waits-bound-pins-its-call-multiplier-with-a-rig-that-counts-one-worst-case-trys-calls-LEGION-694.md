@@ -29,8 +29,8 @@ related_issues:
   every per-step deadline.
 - Expect the rig's count to exceed a plan's estimate: the plan guessed one call per role write and
   bind and about 50 minutes at the defaults; the rig measured 46 calls for one replacing try and
-  the honest multiplier is 71 (17 per try, 9 per launcher role × 6 roles), 1 h 15 min at the
-  defaults. Record the value and its derivation where the operator reads it (`docs/kubernetes.md`)
+  the honest multiplier is 71 (17 per try, 9 per launcher role × 6 roles), 1 h 45 min at the
+  defaults since `ProvisionBound` became 60 minutes. Record the value and its derivation where the operator reads it (`docs/kubernetes.md`)
   and in the pull request, since it is above the number the spec's prose carried.
 - Apply the bound inside the runtime as a child context of the caller's (`context.WithTimeout(ctx,
   bound)` from after the pod's launch turn through the launcher's start), keep the failure-path
@@ -49,8 +49,8 @@ the bounded context ended with the parent alive). The plan's D8 estimated about 
 `TestAReplacingLaunchMakesNoMoreCallsThanTheBoundCounts` (`launch_bound_test.go`) counted 46 bounded
 calls in one replacing launch on the rig — 37 fake-client requests, 1 provisioning-token mint, 6
 credential renders, 1 store read, 1 launcher frame — against `relaunchCalls = 71`, and
-`TestLaunchBoundSumsTheTrysWaitsAndCalls` pins `launchBound(120 s, 30 min, 10 s) = 1h15m41s`, above
-`bootTimeout + ProvisionBound + terminationGrace` and the spec's 30-minute floor.
+`TestLaunchBoundSumsTheTrysWaitsAndCalls` pins `launchBound(120 s, 60 min, 10 s) = 1h45m41s`, above
+`bootTimeout + ProvisionBound + terminationGrace` and `ProvisionBound`'s 60-minute floor.
 `TestALaunchTryThatRunsOutIsChargedAndTheNextTryRuns` drives the real `supervise.Machine` over the
 rig with the bound shortened under the boot timeout: the first try ends at the bound, the claim is
 charged one launch failure and the next try begins; `TestALaunchTryItsContextEndsIsChargedNothing`

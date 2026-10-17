@@ -100,7 +100,7 @@ func TestLocalWriteLifecycle(t *testing.T) {
 		t.Fatalf("TagResource: %v", err)
 	}
 	d := describe()
-	if tags := tagMap(d.Tags); len(tags) != 2 || tags["owner"] != "ada@example.com" || tags["tier"] != "human" || aws.ToString(d.KmsKeyId) != "alias/dev" {
+	if tags := TagMap(d.Tags); len(tags) != 2 || tags["owner"] != "ada@example.com" || tags["tier"] != "human" || aws.ToString(d.KmsKeyId) != "alias/dev" {
 		t.Fatalf("after retag: key %q, tags %v; want alias/dev, owner kept and tier human", aws.ToString(d.KmsKeyId), tags)
 	}
 
@@ -246,12 +246,4 @@ func second[T any](_ T, err error) error { return err }
 
 func tag(key, value string) types.Tag {
 	return types.Tag{Key: aws.String(key), Value: aws.String(value)}
-}
-
-func tagMap(tags []types.Tag) map[string]string {
-	m := make(map[string]string, len(tags))
-	for _, t := range tags {
-		m[aws.ToString(t.Key)] = aws.ToString(t.Value)
-	}
-	return m
 }

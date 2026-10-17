@@ -2108,16 +2108,19 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s clone and
   its retries of a transient failure, all within one `workspace.FetchTimeout` rather than
   `workspace.CommandTimeout` ([Trust model](#trust-model-the-provisioning-token)), then
-  `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; it waits on no other pod
+  `workspace-init`'s clone of the feed within `workspace.CloneTimeout` and its other commands, each
+  up to `workspace.CommandTimeout`; it waits on no other pod
   and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
   and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
   The launch that created the pod waits for the role's launcher, which starts only once both init
   containers have finished. Until it first sees an init container running it waits
   `worker_boot_timeout_seconds`, the image pull's bound; from then on, `worker_boot_timeout_seconds`
   counted from the last moment it saw one running, and never longer than that plus
-  `workspace.FetchTimeout` (30 min; `sandbox.Runtime.ProvisionBound`) from the first
-  (`awaitRoleLauncher`, `internal/runtime/sandbox/relaunch.go`). The fetch started no later than
-  that first sighting, so it ends inside the bound, and `workspace-init` then has at least the boot
+  `workspace.FetchTimeout` and `workspace.CloneTimeout` together (60 min;
+  `sandbox.Runtime.ProvisionBound`) from the first (`awaitRoleLauncher`,
+  `internal/runtime/sandbox/relaunch.go`). The fetch started no later than that first sighting and
+  `workspace-init`'s clone of the feed after the fetch ended, so both end inside the bound, and
+  `workspace-init`'s other commands then have at least the boot
   timeout. A pod that provisions for twenty minutes is one launch, not a launch failure per boot
   timeout, and a launcher that has not connected the boot timeout after provisioning ended still
   fails the launch. The wait runs inside whatever asked for the launch, and a start row asks from
@@ -2128,18 +2131,20 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   every connect times out (127 s each), after which the fetch fails and the launch ends; each
   relaunch of the claim then holds the issue's lifecycle lane as long again, and the issue's later
   lifecycle rows wait on it. A transfer that keeps making progress can hold the launch for the
-  whole 30 minutes. Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`,
+  whole 30 minutes, and `workspace-init`'s clone of the feed, for a large repository, up to 30
+  more. Each launch try is bounded inside the runtime (`sandbox.Runtime.LaunchBound`,
   `internal/runtime/sandbox/relaunch.go`) at the sum of the try's waits and bounded calls — three
   boot timeouts, the launcher wait's backstop of twice the boot timeout plus
-  `workspace.FetchTimeout`, the termination grace, and the try's client calls at their 30 s
-  timeout — about 1 h 15 min at the defaults; a try that reaches it is charged a launch failure
-  and the next try runs, while a try the daemon's own stop ends is still charged nothing. Once the
-  launch returns, the boot watchdog re-arms on the claim, bounded by its registration deadline
+  `sandbox.Runtime.ProvisionBound`, the termination grace, and the try's client calls at their
+  30 s timeout — about 1 h 45 min at the defaults; a try that reaches it is charged a launch
+  failure and the next try runs, while a try the daemon's own stop ends is still charged nothing.
+  Once the launch returns, the boot watchdog re-arms on the claim, bounded by its registration
+  deadline
   (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
-  6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchTimeout` until
-  the shim's first hello, and from there the daemon re-arms the base deadline alone, the same one a
-  tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
-  plus the base deadline plus the bound, armed as one (36 min at the defaults); one that says hello
+  6 min): under Kubernetes, the deadline carries an added bound of `sandbox.Runtime.ProvisionBound`
+  until the shim's first hello, and from there the daemon re-arms the base deadline alone, the same
+  one a tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
+  plus the base deadline plus the bound, armed as one (66 min at the defaults); one that says hello
   and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
   one whose agent registers and never says it is ready is retired at its registration plus the base
   deadline alone (6 min from the registration, again from a daemon restart that finds it
@@ -2224,10 +2229,9 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   /var/run/legion/feed`: a `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
   reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
-  It mounts neither the issue's volume nor the config home. Every other provisioning command is
-  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but this clone's duration follows the
-  repository's size and the network's speed, not a fixed step in provisioning: it runs under
-  `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A clone that
+  It mounts neither the issue's volume nor the config home. This clone's duration follows the
+  repository's size and the network's speed, so it runs under `workspace.FetchTimeout` (30
+  minutes), one bound for every attempt of it, rather than `workspace.CommandTimeout` (5 minutes). A clone that
   fails transiently is cloned again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
   5xx, or a connection that could not be made or broke (connect, DNS, reset, timeout, empty reply,
@@ -2239,11 +2243,12 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   no retry starts past them. Any other failure — a token refused, a repository not found or not
   granted, a certificate that does not verify, a curl error the list does not name — fails the
   fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`). The launch waits for the
-  pod's launchers while either init container runs, up to the same 30 minutes plus its boot timeout
-  from when it first sees one running (above, "Liveness rules"), so the fetch, retries included,
-  spends no launch failure, and `workspace-init` has at least the boot timeout after a fetch that
-  ran its whole 30 minutes. The fetch reads the token once, and the daemon hands a pod the
-  implement App's cached lease while more than 20 minutes of it remain
+  pod's launchers while either init container runs, up to `sandbox.Runtime.ProvisionBound` plus its
+  boot timeout from when it first sees one running (above, "Liveness rules"), so the fetch, retries
+  included, spends no launch failure, and `workspace-init` has its own clone's 30 minutes and at
+  least the boot timeout after a fetch that ran its whole 30 minutes. The fetch reads the token
+  once, and the daemon hands a pod the implement App's cached lease while more than 20 minutes of it
+  remain
   (`internal/appauth/appauth.go`), so a retry late in a long fetch can outlast the token: an
   attempt that starts after it expired fails with `Authentication failed`, which the fetch reads as
   permanent, and the launch's next pod is handed a token afresh.
@@ -2254,7 +2259,11 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   the remote its origin names, at the feed over git's file transport, the fetch bringing the
   default branch and the issue's branch alone, each by its exact name, then the workspace add,
   `update-stale`, and the configuration writes, once it has removed the clone's stale git locks
-  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
+  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)). The clone copies and imports every
+  object of the repository, so like the fetch's clone it runs under a bound of its own,
+  `workspace.CloneTimeout` (30 minutes), rather than `workspace.CommandTimeout`; every other
+  command here keeps the 5 minutes. A 3.4 GB repository (816k objects) took 253 to 281 s to clone
+  from a local feed with two to four cores, using no more than about two either way.
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
   volume, and no other provision shares the repository. What an agent of the issue planted can run
   there, with nothing to take that the agent does not already hold.

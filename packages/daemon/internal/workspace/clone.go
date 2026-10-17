@@ -186,7 +186,8 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
 // contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
-// clone.
+// clone. The clone runs under CloneTimeout, not the runner's slow-command budget: it copies every
+// object of the repository, so its duration follows the repository's size.
 func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, remoteEnv []string) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
@@ -213,7 +214,9 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, r
 		_ = os.RemoveAll(temporary)
 	}()
 
-	if _, err := RunChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, remoteEnv, ""); err != nil {
+	clone := []string{"jj", "git", "clone", remote, temporary}
+	result, err := runCommandTimeout(ctx, run, clone, remoteEnv, "", CloneTimeout)
+	if _, err := checkedResult(clone, result, err); err != nil {
 		return err
 	}
 	complete, err := pathExists(filepath.Join(temporary, ".jj"))

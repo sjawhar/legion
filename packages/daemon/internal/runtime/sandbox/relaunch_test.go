@@ -607,13 +607,14 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the fetch's own clone bound, workspace.FetchTimeout (30m), and nothing more:
+// ProvisionBound is the two clones' bounds together, workspace.FetchTimeout (30m) for
+// workspace-fetch's and workspace.CloneTimeout (30m) for workspace-init's, and nothing more:
 // provisioning from the feed onto the issue's own volume waits on no other pod, so no lock wait is
 // added to it. Pinned to a literal, since no test can wait the real bound out.
-func TestProvisionBoundIsTheFetchTimeoutExactly(t *testing.T) {
+func TestProvisionBoundIsBothClonesBoundsExactly(t *testing.T) {
 	g := newRig(t, nil)
-	if got := g.r.ProvisionBound(); got != 30*time.Minute {
-		t.Fatalf("ProvisionBound = %s, want %s", got, 30*time.Minute)
+	if got := g.r.ProvisionBound(); got != 60*time.Minute {
+		t.Fatalf("ProvisionBound = %s, want %s", got, 60*time.Minute)
 	}
 }
 
