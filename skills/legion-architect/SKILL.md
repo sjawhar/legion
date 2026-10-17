@@ -78,6 +78,15 @@ exercise a criterion end to end, building that path is a child issue of this tre
   answers the tree's asks); under a personal token it goes to that token's owner, whom
   `dispatch whoami` names. Set it only when a human told you a specific person owns that child.
 
+A change across repositories gets one child per repository, each created with
+`dispatch issue --project <project> --parent <root> --repo <owner/name> …`; a child's repository
+is fixed when the daemon records it, so choose it at creation. A child that depends on another
+repository's change is released (`release_children`) only after that change's pull request
+merges, and its task names the merged commit
+(`gh api repos/<owner>/<repo>/pulls/<n> --jq .merge_commit_sha`) to use — for a consumer that pins
+the toolchain, the pin is that commit. Read the other repositories with the read-only access your
+gh carries (`-R owner/repo`).
+
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](skill://dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the
 handoffs; do not narrate them into the spec or a `dispatch message`. A to-do only a human can
@@ -242,9 +251,10 @@ No notice marks the last child's close as the end-game: each closure arrives as 
 `child-closed`, and none is a reason to close the parent. Today's daemon does not order the root's
 own phases after its children: when the design gate opens it starts every admitted issue of the
 tree, the root included, so the root's tester can run, and its pull request merge, before any
-child merges. To get parent integration evidence against current `main` after the last child
-merges, file the parent's integration check as a final child whose acceptance is every parent
-criterion proven on current `main`, release it with `release_children` only once every other
+child merges. To get parent integration evidence against the repository's default branch your
+addressing line names after the last child merges, file the parent's integration check as a final
+child whose acceptance is every parent criterion proven on that default branch, release it with
+`release_children` only once every other
 child has closed, and sign off the root only after it closes. This holds until the redesign's
 integrating phase ships (dispatch://LEGION-223). When that check's tester fails, the daemon sends
 the child back to its implementer; a failure whose fix belongs in other work becomes a new
@@ -269,9 +279,10 @@ back. Park a child first when its work should stop with the root.
 ## 4. Integration verification
 
 Read the integration check's tester evidence (section 3), not merely a child PR's check status.
-The parent test is successful only when every parent acceptance criterion has evidence against
-current main. Route a failed criterion into a corrective child wave; a passing result goes on to
-review and the merge-gate sequence by the daemon's table.
+The parent test is successful only when every parent acceptance criterion has evidence against the
+repository's default branch your addressing line names (never a hard-coded `main`) — the relevant
+repository's, for a criterion that spans more than one. Route a failed criterion into a corrective
+child wave; a passing result goes on to review and the merge-gate sequence by the daemon's table.
 
 ## 5. Retro
 

@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -172,6 +173,15 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if err != nil {
 		return 0, err
 	}
+	// The project's repository mapping (GET /legion/v1/state, unauthenticated) is read and
+	// validated before the capability mint: the mint revokes the incumbent controller's
+	// registration and grants (api.controllerSecret), so a repository-mapping failure found here
+	// must never cut a running controller off for a replacement that will not start.
+	repositories, refused, err := controllerRepositories(ctx, cfg.DaemonURL)
+	if err != nil {
+		removeDirs(created)
+		return 0, err
+	}
 	fmt.Fprintf(stderr, "[legion] checking the controller's Oh My Pi (%s) in %s before the daemon mints a capability\n",
 		omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation), controllerDir)
 	secret, designGate, err := probeAndMint(ctx, cfg.DaemonURL, daemon.ControllerProbe{
@@ -215,16 +225,18 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 			return 0, err
 		}
 	}
-	// The daemon's design gate policy is the controller's addressing, the line its take comment
-	// reads before it promises anyone a design approval (skill://legion-controller). The start
-	// message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather than a CLI
-	// word: the pi-legion extension sends it as the session's first turn once its claim
+	// The daemon's design gate policy, then the project's whole repository list (fetched and
+	// validated above, before the capability mint), is the controller's addressing, the line its
+	// take comment reads before it promises anyone a design approval (skill://legion-controller).
+	// The start message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather
+	// than a CLI word: the pi-legion extension sends it as the session's first turn once its claim
 	// succeeds, before it opens the live wake subscription, so a started or restarted controller
 	// runs its start procedure at once and deterministically, never racing a wake for the one
 	// first-turn slot.
+	addressing := daemon.DesignGateFragment(designGate) + " " + daemon.RepositoriesAddressing(repositories, refused)
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
-		Addressing:                 daemon.DesignGateFragment(designGate),
+		Addressing:                 addressing,
 		DeploymentInstructionsPath: instructionsFile,
 	})
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
@@ -345,6 +357,73 @@ func probeAndMint(ctx context.Context, daemonURL string, probe daemon.Controller
 		return "", "", err
 	}
 	return fetchControllerSecret(ctx, daemonURL, operatorToken, probe.Contract)
+}
+
+// controllerRepositories is the project's whole repository mapping, read from the one
+// unauthenticated route that serves it (GET /legion/v1/state's .repositories field, the same
+// bytes `legion state --json` prints), for the operator's controller addressing
+// (daemon.RepositoriesAddressing) — the list a worker's own addressing names
+// (specs.AddressingFragment, specs.RepositoriesFragment). Read and validated before the
+// capability mint (controllerStart), so a failure here never revokes a running controller for a
+// replacement that will not start. Bounded by requestTimeout, as every other CLI read of the
+// daemon's API is (main.go's get).
+//
+// An empty `mapped` is never refused here, with or without a `refused` list. This route cannot
+// tell "no workflow is configured at all" (an API-only daemon, which always serves this same
+// empty shape) apart from "a workflow booted with a mapping, and a later refresh removed every
+// repository from it": a project with zero mapped and zero refused repositories refuses the
+// daemon's own boot outright (repositories.go's own doc), so that exact shape is only ever
+// reached live, through this route, never at boot — M1's own finding, which the coordinator's
+// ruling accepts rather than adding a wire field to disambiguate it in this PR. Refusing the
+// controller's own start on either reading would wrongly block the one operator action that drives
+// a live project's recovery (admitting work, AGENTS.md "Handover") for nothing. A non-empty
+// `refused` list, by contrast, is unambiguous: every mapped repository lacking an App still boots
+// fine (repositories.go's own doc), so that shape is always a live, fully booted workflow, never
+// the no-workflow case. The caller builds the right addressing sentence from the repositories and
+// refused reasons this returns, on both launch paths, via daemon.RepositoriesAddressing.
+//
+// Refuses, naming why, only when the read itself is unusable: a body that is not a JSON object, one
+// naming no `repositories` field at all (null or absent — a `{}` or a `null` top level both land
+// here, a shape no conforming daemon ever actually serves, since state.Repositories never
+// marshals to null or omits the field), and any mapped entry this daemon did not spell
+// `owner/name` (a daemon bug, never silently dropped: one bad entry refuses the whole list, not
+// just that entry, since an operator reading this sentence must trust it names every mapped
+// repository, never a silently narrowed subset).
+func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Repository, []string, error) {
+	timed, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	status, body, err := operator{base: daemonURL}.do(timed, http.MethodGet, "/legion/v1/state", nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
+	}
+	if status/100 != 2 {
+		return nil, nil, fmt.Errorf("%s/legion/v1/state: the daemon answered %d: %s", daemonURL, status, strings.TrimSpace(string(body)))
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil || raw == nil {
+		return nil, nil, fmt.Errorf("%s/legion/v1/state answered with a body that is not a JSON object naming repositories", daemonURL)
+	}
+	reposRaw, ok := raw["repositories"]
+	if !ok || string(reposRaw) == "null" {
+		return nil, nil, fmt.Errorf("%s/legion/v1/state's body names no repositories field (null or absent): not a shape a conforming daemon ever serves", daemonURL)
+	}
+	var repositoriesView api.RepositoriesView
+	if err := json.Unmarshal(reposRaw, &repositoriesView); err != nil {
+		return nil, nil, fmt.Errorf("%s/legion/v1/state's repositories field is not valid: %w", daemonURL, err)
+	}
+	repositories := make([]ghrepo.Repository, 0, len(repositoriesView.Mapped))
+	for _, mapped := range repositoriesView.Mapped {
+		repository, err := ghrepo.Parse("repositories.mapped", mapped.Repo)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s/legion/v1/state names an invalid mapped repository %q: %w", daemonURL, mapped.Repo, err)
+		}
+		repositories = append(repositories, repository)
+	}
+	refused := make([]string, len(repositoriesView.Refused))
+	for i, r := range repositoriesView.Refused {
+		refused[i] = fmt.Sprintf("%s (%s)", r.Repo, r.Reason)
+	}
+	return repositories, refused, nil
 }
 
 // makeDirs creates dir and its missing parents, 0700, and answers the ones it created, deepest

@@ -112,6 +112,49 @@ func TestAMergerIsToldItsProjectsMergeRules(t *testing.T) {
 	}
 }
 
+// A worker's addressing ends naming its issue's repository and default branch, then the project's
+// whole repository list, sorted by name whatever order the project gives it in. A claim whose
+// issue the workflow does not record (the zero repository) is told neither: the whole sentence is
+// left off, not just the issue's own repository.
+func TestAWorkersAddressingNamesItsRepositoryAndTheProjects(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	repositories := []ghrepo.Repository{
+		ghrepo.MustParse("sjawhar/legion-smoke"), ghrepo.MustParse("acme/widgets"), ghrepo.MustParse("acme/gadgets"),
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer,
+		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
+			return ghrepo.MustParse("acme/widgets"), "release/v7.1", nil
+		},
+		repositories: func() []ghrepo.Repository { return repositories },
+	}
+	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := "your issue's repository is acme/widgets (default branch release/v7.1); " +
+		"the project's repositories are acme/gadgets, acme/widgets, sjawhar/legion-smoke."
+	if !strings.HasSuffix(spec.Prompt.Addressing, want) {
+		t.Fatalf("addressing = %q, want it to end with %q", spec.Prompt.Addressing, want)
+	}
+
+	s.repository = func(context.Context, string) (ghrepo.Repository, string, error) { return ghrepo.Repository{}, "", nil }
+	spec, err = s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if strings.Contains(spec.Prompt.Addressing, "repositories are") || strings.Contains(spec.Prompt.Addressing, "repository is") {
+		t.Fatalf("addressing of an unrecorded issue = %q, want no repository sentence", spec.Prompt.Addressing)
+	}
+}
+
 // The daemon's controller (`controller: daemon`) is launched with its role part and the headless
 // part, told the project's design gate policy as the operator's controller is, with the
 // deployment's instructions and launch secrets, and with no repository, no git identity and
@@ -155,6 +198,85 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	}
 	if !maps.Equal(spec.Secrets, s.secrets) {
 		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
+	}
+}
+
+// The controller's addressing gains the project's repositories after its design gate policy, in
+// the same clause a worker's addressing ends with, so `legion controller start`'s operator and the
+// daemon-launched controller both read where the project's issues live. A daemon with no
+// repositories configured (s.repositories nil, a project with no workflow) tells the controller
+// its design gate policy alone, as TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout checks.
+func TestTheControllersAddressingGainsTheProjectsRepositories(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+		repositories: func() []ghrepo.Repository {
+			return []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion-smoke"), ghrepo.MustParse("acme/widgets")}
+		},
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := DesignGateFragment(config.DesignGateOff) + " the project's repositories are acme/widgets, sjawhar/legion-smoke."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
+	}
+}
+
+// R4: an empty repositories() with a non-empty repositoriesRefused() is a real, fully-booted state
+// (every mapped repository lacks an App), never conflated with no workflow configured at all —
+// but it is never a refusal either (Main's ruling overturned the prior round's refusal here: it
+// burns the daemon-launched controller's launch budget for a state that heals itself once the App
+// is installed and the controller's own next handover refreshes the mapping). The controller
+// launches, its addressing naming the refused repositories and their reasons, the same
+// distinction cmd/legion/controller.go's controllerRepositories draws for the operator-launched
+// controller.
+func TestTheControllersLaunchNamesEveryRefusedRepositoryInsteadOfRefusing(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+		repositories:        func() []ghrepo.Repository { return nil },
+		repositoriesRefused: func() []string { return []string{"acme/widgets (the review App is not installed on acme/widgets)"} },
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := DesignGateFragment(config.DesignGateOff) +
+		" the daemon maps no repository to this project now: acme/widgets (the review App is not installed on acme/widgets)."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
+	}
+}
+
+// R5: an empty repositories() with an empty repositoriesRefused() too (no workflow reached yet, or
+// every repository unmapped by a refresh) also launches, naming the state for what it is — the
+// same wording the operator-launched controller's refusal-free path gives after R4/R5, so the two
+// launch paths never diverge on this state.
+func TestTheControllersLaunchNamesNoRepositoryMappedOrRefused(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+		repositories:        func() []ghrepo.Repository { return nil },
+		repositoriesRefused: func() []string { return nil },
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := DesignGateFragment(config.DesignGateOff) + " the daemon maps no repository to this project now."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 	}
 }
 

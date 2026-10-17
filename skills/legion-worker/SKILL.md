@@ -22,6 +22,7 @@ with the `read` tool: a read by filesystem path stops at 300 lines.
 | When | Read |
 | --- | --- |
 | You write or edit the PR body, record a proof (an `E2E` line or a handoff `proof` array), verify another phase's proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
+| Before a push, to check your commits' App identity against your issue's default branch | `skill://legion-worker/references/default-branch-check.md` |
 | You reply on or resolve a review thread, list a pull request's threads, or adjudicate a bot's finding | `skill://legion-worker/references/review-threads.md` |
 | GitHub reports a conflict, the pull request is retargeted, you compare heads after a conflict merge, or you would rewrite a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
 | You review or approve, build the READY packet, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
@@ -176,9 +177,8 @@ config is one file shared by every issue workspace of the clone. Legion has two 
 one per role: your role's App is the **implement** App if you are the implementer or the merger,
 and the **review** App if you are the planner, tester, reviewer, or an architect; your pane's
 `JJ_USER` and `JJ_EMAIL` name your role's App's bot account. A planner's commits authored
-by the review App are right. Before a push, check, with GitHub's default branch read as a jj string literal in the same command (never a name pasted between quotes),
-`default=$(gh api repos/<owner>/<repo> --jq '.default_branch | @json') && jj -R "$LEGION_WORKSPACE" log -r "${default}@origin..@" -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
-shows your role's App in both columns **on every commit you made** — not on the whole list:
+by the review App are right. Before a push, check your commits against your issue's own default
+branch, read and quoted safely (never a branch name pasted into shell source), per `skill://legion-worker/references/default-branch-check.md`, which shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App. Their *committer* is
 a different matter, and no longer noise to accept. Resolving a conflict rewrites nothing — it is a
 forward merge (`skill://legion-worker/references/conflicts-and-rewrites.md`) — so it changes no
