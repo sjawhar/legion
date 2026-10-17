@@ -38,7 +38,7 @@ type specs struct {
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
 	// slackChannels is the project's slack_channels, which the controller is told after the design
-	// gate policy (SlackChannelsFragment) and as LEGION_SLACK_CHANNELS.
+	// gate policy (SlackChannelsFragment); its LEGION_SLACK_CHANNELS is the runtime's to set.
 	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules

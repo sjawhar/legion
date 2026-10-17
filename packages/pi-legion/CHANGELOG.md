@@ -58,6 +58,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
+  `DISPATCH_PUBLIC_URL` that is not an http or https URL, naming it.
 - The controller skill's Slack replies give the link and assignee `dispatch` printed, never an
   assumed one.
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an

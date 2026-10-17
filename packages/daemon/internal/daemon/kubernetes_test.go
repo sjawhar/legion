@@ -604,6 +604,15 @@ func TestAKubernetesDaemonRefusesAnOperatorPodCollidingWithLegionsBeforeItsBoot(
 			},
 			want: "provider_keys names FOO from the providers Secret's key NATS_NKEY_SEED, which the pod mounts as the launch secret NATS_NKEY_SEED: the shim would export that secret into Oh My Pi's environment as FOO",
 		},
+		{
+			// Every agent reads it, and the dispatch command turns Dispatch off over a value that is
+			// not a URL, so the daemon refuses it here rather than leave each agent to find out.
+			name: "a public Dispatch dashboard that is not a URL",
+			change: func(cfg *config.Config) {
+				cfg.Runtime.Kubernetes.Pod = config.PodConfig{Env: map[string]string{"DISPATCH_PUBLIC_URL": "dispatch.example.org"}}
+			},
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off`,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := kubernetesConfig(t, "https://127.0.0.1:1")

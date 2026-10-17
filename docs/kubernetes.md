@@ -2616,8 +2616,12 @@ issue's pod (every role container of it alike) and the image probe's.
   `runtime.kubernetes.pod.env` to Dispatch's dashboard as people open it, for example
   `https://dispatch.example.org`: every link an agent's `dispatch` command prints, which agents
   repeat in Slack replies, pull requests and comments, then points there, and a pasted dashboard
-  link on either address resolves. The controller's `slack_post` refuses a reply linking a
-  cluster-internal address.
+  link on either address resolves. A value that is not an http or https URL is refused at load,
+  naming it. The controller's `slack_post` refuses a reply linking an address inside the cluster.
+  Like every `pod.env` variable, it reaches an agent with the start command of its next generation,
+  so set it in the same restart that installs this release, which relaunches the controller once.
+  To hand a later change to a running agent, start its next generation with `legion claims suspend`
+  and then `legion claims resume`, which resumes its session; `legion claims stop` starts it fresh.
 - **The Legion machine-user sign-in.** `legion model-token` is a model `apiKey` command that signs a
   pod in to Cognito with its projected service-account token and prints the access token; the
   [operator route README](../deploy/kubernetes/operator-route/README.md) shows the line and what the

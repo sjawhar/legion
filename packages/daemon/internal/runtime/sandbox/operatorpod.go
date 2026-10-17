@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"maps"
+	"net/url"
 	"slices"
 	"strings"
 
@@ -29,7 +30,8 @@ type setter struct {
 
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
-// store's two variables named apart, since they are Legion's under either store, and the name the
+// store's two variables named apart, since they are Legion's under either store, the controller's
+// Slack channel list, which the runtime sets in the controller's pod alone, and the name the
 // providers volume mounts the session database's URL under, sessionDSNFile), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
@@ -45,6 +47,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 		add(name, "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)", false)
 	}
 	add(sessionDSNFile, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
+	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}
@@ -98,6 +101,14 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	for _, name := range slices.Sorted(maps.Keys(pod.Env)) {
 		if s := variables[name]; !s.operatorMay {
 			return fmt.Errorf("runtime.kubernetes.pod.env sets %s, which %s", name, s.who)
+		}
+	}
+	// DISPATCH_PUBLIC_URL is Dispatch's dashboard as people open it, which every agent's dispatch
+	// command links to; it turns Dispatch off over a value that is not an http(s) URL, so the value
+	// is refused here, where one typo would otherwise stop every agent's Dispatch writes.
+	if value, set := pod.Env["DISPATCH_PUBLIC_URL"]; set {
+		if parsed, err := url.Parse(value); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+			return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off", value)
 		}
 	}
 	volumes := legionVolumeNames()

@@ -46,14 +46,15 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		return "provider_keys names " + name + ", whose pointer " + name + "_FILE " + who + ": the shim skips a key whose pointer the pod sets"
 	}
 	const (
-		byRuntime  = "Legion's runtime sets in every pod"
-		byImage    = "the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)"
-		byIdentity = "every launch sets (the git identity the role's GitHub App commits as)"
-		byEnvoy    = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
-		bySessions = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
-		byStore    = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
-		byBaseline = "the pod baseline sets (internal/podsafety)"
-		byOperator = "runtime.kubernetes.pod.env sets"
+		byRuntime    = "Legion's runtime sets in every pod"
+		byImage      = "the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)"
+		byIdentity   = "every launch sets (the git identity the role's GitHub App commits as)"
+		byEnvoy      = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
+		bySessions   = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
+		byStore      = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
+		byBaseline   = "the pod baseline sets (internal/podsafety)"
+		byOperator   = "runtime.kubernetes.pod.env sets"
+		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
 	)
 	// The operator route with its token audience filled in, as an operator and each live harness run
 	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
@@ -89,9 +90,9 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
 		// The daemon names its controller's Slack channels from the project's slack_channels alone: an
 		// operator's value would have the controller hear another project's mentions.
-		{name: "the controller's Slack channels", pod: env("LEGION_SLACK_CHANNELS", "C00000001"), want: envSets("LEGION_SLACK_CHANNELS", byRuntime)},
+		{name: "the controller's Slack channels", pod: env("LEGION_SLACK_CHANNELS", "C00000001"), want: envSets("LEGION_SLACK_CHANNELS", byController)},
 		{name: "a provider key for the controller's Slack channels", keys: map[string]string{"LEGION_SLACK_CHANNELS": "channels"},
-			want: keyNames("LEGION_SLACK_CHANNELS", byRuntime)},
+			want: keyNames("LEGION_SLACK_CHANNELS", byController)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}},
 			{Name: "launcher-tester", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
@@ -140,6 +141,10 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the
 		// in-cluster DISPATCH_URL the runtime hands every agent.
 		{name: "Dispatch's public dashboard", pod: env("DISPATCH_PUBLIC_URL", "https://dispatch.example.org")},
+		{name: "a public dashboard with no scheme", pod: env("DISPATCH_PUBLIC_URL", "dispatch.example.org"),
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off`},
+		{name: "a public dashboard on another scheme", pod: env("DISPATCH_PUBLIC_URL", "ftp://dispatch.example.org"),
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
