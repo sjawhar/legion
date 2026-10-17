@@ -21,9 +21,11 @@ retrospective's durable output.
 1. Tester green and all code-review cycles finish.
 2. The reviewer approves the head. It still carries the issue's handoffs, `.legion/<issue>/`
    (`<issue>` is your `LEGION_ISSUE`), which every tester and reviewer round writes again.
-3. Run this retro (*Durable outputs*, below): its learnings under `docs/solutions/`, then one final
-   commit removing `.legion/<issue>/`, pushed together, and the retro message on the Dispatch
-   issue. Retro writes **no handoff**. The removal exists because a squash merge commits the head
+3. Run this retro (*Durable outputs*, below): its learnings delivered to their destination —
+   the one the deployment instructions in your system prompt name for learnings, or
+   `docs/solutions/` when they name none — then one final commit removing `.legion/<issue>/`,
+   pushed together with any documentation commit, and the retro message on the Dispatch issue.
+   Retro writes **no handoff**. The removal exists because a squash merge commits the head
    merged into the base, and nothing on the base reads a handoff; the handoffs stay on the issue
    branch below that commit.
 4. The merger quotes retro's commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in
@@ -77,6 +79,14 @@ When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` hol
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start; `skill://legion-worker` explains the
 shared-workspace authorship rule.
+
+When the deployment instructions in your system prompt name a destination for end-of-task
+learnings, send the integrated learning there, exactly as those instructions say, and write
+nothing under `docs/solutions/`: this retro's only commit is then the removal of
+`.legion/<issue>/` below, which is also what it commits when there is no learning. The
+Dispatch retro message below is still posted, and its takeaways are the durable copy when
+the named destination is unreachable — say so in that message instead of failing the retro.
+When the instructions name no destination, write `docs/solutions/` as follows.
 
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
 Organize by reusable topic rather than by pull request, but never edit a document you did not
@@ -181,7 +191,8 @@ attribution footer with `phase` set to `retro`; the body is capped at 2,000 char
 dispatch message --issue <KEY> --body-file - <<'EOF'
 ## Retro Complete
 
-**Learnings documented in:**
+**Learnings documented in:** (or, when the deployment instructions name a destination:
+**Learnings sent to:** <the destination, as the instructions name it>)
 - docs/solutions/<path>.md
 
 **Key takeaways:**
@@ -208,7 +219,9 @@ Before returning, verify all of the following:
 
 - The reviewer-approved head remains below the retro commits, and the reviewer's approval of that
   head stands: READY accepts the approved head plus the documentation commit and the removal.
-- The learning documents and the Dispatch message both exist (never a GitHub issue comment).
+- The learnings were delivered — to the destination the deployment instructions name, or as
+  documents under `docs/solutions/` — and the Dispatch message exists (never a GitHub issue
+  comment).
 - The PR body carries what the repository's instructions derive from the pull request's changed
   paths at the retro head, written back before that head's push, and each line that affirms work
   affirms work you did; or the instructions derive nothing.
