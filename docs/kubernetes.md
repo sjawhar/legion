@@ -1284,16 +1284,16 @@ Those names are built in one place, `packages/envoy/daemonpermissions`, which th
 and the hub's rendering both read. The grant reaches no other consumer of the stream, each host's
 listener consumer and another project's daemon consumers included, and no reply inbox but its
 own; the seed still reads the whole stream and every project's role-lane exceptions, and can have
-the stream's messages delivered to any subject (`docs/site/src/content/docs/dispatch/envoy.md`, "The NATS grant a
+the stream's messages delivered to a core subscriber of any subject (`docs/site/src/content/docs/dispatch/envoy.md`, "The NATS grant a
 Legion daemon needs", says how). It publishes on no core subject: role and controller notices go
 to the Envoy listener over HTTP, and control directives over the worker stream, so the Go daemon
 needs no `legion.ctl` grant. `packages/daemon/internal/daemon/nats_permissions_test.go` runs the
-daemon's consumers under exactly this grant on the server images the hub runs: a boot creating both
+daemon's consumers under exactly this grant on NATS 2.10 and the hub's image: a boot creating both
 durables, a restart onto them, a Dispatch and a GitHub event acknowledged after one delivery is
 nacked, and a role-lane
 exception received with no refusal, every entry of the grant admitting a subject the server's trace
 shows the daemon sending, and the refusals of a grant missing one entry, of another consumer's
-create and of `_INBOX.>`. It is read by the same rule
+create and of `_INBOX.>`. The daemon's seed is read by the same rule
 and refusals as the pane seed, the
 group-readable mount included, and neither seed falls back to the other: an unusable
 daemon seed refuses boot even beside a good pane seed. Unset, the daemon connects as the pane

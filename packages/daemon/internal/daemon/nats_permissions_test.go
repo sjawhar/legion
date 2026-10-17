@@ -168,6 +168,30 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				})
 			}
 
+			// The daemon takes its own inbox only as its own user. As the pane user, whose grant
+			// admits `_INBOX.>` and not the daemon's inbox, it keeps nats.go's `_INBOX.` and boots.
+			t.Run("as the pane user, the daemon keeps the shared inbox", func(t *testing.T) {
+				pane := daemonGrant(t)
+				pane.Subscribe = []string{daemonpermissions.RoleExceptions, nats.InboxPrefix + ">"}
+				srv := startDaemonGrantServer(t, image.Ref, pane)
+				createDaemonNotificationStream(t, srv.js)
+				logs := &syncBuffer{}
+				cfg := daemonGrantConfig(srv.uri)
+				w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
+				nc := natsConnection{seed: srv.seed, source: natsSeedPane, paneUser: true}
+				if err := w.connect(t.Context(), cfg, nc); err != nil {
+					t.Fatalf("the daemon as the pane user: %v\n%s", err, logs.String())
+				}
+				defer w.conn.Close()
+				_, subscribe := daemonTrace(daemonGrantServerLogs(t, srv.server))
+				if len(subscribe) == 0 || !slices.ContainsFunc(subscribe, func(s string) bool { return strings.HasPrefix(s, nats.InboxPrefix) }) {
+					t.Fatalf("the daemon as the pane user subscribed to %v, want nats.go's %s inbox", subscribe, nats.InboxPrefix)
+				}
+				if strings.Contains(logs.String(), "NATS refused the daemon a permission") {
+					t.Fatalf("the daemon as the pane user logged a refusal:\n%s", logs.String())
+				}
+			})
+
 			t.Run("the grant refuses another consumer's create and every other client's replies", func(t *testing.T) {
 				srv := startDaemonGrantServer(t, image.Ref, daemonGrant(t))
 				stream := createDaemonNotificationStream(t, srv.js)

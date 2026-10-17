@@ -126,8 +126,9 @@ receives everything, the daemon's replies included. What it still reaches:
 - **Every message of the stream.** The GitHub consumer's filters are in its request body, not its
   subject, so the seed can update that consumer to filter any of the stream's subjects and read
   them, and the Dispatch consumer reads every project's Dispatch issue events, as it always does.
-- **Every role's delivery exceptions.** Role topics carry no project, so the exceptions
-  subscription receives every project's role-lane exceptions; the daemon drops the foreign ones.
+- **Every role's delivery exceptions.** The project is part of a role's token, not a token of its
+  own, and NATS wildcards match whole tokens, so no grant can select one project's role-lane
+  exceptions: the subscription receives every project's, and the daemon drops the foreign ones.
 - **Delivery to subjects it may not publish to.** The server delivers a pull consumer's messages
   to the reply subject of the next-message request, which the client chooses, so the seed can have
   the stream's messages sent to a core subscriber of any subject, such as a role lane or

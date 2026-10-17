@@ -1409,8 +1409,8 @@ credential-free session user holding `SessionPermissions`, are checked against r
 2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
 
 `DaemonPermissions(project)` is the grant of one Legion project's daemon user, refusing a project
-that is not a Legion project key (`^[A-Z][A-Z0-9]*$`), since the project is one subject token of
-every entry. It publishes the notification stream's info request and, for the project's two
+that is not a Legion project key (`^[A-Z][A-Z0-9]*$`), since the project is part of a subject token in
+every entry that names it. It publishes the notification stream's info request and, for the project's two
 durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, each one's
 info, create and next-message requests and its acknowledgements; the Dispatch consumer's create
 names its one filter, `notifications.dispatch.issue.>`, as nats.go sends it. It subscribes to
