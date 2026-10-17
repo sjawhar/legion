@@ -118,8 +118,10 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 		t.Fatalf("publish the mapping change: %v", err)
 	}
 
+	// The refresh sets the GitHub consumer's filters first and publishes what the daemon serves only
+	// once they took, so the test waits for both.
 	want := []string{"notifications.github.Zeta.Tools.>", "notifications.github.acme.widgets.>", "notifications.github.orbit.gadgets.>"}
-	testwait.Eventually(t, "the GitHub consumer hears the changed mapping", func() bool {
+	testwait.Eventually(t, "the GitHub consumer hears the changed mapping and the daemon serves it", func() bool {
 		consumer, err := stream.Consumer(context.Background(), "legion-go-CAPTURE-github")
 		if err != nil {
 			return false
@@ -130,11 +132,8 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 		}
 		got := slices.Clone(info.Config.FilterSubjects)
 		slices.Sort(got)
-		return slices.Equal(got, want)
+		return slices.Equal(got, want) && slices.Equal(w.repositories.Owners(), []string{"acme", "zeta"})
 	})
-	if got := w.repositories.Owners(); !slices.Equal(got, []string{"acme", "zeta"}) {
-		t.Fatalf("Owners = %v, want acme and zeta, the served repositories' owners alone", got)
-	}
 	refused := w.repositories.Refused()
 	if len(refused) != 1 || refused[0].Repo != "acme/thing" || !strings.Contains(refused[0].Reason, "the review App is not installed on acme/thing") {
 		t.Fatalf("Refused = %#v, want acme/thing left out for its review App", refused)
