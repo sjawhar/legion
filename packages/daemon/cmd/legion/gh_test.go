@@ -382,14 +382,14 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		if help == nil {
 			help = savedGhHelp
 		}
-		owner, named, err := ghTargetOf(tc.argv, tc.env, help)
+		owner, err := ghTargetOf(tc.argv, tc.env, help)
 		switch {
 		case tc.err != "":
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
-				t.Errorf("ghTargetOf(%q, %v) = %q, %t, %v; want a refusal containing %q", tc.argv, tc.env, owner, named, err, tc.err)
+				t.Errorf("ghTargetOf(%q, %v) = %q, %v; want a refusal containing %q", tc.argv, tc.env, owner, err, tc.err)
 			}
-		case err != nil || owner != tc.owner || named != (tc.owner != ""):
-			t.Errorf("ghTargetOf(%q, %v) = %q, %t, %v; want %q", tc.argv, tc.env, owner, named, err, tc.owner)
+		case err != nil || owner != tc.owner:
+			t.Errorf("ghTargetOf(%q, %v) = %q, %v; want %q", tc.argv, tc.env, owner, err, tc.owner)
 		}
 	}
 }
@@ -406,7 +406,7 @@ func TestGhTargetOfRefusalsSayHowToNameTheRepository(t *testing.T) {
 		"search issues (repo:acme/w)":    "pass -R <owner>/<repo>",
 		"api search/issues?q=(repo:a/b)": "name it in the endpoint",
 	} {
-		_, _, err := ghTargetOf(strings.Fields(argv), nil, savedGhHelp)
+		_, err := ghTargetOf(strings.Fields(argv), nil, savedGhHelp)
 		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "sends no token") {
 			t.Errorf("ghTargetOf(%q) = %v, want a refusal saying it sends no token and %q", argv, err, want)
 		}
