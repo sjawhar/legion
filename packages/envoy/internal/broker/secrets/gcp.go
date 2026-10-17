@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -69,47 +70,68 @@ type GCP struct {
 	// whose current version is encrypted with any other key, Google's default one included, is
 	// not OnKey.
 	KeyName string
-	// held remembers, per source, when Read last found the secret not scheduled for deletion, so
-	// releasing the same secret again within gcpHeldFor costs no metadata read.
+	// held remembers, per source, Read's last metadata verdict (readable, or not: absent or
+	// scheduled for deletion), so releasing the same secret again within gcpHeldFor costs no
+	// metadata read whatever the verdict was.
 	held *heldCache
 }
 
-// gcpHeldFor is how long Read trusts its last finding that a secret is not scheduled for deletion:
-// a delete made since is refused within that long, and value releases cost metadata reads per
-// distinct secret per 30 s, not per release.
+// gcpHeldFor is how long Read trusts its last metadata verdict on a secret. Value releases cost
+// metadata reads per distinct secret per 30 s, not per release; a delete is refused at most 30 s
+// after Secret Manager's own metadata shows it (which Google documents as eventually consistent).
 const gcpHeldFor = 30 * time.Second
 
-// heldCache is when each source was last found not scheduled for deletion.
+// heldCache is each source's last metadata verdict, with one check at a time per source.
 type heldCache struct {
-	mu  sync.Mutex
-	at  map[string]time.Time
-	now func() time.Time
+	mu      sync.Mutex
+	entries map[string]*heldEntry
+	now     func() time.Time
+}
+
+// heldEntry is one source's verdict: err is nil for readable, ErrNotFound for absent or
+// scheduled for deletion. check serialises the source's metadata reads, so concurrent releases of
+// a cold source make one.
+type heldEntry struct {
+	check sync.Mutex
+	at    time.Time
+	err   error
 }
 
 // NewGCP is the Store over client, on the agent-secrets key keyName.
 func NewGCP(client *secretmanager.Client, keyName string) GCP {
-	return GCP{Client: client, KeyName: keyName, held: &heldCache{at: map[string]time.Time{}, now: time.Now}}
+	return GCP{Client: client, KeyName: keyName, held: &heldCache{entries: map[string]*heldEntry{}, now: time.Now}}
 }
 
-// fresh reports whether source was found not scheduled for deletion within gcpHeldFor.
-func (h *heldCache) fresh(source string) bool {
+// verdict answers source's metadata verdict, from the cache while it is younger than gcpHeldFor
+// and otherwise from look, whose answer it caches unless look failed for another reason.
+// Concurrent callers for one source wait for one look.
+func (h *heldCache) verdict(source string, look func() error) error {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	at, ok := h.at[source]
-	return ok && h.now().Sub(at) < gcpHeldFor
-}
-
-// record notes that source was just found not scheduled for deletion, dropping expired entries.
-func (h *heldCache) record(source string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	now := h.now()
-	for s, at := range h.at {
-		if now.Sub(at) >= gcpHeldFor {
-			delete(h.at, s)
+	for s, e := range h.entries {
+		if e.check.TryLock() {
+			if !e.at.IsZero() && now.Sub(e.at) >= 2*gcpHeldFor {
+				delete(h.entries, s)
+			}
+			e.check.Unlock()
 		}
 	}
-	h.at[source] = now
+	e, ok := h.entries[source]
+	if !ok {
+		e = &heldEntry{}
+		h.entries[source] = e
+	}
+	h.mu.Unlock()
+	e.check.Lock()
+	defer e.check.Unlock()
+	if !e.at.IsZero() && h.now().Sub(e.at) < gcpHeldFor {
+		return e.err
+	}
+	err := look()
+	if err == nil || errors.Is(err, ErrNotFound) {
+		e.at, e.err = h.now(), err
+	}
+	return err
 }
 
 // NewGCPClient opens Secret Manager under Application Default Credentials: on GKE the metadata
@@ -242,28 +264,32 @@ func (g GCP) onKey(keyVersion string) bool {
 // GetSecret that refuses one scheduled for deletion: Secret Manager reads a secret until its
 // expire_time, so without that check a grant made before `agent-secrets secret delete` would keep
 // reading it until the policy drops it, where Secrets Manager refuses a secret in its recovery
-// window at once. That GetSecret counts against the project's shared metadata read quota, so a
-// finding that the secret is not scheduled for deletion is trusted for gcpHeldFor (30 s): a delete
-// is refused within that long, and a busy fleet's releases cost a read per distinct secret per
-// 30 s. ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND), when the
+// window at once. That GetSecret counts against the project's shared metadata read quota, so its
+// verdict (readable, or absent or scheduled for deletion) is trusted for gcpHeldFor (30 s), with
+// one check at a time per secret: a busy fleet's releases, including repeated releases of a
+// deleted secret through a grant the policy has not dropped yet, cost a read per distinct secret
+// per 30 s, and a delete is refused at most 30 s after Secret Manager's metadata shows it.
+// ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND), when the
 // secret has an expire_time, or when the latest version is disabled or destroyed
 // (FAILED_PRECONDITION), all the same answer to the caller: the secret is not readable. The value
 // must be non-empty UTF-8, since the broker injects it into an environment; an error names the
 // secret and never the bytes.
 func (g GCP) Read(ctx context.Context, source string) (string, error) {
-	if !g.held.fresh(source) {
+	if err := g.held.verdict(source, func() error {
 		secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
 		switch status.Code(err) {
 		case codes.OK:
 			if secret.GetExpireTime() != nil {
-				return "", ErrNotFound
+				return ErrNotFound
 			}
+			return nil
 		case codes.NotFound:
-			return "", ErrNotFound
+			return ErrNotFound
 		default:
-			return "", fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
+			return fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
 		}
-		g.held.record(source)
+	}); err != nil {
+		return "", err
 	}
 	latest := source + "/versions/" + gcpLatest
 	out, err := g.Client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})

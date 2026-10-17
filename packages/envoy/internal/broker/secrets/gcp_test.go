@@ -471,3 +471,36 @@ func TestGCPReadChecksDeletionOncePerWindow(t *testing.T) {
 		t.Fatalf("the release after the window cost %d metadata reads, want 1", got)
 	}
 }
+
+// TestGCPReadCachesARefusalAndCoalescesConcurrentChecks pins the rest of Read's bound: repeated
+// releases of a secret scheduled for deletion cost one metadata read per window, as readable ones
+// do, and concurrent releases of a cold secret wait for one check.
+func TestGCPReadCachesARefusalAndCoalescesConcurrentChecks(t *testing.T) {
+	gone := servedSecret("v")
+	gone.expires = time.Now().Add(30 * 24 * time.Hour)
+	f := &fakeSecretManager{secrets: map[string]*fakeSecret{fakePrefix + "gone": gone, fakePrefix + "cold": servedSecret("v")}}
+	store := NewGCP(startFake(t, f), fakeKey)
+	ctx := context.Background()
+	before := f.reads()
+	for range 5 {
+		if _, err := store.Read(ctx, fakePrefix+"gone"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("Read(gone) = %v, want ErrNotFound", err)
+		}
+	}
+	if got := f.reads() - before; got != 1 {
+		t.Fatalf("five releases of a secret scheduled for deletion cost %d metadata reads, want 1", got)
+	}
+	before = f.reads()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			if _, err := store.Read(ctx, fakePrefix+"cold"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if got := f.reads() - before; got != 1 {
+		t.Fatalf("eight concurrent releases of a cold secret cost %d metadata reads, want 1", got)
+	}
+}
