@@ -22,10 +22,13 @@ import (
 
 // wireSettings is GET /v1/settings's answer as the CLI reads it.
 type wireSettings struct {
+	Store         string `json:"store"`
 	SecretsPrefix string `json:"secrets_prefix"`
 	KMSKeyARN     string `json:"kms_key_arn"`
 	AWSAccountID  string `json:"aws_account_id"`
 	AWSRegion     string `json:"aws_region"`
+	KMSKeyName    string `json:"kms_key_name"`
+	GCPProject    string `json:"gcp_project"`
 }
 
 // wireReread is POST /v1/secrets/{name}/reread's answer.
@@ -42,9 +45,48 @@ func TestSettingsAnswersTheNamespaceAndKey(t *testing.T) {
 		t.Fatalf("status %d: %s", status, body)
 	}
 	got := decode[wireSettings](t, body)
-	want := wireSettings{SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: "111122223333", AWSRegion: "us-east-1"}
+	want := wireSettings{Store: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, KMSKeyARN: policytest.KeyARN, AWSAccountID: "111122223333", AWSRegion: "us-east-1"}
 	if got != want {
 		t.Fatalf("settings = %+v, want %+v", got, want)
+	}
+	// The AWS fields are omitted, not empty, so a client reading the raw body sees no AWS key.
+	if strings.Contains(string(body), "kms_key_name") || strings.Contains(string(body), "gcp_project") {
+		t.Fatalf("an AWS broker's settings carry GCP fields: %s", body)
+	}
+}
+
+// TestSettingsAnswersTheGCPStore pins GET /v1/settings for a broker on Google Secret Manager: the
+// store's name, the prefix, the Cloud KMS key's name and the project number cut from the prefix,
+// with none of the AWS fields.
+func TestSettingsAnswersTheGCPStore(t *testing.T) {
+	const prefix = "projects/000000000000/secrets/agent-secrets-"
+	const key = "projects/example-project/locations/global/keyRings/agent-secrets/cryptoKeys/agent-secrets"
+	mux := http.NewServeMux()
+	cur, err := policy.NewCurrent(t.Context(), policytest.Loader(secrets.NewLocal()), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api.Register(mux, api.Deps{Policy: cur, SecretsStore: secrets.StoreGCP, SecretsPrefix: prefix, SecretsKMSKey: key})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/v1/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	got := decode[wireSettings](t, body)
+	want := wireSettings{Store: secrets.StoreGCP, SecretsPrefix: prefix, KMSKeyName: key, GCPProject: "000000000000"}
+	if got != want {
+		t.Fatalf("settings = %+v, want %+v", got, want)
+	}
+	for _, field := range []string{"kms_key_arn", "aws_account_id", "aws_region"} {
+		if strings.Contains(string(body), field) {
+			t.Fatalf("a GCP broker's settings carry %s: %s", field, body)
+		}
 	}
 }
 
@@ -81,14 +123,15 @@ func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
 func TestARereadWhoseRequestEndedLogsNoError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	loader := policytest.Loader(secrets.NewLocal())
-	loader.Describer = abandoningDescriber{cancel: cancel}
+	local := secrets.NewLocal()
+	loader := policytest.Loader(local)
+	loader.Store = policytest.StoreThrough(local, abandoningDescriber{SecretsManagerAPI: local, cancel: cancel})
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mux := http.NewServeMux()
-	api.Register(mux, api.Deps{Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN})
+	api.Register(mux, api.Deps{Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN})
 	logged := policytest.CaptureLog(t)
 
 	mux.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil))
@@ -106,7 +149,10 @@ func TestARereadWhoseRequestEndedLogsNoError(t *testing.T) {
 // abandoningDescriber is a caller that goes away while the reread's DescribeSecret is in flight:
 // it ends that caller's context and fails as the AWS SDK does once a context has ended. For a
 // caller whose context it does not hold, it fails as a throttled Secrets Manager does.
-type abandoningDescriber struct{ cancel context.CancelFunc }
+type abandoningDescriber struct {
+	secrets.SecretsManagerAPI
+	cancel context.CancelFunc
+}
 
 func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
 	d.cancel()

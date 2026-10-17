@@ -6,7 +6,8 @@ sidebar:
 ---
 
 The broker is one stateless HTTP process. Everything it knows lives in Postgres; it reads who may
-have which secret, and the secrets' values, from AWS Secrets Manager, and it starts nothing else.
+have which secret, and the secrets' values, from its secret store, AWS Secrets Manager or Google
+Cloud Secret Manager, and it starts nothing else.
 
 ## What to run
 
@@ -34,12 +35,30 @@ BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
 AWS_REGION=<region>
 ```
 
-`AWS_REGION` is the AWS SDK's own setting, not the broker's: the SDK takes the region of Secrets
-Manager and KMS only from `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS config file, never
-from the instance it runs on. Without one, the broker's first read of the namespace fails and it
-exits at startup with `broker: fatal error="list secrets under production/agent-secrets/: operation
-error Secrets Manager: ListSecrets, failed to resolve service endpoint, endpoint rule error, Invalid
-Configuration: Missing Region"`.
+`BROKER_SECRETS_STORE` picks the secret store: `aws-secrets-manager`, the default when it is unset,
+as above, or `gcp-secret-manager`, which takes the Google Cloud forms of the namespace and the key
+and reads nothing from AWS:
+
+```sh
+BROKER_SECRETS_STORE=gcp-secret-manager
+BROKER_SECRETS_PREFIX=projects/<project number>/secrets/agent-secrets-
+BROKER_SECRETS_KMS_KEY_NAME=projects/<project>/locations/global/keyRings/<ring>/cryptoKeys/<key>
+```
+
+The prefix names the project by its number, not its id, because Secret Manager answers every
+resource name with the number and the broker matches what the API answers (`gcloud projects
+describe <id> --format='value(projectNumber)'` finds it); the id after `secrets/` ends in `-`, so
+the secret a session asks for as `DEEL_API_KEY` is `projects/<number>/secrets/agent-secrets-deel-api-key`.
+The key is in the `global` location, the only one a secret with automatic replication can be
+encrypted with. Each store refuses the other's key variable, so a deployment moved between stores
+cannot keep the old key set and silently mean nothing by it.
+
+`AWS_REGION` is the AWS SDK's own setting, not the broker's, read by the AWS store alone: the SDK
+takes the region of Secrets Manager and KMS only from `AWS_REGION`, `AWS_DEFAULT_REGION` or the
+shared AWS config file, never from the instance it runs on. Without one, the broker's first read of
+the namespace fails and it exits at startup with `broker: fatal error="list secrets under
+production/agent-secrets/: operation error Secrets Manager: ListSecrets, failed to resolve service
+endpoint, endpoint rule error, Invalid Configuration: Missing Region"`.
 
 The broker refuses to start, naming the variable, when one is missing, malformed or out of range,
 and also while a variable it no longer reads is still set. `BROKER_DATABASE_URL` is the only
@@ -157,9 +176,10 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
 | Dependency | What the broker needs from it |
 | --- | --- |
 | Postgres | A database the broker owns (`BROKER_DATABASE_URL`). The broker applies its own migrations at startup; they only move forward, so never run an older broker against a database a newer one has migrated. On Amazon RDS it can sign in by IAM token instead of a password ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)). |
-| AWS Secrets Manager | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, tagged `owner` and `tier`, encrypted with the key `BROKER_SECRETS_KMS_KEY_ARN` names, and holding a non-empty string. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the tags, the name each secret is asked for by, and how often the broker rereads them. |
-| AWS credentials | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key, `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and, when it signs in to RDS by IAM token, `rds-db:connect` on its database user; nothing else. |
-| A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of both AWS services; the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
+| The secret store | The agent secrets: every secret whose name starts with `BROKER_SECRETS_PREFIX`, carrying `owner` and `tier` (AWS tags, or Secret Manager annotations), encrypted with the agent-secrets key, and holding a non-empty string. [Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret) describes the two, the name each secret is asked for by, and how often the broker rereads them. `BROKER_SECRETS_STORE` names which store, and the two rows below say what each needs. |
+| AWS Secrets Manager (`aws-secrets-manager`) | The broker calls AWS with the SDK's default credential chain (environment, shared config, or the workload's role), in a region (`AWS_REGION`, `AWS_DEFAULT_REGION` or the shared config). It needs `secretsmanager:ListSecrets` (which takes no resource, so on `*`), `secretsmanager:DescribeSecret` (to reread one secret) and `secretsmanager:GetSecretValue` on the namespace's secrets, `kms:Decrypt` on the agent-secrets key (`BROKER_SECRETS_KMS_KEY_ARN`), `kms:ListAliases` (on `*`, called only when a secret names its key by an alias), and, when it signs in to RDS by IAM token, `rds-db:connect` on its database user; nothing else. |
+| Google Cloud Secret Manager (`gcp-secret-manager`) | The broker calls Secret Manager under [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials): on GKE, Workload Identity Federation for the pod's Kubernetes ServiceAccount, with no key file and no Google service account; the boot log's `secret store … credentials=application-default` line says so. Its principal needs `secretmanager.secrets.list` on the project (the listing takes the project as its parent) and `secretmanager.secrets.get`, `secretmanager.versions.get` and `secretmanager.versions.access` on the namespace's secrets: `roles/secretmanager.viewer` on the project and `roles/secretmanager.secretAccessor` with an IAM condition `resource.name.startsWith("projects/<number>/secrets/<id prefix>")` cover them. The condition narrows only the accessor binding, so the broker reads values from the namespace alone; the viewer role reaches every secret's metadata in the project (its annotations, its versions' state and its IAM policy), never a value. A secret is served while its `versions/latest` is `ENABLED`, encrypted with the key `BROKER_SECRETS_KMS_KEY_NAME` names (`replication.automatic.customerManagedEncryption`; a secret on Google's default encryption is refused `not-on-agent-secrets-key`); one with an `expire_time` is scheduled for deletion and left out, as a Secrets Manager secret in its recovery window is, and a grant made before it no longer reads its value, though Secret Manager still would until that time. Every Secret Manager call but reading a value counts against the project's read quota, [600 a minute, shared by everything in the project](https://docs.cloud.google.com/secret-manager/quotas) (reading a value has its own 90,000). The broker's worst case against it is the sum of: a reload every five minutes, one listing plus one call per secret (a 200-secret namespace, about 40 a minute); the public reread route, two each, capped at one a second across all callers (at most 120 a minute); each session's rereads for names it was not served, two each, at most one per session every ten seconds; and value releases, one per distinct secret per 30 seconds (two for a secret whose latest version is disabled), since the broker trusts its last check of a secret, readable or not, for that long (so a delete stops releases at most 30 seconds after Secret Manager's own metadata shows it, which Google documents as eventually consistent). A busy fleet of sessions requesting unknown names can still spend the quota, and other workloads in the same project draw on it too, so give the agent secrets a project of their own. On the metadata calls the broker retries an `UNAVAILABLE` answer and never a `RESOURCE_EXHAUSTED` one, which would only spend more of that quota; reading a value keeps the client library's own retry of both, against its separate quota. On Secret Manager the agent-secrets key gates no caller: Secret Manager's service agent makes the KMS calls, so writing a secret onto the key and reading it need no KMS permission, and being on the key is the namespace's convention, not a second permission check as it is on AWS. Secret Manager makes the KMS calls itself, so the broker needs no KMS permission; the Secret Manager service agent needs `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the key. |
+| A local stand-in (development only) | `BROKER_FAKE_SECRETS_FILE` names a JSON file the broker reads in place of the store, in Secrets Manager's shape whatever `BROKER_SECRETS_STORE` says, each secret's `kms_key_id` naming the agent-secrets key as the selected store configures it (`BROKER_SECRETS_KMS_KEY_ARN`, or `BROKER_SECRETS_KMS_KEY_NAME` with the GCP store); the [configuration reference](/legion/broker/reference/config/#variables-the-broker-reads) gives its format. |
 | Dispatch | Dispatch's server calls the broker's approval routes. Set Dispatch's `DISPATCH_AGENT_SECRETS_URL` to the broker's URL and `DISPATCH_AGENT_SECRETS_TOKEN` (or `DISPATCH_AGENT_SECRETS_TOKEN_FILE`) to the same value as the broker's `BROKER_UI_TOKEN`. Without them, Dispatch hides its credential pages. |
 | Kubernetes (optional) | To enroll pods, and to let a service log in with its token (`BROKER_SERVICE_LOGINS`), `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` name the cluster's service-account token issuer and the audience the pods' and the services' projected tokens carry. The broker fetches the issuer's discovery document at startup and refuses to start if it cannot. |
 | Envoy (optional) | With `BROKER_ENVOY_URL`, the broker tells a waiting agent session, best effort, when its pending request expires. |
@@ -173,16 +193,17 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   Dispatch's server and nothing else, and never to an agent.
 - Behind a reverse proxy, set `BROKER_TRUSTED_PROXY_HEADER` so the machine-login and secret-reread
   rate limiters see each caller's address rather than the proxy's.
-- The settings and reread routes take no credential. `GET /v1/settings` answers the namespace
-  prefix, the agent-secrets key's ARN, and that key's AWS account and region.
-  `POST /v1/secrets/{name}/reread` makes the broker read one secret from Secrets Manager at once,
+- The settings and reread routes take no credential. `GET /v1/settings` answers the store, the
+  namespace prefix and, per store, the agent-secrets key's ARN with its AWS account and region, or
+  the Cloud KMS key's name with the project number.
+  `POST /v1/secrets/{name}/reread` makes the broker read one secret from the store at once,
   and answers whether it now serves it and, if not, why. Neither releases a value. What a reread
   does tell any caller who can reach the broker is whether a name under the namespace exists and,
   when the broker leaves it out, which of its reasons applies — `absent`, or a refusal such as
   `owner-tag-missing` or `not-on-agent-secrets-key`. That is more than `UNKNOWN_SECRET`, which says
   only that no agent secret has the name, says it only to an enrolled session, and never separates a
   secret that does not exist from one the broker refuses; it is what anyone allowed to list the
-  namespace reads from the secrets' own names and tags.
+  namespace reads from the secrets' own names and tags (or annotations).
   Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit` and
   `DefaultRereadOverallLimit` in `packages/envoy/internal/broker/api/limits.go`): each source
   address gets a burst of 30, refilled one every 2 seconds, and the broker as a whole takes 4 a
@@ -195,8 +216,8 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   address. When a limit refuses it, the write stands in Secrets Manager and the CLI exits 1 saying
   so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
 - Agents never see the broker's database or the secret store; whoever can write the database can
-  forge a record, so its access control is part of the broker's. Whoever can tag a secret under the
-  namespace decides who gets it, so the tags' write access is part of the broker's too.
+  forge a record, so its access control is part of the broker's. Whoever can tag (or annotate) a
+  secret under the namespace decides who gets it, so that write access is part of the broker's too.
 
 ## People who manage secrets
 
@@ -208,7 +229,15 @@ for its settings (`GET /v1/settings`) and, after each write, for a reread. Befor
 refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
 a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. A
 person's access needs each form's permissions on the namespace's secrets, and the table says what
-each request carries that a policy's conditions can match:
+each request carries that a policy's conditions can match. Against a broker on Google Secret
+Manager this release's forms refuse to run, naming the store; a person writes such a secret with
+`gcloud secrets create <id prefix><slug> --replication-policy=automatic --kms-key-name=<key>
+--set-annotations=owner=<owner>,tier=<tier> --data-file=-`, the value on stdin, and then asks the
+broker to reread it with `POST /v1/secrets/<NAME>/reread`. Secret Manager's IAM conditions can
+match a secret's name but not an annotation's value, so nothing like the AWS conditions below
+exists there: anyone who may update or add a version to a secret under the namespace can rewrite
+its owner and tier, and so take any person's secret or replace its value. On Secret Manager, grant
+write under the namespace to administrators only, and let people ask an administrator to write.
 
 | Form | Permissions | What a condition can match |
 | --- | --- | --- |
@@ -240,10 +269,11 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | Log line | Meaning |
 | --- | --- |
 | `database sign-in method=<method>` | At startup, before the broker reaches for AWS or its database: `rds-iam` when each connection signs in with an RDS IAM token the broker mints, `password` when it signs in as `BROKER_DATABASE_URL` and libpq's defaults say (a password in the URL, `PGPASSWORD`, a passfile, or none for a server that trusts it). |
+| `secret store store=<store> credentials=<source>` | At startup, once the store is built: `aws-secrets-manager` under the AWS SDK's credential chain (`aws-sdk`), `gcp-secret-manager` under Application Default Credentials (`application-default`), or either name over `BROKER_FAKE_SECRETS_FILE` (`fake secrets file`). |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
-| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on every reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. Two things make this line more frequent than one per refused secret per five minutes, and an alarm on it has to allow for both: a refused secret that was reread in the last five minutes is logged twice by each read of the namespace, once from the listing and once from the reread of that one name the read makes; and any caller who can reach the broker writes one by asking for a reread of a refused name, at up to the rate the reread route allows (above). |
-| `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (Secrets Manager or KMS out of reach, or refusing the broker), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. A reread of the namespace in flight when the broker shuts down is not one of these and logs nothing. |
+| `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on every reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`, or Secret Manager's `versions/latest` is not `ENABLED`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes on AWS, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more; on Google Secret Manager usually as soon, though Google bounds its listing's lag only at a few hours). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. Two things make this line more frequent than one per refused secret per five minutes, and an alarm on it has to allow for both: a refused secret that was reread in the last five minutes is logged twice by each read of the namespace, once from the listing and once from the reread of that one name the read makes; and any caller who can reach the broker writes one by asking for a reread of a refused name, at up to the rate the reread route allows (above). |
+| `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (the secret store out of reach, or refusing the broker; a Secret Manager failure names its gRPC status code alone, never the status message), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. A reread of the namespace in flight when the broker shuts down is not one of these and logs nothing. |
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
 | `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, end the login that made the line's enrollment, which ends every enrollment it made, once its `subject` shows whether it is a Legion daemon's ([the renew token check](#the-renew-token-check) gives the query and both ways to end it); never pick a machine-login row by its machine name. |

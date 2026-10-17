@@ -274,11 +274,12 @@ func launcherBackstop(boot, bound time.Duration) time.Duration {
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
 // launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone and its retries may take up to ProvisionBound from the fetch's own start. So until the
-// wait first sees the pod provisioning (an init container running, provisioning) it gives the pod
-// the boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw
-// the pod provisioning, never past the boot timeout plus ProvisionBound from the first
-// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
+// clone with its retries, then workspace-init's clone of the feed, may take up to ProvisionBound
+// from the fetch's own start. So until the wait first sees the pod provisioning (an init container
+// running, provisioning) it gives the pod the boot timeout, the image pull's; from then on, the boot
+// timeout from the last moment it saw the pod provisioning, never past the boot timeout plus
+// ProvisionBound from the first (launcherDeadline). A pod that never provisions past the boot
+// timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
