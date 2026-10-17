@@ -3,6 +3,8 @@ package sandbox
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -155,6 +157,35 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 				t.Fatalf("CheckPod = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// CheckPod accepts exactly the DISPATCH_PUBLIC_URL values the agents' dispatch command accepts:
+// both read packages/contracts/fixtures/dispatch-public-url.json, so a value the daemon lets through
+// at load never turns Dispatch off in every agent (an empty hostname, a port out of range).
+func TestCheckPodHoldsDispatchPublicURLToTheAgentsRule(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "dispatch-public-url.json"))
+	if err != nil {
+		t.Fatalf("read the public-URL fixture: %v", err)
+	}
+	var fixture struct{ Valid, Invalid []string }
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("parse the public-URL fixture: %v", err)
+	}
+	check := func(value string) error {
+		return CheckPod(Pod{Env: map[string]string{"DISPATCH_PUBLIC_URL": value}}, nil, testOptions().Tools,
+			[]string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
+	}
+	for _, value := range fixture.Valid {
+		if err := check(value); err != nil {
+			t.Errorf("CheckPod(%q) = %v, want it accepted", value, err)
+		}
+	}
+	for _, value := range fixture.Invalid {
+		want := fmt.Sprintf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off", value)
+		if err := check(value); err == nil || err.Error() != want {
+			t.Errorf("CheckPod(%q) = %v, want %q", value, err, want)
+		}
 	}
 }
 

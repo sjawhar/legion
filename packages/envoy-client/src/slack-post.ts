@@ -184,18 +184,20 @@ const MAY_HAVE_POSTED =
  * delimiter of Slack's `<url|text>` form. Trailing punctuation is trimmed before it is parsed. The
  * scheme and each host label are bounded, so a long reply is scanned in linear time. */
 const URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
-/** A host written with no scheme: three or more dotted labels, optionally a port, not inside a
- * path, an address or another word. */
-const BARE_HOST =
-  /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.){2,}[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
+/** A host written with no scheme: two or more dotted labels, optionally a port, not inside a
+ * path, an address or another word. Only a host insideCluster names is refused, so dotted prose
+ * (`README.md`, `e.g.`) passes. */
+const BARE_HOST = /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
 const TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
 
 /**
  * The first link in text that points inside the cluster, as the reply wrote it, or undefined. Each
- * URL, Slack's `<url|text>` and its HTML-escaped form included, and each scheme-less host is parsed
- * with the URL parser (which also decodes a percent-encoded host) and its host checked
- * (insideCluster). While DISPATCH_PUBLIC_URL names another host, DISPATCH_URL's host is inside too,
- * whatever form the deployment gave it.
+ * URL, Slack's `<url|text>` and its HTML-escaped form included, is parsed as written and with its
+ * trailing punctuation trimmed, and refused when either host is inside (insideCluster); each
+ * scheme-less host likewise. The URL parser also decodes a percent-encoded host and writes an
+ * IPv4-mapped address in hex, which privateIPv6 reads. While DISPATCH_PUBLIC_URL names another
+ * host, DISPATCH_URL's host is inside too, whatever form the deployment gave it, and is refused
+ * with or without a scheme, a single label included.
  */
 function linkInsideCluster(
   text: string,
@@ -210,17 +212,20 @@ function linkInsideCluster(
       : undefined;
   const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   for (const match of decoded.matchAll(URL_CANDIDATE)) {
-    for (const written of [match[0], match[0].replace(TRAILING_PUNCTUATION, "")]) {
+    for (const written of new Set([match[0], match[0].replace(TRAILING_PUNCTUATION, "")])) {
       const host = hostOf(written);
-      if (host === undefined) continue;
-      if (insideCluster(host, dispatchHost, true)) return written;
-      break;
+      if (host !== undefined && insideCluster(host, dispatchHost, true)) return written;
     }
   }
   const prose = decoded.replace(URL_CANDIDATE, (url) => " ".repeat(url.length));
   for (const match of prose.matchAll(BARE_HOST)) {
     const host = hostOf(`http://${match[0]}`);
     if (host !== undefined && insideCluster(host, dispatchHost, false)) return match[0];
+  }
+  if (dispatchHost !== undefined) {
+    const escaped = dispatchHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const bare = new RegExp(`(?<![\\w@./:%-])${escaped}\\.?(?=[:/])`, "i").exec(prose);
+    if (bare !== null) return bare[0];
   }
   return undefined;
 }
@@ -239,24 +244,25 @@ function hostOf(value: string | undefined): string | undefined {
 /**
  * Whether host is one only the cluster reaches: a Kubernetes Service name (ending `.svc`, a custom
  * cluster domain after `.svc.`, or `.cluster.local`), Dispatch's own in-cluster host (dispatchHost),
- * and, for a host a URL names, a single label (`dispatch`, `localhost`) or a private or loopback IP
- * literal (a ClusterIP among them).
+ * a private or loopback IP literal (a ClusterIP among them, an IPv4-mapped one included), and, for
+ * a host a URL names, a single label (`dispatch`, `localhost`).
  */
 function insideCluster(host: string, dispatchHost: string | undefined, fromUrl: boolean): boolean {
   if (host === dispatchHost) return true;
   if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
     return true;
-  if (!fromUrl) return privateIPv4(host);
   if (host.startsWith("[")) return privateIPv6(host.slice(1, -1));
-  return privateIPv4(host) || !host.includes(".");
+  return privateIPv4(host) || (fromUrl && !host.includes("."));
 }
 
-/** A loopback, link-local, private or shared (carrier-grade NAT) IPv4 address. */
+/** A loopback, link-local, private or shared (carrier-grade NAT) IPv4 address, or the unspecified
+ * one. */
 function privateIPv4(host: string): boolean {
   const octets = host.split(".");
   if (octets.length !== 4 || !octets.every((octet) => /^\d{1,3}$/.test(octet))) return false;
   const [a = 0, b = 0] = octets.map(Number);
   return (
+    a === 0 ||
     a === 10 ||
     a === 127 ||
     (a === 169 && b === 254) ||
@@ -266,10 +272,41 @@ function privateIPv4(host: string): boolean {
   );
 }
 
-/** A loopback, link-local or unique-local IPv6 address. */
+/** A loopback, unspecified, link-local or unique-local IPv6 address, or one that maps or embeds
+ * (`::ffff:a.b.c.d`, `::a.b.c.d`) an IPv4 address privateIPv4 names. */
 function privateIPv6(address: string): boolean {
-  const head = address.split(":")[0] ?? "";
-  return address === "::1" || /^f[cd][0-9a-f]{0,2}$/.test(head) || /^fe[89ab][0-9a-f]?$/.test(head);
+  const words = ipv6Words(address);
+  if (words === undefined) return false;
+  const [first = 0] = words;
+  const zeroUntil = (end: number) => words.slice(0, end).every((word) => word === 0);
+  if (zeroUntil(5) && (words[5] === 0xffff || words[5] === 0)) {
+    const [high = 0, low = 0] = words.slice(6);
+    const ipv4 = `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+    if (words[5] === 0xffff || !zeroUntil(7) || low > 1) return privateIPv4(ipv4);
+    return true; // `::` and `::1`
+  }
+  return (first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80;
+}
+
+/** The eight 16-bit words of an IPv6 address, a trailing dotted IPv4 part included; undefined for
+ * a string that is not one. */
+function ipv6Words(address: string): number[] | undefined {
+  let text = address.toLowerCase();
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted !== null) {
+    const [a, b, c, d] = dotted.slice(1).map(Number) as [number, number, number, number];
+    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2) return undefined;
+  const parse = (part: string) => (part === "" ? [] : part.split(":"));
+  const head = parse(halves[0] ?? "");
+  const tail = halves.length === 2 ? parse(halves[1] ?? "") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1) return undefined;
+  const words = [...head, ...Array<string>(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (!words.every((word) => /^[0-9a-f]{1,4}$/.test(word))) return undefined;
+  return words.map((word) => Number.parseInt(word, 16));
 }
 
 /**

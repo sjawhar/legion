@@ -39593,7 +39593,8 @@ function dispatchSettings(env, config2) {
     const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
     const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env);
     const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    if (publicUrl !== undefined && httpUrl2(publicUrl) === undefined) {
+    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
       return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
     }
     return {
@@ -39908,7 +39909,7 @@ try {
 `;
 var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
 var URL_CANDIDATE = /(?<![a-z0-9+.-])[a-z][a-z0-9+.-]{0,31}:\/\/[^\s<>|"'`]+/gi;
-var BARE_HOST = /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.){2,}[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
+var BARE_HOST = /(?<![\w@./:%-])(?:[a-z0-9-]{1,63}\.)+[a-z0-9-]{1,63}\.?(?::\d{1,5})?(?![\w-])/gi;
 var TRAILING_PUNCTUATION = /[.,;:!?)\]}]+$/;
 function linkInsideCluster(text, env) {
   const { DISPATCH_URL: apiUrl, DISPATCH_PUBLIC_URL: publicUrl } = env;
@@ -39917,13 +39918,10 @@ function linkInsideCluster(text, env) {
   const dispatchHost = apiHost !== undefined && publicHost !== undefined && apiHost !== publicHost ? apiHost : undefined;
   const decoded = text.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
   for (const match of decoded.matchAll(URL_CANDIDATE)) {
-    for (const written of [match[0], match[0].replace(TRAILING_PUNCTUATION, "")]) {
+    for (const written of new Set([match[0], match[0].replace(TRAILING_PUNCTUATION, "")])) {
       const host = hostOf(written);
-      if (host === undefined)
-        continue;
-      if (insideCluster(host, dispatchHost, true))
+      if (host !== undefined && insideCluster(host, dispatchHost, true))
         return written;
-      break;
     }
   }
   const prose = decoded.replace(URL_CANDIDATE, (url2) => " ".repeat(url2.length));
@@ -39931,6 +39929,12 @@ function linkInsideCluster(text, env) {
     const host = hostOf(`http://${match[0]}`);
     if (host !== undefined && insideCluster(host, dispatchHost, false))
       return match[0];
+  }
+  if (dispatchHost !== undefined) {
+    const escaped = dispatchHost.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const bare = new RegExp(`(?<![\\w@./:%-])${escaped}\\.?(?=[:/])`, "i").exec(prose);
+    if (bare !== null)
+      return bare[0];
   }
   return;
 }
@@ -39948,22 +39952,52 @@ function insideCluster(host, dispatchHost, fromUrl) {
     return true;
   if (host.endsWith(".svc") || host.includes(".svc.") || host.endsWith(".cluster.local"))
     return true;
-  if (!fromUrl)
-    return privateIPv4(host);
   if (host.startsWith("["))
     return privateIPv6(host.slice(1, -1));
-  return privateIPv4(host) || !host.includes(".");
+  return privateIPv4(host) || fromUrl && !host.includes(".");
 }
 function privateIPv4(host) {
   const octets = host.split(".");
   if (octets.length !== 4 || !octets.every((octet) => /^\d{1,3}$/.test(octet)))
     return false;
   const [a = 0, b = 0] = octets.map(Number);
-  return a === 10 || a === 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 100 && b >= 64 && b <= 127;
+  return a === 0 || a === 10 || a === 127 || a === 169 && b === 254 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 100 && b >= 64 && b <= 127;
 }
 function privateIPv6(address) {
-  const head = address.split(":")[0] ?? "";
-  return address === "::1" || /^f[cd][0-9a-f]{0,2}$/.test(head) || /^fe[89ab][0-9a-f]?$/.test(head);
+  const words = ipv6Words(address);
+  if (words === undefined)
+    return false;
+  const [first = 0] = words;
+  const zeroUntil = (end) => words.slice(0, end).every((word) => word === 0);
+  if (zeroUntil(5) && (words[5] === 65535 || words[5] === 0)) {
+    const [high = 0, low = 0] = words.slice(6);
+    const ipv43 = `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+    if (words[5] === 65535 || !zeroUntil(7) || low > 1)
+      return privateIPv4(ipv43);
+    return true;
+  }
+  return (first & 65024) === 64512 || (first & 65472) === 65152;
+}
+function ipv6Words(address) {
+  let text = address.toLowerCase();
+  const dotted = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (dotted !== null) {
+    const [a, b, c, d] = dotted.slice(1).map(Number);
+    text = `${text.slice(0, dotted.index)}${(a << 8 | b).toString(16)}:${(c << 8 | d).toString(16)}`;
+  }
+  const halves = text.split("::");
+  if (halves.length > 2)
+    return;
+  const parse5 = (part) => part === "" ? [] : part.split(":");
+  const head = parse5(halves[0] ?? "");
+  const tail = halves.length === 2 ? parse5(halves[1] ?? "") : [];
+  const missing = 8 - head.length - tail.length;
+  if (halves.length === 1 ? missing !== 0 : missing < 1)
+    return;
+  const words = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
+  if (!words.every((word) => /^[0-9a-f]{1,4}$/.test(word)))
+    return;
+  return words.map((word) => Number.parseInt(word, 16));
 }
 async function postSlackReply(reply, options = {}) {
   const env = options.env ?? process.env;

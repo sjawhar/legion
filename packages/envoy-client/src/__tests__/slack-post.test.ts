@@ -227,6 +227,34 @@ describe("postSlackReply", () => {
           DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
         },
       ],
+      ["an IPv4-mapped ClusterIP", "See http://[::ffff:10.96.12.34]:8766/issues/ACME-12"],
+      ["an IPv4-mapped loopback address", "See http://[::ffff:127.0.0.1]:8766/issues/ACME-12"],
+      ["a two-label Service host with no scheme", "See dispatch.svc:8766/issues/ACME-12"],
+      ["a parenthesized .svc link before a full stop", "See (http://dispatch.example-ns.svc)."],
+      [
+        "DISPATCH_URL's two-label host with no scheme while the dashboard is elsewhere",
+        "See dispatch.example-ns:8766/issues/ACME-12",
+        {
+          DISPATCH_URL: "http://dispatch.example-ns:8766",
+          DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
+        },
+      ],
+      [
+        "DISPATCH_URL's host in parentheses before a full stop while the dashboard is elsewhere",
+        "See (http://dispatch.example-ns).",
+        {
+          DISPATCH_URL: "http://dispatch.example-ns:8766",
+          DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
+        },
+      ],
+      [
+        "DISPATCH_URL's single-label host with no scheme while the dashboard is elsewhere",
+        "See dispatch:8766/issues/ACME-12",
+        {
+          DISPATCH_URL: "http://dispatch:8766",
+          DISPATCH_PUBLIC_URL: "https://dispatch.example.org",
+        },
+      ],
     ];
     for (const [name, text, extra] of rows) {
       test(name, async () => {

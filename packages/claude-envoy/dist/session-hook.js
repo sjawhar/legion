@@ -18887,7 +18887,8 @@ function dispatchSettings(env, config2) {
     const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
     const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env);
     const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
-    if (publicUrl !== undefined && httpUrl2(publicUrl) === undefined) {
+    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
       return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
     }
     return {

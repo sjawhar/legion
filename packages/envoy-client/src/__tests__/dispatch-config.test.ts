@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import publicUrlFixture from "../../../contracts/fixtures/dispatch-public-url.json";
 import { activeDispatchSettings, type DispatchEnvironment } from "../dispatch-config";
 import type { EnvoyHarness } from "../envoy-config";
 import { sessionConfigFile, sessionDispatchSettings } from "../session-settings";
@@ -285,7 +286,9 @@ describe("Dispatch from a harness's envoy.json", () => {
       publicUrl: "https://dispatch.example.org",
     });
     expect(dispatchFor(env, { ...command, cwd: tempDir() })).not.toHaveProperty("publicUrl");
-    for (const url of ["dispatch.example.org", "ftp://dispatch.example.org"]) {
+    // The same cases the daemon's CheckPod refuses at load (fixtures/dispatch-public-url.json), so
+    // no value the daemon accepts turns Dispatch off in an agent.
+    for (const url of publicUrlFixture.invalid) {
       expect(
         dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
       ).toEqual({
@@ -293,6 +296,11 @@ describe("Dispatch from a harness's envoy.json", () => {
         notice: null,
         error: "DISPATCH_PUBLIC_URL must be an http or https URL",
       });
+    }
+    for (const url of publicUrlFixture.valid) {
+      expect(
+        dispatchFor({ ...env, DISPATCH_PUBLIC_URL: url }, { ...command, cwd: tempDir() })
+      ).toMatchObject({ enabled: true, publicUrl: url.replace(/\/+$/, "") });
     }
   });
 

@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
@@ -104,12 +105,12 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		}
 	}
 	// DISPATCH_PUBLIC_URL is Dispatch's dashboard as people open it, which every agent's dispatch
-	// command links to; it turns Dispatch off over a value that is not an http(s) URL, so the value
-	// is refused here, where one typo would otherwise stop every agent's Dispatch writes.
-	if value, set := pod.Env["DISPATCH_PUBLIC_URL"]; set {
-		if parsed, err := url.Parse(value); err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
-			return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off", value)
-		}
+	// command links to; it turns Dispatch off over a value that is not an http(s) URL with a
+	// hostname and, when it names one, a port from 1 to 65535, so the same value is refused here,
+	// where one typo would otherwise stop every agent's Dispatch writes. Both sides hold to
+	// packages/contracts/fixtures/dispatch-public-url.json.
+	if value, set := pod.Env["DISPATCH_PUBLIC_URL"]; set && !dashboardURL(value) {
+		return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an absolute http or https URL: every agent's dispatch command would turn Dispatch off", value)
 	}
 	volumes := legionVolumeNames()
 	for i, volume := range pod.Volumes {
@@ -165,4 +166,21 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 func overlaps(a, b string) bool {
 	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
 	return a == b || under(a, b) || under(b, a)
+}
+
+// dashboardURL is whether value is a URL the agents' dispatch command takes as DISPATCH_PUBLIC_URL
+// (envoy-client's dispatchSettings): http or https, a nonempty hostname, and a port from 1 to 65535
+// when it names one.
+func dashboardURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" {
+		return false
+	}
+	if port := parsed.Port(); port != "" {
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return false
+		}
+	}
+	return true
 }
