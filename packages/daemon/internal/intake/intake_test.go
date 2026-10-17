@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go/jetstream"
 
+	"github.com/sjawhar/envoy/daemonpermissions"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -445,7 +446,7 @@ func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 	if got := strings.Count(logs.String(), "poison JetStream message"); got != 2 {
 		t.Fatalf("poison logs after ack wait = %d, want 2", got)
 	}
-	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	assertNoAckPending(t, stream, daemonpermissions.DispatchConsumer(spec.Project))
 }
 
 // One NATS stream carries every Dispatch project's issue events. A daemon acts only on its own
@@ -462,7 +463,7 @@ func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *tes
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	testwait.Eventually(t, "the foreign event acknowledged", func() bool {
-		consumer, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
+		consumer, err := stream.Consumer(context.Background(), daemonpermissions.DispatchConsumer(spec.Project))
 		if err != nil {
 			return false
 		}
@@ -491,7 +492,7 @@ func TestConsumeAcknowledgesAnotherRepositorysGitHubEventWithoutApplyingIt(t *te
 	foreign := bytes.ReplaceAll(capturedGitHubEnvelope(t, "pr-opened.json"), []byte("sjawhar/legion"), []byte("sjawhar/legion.x"))
 	publish(t, js, "notifications.github.sjawhar.legion.x.pr.42", foreign)
 	testwait.Eventually(t, "the foreign pull request acknowledged", func() bool {
-		consumer, err := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
+		consumer, err := stream.Consumer(context.Background(), daemonpermissions.GitHubConsumer(spec.Project))
 		if err != nil {
 			return false
 		}
@@ -515,7 +516,7 @@ func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
 	testwait.Eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
-	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	assertNoAckPending(t, stream, daemonpermissions.DispatchConsumer(spec.Project))
 }
 
 func TestConsumeNaksRollbackAndAppliesRedeliveryOnce(t *testing.T) {
@@ -538,7 +539,7 @@ func TestConsumeNaksRollbackAndAppliesRedeliveryOnce(t *testing.T) {
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	testwait.Eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
-	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	assertNoAckPending(t, stream, daemonpermissions.DispatchConsumer(spec.Project))
 }
 
 func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
@@ -574,7 +575,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
-	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	for _, name := range []string{daemonpermissions.DispatchConsumer(spec.Project), daemonpermissions.GitHubConsumer(spec.Project)} {
 		if pending := consumerInfo(t, stream, name).NumPending; pending != 0 {
 			t.Errorf("%s was created with %d messages of history pending, want 0", name, pending)
 		}
@@ -583,7 +584,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	defer stop()
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
 	testwait.Eventually(t, "the next message committed", func() bool { return writeCount(t, pool) >= 1 })
-	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	assertNoAckPending(t, stream, daemonpermissions.DispatchConsumer(spec.Project))
 	if got := writeCount(t, pool); got != 1 {
 		t.Errorf("%d facts committed, want only the message published after the consumers were created", got)
 	}
@@ -600,8 +601,8 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
 	for _, config := range []jetstream.ConsumerConfig{
-		{Durable: dispatchConsumerName(spec.Project), FilterSubject: "notifications.dispatch.issue.>", AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
-		{Durable: githubConsumerName(spec.Project), FilterSubjects: githubFilters(spec.Repositories), AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+		{Durable: daemonpermissions.DispatchConsumer(spec.Project), FilterSubject: "notifications.dispatch.issue.>", AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+		{Durable: daemonpermissions.GitHubConsumer(spec.Project), FilterSubjects: githubFilters(spec.Repositories), AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
 	} {
 		if _, err := stream.CreateConsumer(context.Background(), config); err != nil {
 			t.Fatalf("create the earlier daemon's consumer %s: %v", config.Durable, err)
@@ -612,19 +613,19 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
-	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	for _, name := range []string{daemonpermissions.DispatchConsumer(spec.Project), daemonpermissions.GitHubConsumer(spec.Project)} {
 		if pending := consumerInfo(t, stream, name).NumPending; pending != 1 {
 			t.Errorf("%s has %d messages pending after the boot, want its backlog of 1", name, pending)
 		}
 	}
-	if got, want := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects, githubFilters(spec.Repositories); !slices.Equal(got, want) {
+	if got, want := consumerInfo(t, stream, daemonpermissions.GitHubConsumer(spec.Project)).Config.FilterSubjects, githubFilters(spec.Repositories); !slices.Equal(got, want) {
 		t.Errorf("GitHub consumer filters = %v, want the boot's %v", got, want)
 	}
 
 	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
 	defer stop()
 	testwait.Eventually(t, "both backlogs delivered and acknowledged", func() bool {
-		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+		for _, name := range []string{daemonpermissions.DispatchConsumer(spec.Project), daemonpermissions.GitHubConsumer(spec.Project)} {
 			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
 				return false
 			}
@@ -669,7 +670,7 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	testwait.Eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
-	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	assertNoAckPending(t, stream, daemonpermissions.DispatchConsumer(spec.Project))
 }
 
 // Every carrier of a ghrepo.Repository refuses the zero value, and intake is one: a zero

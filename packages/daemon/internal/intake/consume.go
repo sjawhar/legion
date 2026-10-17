@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sjawhar/envoy/daemonpermissions"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -90,8 +91,8 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	}
 
 	dispatch, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
-		Durable:       dispatchConsumerName(spec.Project),
-		FilterSubject: "notifications.dispatch.issue.>",
+		Durable:       daemonpermissions.DispatchConsumer(spec.Project),
+		FilterSubject: daemonpermissions.DispatchFilter,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       spec.AckWait,
 	})
@@ -99,7 +100,7 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
 	}
 	github, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
-		Durable:        githubConsumerName(spec.Project),
+		Durable:        daemonpermissions.GitHubConsumer(spec.Project),
 		FilterSubjects: githubFilters(spec.Repositories),
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		AckWait:        spec.AckWait,
@@ -372,12 +373,4 @@ func githubFilters(repositories []ghrepo.Repository) []string {
 // the payload's repository, not the subject, says whose event it is.
 func githubRepositoryPrefix(repo ghrepo.Repository) string {
 	return "notifications.github." + strings.ReplaceAll(repo.Owner(), ".", "_") + "." + strings.ReplaceAll(repo.Name(), ".", "_")
-}
-
-func dispatchConsumerName(project string) string {
-	return "legion-go-" + project + "-dispatch"
-}
-
-func githubConsumerName(project string) string {
-	return "legion-go-" + project + "-github"
 }

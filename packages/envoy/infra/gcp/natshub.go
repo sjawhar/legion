@@ -131,15 +131,15 @@ type NatsHubArgs struct {
 	SessionUser *SessionUserArgs `pulumi:"sessionUser,optional"`
 }
 
-// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, daemon, and permissions
-// selects the user's grant. nkey is named as aws:User names it, so a consumer running both clouds
-// spells a user alike.
+// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, daemonProject, and
+// permissions selects the user's grant. nkey is named as aws:User names it, so a consumer running
+// both clouds spells a user alike.
 type NATSUserArgs struct {
-	Name        string           `pulumi:"name"`
-	NKey        string           `pulumi:"nkey"`                 // the user's public key; never its seed
-	MachineID   *string          `pulumi:"machineId,optional"`   // permissions = core.HostPermissions(machineId)
-	Daemon      bool             `pulumi:"daemon,optional"`      // permissions = core.DaemonPermissions()
-	Permissions *PermissionsArgs `pulumi:"permissions,optional"` // explicit
+	Name          string           `pulumi:"name"`
+	NKey          string           `pulumi:"nkey"`                   // the user's public key; never its seed
+	MachineID     *string          `pulumi:"machineId,optional"`     // permissions = core.HostPermissions(machineId)
+	DaemonProject *string          `pulumi:"daemonProject,optional"` // permissions = core.DaemonPermissions(daemonProject)
+	Permissions   *PermissionsArgs `pulumi:"permissions,optional"`   // explicit
 }
 
 // Annotate names the type gcp:NatsUser in the schema: generated SDKs append Args to an object
@@ -327,9 +327,9 @@ func resolveListener(args *NatsHubArgs) (*listener, error) {
 // '_' or whitespace, or percent-encoded), by its path and never its value: the hostname and the
 // tags, quoted by the hub's own refusals and written into the user data; the zone, the machine
 // type and the disk type, the group's and the template's inputs, the disk type also quoted by its
-// refusal; the images, written into the user data; and each user's machine id, which the hub
-// turns into that user's rules before core sees them, so core's refusal would name a rule entry
-// the user never wrote. A user's name and rule entries are core's:
+// refusal; the images, written into the user data; and each user's machine id and daemon project,
+// which the hub turns into that user's rules before core sees them, so core's refusal would name a
+// rule entry the user never wrote. A user's name and rule entries are core's:
 // core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
 // hub's own user refusals name a user by its index alone (authorization). A user's nkey is core's
 // too: it refuses any nkey that is not a user public key, a seed included, without quoting it.
@@ -351,6 +351,9 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 	for i, u := range args.Users {
 		if u.MachineID != nil {
 			fields = append(fields, field{fmt.Sprintf("users[%d].machineId", i), *u.MachineID})
+		}
+		if u.DaemonProject != nil {
+			fields = append(fields, field{fmt.Sprintf("users[%d].daemonProject", i), *u.DaemonProject})
 		}
 	}
 	if args.Listener != nil {
@@ -394,14 +397,14 @@ func refuseSeedInSecret(value pulumi.StringInput, hub, input string) pulumi.Stri
 }
 
 // authorization maps the hub's users onto core's. Each of users is a keyed user with a seed, whose
-// permissions are its host's set when it names a machine id, the daemon's set when daemon is true,
-// and its own when it names permissions. The listener's user follows them, named hostname, with the
-// listener's set for that machine and a seed; the session user comes last, with the session's set
-// and no seed, as the authorization's noAuthUser. A hub needs users or a listener: with the session
-// user alone, no client could hold more than a session's grant, and no listener could run. core
-// validates the rest when it renders, a seed in a name or a rule entry first. The hub's own refusals
-// name a user by its index alone: they come before core has read the names, so quoting one could
-// quote a seed.
+// permissions are its host's set when it names a machine id, the set of its project's daemon when
+// it names a daemon project, and its own when it names permissions. The listener's user follows
+// them, named hostname, with the listener's set for that machine and a seed; the session user comes
+// last, with the session's set and no seed, as the authorization's noAuthUser. A hub needs users or
+// a listener: with the session user alone, no client could hold more than a session's grant, and no
+// listener could run. core validates the rest when it renders, a seed in a name or a rule entry
+// first. The hub's own refusals name a user by its index alone, and quote no daemon project: they
+// come before core has read the names, so quoting one could quote a seed.
 func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, session *SessionUserArgs) (core.Authorization, error) {
 	if len(users) == 0 && l == nil {
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
@@ -416,24 +419,27 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		switch {
 		case u.MachineID != nil && u.Permissions != nil:
 			return core.Authorization{}, fmt.Errorf("%s: machineId and permissions are both set; name one", where)
-		case u.MachineID != nil && u.Daemon:
-			return core.Authorization{}, fmt.Errorf("%s: machineId and daemon are both set; name one", where)
-		case u.Daemon && u.Permissions != nil:
-			return core.Authorization{}, fmt.Errorf("%s: daemon and permissions are both set; name one", where)
+		case u.MachineID != nil && u.DaemonProject != nil:
+			return core.Authorization{}, fmt.Errorf("%s: machineId and daemonProject are both set; name one", where)
+		case u.DaemonProject != nil && u.Permissions != nil:
+			return core.Authorization{}, fmt.Errorf("%s: daemonProject and permissions are both set; name one", where)
 		case u.MachineID != nil:
 			if *u.MachineID == "" {
 				return core.Authorization{}, fmt.Errorf("%s: machineId is empty", where)
 			}
 			perms = core.HostPermissions(*u.MachineID)
-		case u.Daemon:
-			perms = core.DaemonPermissions()
+		case u.DaemonProject != nil:
+			var err error
+			if perms, err = core.DaemonPermissions(*u.DaemonProject); err != nil {
+				return core.Authorization{}, fmt.Errorf("%s: daemonProject: %w", where, err)
+			}
 		case u.Permissions != nil:
 			perms = core.Permissions{
 				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
 				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
 			}
 		default:
-			return core.Authorization{}, fmt.Errorf("%s: name machineId, daemon, or permissions", where)
+			return core.Authorization{}, fmt.Errorf("%s: name machineId, daemonProject, or permissions", where)
 		}
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,

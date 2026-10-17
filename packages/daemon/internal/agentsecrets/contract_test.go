@@ -6,8 +6,8 @@
 // BROKER_TEST_DATABASE_URL (brokertest.NewRig's own skip), except on GitHub Actions, where the Tests
 // workflow's test job sets it and a skip would hide that it stopped (newBrokerRig).
 //
-// This is the only file in this module that imports anything under github.com/sjawhar/envoy/...:
-// that import is test-only, never leaking into the daemon's production build. It imports
+// The daemon's production build imports packages/envoy/daemonpermissions, the NATS names its grant
+// is built from; this file's import of the broker rig is test-only. It imports
 // packages/envoy/brokertest, a thin public facade over the internal rig, because Go's
 // internal-package rule refuses this module an import under github.com/sjawhar/envoy/internal/...
 package agentsecrets

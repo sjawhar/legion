@@ -1408,16 +1408,19 @@ user holding `HostPermissions`, and connected as a user holding `ListenerPermiss
 credential-free session user holding `SessionPermissions`, are checked against real nats-server
 2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
 
-`DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
-notification stream's info request, the info, create and next-message requests of any consumer of
-that stream, and their acknowledgements. It subscribes to the daemon's role-lane delivery
-exceptions and to reply inboxes. The consumer subjects are not narrowed to the daemon's own two,
-so its seed can read, recreate and drain every consumer of the stream, each host's listener
-consumer included, and create a push consumer that delivers the stream's messages to any subject,
-one it may not publish to included. Its `_INBOX.>` subscription receives every reply any client
-on the server gets, key-value reads and watch updates included, such as the listener's
-`envoy_roles` and `envoy_sessions` watchers. A `gcp:NatsHub` user with `daemon: true` receives
-this set; its seed belongs to the daemon, not to a host or session.
+`DaemonPermissions(project)` is the grant of one Legion project's daemon user, refusing a project
+that is not a Legion project key (`^[A-Z][A-Z0-9]*$`), since the project is part of a subject token in
+every entry that names it. It publishes the notification stream's info request and, for the project's two
+durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, each one's
+info, create and next-message requests and its acknowledgements; the Dispatch consumer's create
+names its one filter, `notifications.dispatch.issue.>`, as nats.go sends it. It subscribes to
+the role-lane delivery exceptions, `notifications.envoy.exceptions.notifications.role.*`, and to
+the daemon's own reply inbox, `_INBOX_legion_daemon_<project>.>`. It reaches no other consumer of
+the stream and no reply inbox but its own. Its seed still reads every message of the stream and
+every project's role-lane exceptions, and can have the stream's messages delivered to subjects it
+may not publish to (`docs/site/src/content/docs/dispatch/envoy.md` in this repository says how). A `gcp:NatsHub` user
+with `daemonProject: <project>` receives this set; its seed belongs to that project's daemon, not
+to a host or session, so each project's daemon has a user of its own.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by

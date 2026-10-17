@@ -6,7 +6,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -28,25 +30,28 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
-const (
-	dispatchGrantConsumer = "legion-go-CAPTURE-dispatch"
-	githubGrantConsumer   = "legion-go-CAPTURE-github"
-)
+// grantProject is the project the proof's daemon runs as.
+const grantProject = "CAPTURE"
 
 // The deployment and this proof share daemonpermissions.Grant: core wraps the same values as the
 // NATS server grant, while this test drives the daemon's real connection, durable consumers,
-// acknowledgements, and exceptions subscription through it.
+// acknowledgements, and exceptions subscription through it, on each server image the hub runs.
+// The server traces every protocol operation (-DV), and the subjects the daemon's connections
+// published and subscribed to are read back from that trace, since nats.go, not Legion's code,
+// chooses most of them.
 func TestDaemonPermissionsOnRealServers(t *testing.T) {
+	dispatchConsumer := daemonpermissions.DispatchConsumer(grantProject)
+	githubConsumer := daemonpermissions.GitHubConsumer(grantProject)
+	inbox := daemonpermissions.InboxPrefix(grantProject)
 	for _, image := range testnatsimages.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			t.Run("the daemon restarts, acknowledges Dispatch and GitHub, and receives exceptions", func(t *testing.T) {
-				grant := daemonpermissions.Grant()
-				daemonSeed, admin, js, server, uri := startDaemonGrantServer(t, image.Ref, grant)
-				defer admin.Close()
-				stream := createDaemonNotificationStream(t, js)
+				grant := daemonGrant(t)
+				srv := startDaemonGrantServer(t, image.Ref, grant)
+				stream := createDaemonNotificationStream(t, srv.js)
 
-				first := connectDaemonGrant(t, uri, daemonSeed, &syncBuffer{})
-				for _, name := range []string{dispatchGrantConsumer, githubGrantConsumer} {
+				first := connectDaemonGrant(t, srv.uri, srv.seed, &syncBuffer{})
+				for _, name := range []string{dispatchConsumer, githubConsumer} {
 					if _, err := stream.Consumer(t.Context(), name); err != nil {
 						t.Fatalf("the first daemon creates %s: %v", name, err)
 					}
@@ -54,7 +59,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				first.conn.Close()
 
 				logs := &syncBuffer{}
-				restarted := connectDaemonGrant(t, uri, daemonSeed, logs)
+				restarted := connectDaemonGrant(t, srv.uri, srv.seed, logs)
 				defer restarted.conn.Close()
 
 				exception := make(chan []byte, 1)
@@ -71,12 +76,12 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				stop := runDaemonGrantConsumers(t, restarted, handler)
 				defer stop()
 
-				publishDaemonGrantFixture(t, js, "../intake/testdata/dispatch/issue-updated.json")
-				publishDaemonGrantFixture(t, js, "../intake/testdata/github/pr-opened.json")
-				if err := admin.Publish("notifications.envoy.exceptions.notifications.role.example", []byte("retry this notice")); err != nil {
+				publishDaemonGrantFixture(t, srv.js, "../intake/testdata/dispatch/issue-updated.json")
+				publishDaemonGrantFixture(t, srv.js, "../intake/testdata/github/pr-opened.json")
+				if err := srv.admin.Publish("notifications.envoy.exceptions.notifications.role.example", []byte("retry this notice")); err != nil {
 					t.Fatalf("publish the role-lane exception: %v", err)
 				}
-				if err := admin.Flush(); err != nil {
+				if err := srv.admin.Flush(); err != nil {
 					t.Fatalf("flush the role-lane exception: %v", err)
 				}
 
@@ -95,59 +100,262 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				testwait.Eventually(t, "the daemon naking one delivery and applying its redelivery with both event types", func() bool {
 					return handler.calls.Load() >= 3
 				})
-				requireDaemonGrantAcknowledged(t, stream, dispatchGrantConsumer, githubGrantConsumer)
+				requireDaemonGrantAcknowledged(t, stream, dispatchConsumer, githubConsumer)
 				if strings.Contains(logs.String(), "NATS refused the daemon a permission") {
 					t.Fatalf("the daemon logged a permission refusal:\n%s", logs.String())
 				}
-				if serverLog := daemonGrantServerLogs(t, server); strings.Contains(serverLog, "Permissions Violation") {
+				serverLog := daemonGrantServerLogs(t, srv.server)
+				// The readiness probe's credential-free dial is refused with an Authorization Violation;
+				// a refused permission is logged as a Publish or Subscription Violation.
+				if strings.Contains(serverLog, "Publish Violation") || strings.Contains(serverLog, "Subscription Violation") {
 					t.Fatalf("the server logged a permissions violation:\n%s", serverLog)
 				}
-				t.Log("restarted daemon created both consumers, NAKed then acknowledged both event kinds, and received the role-lane exception without a permission refusal")
+
+				publish, subscribe := daemonTrace(serverLog)
+				requireEveryGrantEntryUsed(t, "publish", grant.Publish, publish)
+				requireEveryGrantEntryUsed(t, "subscribe", grant.Subscribe, subscribe)
+				for _, subject := range subscribe {
+					if !strings.HasPrefix(subject, inbox+".") && subject != daemonpermissions.RoleExceptions {
+						t.Errorf("the daemon subscribed to %s, outside its own inbox and the role-lane exceptions", subject)
+					}
+				}
+				t.Logf("server trace: the daemon published %s", strings.Join(traceSubjects(publish, inbox), ", "))
+				t.Logf("server trace: the daemon subscribed to %s", strings.Join(traceSubjects(subscribe, inbox), ", "))
+				t.Log("the first daemon created both consumers and the restarted one updated them, NAKed one delivery and acknowledged both event kinds, and received the role-lane exception without a permission refusal, using every entry of its grant")
 			})
 
-			t.Run("without the dispatch consumer-create permission, the daemon and server report it", func(t *testing.T) {
-				const removed = "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>"
-				grant := daemonpermissions.Grant()
-				held := len(grant.Publish)
-				grant.Publish = slices.DeleteFunc(grant.Publish, func(subject string) bool { return subject == removed })
-				if len(grant.Publish) != held-1 {
-					t.Fatalf("the daemon grant does not contain %s: %v", removed, grant.Publish)
-				}
+			// Each control removes one entry the daemon uses, and the daemon and the server then both
+			// report the refusal of exactly that subject: the passing run above passes because the grant
+			// holds that entry, not because the server enforces nothing.
+			for _, control := range []struct {
+				name, removed, violation, denied string
+			}{
+				{
+					name:      "without the Dispatch consumer's create, the daemon and server report it",
+					removed:   "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS." + dispatchConsumer + "." + daemonpermissions.DispatchFilter,
+					violation: "Publish Violation",
+					denied:    "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS." + dispatchConsumer + "." + daemonpermissions.DispatchFilter,
+				},
+				{
+					name:      "without its own reply inbox, the daemon and server report it",
+					removed:   inbox + ".>",
+					violation: "Subscription Violation",
+					denied:    inbox + ".",
+				},
+			} {
+				t.Run(control.name, func(t *testing.T) {
+					grant := daemonGrant(t)
+					held := len(grant.Publish) + len(grant.Subscribe)
+					drop := func(subject string) bool { return subject == control.removed }
+					grant.Publish = slices.DeleteFunc(grant.Publish, drop)
+					grant.Subscribe = slices.DeleteFunc(grant.Subscribe, drop)
+					if len(grant.Publish)+len(grant.Subscribe) != held-1 {
+						t.Fatalf("the daemon grant does not hold %s once: %v", control.removed, grant)
+					}
 
-				daemonSeed, admin, js, server, uri := startDaemonGrantServer(t, image.Ref, grant)
-				defer admin.Close()
-				createDaemonNotificationStream(t, js)
+					srv := startDaemonGrantServer(t, image.Ref, grant)
+					createDaemonNotificationStream(t, srv.js)
 
+					logs := &syncBuffer{}
+					cfg := daemonGrantConfig(srv.uri)
+					attempt, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+					defer cancel()
+					w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
+					if err := w.connect(attempt, cfg, daemonGrantConnection(srv.seed)); err == nil {
+						t.Fatalf("the daemon connected without %s", control.removed)
+					}
+					requireGrantRefusal(t, logs, srv.server, control.violation, control.denied)
+				})
+			}
+
+			// The daemon takes its own inbox only as its own user. As the pane user, whose grant
+			// admits `_INBOX.>` and not the daemon's inbox, it keeps nats.go's `_INBOX.` and boots.
+			t.Run("as the pane user, the daemon keeps the shared inbox", func(t *testing.T) {
+				pane := daemonGrant(t)
+				pane.Subscribe = []string{daemonpermissions.RoleExceptions, nats.InboxPrefix + ">"}
+				srv := startDaemonGrantServer(t, image.Ref, pane)
+				createDaemonNotificationStream(t, srv.js)
 				logs := &syncBuffer{}
-				cfg := daemonGrantConfig(uri)
-				attempt, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-				defer cancel()
+				cfg := daemonGrantConfig(srv.uri)
 				w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
-				if err := w.connect(attempt, cfg, natsConnection{seed: daemonSeed}); err == nil {
-					t.Fatal("the daemon connected without the dispatch consumer-create permission")
+				nc := natsConnection{seed: srv.seed, source: natsSeedPane, paneUser: true}
+				if err := w.connect(t.Context(), cfg, nc); err != nil {
+					t.Fatalf("the daemon as the pane user: %v\n%s", err, logs.String())
+				}
+				defer w.conn.Close()
+				_, subscribe := daemonTrace(daemonGrantServerLogs(t, srv.server))
+				if len(subscribe) == 0 || !slices.ContainsFunc(subscribe, func(s string) bool { return strings.HasPrefix(s, nats.InboxPrefix) }) {
+					t.Fatalf("the daemon as the pane user subscribed to %v, want nats.go's %s inbox", subscribe, nats.InboxPrefix)
+				}
+				if strings.Contains(logs.String(), "NATS refused the daemon a permission") {
+					t.Fatalf("the daemon as the pane user logged a refusal:\n%s", logs.String())
+				}
+			})
+
+			t.Run("the grant refuses another consumer's create and every other client's replies", func(t *testing.T) {
+				srv := startDaemonGrantServer(t, image.Ref, daemonGrant(t))
+				stream := createDaemonNotificationStream(t, srv.js)
+				logs := &syncBuffer{}
+				conn, err := natsauth.Connect([]string{srv.uri}, srv.seed, nats.Timeout(5*time.Second),
+					natsauth.DaemonInbox(grantProject), natsauth.LogEvents(grantLogger(logs)))
+				if err != nil {
+					t.Fatalf("connect as the daemon user: %v", err)
+				}
+				defer conn.Close()
+				js, err := jetstream.New(conn)
+				if err != nil {
+					t.Fatalf("open JetStream as the daemon user: %v", err)
 				}
 
-				denied := "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS." + dispatchGrantConsumer
-				var daemonLine, serverLine string
-				testwait.Eventually(t, "the daemon log naming the refused JetStream API publish", func() bool {
-					daemonLine = matchingLogLine(logs.String(), "NATS refused the daemon a permission", denied)
-					return daemonLine != ""
-				})
-				var serverLogErr error
-				testwait.Eventually(t, "the server log naming the refused JetStream API publish", func() bool {
-					var serverLog string
-					serverLog, serverLogErr = readDaemonGrantServerLogs(server)
-					serverLine = matchingLogLine(serverLog, "Publish Violation", denied)
-					return serverLine != ""
-				})
-				if serverLogErr != nil {
-					t.Fatalf("read the server log: %v", serverLogErr)
+				for _, other := range []jetstream.ConsumerConfig{
+					{Durable: daemonpermissions.DispatchConsumer("OTHER"), FilterSubject: daemonpermissions.DispatchFilter, AckPolicy: jetstream.AckExplicitPolicy},
+					{Durable: "listener-example-host-a", AckPolicy: jetstream.AckExplicitPolicy},
+				} {
+					attempt, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+					_, err := js.CreateConsumer(attempt, "ENVOY_NOTIFICATIONS", other)
+					cancel()
+					if err == nil {
+						t.Fatalf("the daemon user created %s", other.Durable)
+					}
+					denied := "$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS." + other.Durable
+					if other.FilterSubject != "" {
+						denied += "." + other.FilterSubject
+					}
+					requireGrantRefusal(t, logs, srv.server, "Publish Violation", denied)
+					if _, err := stream.Consumer(t.Context(), other.Durable); !errors.Is(err, jetstream.ErrConsumerNotFound) {
+						t.Fatalf("%s after the refused create: %v, want it absent", other.Durable, err)
+					}
 				}
-				t.Logf("observed daemon refusal: %s", daemonLine)
-				t.Logf("observed server refusal: %s", serverLine)
+
+				if _, err := conn.SubscribeSync(nats.InboxPrefix + ">"); err != nil {
+					t.Fatalf("send the shared-inbox subscription: %v", err)
+				}
+				if err := conn.Flush(); err != nil {
+					t.Fatalf("flush the shared-inbox subscription: %v", err)
+				}
+				requireGrantRefusal(t, logs, srv.server, "Subscription Violation", `"`+nats.InboxPrefix+`>"`)
 			})
 		})
 	}
+}
+
+// daemonGrant is the grant of grantProject's daemon.
+func daemonGrant(t *testing.T) daemonpermissions.Permissions {
+	t.Helper()
+	grant, err := daemonpermissions.Grant(grantProject)
+	if err != nil {
+		t.Fatalf("the grant of %s: %v", grantProject, err)
+	}
+	return grant
+}
+
+// daemonGrantConnection is the daemon's connection as its own NATS user, the one the grant is for.
+func daemonGrantConnection(seed string) natsConnection {
+	return natsConnection{seed: seed, source: natsSeedDaemon}
+}
+
+// requireGrantRefusal waits for the daemon's log and the server's to name the refusal of denied,
+// the server's in a line with violation, and logs both lines.
+func requireGrantRefusal(t *testing.T, logs *syncBuffer, server *tcnats.NATSContainer, violation, denied string) {
+	t.Helper()
+	var daemonLine, serverLine string
+	testwait.Eventually(t, "the daemon log naming the refusal of "+denied, func() bool {
+		daemonLine = matchingLogLine(logs.String(), "NATS refused the daemon a permission", strings.Trim(denied, `"`))
+		return daemonLine != ""
+	})
+	var serverLogErr error
+	testwait.Eventually(t, "the server log naming the refusal of "+denied, func() bool {
+		var serverLog string
+		serverLog, serverLogErr = readDaemonGrantServerLogs(server)
+		serverLine = matchingLogLine(serverLog, violation, denied)
+		return serverLine != ""
+	})
+	if serverLogErr != nil {
+		t.Fatalf("read the server log: %v", serverLogErr)
+	}
+	t.Logf("observed daemon refusal: %s", daemonLine)
+	t.Logf("observed server refusal: %s", strings.TrimSpace(serverLine))
+}
+
+// traceOperation is one client protocol operation the server traced: the client's connection id and
+// the operation as it arrived.
+var traceOperation = regexp.MustCompile(`cid:(\d+) .*<<- \[(.*)\]`)
+
+// grantAdminName is the admin connection's name, which its CONNECT carries in the server's trace.
+const grantAdminName = "daemon-grant-admin"
+
+// daemonTrace is every subject the daemon's connections published to and subscribed to, in the
+// order the server's trace shows them. A daemon connection is one whose CONNECT carries an nkey
+// and is not the admin's: the hub image redacts the nkey in its trace, so the user is told by the
+// admin connection's name, and the readiness probe's credential-free dial carries no nkey.
+func daemonTrace(serverLog string) (publish, subscribe []string) {
+	lines := strings.Split(serverLog, "\n")
+	daemon := map[string]bool{}
+	for _, line := range lines {
+		m := traceOperation.FindStringSubmatch(line)
+		if m != nil && strings.HasPrefix(m[2], "CONNECT ") && strings.Contains(m[2], `"nkey":`) &&
+			!strings.Contains(m[2], `"name":"`+grantAdminName+`"`) {
+			daemon[m[1]] = true
+		}
+	}
+	for _, line := range lines {
+		m := traceOperation.FindStringSubmatch(line)
+		if m == nil || !daemon[m[1]] {
+			continue
+		}
+		switch fields := strings.Fields(m[2]); fields[0] {
+		case "PUB", "HPUB":
+			publish = append(publish, fields[1])
+		case "SUB":
+			subscribe = append(subscribe, fields[1])
+		}
+	}
+	return publish, subscribe
+}
+
+// requireEveryGrantEntryUsed fails unless each entry of allow admits at least one of subjects: no
+// entry of the grant is one the daemon does not use.
+func requireEveryGrantEntryUsed(t *testing.T, direction string, allow, subjects []string) {
+	t.Helper()
+	for _, entry := range allow {
+		if !slices.ContainsFunc(subjects, func(subject string) bool { return subjectMatches(entry, subject) }) {
+			t.Errorf("%s entry %s admits nothing the daemon sent: %v", direction, entry, subjects)
+		}
+	}
+}
+
+// subjectMatches reports whether pattern, a permission entry, admits subject token by token: `*`
+// admits one token, a trailing `>` one or more.
+func subjectMatches(pattern, subject string) bool {
+	want, got := strings.Split(pattern, "."), strings.Split(subject, ".")
+	for i, token := range want {
+		if token == ">" {
+			return len(got) > i
+		}
+		if i >= len(got) || (token != "*" && token != got[i]) {
+			return false
+		}
+	}
+	return len(got) == len(want)
+}
+
+// traceSubjects is subjects without repeats, sorted, with what varies per call written as a
+// placeholder: the unique token of a reply inbox, and an acknowledgement's delivery tokens.
+func traceSubjects(subjects []string, inbox string) []string {
+	seen := map[string]bool{}
+	for _, subject := range subjects {
+		if rest, ok := strings.CutPrefix(subject, inbox+"."); ok {
+			_, after, nested := strings.Cut(rest, ".")
+			subject = inbox + ".<nuid>"
+			if nested {
+				subject += "." + after
+			}
+		} else if tokens := strings.Split(subject, "."); tokens[0] == "$JS" && tokens[1] == "ACK" && len(tokens) > 4 {
+			subject = strings.Join(tokens[:4], ".") + ".<delivery>"
+		}
+		seen[subject] = true
+	}
+	return slices.Sorted(maps.Keys(seen))
 }
 
 func grantLogger(logs *syncBuffer) *slog.Logger {
@@ -155,10 +363,9 @@ func grantLogger(logs *syncBuffer) *slog.Logger {
 }
 
 func daemonGrantConfig(uri string) config.Config {
-	const project = "CAPTURE"
 	return config.Config{
-		Project: project, NatsURLs: []string{uri}, WorkerRPCTimeout: time.Second,
-		Projects: map[string]config.Project{project: {Repo: ghrepo.MustParse("sjawhar/legion")}},
+		Project: grantProject, NatsURLs: []string{uri}, WorkerRPCTimeout: time.Second,
+		Projects: map[string]config.Project{grantProject: {Repo: ghrepo.MustParse("sjawhar/legion")}},
 	}
 }
 
@@ -166,7 +373,7 @@ func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workf
 	t.Helper()
 	cfg := daemonGrantConfig(uri)
 	w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
-	if err := w.connect(t.Context(), cfg, natsConnection{seed: seed}); err != nil {
+	if err := w.connect(t.Context(), cfg, daemonGrantConnection(seed)); err != nil {
 		t.Fatalf("connect the daemon: %v", err)
 	}
 	return w
@@ -238,7 +445,18 @@ func createDaemonNotificationStream(t *testing.T, js jetstream.JetStream) jetstr
 	return stream
 }
 
-func startDaemonGrantServer(t *testing.T, image string, grant daemonpermissions.Permissions) (string, *nats.Conn, jetstream.JetStream, *tcnats.NATSContainer, string) {
+// daemonGrantServer is a NATS server admitting the daemon user under one grant and an admin user
+// granted everything: the daemon user's seed and public key, the admin's connection and JetStream,
+// the server's container (its log is the trace) and its client URL.
+type daemonGrantServer struct {
+	seed   string
+	admin  *nats.Conn
+	js     jetstream.JetStream
+	server *tcnats.NATSContainer
+	uri    string
+}
+
+func startDaemonGrantServer(t *testing.T, image string, grant daemonpermissions.Permissions) daemonGrantServer {
 	t.Helper()
 	daemonSeed, daemonPublic := testnats.User(t)
 	adminSeed, adminPublic := testnats.User(t)
@@ -255,15 +473,16 @@ func startDaemonGrantServer(t *testing.T, image string, grant daemonpermissions.
 	server, uri := testnats.StartNkeyAuthorizedUsers(t, image,
 		testnats.NkeyUser{Public: daemonPublic, Permissions: strings.TrimSpace(permissions.String())},
 		testnats.NkeyUser{Public: adminPublic})
-	admin, err := natsauth.Connect([]string{uri}, adminSeed, nats.Timeout(5*time.Second))
+	admin, err := natsauth.Connect([]string{uri}, adminSeed, nats.Timeout(5*time.Second), nats.Name(grantAdminName))
 	if err != nil {
 		t.Fatalf("connect the admin user: %v", err)
 	}
+	t.Cleanup(admin.Close)
 	js, err := jetstream.New(admin)
 	if err != nil {
 		t.Fatalf("open JetStream as the admin user: %v", err)
 	}
-	return daemonSeed, admin, js, server, uri
+	return daemonGrantServer{seed: daemonSeed, admin: admin, js: js, server: server, uri: uri}
 }
 
 func daemonGrantServerLogs(t *testing.T, server *tcnats.NATSContainer) string {

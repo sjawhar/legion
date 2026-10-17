@@ -103,7 +103,8 @@ versions. Never add the module to the root `go.work`.
   with `network`; `network`, `subnetwork` and the secret `tailnetAuthKey` are checked for a seed
   once they resolve (`gcp.refuseSeed`, `gcp.refuseSeedInSecret`, which keeps the key secret and
   never quotes it). Its resolver refuses a seed in every string input the hub itself carries
-  first (`gcp.seededInput`: hostname, tags, zone, machine type, images, each user's machine id),
+  first (`gcp.seededInput`: hostname, tags, zone, machine type, images, each user's machine id and
+  daemon project),
   naming the input's path and never its value; a string input added to the hub joins that list,
   with a row in `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and rule entries are
   core's to refuse, and the hub's own user refusals, which run before core's, name a user by its
@@ -166,7 +167,7 @@ versions. Never add the module to the root `go.work`.
   change to any of them is tested there.
 - **Permission sets.** `core/permissions.go` builds the listener, session and host sets from names
   that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
-  `packages/envoy/daemonpermissions.Grant`, which builds the daemon's shared grant from those same
+  `packages/envoy/daemonpermissions.Grant`, which builds each project's daemon grant from those same
   names so its real-NATS proof and the hub cannot diverge. The plugin and the command compile only
   `daemonpermissions`, `internal/bus` and `internal/contracts` from Envoy (`go list -deps ./cmd/...`),
   so a change to Envoy's stores cuts no plugin release. A subject Envoy's code sends that has no

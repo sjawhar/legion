@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/daemonpermissions"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -21,10 +22,11 @@ import (
 
 // noticeExceptionSubjects is where the Envoy listener reports a role-lane forward it could not
 // complete: notifications.envoy.exceptions.<the original role topic>
-// (packages/envoy/cmd/listener/delivery.go, publishDeliveryException). A role topic is outside the
-// notification stream, so the report goes over core NATS and reaches only a subscriber connected
-// when it is sent.
-const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleTopicPrefix + "*"
+// (packages/envoy/cmd/listener/delivery.go, publishDeliveryException), one token per role, the
+// subject the daemon's NATS grant lets it subscribe to (daemonpermissions.RoleExceptions). A role
+// topic is outside the notification stream, so the report goes over core NATS and reaches only a
+// subscriber connected when it is sent.
+const noticeExceptionSubjects = daemonpermissions.RoleExceptions
 
 // The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's
 // registration lives for listenerSessionTTL after its last heartbeat (registry.go), delivery drops

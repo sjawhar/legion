@@ -89,14 +89,18 @@ func SessionPermissions() Permissions {
 	}
 }
 
-// DaemonPermissions is the NATS grant one Legion daemon needs. The grant itself lives with
-// Envoy's subject names so the daemon's real-NATS proof and the hub's rendered user share it.
-func DaemonPermissions() Permissions {
-	grant := daemonpermissions.Grant()
+// DaemonPermissions is the NATS grant the Legion daemon of project needs, refusing a project that
+// is not a Legion project key. The grant itself lives with Envoy's subject names
+// (daemonpermissions.Grant) so the daemon's real-NATS proof and the hub's rendered user share it.
+func DaemonPermissions(project string) (Permissions, error) {
+	grant, err := daemonpermissions.Grant(project)
+	if err != nil {
+		return Permissions{}, err
+	}
 	return Permissions{
 		Publish:   Rules{Allow: grant.Publish},
 		Subscribe: Rules{Allow: grant.Subscribe},
-	}
+	}, nil
 }
 
 // HostPermissions is the grant of a host's one NATS user, which its listener and every session on

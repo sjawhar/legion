@@ -100,6 +100,13 @@ type natsConnection struct {
 	paneUser bool           // whether user is the pane seed's user, as when the daemon seed is the pane seed
 }
 
+// ownUser reports whether the connection authenticates as the daemon's own NATS user, one the
+// pane seed is not: the user whose grant (daemonpermissions.Grant) admits the daemon's own reply
+// inbox and no other.
+func (c natsConnection) ownUser() bool {
+	return c.source == natsSeedDaemon && !c.paneUser
+}
+
 // natsSeedSource is where the daemon's own connection's seed came from, as its boot line names it.
 type natsSeedSource string
 

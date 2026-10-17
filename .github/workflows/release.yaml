@@ -265,7 +265,10 @@ jobs:
       # tag. The binary embeds its prompts (internal/prompts/roles and go), so a docs: commit there
       # still releases. The notices scripts and the target list are runtime inputs of the release
       # archives and worker image, so any change to one needs a new tag rather than a CI-only
-      # rebuild. release-bump.sh reads a --patch-path only when it is also one of the paths after --.
+      # rebuild. The binary also compiles packages/envoy's daemonpermissions (the daemon's NATS
+      # names and grant) and the internal/bus and internal/contracts names it builds on, so a
+      # change there releases the daemon as it releases envoy-infra, keeping the two paired.
+      # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
       - name: Determine next version
         id: version
         run: |
@@ -274,6 +277,7 @@ jobs:
             --patch-path scripts/go-third-party-notices.sh --patch-path scripts/assemble-third-party-notices.sh \
             --patch-path .github/go-release-targets.json \
             -- packages/daemon/ packages/daemon/internal/prompts/roles/ packages/daemon/internal/prompts/go/ \
+            packages/envoy/daemonpermissions/ packages/envoy/internal/bus/ packages/envoy/internal/contracts/ \
             scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh .github/go-release-targets.json \
             >> "$GITHUB_OUTPUT"
       - name: Resolve plugin versions for the smoke test and worker image

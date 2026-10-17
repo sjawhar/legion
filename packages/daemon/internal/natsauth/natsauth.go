@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
+	"github.com/sjawhar/envoy/daemonpermissions"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
@@ -160,6 +161,13 @@ func Connect(urls []string, seed string, options ...nats.Option) (*nats.Conn, er
 		options = append(options, nats.Nkey(public, user.Sign))
 	}
 	return nats.Connect(strings.Join(urls, ","), options...)
+}
+
+// DaemonInbox is the connection option that gives project's daemon connection its own reply inbox
+// prefix (daemonpermissions.InboxPrefix), the one its NATS grant lets it receive replies on, in
+// place of nats.go's shared `_INBOX.`.
+func DaemonInbox(project string) nats.Option {
+	return nats.CustomInboxPrefix(daemonpermissions.InboxPrefix(project))
 }
 
 // ReconnectForever is the connection option that never gives up reconnecting. nats.go's own

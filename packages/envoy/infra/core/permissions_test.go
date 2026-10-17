@@ -103,7 +103,7 @@ func TestNoSetRepeatsAnEntry(t *testing.T) {
 		"listener": core.ListenerPermissions("example-host-a"),
 		"session":  core.SessionPermissions(),
 		"host":     core.HostPermissions("example-host-a"),
-		"daemon":   core.DaemonPermissions(),
+		"daemon":   daemonPermissions(t, "ACME"),
 	}
 	for name, p := range sets {
 		for direction, allow := range map[string][]string{"publish": p.Publish.Allow, "subscribe": p.Subscribe.Allow} {
@@ -128,11 +128,11 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	session := core.SessionPermissions()
 	session.Publish.Allow[0] = "edited"
 	require.Equal(t, "_INBOX.>", core.SessionPermissions().Publish.Allow[0])
-	daemon := core.DaemonPermissions()
+	daemon := daemonPermissions(t, "ACME")
 	daemon.Publish.Allow[0] = "edited"
 	daemon.Subscribe.Allow[0] = "edited"
-	require.Equal(t, "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", core.DaemonPermissions().Publish.Allow[0])
-	require.Equal(t, "notifications.envoy.exceptions.notifications.role.>", core.DaemonPermissions().Subscribe.Allow[0])
+	require.Equal(t, "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", daemonPermissions(t, "ACME").Publish.Allow[0])
+	require.Equal(t, "notifications.envoy.exceptions.notifications.role.*", daemonPermissions(t, "ACME").Subscribe.Allow[0])
 }
 
 // A set drops into a User as its rules, and the authorization renders it.
@@ -149,20 +149,41 @@ func TestASetIsAUsersRules(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func daemonPermissions(t *testing.T, project string) core.Permissions {
+	t.Helper()
+	p, err := core.DaemonPermissions(project)
+	require.NoError(t, err)
+	return p
+}
+
 // The expected daemon grant is written out literally rather than built from Envoy's subject names,
-// so a change to the grant or to the names it is built from fails here until reviewed.
+// so a change to the grant or to the names it is built from fails here until reviewed. It names
+// the project's two consumers and its own reply inbox, and nothing of another project's.
 func TestDaemonPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: []string{
 			"$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS",
-			"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>",
-			"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>",
-			"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>",
-			"$JS.ACK.ENVOY_NOTIFICATIONS.>",
+			"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.legion-go-ACME-dispatch",
+			"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.legion-go-ACME-dispatch.notifications.dispatch.issue.>",
+			"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.legion-go-ACME-dispatch",
+			"$JS.ACK.ENVOY_NOTIFICATIONS.legion-go-ACME-dispatch.>",
+			"$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.legion-go-ACME-github",
+			"$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.legion-go-ACME-github",
+			"$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.legion-go-ACME-github",
+			"$JS.ACK.ENVOY_NOTIFICATIONS.legion-go-ACME-github.>",
 		}},
 		Subscribe: core.Rules{Allow: []string{
-			"notifications.envoy.exceptions.notifications.role.>",
-			"_INBOX.>",
+			"notifications.envoy.exceptions.notifications.role.*",
+			"_INBOX_legion_daemon_ACME.>",
 		}},
-	}, core.DaemonPermissions())
+	}, daemonPermissions(t, "ACME"))
+}
+
+// A project is one subject token of every name the grant holds, so anything but a project key, a
+// wildcard or a dot above all, is refused rather than widening the grant.
+func TestDaemonPermissionsRefuseAnythingButAProjectKey(t *testing.T) {
+	for _, project := range []string{"", "acme", "1ACME", "AC.ME", "*", ">", "ACME.>", "AC ME", "ACME-2"} {
+		_, err := core.DaemonPermissions(project)
+		require.ErrorContains(t, err, "the daemon's project must be a Legion project key", "project %q", project)
+	}
 }
