@@ -1416,7 +1416,8 @@ agent-stream control subject; and subscription to every session's agent-stream f
 `gcp:NatsHub` user with `dispatchMachineId` holds it. Whatever holds its seed, `envoy-dispatch` or
 the listener beside it, can read every session's agent-stream frames, send control to any session,
 and, through `HostPermissions`, publish frames as any session, so the seed is as sensitive as every
-session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and 2.15.1 in `core/dispatch_permissions_live_test.go`.
+session's stream. The real `envoy-dispatch` runs under that grant against nats-server 2.10 and
+2.15.1 in `core/dispatch_permissions_live_test.go`.
 
 `DaemonPermissions()` is the grant of a Legion daemon's dedicated NATS user. It publishes the
 notification stream's info request, the info, create and next-message requests of any consumer of
