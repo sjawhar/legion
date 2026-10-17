@@ -169,8 +169,8 @@ versions. Never add the module to the root `go.work`.
   `gcp/tailnet_joined_test.go` and `gcp/data_disk_test.go` run the secret fetcher, the listener's
   seed script, the joined script and the data disk's bootcmd entry as the golden holds them, so a
   change to any of them is tested there.
-- **Permission sets.** `core/permissions.go` builds the listener, session and host sets from names
-  that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
+- **Permission sets.** `core/permissions.go` builds the listener, session, host and Dispatch sets
+  from names that `packages/envoy/internal/bus` and `internal/contracts` export. Its daemon set maps
   `packages/envoy/daemonpermissions.Grant`, which builds the daemon's shared grant from those same
   names so its real-NATS proof and the hub cannot diverge. The plugin and the command compile only
   `daemonpermissions`, `internal/bus` and `internal/contracts` from Envoy (`go list -deps ./cmd/...`),
@@ -275,12 +275,12 @@ users, the listener reaches `"status":"healthy"` as a user holding `ListenerPerm
 session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
 receives a send and a role message, and is refused a publish to another session's subject; and a
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
-`core/dispatch_permissions_live_test.go`
-also starts `testpg.Image`, builds and runs the real `envoy-dispatch` against `DispatchPermissions`,
-and proves both delivery durables (each binds and acknowledges a message), the outbox, the agent
-stream relay and the redelivery bucket;
-its negative control removes the delivery durable's filtered create permission and receives that
-server violation alone. The `envoy-infra-go` job in
+`core/dispatch_permissions_live_test.go` also starts `testpg.Image`, builds and runs the real
+`envoy-dispatch` against `DispatchPermissions`, and proves both delivery durables (each binds and
+acknowledges a message), the outbox's owner-topic JetStream publish, the agent stream relay, and
+Dispatch creating the redelivery bucket, which the test client then reads and writes; its negative
+control removes the delivery durable's filtered create permission and receives that server
+violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh

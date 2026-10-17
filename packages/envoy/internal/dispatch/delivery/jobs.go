@@ -63,7 +63,6 @@ type pendingRun struct {
 }
 
 const (
-	jobConsumerName  = bus.DispatchJobDurable
 	jobSubject       = "notifications.github.*.*.job.>"
 	jobQuiet         = 2 * time.Second
 	jobMaxWait       = 10 * time.Second
@@ -127,7 +126,7 @@ func (j *JobIntake) Run(ctx context.Context) {
 // the run's end event and the reconcile do not.
 func jobConsumerConfig() natsgo.ConsumerConfig {
 	return natsgo.ConsumerConfig{
-		Durable:        jobConsumerName,
+		Durable:        bus.DispatchJobDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubject:  jobSubject,
 		DeliverPolicy:  natsgo.DeliverNewPolicy,

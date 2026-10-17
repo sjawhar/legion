@@ -235,12 +235,6 @@ func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
 	return payload, nil
 }
 
-// deliveryConsumerName is the durable this package's events are read through: one push consumer
-// over githubIntakeSubject, with the flow control below. The server holds a backlog undelivered
-// until a subscriber attaches, so a restart with events waiting loses none of them and none of
-// them count against MaxAckPending in the meantime.
-const deliveryConsumerName = bus.DispatchDeliveryDurable
-
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
 // handler decides what to do with each (route), and fetches nothing for the ones this slice does
 // not want, which costs one decode of the payload per envelope.
@@ -284,11 +278,14 @@ func intakeAckWait() time.Duration {
 	return time.Duration(intakeMaxAckPending)*intakeMessageTimeout + time.Minute
 }
 
-// deliveryConsumerConfig is the policy bind stamps on the durable, whether it creates it or
-// finds one an earlier release left with another filter or the server's own flow control.
+// deliveryConsumerConfig is the policy bind stamps on the durable (bus.DispatchDeliveryDurable,
+// one push consumer over githubIntakeSubject), whether it creates it or finds one an earlier
+// release left with another filter or the server's own flow control. The server holds a backlog
+// undelivered until a subscriber attaches, so a restart with events waiting loses none of them
+// and none of them count against MaxAckPending in the meantime.
 func deliveryConsumerConfig() natsgo.ConsumerConfig {
 	return natsgo.ConsumerConfig{
-		Durable:        deliveryConsumerName,
+		Durable:        bus.DispatchDeliveryDurable,
 		DeliverSubject: natsgo.NewInbox(),
 		FilterSubject:  githubIntakeSubject,
 		AckPolicy:      natsgo.AckExplicitPolicy,
