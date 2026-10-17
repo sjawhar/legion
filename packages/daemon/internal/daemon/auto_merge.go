@@ -89,11 +89,17 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 		return err
 	case errors.As(err, &failed):
 		fact := intake.MergeFailed{Issue: row.Issue, Number: payload.Number, Head: payload.Head, Reason: failed.Error()}
-		if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("merge-failed:%s:%s:%s", row.Issue, payload.Head, failed.Event), fact, r.handlers...); err != nil {
-			return fmt.Errorf("send %s back to implementing on its failed merge: %w", row.Issue, err)
+		applied, applyErr := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("merge-failed:%s:%s:%s", row.Issue, payload.Head, failed.Event), fact, r.handlers...)
+		if applyErr != nil {
+			return fmt.Errorf("send %s back to implementing on its failed merge: %w", row.Issue, applyErr)
 		}
-		r.log.Info("outbox READY merge failed in the merge queue; the issue goes back to implementing", "row", row.ID, "issue", row.Issue,
-			"number", payload.Number, "head", payload.Head, "reason", failed.Error())
+		// The workflow moves only an issue that still awaits that READY (workflow's mergeFailed), and
+		// a fact already applied moves nothing.
+		message := "outbox READY merge failed in the merge queue; the workflow sends the issue back to implementing if it still awaits that READY"
+		if applied.Duplicate {
+			message = "outbox READY merge failed in the merge queue; that failure was already applied, so nothing changed"
+		}
+		r.log.Info(message, "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head, "reason", failed.Error())
 		return nil
 	case err != nil:
 		return err

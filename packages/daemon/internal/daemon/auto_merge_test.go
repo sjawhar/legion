@@ -538,6 +538,52 @@ func TestAMergeTheQueueFailsSendsTheIssueBackToImplementing(t *testing.T) {
 	}
 }
 
+// A merge failure whose fact the workflow already applied (intake.ApplyFact's Duplicate) changes
+// nothing, and the row's log says so rather than that the issue goes back to implementing.
+func TestAMergeFailureAlreadyAppliedIsNotLoggedAsSendingTheIssueBack(t *testing.T) {
+	github := newQueueGitHub(t, "CLEAN")
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	clock := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
+	var logged bytes.Buffer
+	runner := mergeRunner(pool, records, github.url, slog.New(slog.NewJSONHandler(&logged, nil)), func() time.Time { return clock })
+	runner.handlers = []intake.Handler{workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce READY's submission: %v", err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		_, err := records.MarkProcessed(context.Background(), tx, "outbox", "merge-failed:LEGION-208:ready-head:RFMQE_1")
+		return err
+	}); err != nil {
+		t.Fatalf("record the merge failure's fact as applied: %v", err)
+	}
+	github.remove(dequeuedEvent("failed_checks", "github-merge-queue", failedMergeGroup))
+	clock = clock.Add(time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce after the merge queue failed the merge: %v", err)
+	}
+	var at string
+	if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-208'").Scan(&at); err != nil || at != string(phase.AwaitingMerge) {
+		t.Fatalf("LEGION-208 in %q (%v), want awaiting_merge: the fact was already applied", at, err)
+	}
+	told := false
+	for line := range strings.Lines(logged.String()) {
+		var entry struct{ Msg string }
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if strings.Contains(entry.Msg, "goes back to implementing") {
+			t.Fatalf("the row logged %q for a merge failure already applied", entry.Msg)
+		}
+		told = told || strings.Contains(entry.Msg, "already applied")
+	}
+	if !told {
+		t.Fatalf("the row's log %s, want a line saying the merge failure was already applied", logged.String())
+	}
+}
+
 // Any other removal of an arm or queue entry the row saw at READY's head (a person dequeuing the
 // pull request, a person turning its auto-merge off) is not the row's to undo (LEGION-800): the row
 // ends, submitting nothing more, and tells the architect once (merge-removed), naming what was
@@ -809,9 +855,11 @@ const failedMergeGroup = `{"oid":"group-sha","statusCheckRollup":{"contexts":{"n
 
 // A reopen at READY's head that lands while a worker is recording GitHub's permanent refusal takes
 // the row from that worker: the worker's notice rolls back with its finish, and the run that holds
-// the row afterwards tells the architect, so the refusal is told once.
+// the row afterwards tells the architect, so the refusal is told once. The worker whose finish
+// rolled back logs the refusal it could not record beside its finish's failure.
 func TestAReopenDuringAPermanentRefusalTellsTheArchitectOnce(t *testing.T) {
-	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer("Squash merges are not allowed on this repository."))
+	const squash = "Squash merges are not allowed on this repository."
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer(squash))
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
@@ -819,13 +867,25 @@ func TestAReopenDuringAPermanentRefusalTellsTheArchitectOnce(t *testing.T) {
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
 	clock := now
 	reopening := &reopensBeforeFinish{Store: records, t: t, pool: pool}
-	if err := mergeRunner(pool, reopening, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
+	var logged bytes.Buffer
+	if err := mergeRunner(pool, reopening, github.url, slog.New(slog.NewJSONHandler(&logged, nil)), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
 		t.Fatalf("first RunOnce: %v", err)
 	}
 	if !reopening.reopened {
 		t.Fatal("the refusal finished without the reopen landing first")
 	}
 	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	logsCause := false
+	for line := range strings.Lines(logged.String()) {
+		var entry struct{ Level, Msg, Cause string }
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		logsCause = logsCause || entry.Level == "ERROR" && strings.Contains(entry.Msg, "finish not recorded") && strings.Contains(entry.Cause, squash)
+	}
+	if !logsCause {
+		t.Fatalf("the worker whose finish rolled back logged %s, want its failed finish logged at ERROR with the refusal as its cause", logged.String())
+	}
 	clock = clock.Add(time.Minute)
 	if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock }).RunOnce(context.Background()); err != nil {
 		t.Fatalf("second RunOnce: %v", err)

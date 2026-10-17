@@ -185,8 +185,10 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
 	if err != nil {
 		r.noteLimit(row, err)
-		// A failure no retry repairs is logged once, by finishRefused's own line, which says what
-		// became of the row: a person's dequeue of a READY merge, say, is no failure of the daemon's.
+		// A failure no retry repairs is not logged as the row failing: once its finish commits,
+		// finishRefused's own line says what became of the row (a person's dequeue of a READY merge,
+		// say, is no failure of the daemon's), and a finish that does not commit is logged below with
+		// it as the cause. A wait that ends the row (a stalled ghautomerge.Lagging) logs as a wait too.
 		permanent := permanentRefusal(row, err, r.now().UTC())
 		if errors.Is(err, wait.ErrWaiting) {
 			// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
@@ -207,8 +209,8 @@ func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
 			r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 		}
 		if permanent {
-			if err := r.finishRefused(ctx, row, err); err != nil {
-				r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+			if finishErr := r.finishRefused(ctx, row, err); finishErr != nil {
+				r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", finishErr, "cause", err)
 			}
 			return
 		}
