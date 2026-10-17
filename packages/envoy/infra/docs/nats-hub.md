@@ -60,8 +60,7 @@ The hub refuses these before it registers anything, with an error naming the inp
   hub's own name or an input it carries into the user data, a child or a refusal: `hostname`, a
   tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId` or `dispatchMachineId`,
   or the listener's `image` or `seedSecret`. The error names the input by its path and never its
-  value, as
-  `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
+  value, as `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
   seed in the hub's own name as `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed
   (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another resource, so a
   seed in any of them fails the preview or update once it resolves, with the same error, before
