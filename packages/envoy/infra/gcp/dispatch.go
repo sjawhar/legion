@@ -206,9 +206,14 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		}
 		// The shape Dispatch itself requires of DISPATCH_AGENT_SECRETS_URL, checked here so a bad
 		// URL fails the resolver rather than the pod's boot.
+		// It is rendered as a plain environment variable, so a user, a password, a query or a
+		// fragment, any of which could carry a credential, is refused too, and no refusal quotes it.
 		parsed, err := url.Parse(agentSecretsURL)
 		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.Path != "" {
-			return dispatchSettings{}, fmt.Errorf("agentSecretsUrl %q must be an absolute http(s) URL with no path, as Dispatch requires of DISPATCH_AGENT_SECRETS_URL", args.AgentSecretsUrl)
+			return dispatchSettings{}, errors.New("agentSecretsUrl must be an absolute http(s) URL with no path, as Dispatch requires of DISPATCH_AGENT_SECRETS_URL (not echoed)")
+		}
+		if parsed.User != nil || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || strings.Contains(agentSecretsURL, "#") {
+			return dispatchSettings{}, errors.New("agentSecretsUrl must carry no user, password, query or fragment: it is rendered as a plain environment variable (not echoed)")
 		}
 	}
 	if args.AppPrivateKey != nil && args.AppClientId == "" {

@@ -1,6 +1,8 @@
 package gcp
 
 import (
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/pem"
 	"errors"
@@ -97,30 +99,60 @@ func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi
 	}).(pulumi.StringOutput)
 }
 
-// refuseDispatchSeedInSecret is value, a secret Input of the component, as a secret, with a value
-// holding an nkey seed refused once it resolves: the output fails naming input and never the
-// value, so no child is registered with it. ApplyT keeps value's secretness, and ToSecret marks
-// the result secret whatever value's own marking.
+// refuseDispatchSecret is the one check every secret credential input of the component runs once
+// it resolves (tailnetAuthKey, signInClientSecret, agentSecretsToken, appPrivateKey): Dispatch
+// reads each as a token or credential and refuses a blank one only at boot, so a blank or
+// whitespace-only value is refused here, and so is one holding an nkey seed. Each refusal names
+// input and never the value.
+func refuseDispatchSecret(v, dispatch, input string) error {
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("%s: %w", dispatch, core.InputErrorf(input, "%s is blank; Dispatch reads it as a credential, so it would fail the pod's boot", input))
+	}
+	if bus.HoldsSeed(v) {
+		return fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
+	}
+	return nil
+}
+
+// refuseDispatchSeedInSecret is value, a secret Input of the component, as a secret, with a blank
+// value or one holding an nkey seed refused once it resolves: the output fails naming input and
+// never the value, so no child is registered with it. ApplyT keeps value's secretness, and
+// ToSecret marks the result secret whatever value's own marking.
 func refuseDispatchSeedInSecret(value pulumi.StringInput, dispatch, input string) pulumi.StringOutput {
 	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
-		if bus.HoldsSeed(v) {
-			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
+		if err := refuseDispatchSecret(v, dispatch, input); err != nil {
+			return "", err
 		}
 		return v, nil
 	})).(pulumi.StringOutput)
 }
 
 // dispatchAppPEM is appPrivateKey once it resolves, rendered as the base64 Dispatch reads from
-// DISPATCH_APP_PEM_B64: a value holding an nkey seed, or one no PEM block parses from, is refused
-// naming appPrivateKey and never the value, so no child is registered with it. ApplyT keeps the
-// input's secretness, and ToSecret marks the result secret whatever its own marking.
+// DISPATCH_APP_PEM_B64. Dispatch boots on this key only when its first PEM block parses as a
+// PKCS#1 RSA private key, or else as PKCS#8 holding an *rsa.PrivateKey — the rule mirrors
+// githubapp.parsePrivateKey (packages/envoy/internal/dispatch/githubapp/client.go), copied here
+// because the plugin compiles no Envoy package but bus and contracts — so anything else (a blank
+// value, a seed, no PEM block, an RSA public key, garbage in a PEM frame, an EC or Ed25519 key)
+// is refused naming appPrivateKey and never the value, failing the preview or update rather than
+// the pod's boot. ApplyT keeps the input's secretness, and ToSecret marks the result secret
+// whatever its own marking.
 func dispatchAppPEM(value pulumi.StringInput, dispatch string) pulumi.StringOutput {
 	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
-		if bus.HoldsSeed(v) {
-			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal("appPrivateKey"))
+		if err := refuseDispatchSecret(v, dispatch, "appPrivateKey"); err != nil {
+			return "", err
 		}
-		if block, _ := pem.Decode([]byte(v)); block == nil {
+		block, _ := pem.Decode([]byte(v))
+		if block == nil {
 			return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey does not parse as a PEM block (not echoed)"))
+		}
+		if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+			parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+			if err != nil {
+				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block is not a PKCS#1 or PKCS#8 RSA private key, which Dispatch's GitHub App needs to boot (not echoed)"))
+			}
+			if _, ok := parsed.(*rsa.PrivateKey); !ok {
+				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block holds a %T, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)", parsed))
+			}
 		}
 		return base64.StdEncoding.EncodeToString([]byte(v)), nil
 	})).(pulumi.StringOutput)

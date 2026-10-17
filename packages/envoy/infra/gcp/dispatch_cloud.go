@@ -125,7 +125,13 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
-	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch")}, child)
+	// deletionProtection also keeps the database itself: PREVENT refuses its delete, which an
+	// instance replacement would otherwise make first.
+	databasePolicy := "DELETE"
+	if s.deletionProtection {
+		databasePolicy = "PREVENT"
+	}
+	_, err = sql.NewDatabase(ctx, s.hostname, &sql.DatabaseArgs{Instance: instance.Name, Name: pulumi.String("dispatch"), DeletionPolicy: pulumi.String(databasePolicy)}, child)
 	if err != nil {
 		return nil, err
 	}

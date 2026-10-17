@@ -150,9 +150,12 @@ digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
 `deletionProtection` to `true`; it sets both Pulumi's own guard and the Cloud SQL instance's
-`deletionProtectionEnabled`, which refuses a delete from the API or the console too. `allowedNamespaces` (optional, each a DNS label) names the
-Kubernetes namespaces, in the Dispatch pod's own cluster, whose pods the NetworkPolicy admits on
-port 8766; unset or empty, the policy admits no ingress at all.
+`deletionProtectionEnabled`, which refuses a delete from the API or the console too, and the
+`dispatch` database's `deletionPolicy` `PREVENT` (otherwise `DELETE`), which keeps an instance
+replacement from deleting the database first.
+`allowedNamespaces` (optional, each a DNS label) names the Kubernetes namespaces, in the Dispatch
+pod's own cluster, whose pods the NetworkPolicy admits on port 8766; unset or empty, the policy
+admits no ingress at all.
 
 Two optional pairs each come as both inputs or neither. `agentSecretsUrl` (plain) with
 `agentSecretsToken` (a secret Pulumi input) turns on Dispatch's secrets-broker relay: the URL must
@@ -161,25 +164,37 @@ be absolute http(s) with a host and no path, as Dispatch requires of `DISPATCH_A
 the token becomes the `DISPATCH_AGENT_SECRETS_TOKEN` key of the `<hostname>-dispatch` Secret,
 mounted alone as a read-only file of a volume of its own at
 `/var/run/secrets/dispatch/agent-secrets-token`, which `DISPATCH_AGENT_SECRETS_TOKEN_FILE` names.
-`appClientId` (plain) with `appPrivateKey` (the PEM text, a secret Pulumi input) turns on
+The URL must be reachable from the pod's own network, because Dispatch's broker client dials it
+directly, never through the Tailscale sidecar's SOCKS5 proxy (which only the NATS clients use): an
+Internet host through Cloud NAT, an in-cluster Service, or a name a private DNS zone on the
+cluster's VPC resolves to one. A name only the tailnet resolves fails at request time, not at boot.
+The URL is rendered as a plain environment variable, so one carrying a user, a password, a query
+or a fragment is refused, and no refusal quotes it.
+`appClientId` (plain) with `appPrivateKey` (the key's PEM text, a secret Pulumi input) turns on
 Dispatch's GitHub App: `DISPATCH_APP_CLIENT_ID` is a plain env var, and `DISPATCH_APP_PEM_B64`,
 the base64 of the PEM, is a new key of the same Secret, computed without unmarking the key's
-secretness and read as a secret env var; no numeric App ID is sent. With either pair unset,
-nothing renders and the pod template is unchanged.
+secretness and read as a secret env var; no numeric App ID is sent. The key must be an RSA private
+key, as PKCS#1 (the form GitHub serves an App's key in) or PKCS#8 — the one kind Dispatch's
+GitHub App boots on. Setting the App also starts Dispatch's webhook redelivery sweep, which needs
+the NATS redelivery bucket the hub's Dispatch user is granted (`DispatchPermissions`): a pod whose
+NATS user lacks it exits at boot. With either pair unset, nothing renders and the pod template is
+unchanged.
 
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
 names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
 and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses an
 `agentSecretsUrl` or an `appClientId` whose partner input is missing, and an `agentSecretsUrl`
-that is not an absolute http(s) URL with no path; it refuses a
-seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`, `agentSecretsToken` and
-`appPrivateKey` once each resolves, before any child takes it, an `appPrivateKey` no PEM block
-parses from (a refusal naming `appPrivateKey`, never echoing it), and a `natsUrl` that holds a
-seed, is local (the pod reaches NATS only through the
-Tailscale sidecar's SOCKS5 proxy), is empty, or holds a comma or a control character once it
-resolves, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
-creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
-running Pulumi needs `gke-gcloud-auth-plugin`.
+that is not an absolute http(s) URL with no path. Once each secret input resolves, before any
+child takes it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`,
+`agentSecretsToken` and `appPrivateKey`; a blank or whitespace-only `tailnetAuthKey`,
+`signInClientSecret`, `agentSecretsToken` or `appPrivateKey`, each of which Dispatch reads as a
+token or credential and refuses only at boot; and an `appPrivateKey` whose first PEM block is not
+a PKCS#1 or PKCS#8 RSA private key, the one key Dispatch boots on — each a refusal naming the
+input and never echoing it. It refuses a `natsUrl` that holds a seed, is local (the pod reaches
+NATS only through the Tailscale sidecar's SOCKS5 proxy), is empty, or holds a comma or a control
+character once it resolves, each a refusal naming `natsUrl`. It requires both `gcp` and `random`
+providers. It creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so
+the machine running Pulumi needs `gke-gcloud-auth-plugin`.
 
 The generated `principal` output is the Kubernetes service account's Workload Identity principal,
 built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
@@ -188,12 +203,11 @@ project scope with an IAM condition limiting it to this component's Cloud SQL in
 Cloud SQL has no per-instance IAM — and `roles/secretmanager.secretAccessor` only on the NATS seed
 secret; the Deployment waits for both grants to be written. IAM can take minutes to apply a new
 binding (Google cites typically two, sometimes seven or more), and the pod restarts until the
-proxy may connect. The
-Cloud SQL grant is an additive IAM member beside whatever the project already holds, and writing
-it needs `resourcemanager.projects.setIamPolicy` on the identity the `gcp` provider runs as
-(`roles/resourcemanager.projectIamAdmin` or equivalent). The pod's Kubernetes Role lets it read and
-update its Tailscale state Secret and create Secrets in its namespace, since Tailscale creates its
-state Secret on first start.
+proxy may connect. The Cloud SQL grant is an additive IAM member beside whatever the project
+already holds, and writing it needs `resourcemanager.projects.setIamPolicy` on the identity the
+`gcp` provider runs as (`roles/resourcemanager.projectIamAdmin` or equivalent). The pod's
+Kubernetes Role lets it read and update its Tailscale state Secret and create Secrets in its
+namespace, since Tailscale creates its state Secret on first start.
 
 ### The pod
 
@@ -204,10 +218,18 @@ containers mount the NATS seed at `/var/run/secrets/envoy/nats-seed`; the seed r
 Pulumi state. With `agentSecretsUrl` set, the `envoy-dispatch` container alone also mounts the
 broker token, read-only, at `/var/run/secrets/dispatch/agent-secrets-token`.
 
+Dispatch reads every value of the `<hostname>-dispatch` Secret, the broker token file and the
+NATS seed once, at boot, and rotating a secret's value changes only the Secret, never the pod
+template, so no rotation restarts the pod on its own — this holds for every secret the component
+renders, the original four keys as much as the broker token and the App key. After rotating one,
+restart the Deployment (`kubectl -n <namespace> rollout restart deployment/<hostname>`) so the pod
+boots on the new value.
+
 The deployment intentionally has no liveness probe for Dispatch because its health endpoint reads
 Cloud SQL. A rolling input or image update recreates its one pod and causes brief downtime. A
 region change replaces the component's networked resources. Keep `deletionProtection` enabled
 outside deliberate teardown-and-rebuild work: deleting the Cloud SQL instance deletes its backups.
+A teardown therefore takes an `up` with `deletionProtection: false` before `destroy`.
 
 To inspect pending migrations before an image update, run the image with the deployment's service
 account and `DATABASE_URL` from its Secret:

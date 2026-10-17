@@ -131,6 +131,8 @@ func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
 	require.True(t, dispatch.IsComponent)
 	require.True(t, dispatch.InputProperties["tailnetAuthKey"].Secret)
 	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
+	require.True(t, dispatch.InputProperties["agentSecretsToken"].Secret)
+	require.True(t, dispatch.InputProperties["appPrivateKey"].Secret)
 	require.True(t, dispatch.Properties["agentToken"].Secret)
 }
 

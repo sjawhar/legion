@@ -118,13 +118,19 @@ versions. Never add the module to the root `go.work`.
   `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret`,
   `natsSeedSecret`, `agentSecretsToken` and `appPrivateKey` are checked for a seed once they
   resolve, before any child takes them (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
-  `gcp.dispatchAppPEM`, `TestConstructRefusesASeedInADispatchInput`), and `appPrivateKey` is also
-  refused, naming it and never echoing it, when no PEM block parses from it once it resolves
-  (`gcp.dispatchAppPEM`, `TestDispatchRefusesANonPEMAppPrivateKeyOnceItResolves`); and `natsUrl`
-  is checked inside the `ApplyT` that
-  renders the listener container's environment, where core's `Env` refusals — which name core's
-  own inputs, `natsUrls` and `socks5Proxy` — are mapped onto `natsUrl`, each a `core.InputError`
-  naming it, wrapped with the component's type and name and never a panic
+  `gcp.dispatchAppPEM`, `TestConstructRefusesASeedInADispatchInput`); the four of those Dispatch
+  reads as a token or credential — `tailnetAuthKey`, `signInClientSecret`, `agentSecretsToken`
+  and `appPrivateKey` — are also refused blank or whitespace-only then, through the one rule all
+  four run (`gcp.refuseDispatchSecret`, `TestDispatchRefusesABlankSecretOnceItResolves`), since
+  Dispatch refuses an empty credential only at boot; `appPrivateKey` is further refused, naming
+  it and never echoing it, unless its first PEM block parses as a PKCS#1 or PKCS#8 RSA private
+  key — the rule Dispatch boots on, `githubapp.parsePrivateKey`, copied into `gcp.dispatchAppPEM`
+  because the plugin compiles no Envoy package but bus and contracts
+  (`TestDispatchRefusesAnAppPrivateKeyDispatchCannotBootOn`, with both accepted encodings in
+  `TestDispatchSecretCarriesTheBrokerTokenAndTheAppKey`); and `natsUrl` is checked inside the
+  `ApplyT` that renders the listener container's environment, where core's `Env` refusals — which
+  name core's own inputs, `natsUrls` and `socks5Proxy` — are mapped onto `natsUrl`, each a
+  `core.InputError` naming it, wrapped with the component's type and name and never a panic
   (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
