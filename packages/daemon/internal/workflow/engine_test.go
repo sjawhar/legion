@@ -1028,3 +1028,30 @@ func randomSuffix(t *testing.T) string {
 	}
 	return hex.EncodeToString(bytes[:])
 }
+
+// A backward move starts the target role on a task of its own: the requester's phase row says
+// nothing about the started role's work, so the task never tells it to resume that row, and it
+// names the issue's pull request and the move's reason, which a reviewer sent back by a READY
+// refusal keys its new round on.
+func TestABackwardMoveTellsTheStartedRoleItsOwnTask(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: RoleFor(phase.Merging), Claim: "claim"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42})
+	reason := "READY_UNREVIEWED_CHANGE: src/x.go"
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "merging-reviewing", intake.BackwardMove{Issue: "LEGION-208", Requester: RoleFor(phase.Merging), To: phase.Reviewing, Reason: reason}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact backward: %v", err)
+	}
+	var task string
+	if err := pool.QueryRow(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = $1", string(RoleFor(phase.Reviewing))).Scan(&task); err != nil {
+		t.Fatalf("read the reviewer's start: %v", err)
+	}
+	if strings.Contains(task, "Resume the existing phase work") {
+		t.Fatalf("task = %q, want no resume of the merger's phase row", task)
+	}
+	for _, want := range []string{"Phase: reviewing.", "Pull request: #42.", "Reason: " + reason + "."} {
+		if !strings.Contains(task, want) {
+			t.Fatalf("task = %q, want it to carry %q", task, want)
+		}
+	}
+}

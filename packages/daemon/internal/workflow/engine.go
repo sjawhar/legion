@@ -601,7 +601,11 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, nil, fact.Reason)
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, pr, fact.Reason)
 }
 
 // signOff closes the issue once the implementer's production check was recorded: the merge started
@@ -683,7 +687,14 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err != nil {
 		return err
 	}
-	if err := e.start(ctx, tx, issue, starting, task(issue, handoff, pr, reason), quiesce); err != nil {
+	// A backward move's handoff is the requester's phase row, which the notice reports; the role it
+	// starts is told only its own phase, the pull request and the move's reason, never to resume
+	// the requester's work.
+	taskHandoff := handoff
+	if trigger == TriggerBackward {
+		taskHandoff = record.PhaseRow{}
+	}
+	if err := e.start(ctx, tx, issue, starting, task(issue, taskHandoff, pr, reason), quiesce); err != nil {
 		return err
 	}
 	if err := e.notice(ctx, tx, issue.Key, noticeFor(trigger, from, handoff, reason)); err != nil {

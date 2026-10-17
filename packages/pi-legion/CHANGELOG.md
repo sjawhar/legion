@@ -116,6 +116,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   request asks only that the implementer complete so the tester runs the head, and the implementer's
   prompt says how. The merge-gate reference and the architect and retro skills say the same, and
   the architect's `review_round_cap` judgment does not count those rounds as going in circles.
+  A backward move's task no longer tells the role it starts to resume the requester's phase work;
+  it names that role's phase, the pull request and the move's reason.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
