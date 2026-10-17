@@ -16901,15 +16901,15 @@ function progressText(progress, sep) {
   return parts.join(sep);
 }
 function repositoryLine(issue2) {
-  if (issue2.resolved_repo === undefined)
-    return `Repository: ${REPOSITORY_UNKNOWN}`;
+  if (issue2.resolved_repo === undefined) {
+    return "Repository: unknown (this Dispatch server predates repository fields; upgrade it)";
+  }
   if (issue2.resolved_repo === null)
     return "Repository: none";
   if (issue2.repo !== null && issue2.repo !== undefined)
     return `Repository: ${issue2.repo} (own)`;
   return `Repository: ${issue2.resolved_repo} (inherited or project default)`;
 }
-var REPOSITORY_UNKNOWN = "unknown (this Dispatch server predates repository fields; upgrade it)";
 function repositoryFieldsWarnings(issue2) {
   if (issue2.resolved_repo !== undefined)
     return {};

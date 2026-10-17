@@ -1341,13 +1341,13 @@ function repositoryLine(issue: {
   readonly repo?: string | null;
   readonly resolved_repo?: string | null;
 }): string {
-  if (issue.resolved_repo === undefined) return `Repository: ${REPOSITORY_UNKNOWN}`;
+  if (issue.resolved_repo === undefined) {
+    return "Repository: unknown (this Dispatch server predates repository fields; upgrade it)";
+  }
   if (issue.resolved_repo === null) return "Repository: none";
   if (issue.repo !== null && issue.repo !== undefined) return `Repository: ${issue.repo} (own)`;
   return `Repository: ${issue.resolved_repo} (inherited or project default)`;
 }
-
-const REPOSITORY_UNKNOWN = "unknown (this Dispatch server predates repository fields; upgrade it)";
 
 /** The warning a read from a Dispatch server without the repository fields carries: it names the
  *  refusal this client does not make, so a session's clients can update before its server does. */

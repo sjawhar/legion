@@ -79,11 +79,7 @@ export function SettingsPage(): ReactNode {
     MappingInput,
     { previous: RepoProject[] | undefined }
   >({
-    mutationFn: ({ repo, project, default: isDefault }) =>
-      api.putRepoProject(
-        repo,
-        isDefault === undefined ? { project } : { project, default: isDefault }
-      ),
+    mutationFn: ({ repo, ...input }) => api.putRepoProject(repo, input),
     onError: (error, variables, context) => {
       queryClient.setQueryData(["repo-projects"], context?.previous);
       setFailedAction({
