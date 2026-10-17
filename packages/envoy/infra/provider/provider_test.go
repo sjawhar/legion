@@ -75,7 +75,7 @@ func TestSchemaTypes(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:nats:Rules",
-		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions",
+		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:HubListener", "envoy-infra:gcp:SessionUser",
 	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
@@ -98,14 +98,18 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.True(t, hub.IsComponent)
 	require.ElementsMatch(t, []string{
 		"users", "tailnetAuthKey", "hostname", "tags", "zone", "machineType", "diskType", "diskSizeGb", "natsImage",
-		"tailscaleImage", "network", "subnetwork",
+		"tailscaleImage", "network", "subnetwork", "listener", "sessionUser",
 	}, slices.Collect(maps.Keys(hub.InputProperties)))
-	require.ElementsMatch(t, []string{"users", "tailnetAuthKey", "hostname", "tags", "zone", "natsImage", "tailscaleImage"},
+	require.ElementsMatch(t, []string{"tailnetAuthKey", "hostname", "tags", "zone", "natsImage", "tailscaleImage"},
 		hub.RequiredInputs)
 	for name, in := range hub.InputProperties {
 		require.Equal(t, name == "tailnetAuthKey", in.Secret, "only tailnetAuthKey is a secret input, not %s", name)
 	}
 	require.Equal(t, "#/types/envoy-infra:gcp:NatsUser", hub.InputProperties["users"].Items.Ref)
+	require.Equal(t, "#/types/envoy-infra:gcp:HubListener", hub.InputProperties["listener"].Ref)
+	require.Equal(t, "#/types/envoy-infra:gcp:SessionUser", hub.InputProperties["sessionUser"].Ref)
+	require.ElementsMatch(t, []string{"image", "seedSecret", "nkey"}, s.Types["envoy-infra:gcp:HubListener"].Required)
+	require.ElementsMatch(t, []string{"name", "nkey"}, s.Types["envoy-infra:gcp:SessionUser"].Required)
 	require.ElementsMatch(t, []string{"natsUrl", "instanceGroup"}, slices.Collect(maps.Keys(hub.Properties)))
 
 	// Generated SDKs append Args to an object type's name for its input type, so the Go names

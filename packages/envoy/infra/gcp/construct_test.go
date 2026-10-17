@@ -63,6 +63,15 @@ func plainInputs() map[string]property.Value {
 		"zone":           property.New("us-central1-a"),
 		"natsImage":      property.New(natsImage),
 		"tailscaleImage": property.New(tailscaleImage),
+		"listener": property.New(property.NewMap(map[string]property.Value{
+			"image":      property.New(listenerImage),
+			"seedSecret": property.New(listenerSeed),
+			"nkey":       property.New(keyListener),
+		})),
+		"sessionUser": property.New(property.NewMap(map[string]property.Value{
+			"name": property.New("example-sessions"),
+			"nkey": property.New(keySessions),
+		})),
 	}
 }
 

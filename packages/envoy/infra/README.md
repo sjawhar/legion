@@ -1290,7 +1290,7 @@ it as its `authorization` input, an `aws:Authorization` of `aws:User`s, with the
 `envoy-infra render nats-start-script` reads the same from its file, keyed the same way. A user's
 `publish` and `subscribe` are each a `nats:Rules`, the one rules type every NATS component takes,
 whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs. `gcp:NatsHub` renders its server's
-from its `users` (see [The hub's users](docs/nats-hub.md#the-hubs-users)); `host:Listener` runs no
+from its `users`, `listener` and `sessionUser` (see [The hub's users](docs/nats-hub.md#the-hubs-users)); `host:Listener` runs no
 NATS server and takes none.
 
 | Input | What it is |
@@ -1394,16 +1394,19 @@ It subscribes to `_INBOX.>`, and to the role lanes in the machine's queue group,
 
 `SessionPermissions()` is what any agent session needs, with `*` for the session id. It publishes
 to `_INBOX.>`, for the receipt a role delivery waits for, and `agentstream.*.frames`, and
-subscribes to `notifications.>` and `agentstream.*.control`.
+subscribes to `notifications.>` and `agentstream.*.control`. A `gcp:NatsHub`'s `sessionUser`
+holds it.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
 session on the host share: in each direction the listener's entries, then each of the session's
-the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. Sharing one user makes the
-host one trust domain: any process that reaches the server as it, a listener's own process or
-any session on the host, holds the whole grant above, host sessions included, since sessions run
-as the Unix user that already reads the host's seed. This repository's listener and a session,
-connected as one user holding it, are checked against real nats-server 2.10 and 2.15.1 servers;
-`AGENTS.md` in this directory says how.
+the listener's lack. A `gcp:NatsHub` user with `machineId` holds it, and a hub's own `listener`
+holds `ListenerPermissions` for the hub's hostname. Sharing one user makes the host one trust
+domain: any process that reaches the server as it, a listener's own process or any session on the
+host, holds the whole grant above, host sessions included, since sessions run as the Unix user
+that already reads the host's seed. This repository's listener and a session, connected as one
+user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
+credential-free session user holding `SessionPermissions`, are checked against real nats-server
+2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by

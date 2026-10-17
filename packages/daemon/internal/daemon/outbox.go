@@ -185,6 +185,11 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
 	if err != nil {
 		r.noteLimit(row, err)
+		// A failure no retry repairs is not logged as the row failing: once its finish commits,
+		// finishRefused's own line says what became of the row (a person's dequeue of a READY merge,
+		// say, is no failure of the daemon's), and a finish that does not commit is logged below with
+		// it as the cause. A wait that ends the row (a stalled ghautomerge.Lagging) logs as a wait too.
+		permanent := permanentRefusal(row, err, r.now().UTC())
 		if errors.Is(err, wait.ErrWaiting) {
 			// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
 			// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
@@ -200,12 +205,12 @@ func (r *outbox) settle(ctx context.Context, row record.OutboxRow, err error) {
 			}
 			r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
 				"attempts", row.Attempts, "error", err)
-		} else {
+		} else if !permanent {
 			r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 		}
-		if permanentRefusal(row, err, r.now().UTC()) {
-			if err := r.finishRefused(ctx, row, err); err != nil {
-				r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+		if permanent {
+			if finishErr := r.finishRefused(ctx, row, err); finishErr != nil {
+				r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", finishErr, "cause", err)
 			}
 			return
 		}
@@ -297,8 +302,15 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 			return err
 		}
 		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
+		// Someone removing the arm is a person's act, told to the architect; GitHub refusing the
+		// submission or a webhook the daemon never received is a fault.
+		level := slog.LevelError
+		var removed *ghautomerge.Removed
+		if errors.As(cause, &removed) {
+			level = slog.LevelWarn
+		}
 		told = func() {
-			r.log.Error("outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
+			r.log.Log(scoped, level, "outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
 		}
 	}
 	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
@@ -379,9 +391,10 @@ func retryBackoff(attempts int) time.Duration {
 // permanentRefusal is a row's failure no retry repairs, so the row is finished with its follow-up
 // (finishRefused) rather than retried: a Dispatch status write Dispatch refuses the same way every
 // time (dispatch.PermanentRefusal), which would hold every later status of its issue behind it, and
-// a READY merge GitHub refuses where it still stands (ghautomerge.Refused), or whose pull request
+// a READY merge GitHub refuses where it still stands (ghautomerge.Refused), whose pull request
 // GitHub has shown closed or at another head than the record awaits for longer than
-// ghautomerge.LagBound at now (ghautomerge.Lagging.Stalled).
+// ghautomerge.LagBound at now (ghautomerge.Lagging.Stalled), or whose arm or merge-queue entry
+// someone else removed without a merge (ghautomerge.Removed), which a retry must not undo.
 func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
 	switch row.Kind {
 	case record.OutboxKindDispatchStatus:
@@ -389,16 +402,18 @@ func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
 		return permanent
 	case record.OutboxKindReadyMerge:
 		var refused *ghautomerge.Refused
+		var removed *ghautomerge.Removed
 		var lagging *ghautomerge.Lagging
-		return errors.As(err, &refused) || errors.As(err, &lagging) && lagging.Stalled(now)
+		return errors.As(err, &refused) || errors.As(err, &removed) || errors.As(err, &lagging) && lagging.Stalled(now)
 	default:
 		return false
 	}
 }
 
 // routineWait is a wait only GitHub's own rules hold back, which ends without anyone acting for
-// Legion: a pull request armed or queued at READY's head (ghautomerge.Armed), or one GitHub
-// reports not mergeable yet for a reason its rules end (ghautomerge.Unmergeable.Routine).
+// Legion: a pull request armed or queued at READY's head (ghautomerge.Armed), one GitHub reports not
+// mergeable yet for a reason its rules end (ghautomerge.Unmergeable.Routine), or one the merge queue
+// took out to merge, which GitHub has yet to show merged (ghautomerge.Merging).
 func routineWait(err error) bool {
 	var routine interface{ Routine() bool }
 	return errors.As(err, &routine) && routine.Routine()

@@ -14,12 +14,13 @@ A hub whose `hostname` is `<h>` registers these resources, each a child of the h
 | `<h>-hub` | `gcp:serviceaccount/account:Account` | The VM's service account, account id `<h>-hub`. |
 | `<h>-tailnet-auth-key` | `gcp:secretmanager/secret:Secret` | The secret `<h>-tailnet-auth-key`, replicated automatically. |
 | `<h>-tailnet-auth-key` | `gcp:secretmanager/secretVersion:SecretVersion` | Its version, holding `tailnetAuthKey`. |
-| `<h>-tailnet-auth-key-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | The service account's one grant: `roles/secretmanager.secretAccessor` on that secret. |
+| `<h>-tailnet-auth-key-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | The service account's grant of `roles/secretmanager.secretAccessor` on that secret. |
+| `<h>-listener-seed-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | Only with `listener`: the same grant on `listener.seedSecret`, a secret the consumer declares and writes. |
 | `<h>-network` | `gcp:compute/network:Network` | Only without `network`: an auto-mode network, with a subnetwork in every region. |
 | `<h>-health-checks` | `gcp:compute/firewall:Firewall` | The hub's one firewall rule: tcp/8222 from Google's health-check ranges, `130.211.0.0/22` and `35.191.0.0/16`, to the VM's network tag `<h>-hub`. |
 | `<h>-healthz` | `gcp:compute/healthCheck:HealthCheck` | An HTTP check of NATS's `/healthz` on port 8222, every 10 seconds, unhealthy after 6 failures. |
 | `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet (see [The VM's external address](#the-vms-external-address)), the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
-| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from an initial delay after the VM is created that covers the first boot's read of the data disk (see [The first boot's read](#the-first-boots-read)), and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, since its first VM fetches the key when it boots, and `pulumi up` waits until it is `STABLE`. |
+| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from an initial delay after the VM is created that covers the first boot's read of the data disk (see [The first boot's read](#the-first-boots-read)), and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grants, since its first VM fetches the key when it boots and its listener fetches its seed when it starts, and `pulumi up` waits until it is `STABLE`. |
 
 Every resource is in the gcp provider's project. The template's name is `<h>-` and a suffix the
 provider adds, and the network, the firewall rule, the health check and the group are named after
@@ -33,7 +34,7 @@ and `instanceGroup`, the group's name.
 
 | Input | Default | What it is |
 | --- | --- | --- |
-| `users` | required | The NATS server's nkey users. See [The hub's users](#the-hubs-users). |
+| `users` | none | The NATS server's nkey users. See [The hub's users](#the-hubs-users). At least one is required unless the hub has a `listener`. |
 | `tailnetAuthKey` | required | A secret: the Tailscale auth key the VM joins the tailnet with. Use a single-use, pre-approved key: the hub's service account can read it for as long as the hub exists, and so can root on the VM, the NATS container included, until the node has joined, so a reusable key would let either add devices with the hub's tags. The tailnet must let it advertise `tags`. May come from another resource or stack. |
 | `hostname` | required | The VM's name on the tailnet and `natsUrl`'s host: 2 to 26 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen (`^[a-z][a-z0-9-]{0,24}[a-z0-9]$`). It also names every child. |
 | `tags` | required | The tailnet tags the VM advertises when it joins, each `tag:<name>`. At least one. |
@@ -45,6 +46,8 @@ and `instanceGroup`, the group's name.
 | `tailscaleImage` | required | Tailscale's image, pinned the same way. The unit configures it through containerboot's `TS_*` variables, as Tailscale's own image reads them. |
 | `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address and takes the network's rules for all its instances, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, its sshd is reachable from the internet: see [The VM's external address](#the-vms-external-address). May come from another resource or stack. |
 | `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
+| `listener` | unset | The hub's own Envoy listener: `image`, the listener's image pinned as the images above are; `seedSecret`, the id of a Secret Manager secret in the hub's project holding its NATS user's seed; and `nkey`, that seed's public key. See [The hub's listener](#the-hubs-listener). |
+| `sessionUser` | unset | `name` and `nkey`, the NATS user a client presenting no credential becomes, granted `SessionPermissions`. See [The hub's users](#the-hubs-users). |
 
 Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
 other input takes a value the program knows when it runs, and the plugin refuses an output there,
@@ -55,16 +58,17 @@ The hub refuses these before it registers anything, with an error naming the inp
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in the
   hub's own name or an input it carries into the user data, a child or a refusal: `hostname`, a
-  tag, `zone`, `machineType`, `diskType`, an image, or a user's `machineId`. The error names the
-  input by its path and never its value, as `users[0].machineId: an nkey user seed, which is
-  never an input of the hub (not echoed)`, and a seed in the hub's own name as
-  `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed (not echoed)`. `network`,
-  `subnetwork` and `tailnetAuthKey` may come from another resource, so a seed in any of them
-  fails the preview or update once it resolves, with the same error, before any child is
-  registered with it: a NATS seed passed as the Tailscale key is refused before a Secret Manager
-  version holds it, and the error never carries the secret. A seed in a user's `name` or a rule
-  entry is refused by the authorization, as [The hub's users](#the-hubs-users) says, and a seed
-  as a user's `nkey` is refused as an `nkey` that is no public key, without quoting it;
+  tag, `zone`, `machineType`, `diskType`, an image, a user's `machineId`, or the listener's
+  `image` or `seedSecret`. The error names the input by its path and never its value, as
+  `users[0].machineId: an nkey user seed, which is never an input of the hub (not echoed)`, and a
+  seed in the hub's own name as `envoy-infra:gcp:NatsHub: the component's name holds an nkey seed
+  (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another resource, so a
+  seed in any of them fails the preview or update once it resolves, with the same error, before
+  any child is registered with it: a NATS seed passed as the Tailscale key is refused before a
+  Secret Manager version holds it, and the error never carries the secret. A seed in a user's
+  `name` or a rule entry is refused by the authorization, as [The hub's users](#the-hubs-users)
+  says, and a seed as a user's `nkey` is refused as an `nkey` that is no public key, without
+  quoting it;
 - a `hostname` outside the rule above;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;
@@ -81,12 +85,18 @@ The hub refuses these before it registers anything, with an error naming the inp
   252`;
 - no `tailnetAuthKey`;
 - `subnetwork` without `network`, since the firewall rule needs the network;
-- no `users`, or a user refused as [The hub's users](#the-hubs-users) lists;
+- no `users` and no `listener`, or a user refused as [The hub's users](#the-hubs-users) lists;
+- a `listener` whose `image` is not pinned as above, whose `seedSecret` is not a secret id
+  (`^[A-Za-z0-9_-]{1,255}$`, Secret Manager's rule, so a resource path such as
+  `projects/<p>/secrets/<s>` is refused) or is the hub's own `<h>-tailnet-auth-key`, or whose
+  `nkey` is empty;
+- a `sessionUser` whose `nkey` is empty;
 - a missing provider (see [Providers](../README.md#providers)).
 
 ## The hub's users
 
-`users` is the NATS server's whole authorization. Each user is `name`, `nkey` and exactly one of:
+`users` holds the NATS server's nkey users, and `listener` and `sessionUser` add one each. Each of
+`users` is `name`, `nkey` and exactly one of:
 
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
@@ -100,11 +110,25 @@ named as `aws:NatsService`'s users name it, so a user is written alike for both 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): the host's listener reads it from
 there into its `seed`, and its `natsUrls` is the hub's `natsUrl`. In the authorization `core`
-renders (see [NATS authorization](../README.md#nats-authorization)), each user is a keyed user
-with `HasSeed` set, and no user stands for a client presenting no credential, so the server
-refuses every client without the seed of one of `users`. The rendered file, headed
+renders (see [NATS authorization](../README.md#nats-authorization)), each of `users` is a keyed
+user with `HasSeed` set. The listener's user follows them, named `<h>`, with `listener.nkey` and
+`ListenerPermissions(<h>)` and `HasSeed` set. `sessionUser` comes last, with
+`SessionPermissions()` and no seed, as the authorization's `noAuthUser`: a client that presents no
+credential becomes that user, and one that presents a key the server does not know is refused.
+Without `sessionUser`, no user stands for a client presenting no credential, so the server refuses
+every client without the seed of one of its users. Give `sessionUser.nkey` a public key whose seed
+nobody keeps (`nk -gen user -pubout`, keeping only the `U…` line): no client presents it, and a
+client holding its seed would only be the same session user. The rendered file, headed
 `# Rendered by envoy-infra. Public keys only.`, is `/etc/nats/nats-server.conf` on the VM; the
 VM's metadata holds it in the clear.
+
+A session user lets anything that reaches 4222 publish and subscribe as `SessionPermissions()`
+allows: it reads every notification topic, answers any reply inbox it sees there (a role
+delivery's receipt included), and publishes agent stream frames and answers stream replay requests
+for any session id, so it can fake any agent's live stream in Dispatch. With one, the tailnet's
+policy is the gate on 4222: which devices it lets reach the hub's 4222 decides who is on the bus.
+A `listener` opens a second door, port 9020, with or without a session user, and it grants far
+more ([The hub's listener](#the-hubs-listener)).
 
 A user is refused when it names both `machineId` and `permissions` or neither, or when its
 `machineId` or `nkey` is empty, named by its index alone, as `users[1]: nkey is required`, since
@@ -114,7 +138,49 @@ authorization's own refusals under [NATS authorization](../README.md#nats-author
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
 user's name or a rule entry before any of those, naming the path and not the value, as
 `users[1]: name holds an nkey seed (not echoed)` or
-`users[1] "example-operator": publish.allow[0] holds an nkey seed (not echoed)`.
+`users[1] "example-operator": publish.allow[0] holds an nkey seed (not echoed)`. The listener's
+user and the session user are named by their inputs in the same refusals, as
+`listener "<h>": nkey repeats users[0] "example-host-a"` or
+`sessionUser "<name>": nkey is not a user public key …`; a user of `users` named `<h>` is refused
+as the listener's user repeating it, as `listener "<h>": name repeats users[<index>]`.
+
+## The hub's listener
+
+With `listener`, the VM runs Envoy's listener beside NATS, as machine `<h>`. It listens on the
+VM's loopback, `127.0.0.1:9020`, and reaches NATS there too, on `nats://127.0.0.1:4222`. Tailscale
+Serve forwards the tailnet's connections to the hub's port 9020 to that address. A self-subscribed
+client such as pi-envoy or claude-envoy registers and sends through
+`http://<h>.<tailnet>:9020`; it receives directly from NATS, with no listener of its own. A client
+that registers a serving port, including the OpenCode plugin, cannot receive delivery through this
+hub listener: its registration is the hub's machine, and the hub has no host bridge to reach the
+client's port. Run a listener beside that client instead. The listener's `/v1` API takes no bearer,
+which the listener allows only on a loopback address (`packages/envoy/cmd/listener/apiauth.go`), so
+the tailnet's policy for port 9020 is the only thing that decides who may call it, and a caller
+gets the whole API with no credential: it can publish to any topic outside the agent topics with
+a `source` of its choosing, under the listener's user's publish grant (Dispatch, GitHub, Slack,
+Legion and role notifications included), claim a role, list every session and delete one. That
+holds whether or not the hub has a `sessionUser`, so a hub without one still has an open bus for
+any device the policy lets reach 9020: grant 9020 only to devices that may act as any agent.
+
+Because the API takes no bearer, a web page open on any device the policy lets reach 9020 could
+otherwise post to it: a browser sends a cross-site form without asking. The listener refuses any
+request body whose `Content-Type` is not `application/json`, which a page can send cross-site only
+after a CORS preflight the listener never grants (`apiauth.go`). That refusal shipped in
+legion-envoy-v13.9.0, so pin `listener.image` to that release or a later one; an older image
+leaves 9020 open to any page a tailnet user visits. The refusal does not stop DNS rebinding: a
+page whose own name an attacker repoints at the hub's tailnet address is same-origin with it, so
+it sends JSON with no preflight, reads the replies, and has the whole API, since the listener does
+not check the request's `Host`. A browser that asks before a public page reaches a private or
+tailnet address (Chrome's Local Network Access) blocks that; any other browser on a device the
+policy admits to 9020 is a way in, which is one more reason to grant 9020 narrowly.
+
+The listener connects as the listener's user (see [The hub's users](#the-hubs-users)) with the
+seed `listener.seedSecret` holds. The hub's service account gets
+`roles/secretmanager.secretAccessor` on that secret and nothing more; the consumer declares the
+secret and writes the seed with `envoy-infra seed generate`, whose printed key is `listener.nkey`
+(see [Making a seed](../README.md#making-a-seed)). The seed reaches the listener's environment as
+`NATS_NKEY_SEED` through `docker run --env-file`, which Docker reads as root, since the listener's
+image runs as an unprivileged user.
 
 ## What the hub's VM runs
 
@@ -150,31 +216,38 @@ so cloud-init applies the hub's cloud-config at every boot. The whole document, 
    `/run/envoy/tailnet-auth-key`, mode 0600, so the key's bind mount into the Tailscale container
    is always of a file.
 
-`write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the key fetcher to
-`/etc/envoy/fetch-tailnet-key`, the joined script to `/etc/envoy/tailnet-joined` and five systemd
-units to `/etc/systemd/system/`, and `runcmd` reloads systemd and starts the units in this order.
-They are started and never enabled, since `/etc` does not outlive the boot.
+`write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the secret fetcher to
+`/etc/envoy/fetch-secret`, the joined script to `/etc/envoy/tailnet-joined`, and Tailscale Serve's
+configuration to `/etc/tailscale-serve/serve.json`. With a `listener`, it also writes the seed
+script to `/etc/envoy/listener-seed-env`, and the Serve configuration forwards port 9020; without
+one, the configuration is `{}`, which clears a forward from a previous VM. It then writes the
+systemd units to `/etc/systemd/system/`, and `runcmd` reloads systemd and starts the units in this
+order. They are started and never enabled, since `/etc` does not outlive the boot.
 
 | Unit | What it does |
 | --- | --- |
-| `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
-| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It wants the fetch and starts after it ends, but does not require it. |
+| `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-secret /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
+| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It mounts `/etc/tailscale-serve` read-only and sets `TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json`: containerboot applies that configuration once the node is up, and again whenever the file changes, watching its directory (tailscale v1.104.1 `cmd/containerboot/serve.go`). With a `listener`, the configuration forwards port 9020; without one it is `{}`, which clears a prior forward. It wants the fetch and starts after it ends, but does not require it. |
 | `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it empties the key file, which stays for the container's bind mount, and only once that has succeeded writes the marker. A simple service, so its start returns at once; a run that fails, as one whose key drop fails does, is run again 10 seconds later. |
 | `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
+| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`. `TimeoutStartSec=600` exceeds the fetcher's 590-second maximum: six attempts, each with three 30-second curl limits, separated by five 10-second waits. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
 
-Both container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
+The container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
 point, so that their state never lands on the tmpfs beneath, and restart 10 seconds after their
-container exits.
+container exits, or after their start fails.
 
-The key fetcher runs under `/bin/sh` with curl, jq and base64. It takes the VM's project id and an
-access token for its service account from the metadata server, reads the secret's `latest` version
-through Secret Manager's REST API, and moves the decoded key onto `/run/envoy/tailnet-auth-key`
-from a temporary file readable by root alone, only when the key is not empty. A new grant can take
-a while to reach Secret Manager, so it tries six times, ten seconds apart, and exits 1 after the
-sixth failure. Nothing of the key or the token is printed or passed in a command's arguments.
-`GCE_METADATA_HOST` and `SECRET_MANAGER_ENDPOINT` replace the metadata server's host and Secret
-Manager's base URL, which its tests use.
+The secret fetcher runs under `/bin/sh` with curl, jq and base64. It takes the VM's project id and
+an access token for its service account from the metadata server, reads the secret's `latest`
+version through Secret Manager's REST API, and moves the decoded value onto the file it is given
+from a temporary file readable by root alone, only when the value is not empty. A new grant can
+take a while to reach Secret Manager, so it tries six times, ten seconds apart, and exits 1 after
+the sixth failure. Nothing of the value or the token is printed or passed in a command's
+arguments. `GCE_METADATA_HOST` and `SECRET_MANAGER_ENDPOINT` replace the metadata server's host
+and Secret Manager's base URL, which its tests use. The seed script fetches the listener's seed
+with it into a temporary file, refuses a seed of more than one line, which would add a variable of
+the secret's choosing to the listener's environment, and writes `NATS_NKEY_SEED=<seed>` to
+`/run/envoy/listener.env`, readable by root alone, removing the fetched file.
 
 NATS listens for clients on 4222 and serves its monitoring endpoints on 8222, on every interface.
 The hub's VPC firewall rule and `nats-firewall` admit Google's health checks to 8222, and
@@ -182,7 +255,12 @@ The hub's VPC firewall rule and `nats-firewall` admit Google's health checks to 
 the tailnet's policy decides which peers reach 4222. 8222's `/varz`, `/connz` and `/jsz` are
 reachable over the tailnet only through Tailscale's own accept rule for `tailscale0`, as are its
 other ports (see
-[What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
+[What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)). The
+listener's port 9020 needs no host firewall rule: tailscaled takes a connection to a port Serve
+publishes before the host's iptables sees it, and opens its own connection to `127.0.0.1:9020`.
+On a Linux host with tailscaled 1.104.1 in kernel mode, a port Serve published still answered
+over the tailnet while iptables dropped that port on `tailscale0`, and a port Serve did not
+publish timed out. Serve publishes nothing else.
 
 ## The VM's external address
 
@@ -365,13 +443,17 @@ e2fsck's repair, on a real disk, leaves what JetStream needs are for a first dep
 An instance template cannot change once it is created
 ([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
 holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskType`, `diskSizeGb`, `network` or
-`subnetwork` makes a new template. The group then replaces its VM at once (`PROACTIVE`, minimal
-action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
-unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
-clients reconnect then. The new VM gets the same data disk, so it keeps the stream and rejoins the
-tailnet as the same node. Its boot disk comes from the `cos-stable` family as it is then, so a new
-template also brings whichever COS release the family names at that moment.
+`listener`, `sessionUser`, `tags`, `natsImage`, `tailscaleImage`) or to `machineType`,
+`diskType`, `diskSizeGb`, `network` or `subnetwork` makes a new template. So does a plugin release
+that changes the rendering itself: the release that added `listener` and `sessionUser` renamed the
+secret fetcher and gives every hub a Serve configuration, so upgrading to it replaces every
+existing hub's VM once, with the outage below, even a hub that sets neither input. The group then
+replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting it before it creates the
+next (`RECREATE`, no surge, at most one unavailable). NATS is down from the old VM's stop until the
+new one's `nats` unit starts, and its clients reconnect then. The new VM gets the same data disk,
+so it keeps the stream and rejoins the tailnet as the same node. Its boot disk comes from the
+`cos-stable` family as it is then, so a new template also brings whichever COS release the family
+names at that moment.
 
 Three inputs work otherwise:
 
@@ -406,8 +488,10 @@ Three inputs work otherwise:
 ## What a first Google Cloud deployment proves
 
 The unit tests run the hub under Pulumi's mocks, check its cloud-config against the golden, and
-run the key fetcher, the joined script and the data disk's entry under `/bin/sh` against fakes
-and stubs; the seed command's Secret Manager store runs against a fake too. None of them runs
+run the secret fetcher, the listener's seed script, the joined script and the data disk's entry
+under `/bin/sh` against fakes and stubs; the seed command's Secret Manager store runs against a
+fake too. The live tests run the listener as the listener's user and a session with no credential
+as the session user on real NATS servers. None of them runs
 Google Cloud, COS or a tailnet, so the first deployment is where these hold or fail. Watch them on
 its first `pulumi up`:
 
@@ -445,6 +529,13 @@ its first `pulumi up`:
   attempt fails, containerboot, finding no key, exits at its 60-second boot timeout
   (`TS_BOOT_TIMEOUT`), and `tailscaled.service`'s restart runs the fetch again; that loop was
   measured on systemd 255, not on COS's own.
+- containerboot applies `/etc/tailscale-serve/serve.json` once the node is up, so
+  `tailscale serve status --json` on the VM's Tailscale container shows the forward of 9020, and
+  `http://<h>.<tailnet>:9020/healthz` answers over the tailnet from a device the policy lets reach
+  port 9020. That containerboot watches the file's directory was read in its source, not run.
+- `envoy-listener.service`'s `ExecStartPre` failing, as it does until the seed's grant reaches
+  Secret Manager, is restarted by `Restart=always` 10 seconds later. That was measured on systemd
+  255, not on COS's own.
 - `envoy-infra seed` against Secret Manager itself: that `versions/latest` names a newest version
   that is `DISABLED` or `DESTROYED`, that `GetSecretVersion` on `latest` answers `NOT_FOUND` for a
   secret with no version, that `ListSecretVersions` with no filter lists `DESTROYED` versions, and
@@ -466,8 +557,12 @@ The whole `Pulumi.yaml` of a project with one hub in the project `example-projec
 tailnet auth key from a secret config value. `example-hub`, `example-project`, the
 `example.invalid` images and each `<...>` are placeholders for your own values. Its users are
 `example-host-a`, the host whose listener [the module's YAML example](../README.md#yaml)
-runs, and `example-operator`, a client with permissions of its own. Their public keys are the
-placeholders `core`'s tests use: put in the ones `envoy-infra seed generate` printed for your users.
+runs, and `example-operator`, a client with permissions of its own. It runs a listener of its own,
+whose seed is in the secret `example-hub-listener-seed`, and admits a client presenting no
+credential as `example-sessions`. The users' public keys are the placeholders `core`'s tests use,
+and the listener's and the session user's are placeholders too: put in the ones
+`envoy-infra seed generate` printed for your users and your listener, and one whose seed you
+discarded for the session user.
 
 ```yaml
 name: envoy-nats
@@ -510,6 +605,13 @@ resources:
             subscribe:
               allow: [">"]
               deny: ["$SYS.>"]
+      listener:
+        image: example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+        seedSecret: example-hub-listener-seed
+        nkey: UBZEZDPQNFYMZ4J4XOLTB2IN5PBPZ6FZEGY55R623A4GPBPZLTQFKDYV
+      sessionUser:
+        name: example-sessions
+        nkey: UCNPQVMRWOOJWCD7XDVLH6MEOVFBMTV4LAQSKZYROSETYJVFAWDMNKVA
     options:
       providers:
         - ${gcp-example-project}
@@ -527,9 +629,11 @@ pulumi config set --secret tailnetAuthKey <tailnet auth key>
 pulumi preview
 ```
 
-The preview plans `+ 12 to create`: the stack, the gcp provider `gcp-example-project`, the hub
-`example-hub`, and the hub's nine children as
-[What `gcp:NatsHub` deploys](#what-gcpnatshub-deploys) lists them, the network among them. Its
+The preview plans `+ 13 to create`: the stack, the gcp provider `gcp-example-project`, the hub
+`example-hub`, and the hub's ten children as
+[What `gcp:NatsHub` deploys](#what-gcpnatshub-deploys) lists them, the network and the listener's
+seed grant among them. The secret `example-hub-listener-seed` must exist in `example-project`
+before `pulumi up`, and hold the listener's seed before the VM starts its listener. Its
 outputs are `natsUrl: "nats://example-hub:4222"` and `instanceGroup`, `example-hub-` and a random
 suffix. The template's `user-data` is `gcp/testdata/cloud-config.golden` byte for byte. `pulumi up`
 then applies it. The listener of the module's first example reaches this hub with `natsUrls` set
