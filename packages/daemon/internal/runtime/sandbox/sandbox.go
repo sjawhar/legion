@@ -87,6 +87,7 @@ type Runtime struct {
 	bootTimeout                    time.Duration
 	busyBackoff                    time.Duration
 	provisionBound                 time.Duration
+	launchBound                    time.Duration
 	terminationGrace               time.Duration
 	probeInterval                  time.Duration
 	adoptTimeout                   time.Duration
@@ -253,6 +254,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionDSNKey: opts.SessionDSNKey,
 		bootTimeout:   opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: workspace.FetchTimeout, terminationGrace: opts.TerminationGrace,
+		launchBound:   launchBound(opts.BootTimeout, workspace.FetchTimeout, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},

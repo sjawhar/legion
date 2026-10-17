@@ -8,6 +8,7 @@ import (
 	"maps"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,6 +58,11 @@ type workflowRuntime struct {
 	conn            *nats.Conn
 	consumers       *intake.Consumers
 	outbox          *outbox
+	// outboxWake is the outbox as the records' wake reaches it (wakeOutbox): the records are built
+	// at open, before the outbox exists, and the facts the boot applies before attach write rows
+	// through them, so the wake forwards to whatever attach has stored, and to nothing before
+	// then — the outbox's boot sweep finds every row written before it ran.
+	outboxWake atomic.Pointer[outbox]
 	// bootID disambiguates this boot's synthetic Dispatch consumer position facts from another
 	// boot's, or another project's daemon: processed_events is keyed only on (source, event_id),
 	// shared by every project's daemon in the database, and a stream recreated by a later boot
@@ -190,17 +196,28 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	// The database is shared by every project's daemon: the workflow reads this project's issues.
-	records := projectRecords{Store: record.NewStore(), project: cfg.Project}
-	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
-	admission := admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
-	return &workflowRuntime{
-		pool: st.Pool(), records: records, engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
+	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
+	// through the runtime, since the outbox itself is built later (attach).
+	w := &workflowRuntime{
+		pool: st.Pool(), tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
-	}, nil
+	}
+	records := projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
+	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
+	w.records, w.engine, w.admission = records, engine, admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
+	w.handlers = []intake.Handler{w.engine, w.admission}
+	return w, nil
+}
+
+// wakeOutbox is the records' wake (projectRecords.wake): it reaches the outbox attach stored, and
+// nothing before attach.
+func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
+	if r := w.outboxWake.Load(); r != nil {
+		r.wake(issue, kind)
+	}
 }
 
 // engineConfig is the workflow engine's configuration from the daemon's and the review App's bot
@@ -387,6 +404,7 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, w.defaultBranches.Of,
 		supervision.plan.tools, w.log)
+	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 

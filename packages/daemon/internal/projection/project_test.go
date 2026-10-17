@@ -22,6 +22,7 @@ type projectionStore struct {
 	phases       map[string][]record.PhaseRow
 	slots        []record.Slot
 	pullRequests map[string]*record.PullRequest
+	held         []record.HeldRow
 }
 
 func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) {
@@ -30,6 +31,9 @@ func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error)
 func (s projectionStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) { return s.slots, nil }
 func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx, string) ([]record.OutboxRow, error) {
 	return nil, nil
+}
+func (s projectionStore) HeldRows(context.Context, pgx.Tx, string, string, time.Time) ([]record.HeldRow, error) {
+	return s.held, nil
 }
 func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]record.PhaseRow, error) {
 	return s.phases[issue], nil
@@ -41,8 +45,11 @@ func (projectionStore) Gate(context.Context, pgx.Tx, string) (*record.DesignGate
 	return nil, nil
 }
 
+// projectedAt is the fixed instant every test here projects at.
+var projectedAt = time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+
 func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
-	now := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	now := projectedAt
 	store := projectionStore{
 		issues: []record.Issue{
 			{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
@@ -53,7 +60,7 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil)
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -76,7 +83,7 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
-	}, nil)
+	}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -111,7 +118,7 @@ func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
 	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1", PluginContract: 24},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
-	}, nil)
+	}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -134,7 +141,7 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	}
 	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{{
 		Token: token, Issue: "LEGION-208", Role: claim.RoleArchitect, State: supervise.StateLaunchUncertain,
-	}}, nil)
+	}}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -166,7 +173,7 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 			"LEGION-209": {Issue: "LEGION-209", Number: 43, HeadSHA: "head"},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil)
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -197,7 +204,7 @@ func TestProjectShowsACapabilityReportOnlyOnTheClaimThatSentOne(t *testing.T) {
 	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateWorking, Session: "session-2"},
-	}, map[claim.Token]capabilities.Report{implementer: report})
+	}, map[claim.Token]capabilities.Report{implementer: report}, projectedAt)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -213,5 +220,37 @@ func TestProjectShowsACapabilityReportOnlyOnTheClaimThatSentOne(t *testing.T) {
 	}
 	if got := view.Workers[claim.RoleImplementer].Claim.Capabilities; !reflect.DeepEqual(got, want) {
 		t.Fatalf("implementer capabilities = %#v, want %#v", got, want)
+	}
+}
+
+// A due lifecycle row held behind its issue's running one (record.Store.HeldRows) shows on the
+// state with its id, kind, issue, the row it waits on and how long it has waited, measured from
+// the moment it became due; a row due in the future — not yet held, whatever the store says —
+// shows no negative wait. The rows keep the store's order, and a state with none carries an empty
+// list rather than none.
+func TestProjectShowsTheHeldLifecycleRowsWithTheirWaits(t *testing.T) {
+	start := record.OutboxRow{ID: 802, Kind: record.OutboxKindSupervise, Issue: "LEGION-208", NextAt: projectedAt.Add(-150 * time.Second)}
+	removal := record.OutboxRow{ID: 804, Kind: record.OutboxKindWorkspaceRemove, Issue: "LEGION-209", NextAt: projectedAt.Add(time.Minute)}
+	store := projectionStore{
+		issues: []record.Issue{{Key: "LEGION-208", Tree: "LEGION-208", Status: "in_progress", Phase: phase.Implementing}},
+		held:   []record.HeldRow{{OutboxRow: start, WaitsOn: 801}, {OutboxRow: removal, WaitsOn: 803}},
+	}
+	got, err := Project(context.Background(), nil, store, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	want := []api.HeldOutboxRow{
+		{ID: 802, Kind: "supervise", Issue: "LEGION-208", WaitedSeconds: 150, WaitsOn: 801},
+		{ID: 804, Kind: "workspace_remove", Issue: "LEGION-209", WaitedSeconds: 0, WaitsOn: 803},
+	}
+	if !reflect.DeepEqual(got.HeldOutboxRows, want) {
+		t.Fatalf("heldOutboxRows = %#v, want %#v", got.HeldOutboxRows, want)
+	}
+	none, err := Project(context.Background(), nil, projectionStore{}, "LEGION", nil, nil, projectedAt)
+	if err != nil {
+		t.Fatalf("Project with nothing held: %v", err)
+	}
+	if none.HeldOutboxRows == nil || len(none.HeldOutboxRows) != 0 {
+		t.Fatalf("heldOutboxRows with nothing held = %#v, want an empty list", none.HeldOutboxRows)
 	}
 }

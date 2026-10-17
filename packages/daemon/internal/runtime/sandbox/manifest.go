@@ -739,6 +739,23 @@ func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }
 
+// LaunchBound satisfies runtime.Runtime: the longest one launch try may run once it holds its
+// pod's launch turn (relaunch), the sum of a replacing try's waits and of its bounded calls at
+// their full budgets (launchBound): the boot timeout three times — ensureSandbox's wait for a
+// Sandbox being deleted, awaitPodGone, awaitNewPod — then awaitRoleLauncher's backstop, twice the
+// boot timeout plus ProvisionBound and two recheck intervals (launcherBackstop), then the
+// termination grace the start frame has past the launcher deadline, then relaunchCalls times
+// apiTimeout for every client call, mint, store read and launcher frame between those waits. The
+// wait for the launch turn itself (lockPod) is outside it: that is another launch's time, bounded
+// by that launch's own try, and counting it here would end a try that had not yet begun. Generous
+// by design — a try that runs every call to its budget is still legitimate, and the one thing the
+// bound must never be is shorter than a provisioning pod's rightful wait; a hung try ends at the
+// bound either way, charged to the launch budget, and the next try runs. A test shortens it
+// (launchBound).
+func (r *Runtime) LaunchBound() time.Duration {
+	return r.launchBound
+}
+
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells
 // its agents (podKind.agentEnv: a tree agent its tree, issue, workspace and the gh files its
 // credential is read from, the controller LEGION_CONTROLLER=1), then the rest of the variables
