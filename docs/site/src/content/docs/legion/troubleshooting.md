@@ -447,11 +447,17 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   repository permission`, naming the installation's owner: the review App's installation cannot
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
-- **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
+- **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
+  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
+  removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
+  is not built on the approved one, GitHub does not know the approved head, or GitHub's compare
+  gives no file list or lists 300 files, the most it lists), or
+  the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
+  `reviewing`. It is refused while the head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
-  to `retro`); until every check the base branch requires has succeeded on the head, and every
-  workflow its rulesets require has a run on the head that succeeded; and while the design gate is
-  closed. The refusal names the head and the directory, the check or workflow, or the spec version
+  to `retro`); while a check the base branch requires has failed or is missing on the head, or a
+  workflow its rulesets require has failed or has no run on it (one still running refuses nothing);
+  and while the design gate is closed. The refusal names the head and the directory, the check or workflow, or the spec version
   that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
   failure, and the merger completes again. None of the head checks applies to a pull request a
   person already merged: its `READY` is published unread, and the issue goes on to its production

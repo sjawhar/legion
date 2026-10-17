@@ -3,6 +3,8 @@ package sandbox
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -46,14 +48,15 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		return "provider_keys names " + name + ", whose pointer " + name + "_FILE " + who + ": the shim skips a key whose pointer the pod sets"
 	}
 	const (
-		byRuntime  = "Legion's runtime sets in every pod"
-		byImage    = "the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)"
-		byIdentity = "every launch sets (the git identity the role's GitHub App commits as)"
-		byEnvoy    = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
-		bySessions = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
-		byStore    = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
-		byBaseline = "the pod baseline sets (internal/podsafety)"
-		byOperator = "runtime.kubernetes.pod.env sets"
+		byRuntime    = "Legion's runtime sets in every pod"
+		byImage      = "the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)"
+		byIdentity   = "every launch sets (the git identity the role's GitHub App commits as)"
+		byEnvoy      = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
+		bySessions   = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
+		byStore      = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
+		byBaseline   = "the pod baseline sets (internal/podsafety)"
+		byOperator   = "runtime.kubernetes.pod.env sets"
+		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
 	)
 	// The operator route with its token audience filled in, as an operator and each live harness run
 	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
@@ -87,6 +90,11 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: envSets("OMP_SESSION_SQL_DSN", "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)")},
 		{name: "a variable of the App's git identity", pod: env("JJ_USER", "operator"), want: envSets("JJ_USER", byIdentity)},
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
+		// The daemon names its controller's Slack channels from the project's slack_channels alone: an
+		// operator's value would have the controller hear another project's mentions.
+		{name: "the controller's Slack channels", pod: env("LEGION_SLACK_CHANNELS", "C00000001"), want: envSets("LEGION_SLACK_CHANNELS", byController)},
+		{name: "a provider key for the controller's Slack channels", keys: map[string]string{"LEGION_SLACK_CHANNELS": "channels"},
+			want: keyNames("LEGION_SLACK_CHANNELS", byController)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}},
 			{Name: "launcher-tester", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},
@@ -132,6 +140,13 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		{name: "the live harnesses' operator pod", pod: Pod(fixture), keys: map[string]string{"ANTHROPIC_API_KEY": "anthropic"}},
 		{name: "an operator's own overlays, which the baseline composes with",
 			pod: Pod{Env: map[string]string{"PI_CONFIG_FILES": "/etc/operator/overlay.yml"}}},
+		// Dispatch's dashboard as people open it, which the dispatch command links to in place of the
+		// in-cluster DISPATCH_URL the runtime hands every agent.
+		{name: "Dispatch's public dashboard", pod: env("DISPATCH_PUBLIC_URL", "https://dispatch.example.org")},
+		{name: "a public dashboard with no scheme", pod: env("DISPATCH_PUBLIC_URL", "dispatch.example.org"),
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
+		{name: "a public dashboard on another scheme", pod: env("DISPATCH_PUBLIC_URL", "ftp://dispatch.example.org"),
+			want: `runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to "ftp://dispatch.example.org", which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := CheckPod(tc.pod, tc.keys, testOptions().Tools, []string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
@@ -142,6 +157,37 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 				t.Fatalf("CheckPod = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// CheckPod accepts only DISPATCH_PUBLIC_URL values the agents' dispatch command accepts: both read
+// packages/contracts/fixtures/dispatch-public-url.json, where boot accepts `valid` alone and the
+// agents' test accepts `valid` and `agentsOnly`, so a value the daemon lets through at load never
+// turns Dispatch off in every agent (a numeric last label that is no IPv4 address, invalid
+// punycode, a forbidden host character, a zone, an empty hostname, a port out of range).
+func TestCheckPodHoldsDispatchPublicURLToTheAgentsRule(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "dispatch-public-url.json"))
+	if err != nil {
+		t.Fatalf("read the public-URL fixture: %v", err)
+	}
+	var fixture struct{ Valid, Invalid, AgentsOnly []string }
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("parse the public-URL fixture: %v", err)
+	}
+	check := func(value string) error {
+		return CheckPod(Pod{Env: map[string]string{"DISPATCH_PUBLIC_URL": value}}, nil, testOptions().Tools,
+			[]string{"ENVOY_TOKEN", "NATS_NKEY_SEED"}, []string{"NATS_NKEY_SEED"}, "SESSION_DSN")
+	}
+	for _, value := range fixture.Valid {
+		if err := check(value); err != nil {
+			t.Errorf("CheckPod(%q) = %v, want it accepted", value, err)
+		}
+	}
+	for _, value := range append(fixture.Invalid, fixture.AgentsOnly...) {
+		want := fmt.Sprintf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
+		if err := check(value); err == nil || err.Error() != want {
+			t.Errorf("CheckPod(%q) = %v, want %q", value, err, want)
+		}
 	}
 }
 

@@ -15,7 +15,7 @@ in the environment: a person's own session gets no tool, no title and no daemon 
 The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
 through the interface the Envoy entry publishes: one process-wide object on `globalThis` under
 `Symbol.for("legion.pi-shared.envoy-plugin-interface")`, at `ENVOY_PLUGIN_INTERFACE_VERSION`
-(currently 2), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
+(currently 3), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
 sets its own load marker, `Symbol.for("legion.pi-legion.loaded")`, to
 `{ from: import.meta.url, envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION }`, which the daemon's load
 probe reads.
@@ -87,9 +87,13 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 28 for contract 28's `heldOutboxRows` list on `GET /legion/v1/state` (LEGION-694: every
-due lifecycle outbox row held behind its issue's running lifecycle row, with its id, kind, issue,
-how long it has waited and the row it waits on; 26, reserved for it, is a gap no release declares),
+number is the one `DaemonAPIVersion` declares, last bumped by contract 29's daemon-launched
+controller (sjawhar/legion#1998: its pod enrolled
+with the secrets broker, and the project's `slack_channels` handed to it as
+`LEGION_SLACK_CHANNELS`, which the plugin subscribes to), after contract 28's `heldOutboxRows`
+list on `GET /legion/v1/state` (LEGION-694: every due lifecycle outbox row held behind its issue's
+running lifecycle row, with its id, kind, issue, how long it has waited and the row it waits on; 26,
+reserved for it, is a gap no release declares),
 after contract 27's `--default-branch` on a pod's `workspace-init provision` command
 (sjawhar/legion#1986), after contract 25's `source` on the deployment
 rows of `capabilities` (LEGION-636), after contract 24's `pluginContract` on the claim views and the
@@ -256,20 +260,30 @@ controller grant and posts `POST /legion/v1/issues/status` with it. The claim: `
 `api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
-`LEGION_PROJECT`); each `set_status` then mints from the `/grants` controller-session form with
-the secret the registration was issued. What the daemon publishes
-on that topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
-subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
+`LEGION_PROJECT`), then, in the controller the daemon launched (`daemonLaunchedController`: a
+controller session with a boot token), one to each Slack channel `LEGION_SLACK_CHANNELS` names, on
+its mention topic (`slackMentionTopic`; the daemon always sets the variable for that controller,
+from the project's `slack_channels`, empty for none, and the claim refuses it unset or with an entry
+that is not a channel id; any other controller ignores it); each `set_status` then mints from the
+`/grants` controller-session form with the secret the registration was issued. What the daemon
+publishes on the controller topic is listed at `notify.ControllerTopic`
+(`packages/daemon/internal/notify`). The subscriptions last while the session holds the controller
+role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
-it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
-retries, each compared with the role's state when the connection dropped, do not reopen it once
-the role has ended. A `/new` or `/resume` keeps it open whichever extension handles the switch
-first: Oh My Pi runs the manifest's order but moves on from a handler that outlasts its 30-second
-budget, and the switch's drop of the outgoing role (`endOutgoingRole`) leaves a role already
-claimed under the new session id alone. It is never registered with
-the listener, so a replaced controller resumed later gets it back only by claiming the role, which
-the daemon refuses its replaced capability. It is a live wake that changes no
-request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
+them, so a replaced controller stops taking wakes and mentions within one heartbeat, and a dropped
+connection's retries, each compared with the role's state when the connection dropped, do not
+reopen them once the role has ended. A `/new` or `/resume` keeps them open whichever extension
+handles the switch first: Oh My Pi runs the manifest's order but moves on from a handler that
+outlasts its 30-second budget, and the switch's drop of the outgoing role (`endOutgoingRole`)
+leaves a role already claimed under the new session id alone. None is ever registered with the
+listener, so a replaced controller resumed later gets them back only by claiming the role, which
+the daemon refuses its replaced capability, and a resumed controller hears the channels its own
+launch names, never a list an earlier launch had. A Slack topic a session registered by hand is
+dropped too, a listed channel's included: in the daemon's controller the factory sets the
+interface's `roleClaim.slackRoleOwned`, and the Envoy entry, restoring a resumed session's
+registered interests, unregisters and skips every Slack topic, since a restored topic would
+outlive the role. The controller topic is a live wake that changes no request, response or pane
+variable, and a daemon publishes to the topic whether anyone listens. A
 controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
 subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another
 contract, and the daemon refuses its registration with 409. A later

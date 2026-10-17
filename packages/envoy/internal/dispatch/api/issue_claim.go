@@ -278,11 +278,13 @@ func claimEvent(
 	previous *model.IssueClaim, reason string,
 ) model.Event {
 	return issueOwner(key).event(eventType, actor, model.IssueClaimEventPayload{
-		Key:      key,
-		Status:   after.Status,
-		Claim:    after.Claim,
-		Previous: previous,
-		Reason:   reason,
+		Key:          key,
+		Status:       after.Status,
+		Repo:         after.Repo,
+		ResolvedRepo: after.ResolvedRepo,
+		Claim:        after.Claim,
+		Previous:     previous,
+		Reason:       reason,
 	})
 }
 

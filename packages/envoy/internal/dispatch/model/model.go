@@ -81,10 +81,13 @@ type Project struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// RepoProject assigns an external repository to a native Dispatch project.
+// RepoProject assigns an external repository to a native Dispatch project. Default marks the one
+// mapping of the project an issue with no repository of its own, and none on its parent chain,
+// resolves to; at most one mapping of a project is its default.
 type RepoProject struct {
 	Repo      string    `json:"repo"`
 	Project   string    `json:"project"`
+	Default   bool      `json:"default"`
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -144,13 +147,16 @@ type IssueClaim struct {
 // IssueClaimEventPayload is the payload of issue.claimed and issue.released. Claim is the
 // claim now in force (nil on a release); Previous is the claim this one replaced or cleared,
 // so a takeover names whose work was taken and the outbox can tell that session. Reason is
-// "claimed", "takeover", "forced", "released", or "closed".
+// "claimed", "takeover", "forced", "released", or "closed". Repo and ResolvedRepo are the
+// issue's, as on every issue event.
 type IssueClaimEventPayload struct {
-	Key      string      `json:"key"`
-	Status   string      `json:"status"`
-	Claim    *IssueClaim `json:"claim"`
-	Previous *IssueClaim `json:"previous_claim,omitempty"`
-	Reason   string      `json:"reason"`
+	Key          string      `json:"key"`
+	Status       string      `json:"status"`
+	Repo         *string     `json:"repo"`
+	ResolvedRepo *string     `json:"resolved_repo"`
+	Claim        *IssueClaim `json:"claim"`
+	Previous     *IssueClaim `json:"previous_claim,omitempty"`
+	Reason       string      `json:"reason"`
 }
 
 // ProgressCount is done of total: the task items of a spec, or the direct children of an issue.
@@ -176,27 +182,32 @@ type IssueProgress struct {
 
 // Issue is the complete native issue record.
 type Issue struct {
-	Key               string          `json:"key"`
-	Project           string          `json:"project"`
-	Number            int             `json:"number"`
-	Title             string          `json:"title"`
-	Status            string          `json:"status"`
-	Priority          *int            `json:"priority"`
-	Rank              string          `json:"rank"`
-	Labels            []string        `json:"labels"`
-	Parent            *string         `json:"parent"`
-	BlockedBy         []string        `json:"blocked_by"`
-	Assignee          *string         `json:"assignee"`
-	Claim             *IssueClaim     `json:"claim"`
-	Components        IssueComponents `json:"components"`
-	ExternalLinks     []ExternalLink  `json:"external_links"`
-	Route             *string         `json:"route"`
-	CreatedBy         *Actor          `json:"created_by"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
-	ClosedAt          *time.Time      `json:"closed_at"`
-	PrimaryArtifactID string          `json:"primary_artifact_id"`
-	LastSeq           int             `json:"last_seq"`
+	Key           string          `json:"key"`
+	Project       string          `json:"project"`
+	Number        int             `json:"number"`
+	Title         string          `json:"title"`
+	Status        string          `json:"status"`
+	Priority      *int            `json:"priority"`
+	Rank          string          `json:"rank"`
+	Labels        []string        `json:"labels"`
+	Parent        *string         `json:"parent"`
+	BlockedBy     []string        `json:"blocked_by"`
+	Assignee      *string         `json:"assignee"`
+	Claim         *IssueClaim     `json:"claim"`
+	Components    IssueComponents `json:"components"`
+	ExternalLinks []ExternalLink  `json:"external_links"`
+	Route         *string         `json:"route"`
+	// Repo is the issue's own repository, owner/name, a mapping of its project; nil when it inherits.
+	Repo *string `json:"repo"`
+	// ResolvedRepo is the repository the issue targets, resolved on read: its own Repo, else its
+	// nearest ancestor's, else its project's default mapping, else nil.
+	ResolvedRepo      *string    `json:"resolved_repo"`
+	CreatedBy         *Actor     `json:"created_by"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
+	ClosedAt          *time.Time `json:"closed_at"`
+	PrimaryArtifactID string     `json:"primary_artifact_id"`
+	LastSeq           int        `json:"last_seq"`
 }
 
 // Route statuses: whether an issue's route reaches a running session right now.
@@ -233,6 +244,9 @@ type IssueSummary struct {
 	Claim      *IssueClaim     `json:"claim"`
 	Components IssueComponents `json:"components"`
 	Route      *string         `json:"route"`
+	// Repo and ResolvedRepo are Issue's.
+	Repo         *string `json:"repo"`
+	ResolvedRepo *string `json:"resolved_repo"`
 	IssueRouteReach
 	UpdatedAt         time.Time     `json:"updated_at"`
 	LastSeq           int           `json:"last_seq"`

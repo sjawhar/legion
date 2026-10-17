@@ -152,12 +152,15 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
 	// dropped by value and by pointer; its pane seed pointer is the controller's set's. A pane's boot
 	// token, which a start from inside a Legion pane inherits, is dropped too: the plugin takes a
-	// controller carrying one for a controller the daemon launched (`controller: daemon`).
+	// controller carrying one for a controller the daemon launched (`controller: daemon`). So are
+	// the Slack channels the daemon tells its own controller (LEGION_SLACK_CHANNELS): only that
+	// controller can reply in Slack, and an inherited list is no project's word for this one.
 	env := processEnvironment()
 	delete(env, natsauth.DaemonSeedVariable)
 	delete(env, natsauth.DaemonSeedFileVariable)
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
+	delete(env, "LEGION_SLACK_CHANNELS")
 	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}

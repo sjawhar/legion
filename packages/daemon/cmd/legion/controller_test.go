@@ -1056,6 +1056,24 @@ func TestControllerStartDropsAnInheritedBootToken(t *testing.T) {
 	}
 }
 
+// A start from inside the daemon-launched controller's pod, or from any shell that exported it,
+// inherits LEGION_SLACK_CHANNELS: another project's channels, or ones its own operator controller
+// may not answer, since only the daemon's controller can reply in Slack. Neither the operator's
+// controller nor its load probe is handed it.
+func TestControllerStartDropsInheritedSlackChannels(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	t.Setenv("LEGION_SLACK_CHANNELS", "C00000001")
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	for kind, env := range map[string]map[string]string{"load probe": c.probeEnv(), "controller": c.env()} {
+		if value, set := env["LEGION_SLACK_CHANNELS"]; set {
+			t.Errorf("the %s's environment carries LEGION_SLACK_CHANNELS=%q", kind, value)
+		}
+	}
+}
+
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
 // the state directory, the secret file and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {

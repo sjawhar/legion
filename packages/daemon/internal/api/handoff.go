@@ -175,8 +175,9 @@ func byHandShare(mergeNote string) string {
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
-//     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED,
-//     READY_DISARM_PENDING, READY_CHECKS_NOT_GREEN.
+//     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
+//     (unreviewedChange: the head is not the review round's approved head plus retro's commits),
+//     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, whose token never leaves the daemon; a runtime that
@@ -195,10 +196,10 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		return readyAnswer{}, false
 	}
 	ctx := r.Context()
-	pr, disarmPending, err := s.readyRecord(ctx, issue.Key)
+	pr, disarmPending, approvedHead, err := s.readyRecord(ctx, issue.Key)
 	if err != nil {
-		s.log.Error("api: read the pull request of a completing issue", "issue", issue.Key, "error", err)
-		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request")
+		s.log.Error("api: read the pull request and approved head of a completing issue", "issue", issue.Key, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request and approved head")
 		return readyAnswer{}, false
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
@@ -206,7 +207,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	if s.mergeRules != nil {
 		rules = s.mergeRules(issue.Project)
 	}
-	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr, disarmPending)
+	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, approvedHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)
 		return readyAnswer{}, false
@@ -214,24 +215,30 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	return answer, true
 }
 
-// readyRecord is issue's recorded pull request, nil when it has none, and whether its unfinished
-// disarm keeps an earlier auto-merge arm standing (record.Store.DisarmPending). By-hand READY
-// refuses on that barrier; ordinary READY does not wait for it.
-func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, error) {
+// readyRecord reads, in one repeatable-read snapshot, issue's recorded pull request (nil when it
+// has none), whether its unfinished disarm keeps an earlier auto-merge arm standing
+// (record.Store.DisarmPending; by-hand READY refuses on that barrier, ordinary READY does not wait
+// for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
+// which READY holds the pull request's head to (unreviewedChange).
+func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
 	if s.pool == nil || s.records == nil {
-		return nil, false, errors.New("record dependencies are unavailable")
+		return nil, false, "", errors.New("record dependencies are unavailable")
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})
 	if err != nil {
-		return nil, false, err
+		return nil, false, "", err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	pr, err := s.records.PullRequest(ctx, tx, issue)
 	if err != nil {
-		return nil, false, err
+		return nil, false, "", err
 	}
 	pending, err := s.records.DisarmPending(ctx, tx, issue)
-	return pr, pending, err
+	if err != nil {
+		return nil, false, "", err
+	}
+	head, err := record.ApprovedHead(ctx, s.records, tx, issue)
+	return pr, pending, head, err
 }
 
 // handoffPosition reads the issue record, its tree's generation (the root's), and its review round:

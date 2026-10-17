@@ -287,7 +287,12 @@ DISPATCH_TOKEN_FILE for it`. Invalid configuration, malformed URLs, and empty to
 disabled and name the failing source in `error`; nothing configuring it, or a file turning it off,
 leaves it disabled with a `notice` (`<file> sets dispatch.enabled to false: Dispatch is off`,
 `<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`, or the
-missing-file text).
+missing-file text). `DISPATCH_PUBLIC_URL`, when set, is Dispatch's dashboard as people open it, for
+a session that reaches Dispatch at an address they cannot (a Legion pod's in-cluster one): the
+settings carry it as `publicUrl`, less a trailing slash; every link the executor prints resolves
+against it rather than the API's URL, which every call still goes to; a dashboard URL given as a
+`ref` resolves on either address; and a value that is not an http or https URL disables Dispatch,
+naming it in `error`.
 
 ### The `dispatch` command
 

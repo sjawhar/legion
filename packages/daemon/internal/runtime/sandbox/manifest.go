@@ -88,10 +88,15 @@ var runtimeOwned = map[string]bool{
 	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
-	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true,
+	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
 	"UV_PYTHON_INSTALL_DIR": true, "UV_CACHE_DIR": true, "UV_LINK_MODE": true,
 	ompsessions.StorageVariable: true, ompsessions.DSNFileVariable: true,
 }
+
+// slackChannelsVariable is the project's slack_channels as the runtime tells the controller it
+// launches (Options.ControllerSlackChannels): comma-joined, set even when empty, so no other value
+// stands in for the project's. The controller's plugin subscribes to each channel's app mentions.
+const slackChannelsVariable = "LEGION_SLACK_CHANNELS"
 
 // sessionStoreVariables are Oh My Pi's two variables that place a session: the runtime sets both
 // under a session database (Options.SessionDSNKey) and the pod baseline the first to file otherwise
@@ -107,18 +112,15 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones and each launcher
 // role's private ones. The agent-secrets volumes are reserved whether or not this deployment
-// enrolls: an operator's pod may never claim them. A key volume is a workflow role's alone: the
-// controller never enrolls (enrolledWith), so no pod carries one of its. A gh volume is any
-// launcher role's, the controller's included: every launcherRoles entry holds a GitHub credential.
+// enrolls: an operator's pod may never claim them. Every launcher role, the controller's included,
+// has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
 		issueVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
 	}
 	for _, role := range launcherRoles {
-		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role))
-	}
-	for _, role := range claim.Roles {
-		names = append(names, roleVolume(agentSecretsKeyVolume, role))
+		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
+			roleVolume(agentSecretsKeyVolume, role))
 	}
 	slices.Sort(names)
 	return names
@@ -439,7 +441,7 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			},
 			Env:             slices.Clone(resolved),
 			WorkingDir:      l.workspace,
-			VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.enrolledWith(role), role), r.pod.VolumeMounts),
+			VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.agentSecrets, role), r.pod.VolumeMounts),
 			Resources:       r.resources[role],
 			SecurityContext: restrictedContainer(),
 		})
@@ -500,35 +502,23 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
-// enrolledWith is the secrets broker a launcher of role enrolls its agent with, nil when none:
-// every workflow role enrolls when the runtime enrolls pods (runtime.kubernetes.agent_secrets), but
-// the controller, which holds no human-tier key. The volumes, a launcher container's mounts, the
-// shim's flags (launcherCommand), mainEnvironment and handedAddresses all ask it and read the broker
-// from its answer, so the pod a launch builds and the addresses evaluate compares a running role
-// with agree, and no caller reads a broker it was not handed.
-func (r *Runtime) enrolledWith(role claim.Role) *AgentSecrets {
-	if role == claim.RoleController {
+// agentSecretsVolumes are, for a pod the runtime enrolls with the secrets broker
+// (runtime.kubernetes.agent_secrets), one shared projected ServiceAccount token volume (the
+// admission policy permits one volume per audience) and one private memory key directory per role
+// of roles, the controller's included; none when the runtime enrolls no pod. Every role of every pod
+// enrolls, so the broker can grant a pod of the Legion daemon's service the secrets that service
+// owns, such as the controller's Slack bot token; the mounts (agentSecretsMounts), the shim's flags
+// (launcherCommand), mainEnvironment and handedAddresses read the same r.agentSecrets.
+func (r *Runtime) agentSecretsVolumes(roles []claim.Role) []corev1.Volume {
+	broker := r.agentSecrets
+	if broker == nil {
 		return nil
 	}
-	return r.agentSecrets
-}
-
-// agentSecretsVolumes are, for a pod whose roles enroll (enrolledWith), one shared projected
-// ServiceAccount token volume (the admission policy permits one volume per audience) and one
-// private memory key directory per enrolled role; none when no role of roles enrolls.
-func (r *Runtime) agentSecretsVolumes(roles []claim.Role) []corev1.Volume {
-	var volumes []corev1.Volume
+	volumes := []corev1.Volume{{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
+		DefaultMode: new(int32(0o440)),
+		Sources:     []corev1.VolumeProjection{{ServiceAccountToken: brokerTokenProjection(broker)}},
+	}}}}
 	for _, role := range roles {
-		broker := r.enrolledWith(role)
-		if broker == nil {
-			continue
-		}
-		if volumes == nil {
-			volumes = []corev1.Volume{{Name: agentSecretsTokenVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
-				DefaultMode: new(int32(0o440)),
-				Sources:     []corev1.VolumeProjection{{ServiceAccountToken: brokerTokenProjection(broker)}},
-			}}}}
-		}
 		volumes = append(volumes, corev1.Volume{Name: roleVolume(agentSecretsKeyVolume, role), VolumeSource: corev1.VolumeSource{
 			EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: resource.NewQuantity(1<<20, resource.BinarySI)},
 		}})
@@ -770,7 +760,7 @@ func (r *Runtime) LaunchBound() time.Duration {
 // of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
 // a spec's. XDG_STATE_HOME is the role's own (roleStateHome), carried to the role's shim by the
 // start command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
-// API. The secrets broker is told only to a role that enrolls (enrolledWith). PI_SHELL_PREFIX puts
+// API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
 // issue's volume leads PATH.
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
@@ -797,9 +787,12 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
-	if broker := r.enrolledWith(spec.Role); broker != nil {
+	if broker := r.agentSecrets; broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
+	}
+	if spec.Role == claim.RoleController {
+		add(slackChannelsVariable, r.slackChannelsValue())
 	}
 	env = append(env, xdgEnvironment(roleStateHome(spec.Role))...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
@@ -851,18 +844,18 @@ const connectFlag = "--connect"
 // variable the runtime leaves unset.
 type handedAddress struct{ name, value string }
 
-// handedAddresses are every address a process of role launched now carries: the worker stream
-// listener its launcher dials (launcherContainers, fixed when the pod is created), then the
-// daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment names them
-// (mainEnvironment, carried by each generation's start command, launcherCommand), the broker only
-// for a role that enrolls (enrolledWith). The stream is fixed for the pod's life, so a pod a daemon
-// created under another stream dials it until the pod is replaced; the other five are fixed for
-// the generation's life, and the Sandbox records them per role (recordAddresses) so a daemon
+// handedAddresses are every address a role process launched now carries, whatever its role: the
+// worker stream listener its launcher dials (launcherContainers, fixed when the pod is created),
+// then the daemon's API, NATS, Envoy, Dispatch and the secrets broker as the agent's environment
+// names them (mainEnvironment, carried by each generation's start command, launcherCommand), the
+// broker only when the runtime enrolls pods. The stream is fixed for the pod's life, so a pod a
+// daemon created under another stream dials it until the pod is replaced; the other five are fixed
+// for the generation's life, and the Sandbox records them per role (recordAddresses) so a daemon
 // restarted under other addresses can tell (evaluate).
 // TestHandedAddressesAreEveryAddressAPodCarries keeps this list equal to what those two build.
-func (r *Runtime) handedAddresses(role claim.Role) []handedAddress {
+func (r *Runtime) handedAddresses() []handedAddress {
 	brokerURL := ""
-	if broker := r.enrolledWith(role); broker != nil {
+	if broker := r.agentSecrets; broker != nil {
 		brokerURL = broker.URL
 	}
 	return []handedAddress{

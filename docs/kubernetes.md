@@ -1000,8 +1000,9 @@ every issue pod is relaunched onto the new image.
 
 ### Contract discipline
 
-`DaemonAPIVersion` (27) is the Go daemon's own contract number; each claim records the contract
-its process registered with as `pluginContract`. A role's `pi-legion` declares the contract it was built against
+`DaemonAPIVersion` (`packages/daemon/internal/api/version.go`) is the Go daemon's own contract
+number; each claim records the contract its process registered with as `pluginContract`. A role's
+`pi-legion` declares the contract it was built against
 (`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass
 (`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path
 (`internal/supervise/plugin.go`) agree on one rule: a registered claim whose recorded contract
@@ -1466,10 +1467,10 @@ carries none. Each row's check, and the fact a passing one reports:
   `.claude/skills/*/SKILL.md` the workspace carries is among what Oh My Pi discovers —
   `discovered: <paths>`, or `the repository carries no .omp/extensions, .omp/skills or
   .claude/skills`.
-- `dispatch-envoy-tools`: the ten `envoy_*` tools are registered and `dispatch read --issue
-  <issue>` answers, which is why the row's summary reads "reaches Dispatch through the `dispatch`
-  command and Envoy through the pi-envoy tools" — `ten Envoy tools registered; dispatch read
-  <issue> answered from <path>`.
+- `dispatch-envoy-tools`: the eleven Envoy tools (the ten `envoy_*` tools and `slack_post`) are
+  registered and `dispatch read --issue <issue>` answers, which is why the row's summary reads
+  "reaches Dispatch through the `dispatch` command and Envoy through the pi-envoy tools" — `11
+  Envoy tools registered; dispatch read <issue> answered from <path>`.
 - `github`: `gh api graphql -f query='{ viewer { login } }'` answers the role's App login under the
   role's token file (REST `GET /user` is not a call an App installation token may make, so the row
   never reads it) — `gh viewer login: <login>`.
@@ -1716,16 +1717,17 @@ booting on a full pool ([The image is probed before it publishes](#the-image-is-
 ### A pod whose address moved
 
 A role process's addresses are fixed when it is launched, and nothing changes a running process's
-argv or environment. The daemon hands every role process six from its configuration, and the
-daemon-launched controller, which never enrolls with the secrets broker, every one but
-`AGENT_SECRETS_URL`, which it is compared without. The
-worker stream listener, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in
-every launcher container's command (item 3 of the anatomy list above), so it is fixed for the pod's
-life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
+argv or environment. The daemon hands every role process, the daemon-launched controller's
+included, six from its configuration. The worker stream listener,
+`tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in every launcher
+container's command (item 3 of the anatomy list above), so it is fixed for the pod's life: a
+launcher dials it and never redials elsewhere. The other five reach a generation's Oh
 My Pi in the start command its launcher receives, never in the pod spec, so they are fixed for that
 generation's life: `LEGION_DAEMON_URL` (`daemon_url`), `ENVOY_NATS_URL` (`nats_urls`), `ENVOY_URL`
-(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and, for a workflow role, `AGENT_SECRETS_URL`
-(`runtime.kubernetes.agent_secrets.url`). Each moves when the daemon restarts with its key changed,
+(`envoy_url`), `DISPATCH_URL` (`dispatch_url`) and, when the runtime enrolls pods,
+`AGENT_SECRETS_URL` (`runtime.kubernetes.agent_secrets.url`); the daemon-launched controller's
+generation also carries `LEGION_SLACK_CHANNELS` (the project's `slack_channels`), recorded and
+compared like these. Each moves when the daemon restarts with its key changed,
 and with no `advertise_host` set the stream also moves when the daemon restarts on another host. A
 daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
 re-adoption alone would leave the role holding the old addresses: a launcher dialling a stale
@@ -1779,11 +1781,13 @@ and every role of it is reported at once, from the boot that re-adopts them: the
 relaunched replaces the pod, under the pod's launch turn, and the others, whose relaunches wait on
 that turn, resume into the new pod, whose six launchers dial the current stream and mount the
 current enrollment. None of them is charged, and none is found gone when the pod is replaced under
-it. The controller's pod, whose one launcher dials a stale stream, is replaced the same way at its
-relaunch; it never enrolls, so the broker's settings never replace it. A role whose environment
-alone moved starts its next generation in the same pod, handed the current addresses, and the pod
-and its other roles are left as they are. The stale observation is never charged, since the
-process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
+it. The controller's pod, whose one launcher dials a stale stream, or which lacks the broker
+enrollment under `runtime.kubernetes.agent_secrets`, is replaced the same way at its relaunch. A
+role whose environment alone moved, the broker's URL, `LEGION_SLACK_CHANNELS` for the controller
+and the other addresses its agent is told among them, starts its next generation in the same pod,
+handed the current values, and the pod and its other roles are left as they are. The stale
+observation is never charged, since the process did nothing wrong; a relaunch the runtime refuses
+is charged as any launch failure is.
 A turn the stale process was in used the addresses it holds and ends with the relaunch, so the turn
 is lost: its task goes back to waiting and is sent again once the relaunched agent is ready, the
 recovery a death in a turn gets. A claim whose suspension was held for that turn's end is suspended
@@ -2613,6 +2617,21 @@ issue's pod (every role container of it alike) and the image probe's.
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
   ConfigMap, and a mounted token its key command reads. Its README lists what an operator supplies
   and how `pod` and `provider_keys` compose.
+- **Dispatch's public dashboard.** Every pod reaches Dispatch at `dispatch_url`, usually an
+  in-cluster address nobody outside the cluster can open. Set `DISPATCH_PUBLIC_URL` in
+  `runtime.kubernetes.pod.env` to Dispatch's dashboard as people open it, for example
+  `https://dispatch.example.org`: every link an agent's `dispatch` command prints, which agents
+  repeat in Slack replies, pull requests and comments, then points there, and a pasted dashboard
+  link on either address resolves. Load refuses, naming it, a value that is not an http or https
+  URL with no userinfo, a host that is a DNS name of letters, digits and hyphens (no `xn--` label,
+  no trailing dot, a last label that is not a number), a dotted-quad IPv4 address or a bracketed
+  IPv6 address, and any port from 1 to 65535: a rule narrower than the agents' URL parser, so a
+  value load accepts never turns Dispatch off in an agent. The controller's `slack_post` refuses a
+  reply linking an address inside the cluster.
+  Like every `pod.env` variable, it reaches an agent with the start command of its next generation,
+  so set it in the same restart that installs this release, which relaunches the controller once.
+  To hand a later change to a running agent, start its next generation with `legion claims suspend`
+  and then `legion claims resume`, which resumes its session; `legion claims stop` starts it fresh.
 - **The Legion machine-user sign-in.** `legion model-token` is a model `apiKey` command that signs a
   pod in to Cognito with its projected service-account token and prints the access token; the
   [operator route README](../deploy/kubernetes/operator-route/README.md) shows the line and what the
@@ -3088,8 +3107,16 @@ keeper relaunches it. Its one init container, `legion workspace-init controller 
 exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
-name and to the volume it owns. It is never enrolled with the secrets broker: it has no
-agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it, so under
+name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is enrolled with the
+secrets broker as an issue pod's roles are: it projects the broker's token, has a key directory of
+its own, and its shim takes the three agent-secrets flags and its agent `AGENT_SECRETS_URL` and
+`AGENT_SECRETS_KEY_DIR`. It runs as the operator's ServiceAccount (`runtime.kubernetes.pod`), the
+same account as every issue pod. The broker binds one account to each service (`BROKER_SERVICES`),
+so this shared account is what makes the controller the `legion-daemon` service's own pod: a
+controller given an account of its own would no longer be granted that service's secrets. The
+broker grants it, with no person asked, an agent secret whose owner is `legion-daemon` and whose
+tier is `agent`, which is how the operator stores `LEGION_SLACK_BOT_TOKEN`, the Slack app's bot
+token its `slack_post` replies with. Legion sets no affinity on it, so under
 Karpenter it lands wherever the pool has room for it (on GKE Autopilot it usually gets a node of its own,
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and it is annotated `karpenter.sh/do-not-disrupt:
 "true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
@@ -3097,14 +3124,24 @@ or replaces for drift the node it runs on, though issue pods can still be schedu
 GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) has what it does not stop), after which
 Autopilot may evict it like any other pod, and it is relaunched and resumes the same session like
-any claim's pod that dies ("The claim", above). Its
-agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
-`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
-pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
+any claim's pod that dies ("The claim", above). Its agent is told `LEGION_CONTROLLER=1`,
+`LEGION_ROLE=controller`, `LEGION_PROJECT`, `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch
+settings, `LEGION_SLACK_CHANNELS`, the project's Slack channels comma-separated and empty for none
+(the runtime's, always set, and refused in `runtime.kubernetes.pod.env` and `provider_keys`, so no
+list but the project's reaches it; its plugin subscribes to each channel's mention topic while the
+session holds the controller role, registered with no listener, and a resume first drops every
+Slack topic an earlier session registered (a restored one would outlive the role), so a resume or
+relaunch hears the channels the launch names and no others; the list is one of the addresses the
+runtime records per generation, so a daemon restarted with another `slack_channels` re-adopts the
+controller as an address that moved and relaunches it, resuming its session;
+`legion controller start` drops an inherited value, and any controller but this one ignores it),
+the launch secrets' `<NAME>_FILE` pointers, and the four `GH_*` variables exactly as an issue pod's
+role container is told them
 (`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
-prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line and the
-deployment instructions. Both its containers, the init container and the launcher, carry the
+prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, with the
+project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
+instructions. Both its containers, the init container and the launcher, carry the
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
 the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike, so the pod is
 `Guaranteed`, never the class the kubelet evicts first under node memory pressure; the image probe

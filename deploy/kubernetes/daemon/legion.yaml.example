@@ -41,6 +41,9 @@ projects:
     repo: acme/widgets
     # merge:                           # optional: a pull request touching a by_hand path is merged by a
     #   by_hand: ['^migrations/versions/'] # person; each pattern matches anywhere in a path, so anchor it
+    # slack_channels: [C00000000]      # optional: Slack channels whose @Legion mentions reach this
+    #                                  # project's controller, which answers in the thread; needs
+    #                                  # controller: daemon and runtime.kubernetes.agent_secrets
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:

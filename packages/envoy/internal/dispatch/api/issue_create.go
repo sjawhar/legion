@@ -50,6 +50,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		Priority   json.RawMessage `json:"priority"`
 		Assignee   json.RawMessage `json:"assignee"`
 		Components json.RawMessage `json:"components"`
+		Repo       json.RawMessage `json:"repo"`
 		Actor      *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -178,6 +179,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	repo, _, err := parseIssueRepo(input.Repo)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if input.External == "" && !input.Force {
 		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
 		if err != nil {
@@ -200,9 +206,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// Only a create with blockers can close a wait cycle: a new issue with none has nothing waiting
-	// on it yet, so its parent edge alone cannot close one and takes no dependency lock.
-	if len(blockers) > 0 {
+	// A create with blockers can close a wait cycle, and a create with a parent adds a link the
+	// depth cap counts (refuseParentTooDeep): both serialize on the project's dependency lock with
+	// every other blocker and parent write. A new issue with neither takes no dependency lock.
+	if len(blockers) > 0 || parentKey != "" {
 		if err := lockProjectIssueDependencies(r.Context(), tx, input.Project); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -224,6 +231,10 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			writeError(w, "PARENT_INPUT", http.StatusBadRequest, "parent must be in the same project")
 			return
 		}
+		if err := refuseParentTooDeep(r.Context(), tx, "", parentKey); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if !assigneeProvided {
 		assignee = defaultAssignee(actor, parentAssignee)
@@ -238,6 +249,14 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	`, input.Project).Scan(&number); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// The project row is locked from here; the mapping check takes its key-share lock only now, in
+	// the project-then-mapping order every mapping write follows (lockRepoProjectWrite).
+	if repo != nil {
+		if err := checkIssueRepoMapped(r.Context(), tx, *repo, input.Project); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	key := fmt.Sprintf("%s-%d", input.Project, number)
 	actorJSON, err := encodeJSON(actor)
@@ -262,9 +281,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	issueRank := rank.Between(lastRank, "")
 
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee, repo)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee, repo); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

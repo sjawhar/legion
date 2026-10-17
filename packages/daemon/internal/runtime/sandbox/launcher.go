@@ -397,7 +397,7 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	if r.mountsProviders() {
 		shim = append(shim, "--provider-env-dir", ProvidersDir)
 	}
-	if broker := r.enrolledWith(l.spec.Role); broker != nil {
+	if r.agentSecrets != nil {
 		shim = append(shim, "--agent-secrets-key-dir", AgentSecretsKeyDir, "--pod-token-file", AgentSecretsTokenDir+"/"+AgentSecretsTokenFile, "--agent-secrets-bin", r.tools.AgentSecrets)
 	}
 	_, values := r.launchEnvironment(l)
