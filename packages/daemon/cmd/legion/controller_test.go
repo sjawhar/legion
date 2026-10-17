@@ -771,17 +771,17 @@ func TestControllerStartsAddressingGainsTheProjectsRepositories(t *testing.T) {
 }
 
 // A daemon with an empty, missing, or invalid repository mapping refuses the controller's start
-// outright, naming why — it never silently omits the repositories clause (that test name and
-// behavior are gone: a correctly running daemon always maps at least one repository, since its own
-// workflow refuses to boot on an empty mapping, so an empty or invalid answer here means the state
-// read did not reach a real, fully-booted workflow).
+// outright, naming why — it never silently omits the repositories clause. An empty `mapped` with a
+// non-empty `refused` is a real, fully-booted state (every mapped repository lacks an App) and is
+// told apart from the state read failing to reach a configured workflow at all (that gives an
+// empty `mapped` with an empty `refused` too, which is the other, unusable case below).
 func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		opts controllerDaemonOptions
 		want string
 	}{
-		{"empty mapped", controllerDaemonOptions{repositories: []string{}}, "maps no repository to this project"},
+		{"empty mapped, nothing refused either", controllerDaemonOptions{repositories: []string{}}, "names none refused"},
 		{"empty object body", controllerDaemonOptions{rawStateBody: "{}"}, "names no repositories field"},
 		{"null body", controllerDaemonOptions{rawStateBody: "null"}, "not a JSON object"},
 		{"missing repositories field", controllerDaemonOptions{rawStateBody: `{"daemon":{"project":"demo"}}`}, "names no repositories field"},
@@ -790,6 +790,11 @@ func TestControllerStartRefusesAnUnusableRepositoryMapping(t *testing.T) {
 			"one valid, one invalid entry: the whole list is refused, not narrowed",
 			controllerDaemonOptions{repositories: []string{"acme/widgets", "not a valid repo"}},
 			"an invalid mapped repository",
+		},
+		{
+			"empty mapped, every candidate refused: a real state, named with its reason",
+			controllerDaemonOptions{rawStateBody: `{"repositories":{"mapped":[],"refused":[{"repo":"acme/widgets","reason":"the review App is not installed on acme/widgets"}]}}`},
+			"every repository is refused — acme/widgets (the review App is not installed on acme/widgets)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

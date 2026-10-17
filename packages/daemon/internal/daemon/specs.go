@@ -52,6 +52,12 @@ type specs struct {
 	// that does not exercise it; the daemon always sets it from plan.repositories, which it
 	// constructs at boot whether or not a workflow is configured.
 	repositories func() []ghrepo.Repository
+	// repositoriesRefused is the project's repositories the daemon leaves out, with why
+	// (repositories.Refused, formatted "<repo> (<reason>)"): read only when repositories() is
+	// empty, to tell a real fully-booted state with every candidate refused (an App not installed)
+	// apart from no configured workflow at all — the same distinction controllerRepositories draws
+	// for the operator-launched controller.
+	repositoriesRefused func() []string
 	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
 	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
 	runtimeName string
@@ -167,8 +173,13 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	}
 	addressing := DesignGateFragment(s.designGate)
 	if s.repositories != nil {
-		if repositories := s.repositories(); len(repositories) > 0 {
+		repositories := s.repositories()
+		if len(repositories) > 0 {
 			addressing += " " + RepositoriesFragment(repositories)
+		} else if s.repositoriesRefused != nil {
+			if refused := s.repositoriesRefused(); len(refused) > 0 {
+				return runtime.SpawnSpec{}, fmt.Errorf("the project's repository mapping maps no usable repository: every repository is refused — %s", strings.Join(refused, "; "))
+			}
 		}
 	}
 	return runtime.SpawnSpec{

@@ -364,16 +364,22 @@ func probeAndMint(ctx context.Context, daemonURL string, probe daemon.Controller
 // bytes `legion state --json` prints), for the operator's controller addressing — the list a
 // worker's own addressing names (specs.AddressingFragment, specs.RepositoriesFragment). Read and
 // validated before the capability mint (controllerStart), so a failure here never revokes a
-// running controller for a replacement that will not start. Refuses, naming why: a body that is
-// not a JSON object, one naming no `repositories` field at all (null or absent — a `{}` or a
-// `null` top level both land here), a `repositories.mapped` that unmarshals to zero entries (the
-// daemon's own workflow refuses boot on an empty mapping, so an empty answer here means the state
-// read did not reach a configured workflow), and any mapped entry this daemon did not spell
-// `owner/name` (a daemon bug, never silently dropped: one bad entry refuses the whole list, not
-// just that entry, since an operator reading this sentence must trust it names every mapped
-// repository, never a silently narrowed subset).
+// running controller for a replacement that will not start. Bounded by requestTimeout, as every
+// other CLI read of the daemon's API is (main.go's get). Refuses, naming why: a body that is not
+// a JSON object, one naming no `repositories` field at all (null or absent — a `{}` or a `null`
+// top level both land here), a `repositories.mapped` that unmarshals to zero entries with nothing
+// refused either (the daemon's own workflow refuses boot on an empty mapping with nothing
+// refused, so that combination means the state read did not reach a configured workflow), a
+// mapped that is empty with every candidate repository refused (named with its reason — a real,
+// fully-booted state a missing GitHub App produces, never conflated with the state read failing
+// to reach a workflow at all), and any mapped entry this daemon did not spell `owner/name` (a
+// daemon bug, never silently dropped: one bad entry refuses the whole list, not just that entry,
+// since an operator reading this sentence must trust it names every mapped repository, never a
+// silently narrowed subset).
 func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Repository, error) {
-	status, body, err := operator{base: daemonURL}.do(ctx, http.MethodGet, "/legion/v1/state", nil)
+	timed, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	status, body, err := operator{base: daemonURL}.do(timed, http.MethodGet, "/legion/v1/state", nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not reach the Legion daemon at %s: %v; is the port-forward running? (never falls back to another address)", daemonURL, err)
 	}
@@ -393,7 +399,14 @@ func controllerRepositories(ctx context.Context, daemonURL string) ([]ghrepo.Rep
 		return nil, fmt.Errorf("%s/legion/v1/state's repositories field is not valid: %w", daemonURL, err)
 	}
 	if len(repositoriesView.Mapped) == 0 {
-		return nil, fmt.Errorf("%s/legion/v1/state maps no repository to this project: the daemon's own workflow refuses boot on an empty mapping, so start the daemon with a project default repository set in Dispatch before starting its controller", daemonURL)
+		if len(repositoriesView.Refused) > 0 {
+			reasons := make([]string, len(repositoriesView.Refused))
+			for i, refused := range repositoriesView.Refused {
+				reasons[i] = fmt.Sprintf("%s (%s)", refused.Repo, refused.Reason)
+			}
+			return nil, fmt.Errorf("%s/legion/v1/state maps no usable repository to this project: every repository is refused — %s", daemonURL, strings.Join(reasons, "; "))
+		}
+		return nil, fmt.Errorf("%s/legion/v1/state maps no repository to this project and names none refused: the daemon's own workflow refuses boot on an empty mapping, so this combination means the state read did not reach a configured workflow", daemonURL)
 	}
 	repositories := make([]ghrepo.Repository, 0, len(repositoriesView.Mapped))
 	for _, mapped := range repositoriesView.Mapped {

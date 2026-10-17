@@ -227,6 +227,27 @@ func TestTheControllersAddressingGainsTheProjectsRepositories(t *testing.T) {
 	}
 }
 
+// An empty repositories() with a non-empty repositoriesRefused() is a real, fully-booted state
+// (every mapped repository lacks an App), never conflated with no workflow configured at all: the
+// daemon-launched controller refuses its own launch rather than silently dropping the sentence,
+// naming the refused repositories and their reasons, the same distinction
+// cmd/legion/controller.go's controllerRepositories draws for the operator-launched controller.
+func TestTheControllersLaunchRefusesWhenEveryRepositoryIsRefused(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
+		repositories:        func() []ghrepo.Repository { return nil },
+		repositoriesRefused: func() []string { return []string{"acme/widgets (the review App is not installed on acme/widgets)"} },
+	}
+	_, err = s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err == nil || !strings.Contains(err.Error(), "every repository is refused — acme/widgets (the review App is not installed on acme/widgets)") {
+		t.Fatalf("SpawnSpec error = %v, want it to name the refused repository and its reason", err)
+	}
+}
+
 // A worker's launch is on the repository its issue's record names, at the default branch the record
 // names, whatever its name, which each runtime provisions the issue's workspace at; two issues on
 // two owners' repositories each launch on their own. A record that cannot be read refuses the

@@ -932,7 +932,16 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, prompts: p.prompts,
-			identity: p.identity, repository: p.repository, repositories: p.repositories.Accepted, designGate: cfg.Gates.Design,
+			identity: p.identity, repository: p.repository, repositories: p.repositories.Accepted,
+			repositoriesRefused: func() []string {
+				refused := p.repositories.Refused()
+				out := make([]string, len(refused))
+				for i, r := range refused {
+					out[i] = fmt.Sprintf("%s (%s)", r.Repo, r.Reason)
+				}
+				return out
+			},
+			designGate: cfg.Gates.Design,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     adoptIdentity(p.identity, p.repository),
