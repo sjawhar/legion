@@ -1964,10 +1964,15 @@ volume to detach from the old one, which shows as transient `FailedAttachVolume`
 events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
-from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
-is about Σ memory of the pod's containers, and an active role may use the pod's whole reservation
-while its siblings idle. The reservation is the pod's working set, not one container's; each
-container's own request and limit are what the API shows and the scheduler counts.
+from the pod's cgroup, so `/proc/meminfo`'s `MemTotal` is about Σ memory of the pod's containers,
+and an active role may use the pod's whole reservation while its siblings idle. The reservation is
+the pod's working set, not one container's; each container's own request and limit are what the
+API shows and the scheduler counts. `nproc` inside the sandbox is max(2, ⌈Σ cpu⌉) too, except on
+GKE Autopilot, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md): there `nproc`
+reflects gVisor's own host-vCPU presentation instead, a known gap
+([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the
+pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu
+there.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum: at the defaults, two pods fit a floor node and
@@ -2024,6 +2029,20 @@ ephemeral storage is about 629 GiB of it; with CPU and memory placing about two 
 their limits sum to about 160Gi of those 629 GiB, so the bound has room before any request is
 raised. An operator with a known root volume raises `ephemeral_storage_request` toward the role's
 expected use so the scheduler reserves disk and places no pod a full node could not hold.
+
+**GKE Autopilot's bound is per pod, not per node.** The node-disk framing above is AWS/self-managed
+EKS's: ephemeral storage there is the shared node's own root volume, and raising
+`ephemeral_storage_request` toward a role's real use is an operator's own call, bounded only by
+what the node has. GKE Autopilot has no such headroom: Warden, its admission webhook, refuses a
+pod outright once its containers' *summed ephemeral-storage requests* pass 10Gi — a hard ceiling
+*per pod*, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md) raising every role's
+request to its configured limit (the defaults above: 80Gi summed, two init containers' 10Gi each
+beside them) and having the webhook refuse to schedule the pod at all
+(`autogke-pod-limit-constraints`). Because Legion runs every role of one issue as containers of a
+single pod, that 10Gi is a budget shared across all six roles together: no `legion.yaml`
+`ephemeral_storage_request` can raise more than a small fraction of them past today's 1Gi-request
+default on GKE Autopilot without hitting it — unlike the per-node bound above, this is not
+something an operator's own configuration can size around.
 
 ### Volume retention
 
