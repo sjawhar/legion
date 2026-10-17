@@ -1858,6 +1858,17 @@ Every `/v1` request with a body must set `Content-Type: application/json`; param
 `charset=utf-8` are accepted, and every other type receives a JSON 415 error. Webhook routes
 keep their own signature and content handling.
 
+A listener with no bearer configured (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1`
+only to a request whose `Host` names it: `localhost`, a loopback address (`127.0.0.0/8`,
+`::1`) or one of `ENVOY_ALLOWED_HOSTS`, comma-separated names or addresses with no port. The
+`Host` is compared with its port stripped, its IPv6 brackets off, case folded and one trailing dot
+dropped, and any other `Host`, an empty one included, receives a JSON 421 naming it and
+`ENVOY_ALLOWED_HOSTS`, logged `listener: request for a host it does not serve`. That keeps a page
+that rebinds its own name to an address reaching the listener (a loopback port, or a forward such
+as a tailnet one) from using its bearer-free API. A listener that requires a bearer checks no
+`Host`, since such a page holds no bearer. The boot log's `listener API hosts:` line names what is
+served. `/healthz`, `/metrics` and the webhook routes are served to any `Host`.
+
 | Endpoint | Method | Contract |
 | --- | --- | --- |
 | `/v1/messages/send` | POST | Sends to a live `target_session`. Dispatch uses `source: "dispatch"`, an idempotency key, and a `payload` JSON string whose frame is `{event, delivery}`; the response is the envelope plus `recipient` with the full target session ID, and `duplicate: true` when JetStream already held this message. A `source: "dispatch"` send publishes under a MsgId, and so does a send whose key was minted once for it (the listener's own, or around the shared transport's UUID idempotency key); only those can ever answer `duplicate`: a send that declares `github`, `slack` or `ghostwispr` carries a `SourceEventID` minted for it, which its dedupe key does not name (`contracts.DedupeKeyNamesTheUpstreamEvent`); the field is omitted (read as false) otherwise, which is also what an older listener answers. It means "the stream already held this MsgId", which includes the publish path's own reconnect retry whose first attempt landed and lost its acknowledgement. A message NATS cannot take whole is a 413 naming its size against the server's max payload, and a topic NATS does not accept (one holding whitespace or an empty token) a 400. The route takes the caller's `source` and idempotency key as given (`messageEnvelope`), so any caller can send a `source: "dispatch"` frame under the key a Dispatch send will use, which a core-NATS host then drops as a repeat when the real send or its Retry arrives. That key is not secret: a comment mention's is `<comment id>:<target>:<mode>` (`comment_delivery.go`), and the comment id rides the `comment.created` envelope on the issue's owner topic. It is accepted because every caller `apiAuth` admits (the shared bearer, or any service-account token the verifier accepts, whose claims it does not read) can already send any `source: "dispatch"` frame, with any content, to any live session; suppressing one Retry is a subset of that, and a Dispatch-only credential is the fix for the whole class. The listener is not the only route to that either: a NATS user that may publish on `notifications.agent.>` or `notifications.dispatch.>` reaches core-NATS hosts directly, and with no nkey configured (`internal/bus/nkey.go`) that is any process that can reach the server. |
