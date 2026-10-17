@@ -4,6 +4,10 @@
 
 ### Changed
 
+- The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
+  `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
+  repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
+
 - `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
   `machine_id` for a session whose plugin predates the field) rather than the listener that
   registered it, so filtering by machine finds a session on its own machine again even when every

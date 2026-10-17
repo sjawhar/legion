@@ -100,6 +100,13 @@
 
 ### Added
 
+- `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
+  repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
+  `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the
+  repository fields, the read prints `Repository: unknown (…)` and returns its warning in the new
+  `DispatchToolResult.warnings`, which `runDispatchCli` writes to the new, required
+  `DispatchCliIo.stderr`; a `--repo` write whose answer has no `repo` fails, saying it was not saved.
+
 - `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
   else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a script, harness `command`, tries
   `ENVOY_CONFIG_FILE` and then each harness's directory first, Claude Code's only under
