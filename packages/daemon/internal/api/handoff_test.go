@@ -81,6 +81,13 @@ type handoffGitHub struct {
 	bearers      []string
 	// contentsRead is each path read through the contents API, as path@ref.
 	contentsRead []string
+	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
+	// head; compareAnswers holds the answer to any other basehead (<base>...<head>), and one in
+	// neither is GitHub's 404 (fail makes the compare fail outright); compareRead is each basehead
+	// READY asked it for.
+	compare        string
+	compareAnswers map[string]string
+	compareRead    []string
 }
 
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
@@ -94,6 +101,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		checkRuns:    `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
 		statuses:     `[{"context":"legacy","state":"success"}]`,
 		workflowRuns: `[]`,
+		compare:      retroCompare,
 	}
 	notFound := func(w http.ResponseWriter, message string) {
 		w.WriteHeader(http.StatusNotFound)
@@ -154,6 +162,18 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 				return
 			}
 			_, _ = io.WriteString(w, "["+strings.Join(listing, ",")+"]")
+		case strings.HasPrefix(path, "compare/"):
+			basehead := strings.TrimPrefix(path, "compare/")
+			g.compareRead = append(g.compareRead, basehead)
+			answer, known := g.compareAnswers[basehead]
+			if basehead == approvedSHA+"..."+g.pullHead {
+				answer, known = g.compare, true
+			}
+			if !known {
+				notFound(w, "Not Found")
+				return
+			}
+			_, _ = io.WriteString(w, answer)
 		default:
 			http.NotFound(w, r)
 		}
@@ -186,6 +206,21 @@ func (g *handoffGitHub) reads() []string {
 	defer g.mu.Unlock()
 	return append([]string(nil), g.contentsRead...)
 }
+
+// compares is each basehead READY's compare was asked for so far.
+func (g *handoffGitHub) compares() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]string(nil), g.compareRead...)
+}
+
+// approvedSHA is the head LEGION-208's review round approved, below headSHA: what READY compares
+// retro's last push with unless a test names another.
+const approvedSHA = "a99e0000000000000000000000000000000000ff"
+
+// retroCompare is GitHub's compare of approvedSHA with headSHA as READY reads it: retro's learning
+// added, and its last commit's removal of the issue's handoffs.
+const retroCompare = `{"status":"ahead","files":[{"filename":".legion/LEGION-208/review.json","status":"removed"},{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"}]}`
 
 // acmeWidgets is the repository every issue of the test project works in, as Options.Repository
 // answers it: none for any other project.
@@ -250,6 +285,25 @@ func seedPullRequestAt(t *testing.T, h *harness, key, head string, at time.Time)
 	if err != nil {
 		t.Fatalf("seed the pull request of %s: %v", key, err)
 	}
+}
+
+// seedReviewDecision records decision as key's review round's decision, on its reviewer's row: an
+// approval names the head READY compares the pull request's head with, and nil is a round that
+// recorded none.
+func seedReviewDecision(t *testing.T, h *harness, key string, decision *record.ReviewDecision) {
+	t.Helper()
+	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutPhase(context.Background(), tx, record.PhaseRow{Issue: key, Role: claim.RoleReviewer, Claim: "reviewer-claim", Decision: decision})
+	})
+	if err != nil {
+		t.Fatalf("seed the review decision of %s: %v", key, err)
+	}
+}
+
+// seedApproval records key's review round as approving head.
+func seedApproval(t *testing.T, h *harness, key, head string) {
+	t.Helper()
+	seedReviewDecision(t, h, key, &record.ReviewDecision{State: "approved", Head: head})
 }
 
 // complete posts req to the completion route.
@@ -492,6 +546,7 @@ func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testin
 	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "READY_REQUIRED", Message: "call the legion tool's handoff_complete with ready: true"})
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	seedPullRequest(t, h, "LEGION-208", headSHA)
+	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "merge-ready", Commit: headSHA}), http.StatusConflict, "READY_REQUIRED")
 
@@ -521,6 +576,7 @@ func TestHandoffCompleteRefusesAREADYPacketTheDaemonCannotPostAndAppliesTheShort
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	seedPullRequest(t, h, "LEGION-208", headSHA)
+	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	const emoji = "\U0001F600"
 	over := emoji + strings.Repeat("x", record.MessagePostLimit-1)
@@ -1065,12 +1121,14 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 }
 
 // newReadyHarness is the merger of LEGION-208 at merging, with its pull request acme/widgets#42
-// recorded at headSHA, retro's last push: what a READY is read against.
+// recorded at headSHA, retro's last push, and its review round's approval of approvedSHA: what a
+// READY is read against.
 func newReadyHarness(t *testing.T, github *handoffGitHub) (*harness, *factRecorder, liveClaim) {
 	t.Helper()
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	seedPullRequest(t, h, "LEGION-208", headSHA)
+	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	return h, facts, merger
 }
@@ -1204,6 +1262,7 @@ func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T
 	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED", Message: "READY refused: approve design version 4 before requesting READY."})
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)
 	seedPullRequest(t, h, "LEGION-208", headSHA)
+	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "gate facts hold", Ready: true, Commit: headSHA})
 	if message := refused(t, recorder, http.StatusConflict, "DESIGN_GATE_CLOSED"); !strings.Contains(message, "MANUAL_MERGE_REQUIRED: pull request #42") {

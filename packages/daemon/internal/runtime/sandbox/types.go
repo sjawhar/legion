@@ -111,6 +111,11 @@ type Options struct {
 	Tools    Tools
 	// AgentSecrets enrolls every pod with the secrets broker; nil enrolls none. See AgentSecrets.
 	AgentSecrets *AgentSecrets
+	// ControllerSlackChannels is the project's slack_channels, which the controller this runtime
+	// launches is told as LEGION_SLACK_CHANNELS, comma-joined and set even when empty, and which a
+	// running controller's address record is compared with (environmentAddresses), so a daemon
+	// restarted with another list relaunches it, resuming its session.
+	ControllerSlackChannels []string
 	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
 	Pod Pod
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret

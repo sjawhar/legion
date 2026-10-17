@@ -13,6 +13,7 @@ import {
   type OpenAsk,
   type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
+  slackTopicChannel,
   zodSchemaApi,
 } from "@legion/contracts";
 import {
@@ -52,6 +53,7 @@ import {
   sessionDispatchSettings,
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
+import { postSlackReply } from "@legion/envoy-client/slack-post";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -1501,11 +1503,29 @@ export default function envoyExtension(pi: PiApi): void {
     // entry, and a listener outage must not fail session start.
     // Role topics are not subscriptions (role deliveries arrive on the agent
     // subject); they are re-claimed by reclaimHeldRoles once registered.
+    // In the daemon-launched controller (the bridge's `slackRoleOwned`), every registered Slack
+    // topic is unsubscribed from the listener and never restored: a restored topic would be a plain
+    // subscription, which outlives the controller role, and the controller hears its listed
+    // channels through the subscriptions its role owns (pi-legion's controller-session.ts).
     const { client } = requireEnvoy();
     const registry = await client.getInterest(sessionID).catch(() => undefined);
     if (registry === undefined) return;
+    const retired =
+      publishedInterface?.roleClaim.slackRoleOwned === true
+        ? registry.topics.filter((topic) => slackTopicChannel(topic) !== undefined)
+        : [];
+    if (retired.length > 0) {
+      await client.unsubscribe({ sessionID, topics: retired }).catch((error: unknown) => {
+        logger.warn("envoy: could not unregister a resumed controller's retired Slack topics", {
+          sessionID,
+          topics: retired,
+          error: messageFor(error),
+        });
+      });
+    }
     for (const topic of registry.topics) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
+      if (retired.includes(topic)) continue;
       await subscribe(topic);
     }
   };
@@ -2439,6 +2459,17 @@ export default function envoyExtension(pi: PiApi): void {
             dir: directory,
             title,
           });
+        }
+        case EnvoyToolOperation.slackPost: {
+          const posted = await postSlackReply({
+            channel: stringFor(parameters, "channel"),
+            threadTs: stringFor(parameters, "thread_ts"),
+            text: stringFor(parameters, "text"),
+          });
+          return toolSuccess(
+            `posted ${posted.ts} in ${posted.channel}, thread ${posted.threadTs}`,
+            { channel: posted.channel, thread_ts: posted.threadTs, ts: posted.ts }
+          );
         }
       }
     } catch (error) {

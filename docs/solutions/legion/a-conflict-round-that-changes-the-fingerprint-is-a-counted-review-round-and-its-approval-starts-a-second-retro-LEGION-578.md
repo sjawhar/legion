@@ -9,7 +9,7 @@ tags:
   - retro
   - workflow-table
 date: 2026-10-08
-status: active
+status: superseded in part by sjawhar/legion#2010 — a conflict merge pushed after retro with no review round after it brings the base's paths above the approved head, so READY refuses it `READY_UNREVIEWED_CHANGE` and the reviewer runs a new round; it no longer goes straight to the merger with the approval standing. The counted conflict round and the second retro below still hold
 module: packages/daemon
 related_issues:
   - "LEGION-578"

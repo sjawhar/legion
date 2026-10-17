@@ -9,7 +9,7 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors";
  * `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools` and `github`. Each check
  * proves the capability from inside the session, the way the agent would use it: the `task` tool
  * resolving the agents the role's prompts dispatch, one real web search, the configured MCP servers
- * connecting, the repository's own extensions and skills loaded, the ten Envoy tools registered and
+ * connecting, the repository's own extensions and skills loaded, the Envoy tools registered and
  * `dispatch read` answering, and the role's App login through `gh api graphql {viewer{login}}`.
  *
  * The daemon renders the report and never refuses a session for it, so a failing check is a
@@ -27,8 +27,8 @@ export const CAPABILITY_REPORT_TIMEOUT_MS = 10_000;
 export const WEB_SEARCH_PROBE_QUERY = "jujutsu version control";
 
 /** The Envoy tools `@sjawhar/pi-envoy` registers (`envoyToolSpecs` in
- * `@legion/envoy-client/tool-contract`), each of which the dispatch-envoy-tools check expects
- * among the session's active tools. */
+ * `@legion/envoy-client/tool-contract`): the ten `envoy_*` tools and `slack_post`, each of which
+ * the dispatch-envoy-tools check expects among the session's active tools. */
 export const ENVOY_TOOL_NAMES = [
   "envoy_subscribe",
   "envoy_unsubscribe",
@@ -40,6 +40,7 @@ export const ENVOY_TOOL_NAMES = [
   "envoy_role_get",
   "envoy_whoami",
   "envoy_sessions",
+  "slack_post",
 ] as const;
 
 /** The live rows, in the daemon's table order (`internal/capabilities`, `Live()`). */
@@ -378,7 +379,7 @@ const checkDispatchEnvoyTools: Check = async (host, input, signal) => {
   });
   if (result.code !== 0) return failed(`dispatch read failed: ${commandFailure(result)}`);
   return ok(
-    `ten Envoy tools registered; dispatch read ${input.issue} answered from ${whichOnPath("dispatch")}`
+    `${ENVOY_TOOL_NAMES.length} Envoy tools registered; dispatch read ${input.issue} answered from ${whichOnPath("dispatch")}`
   );
 };
 

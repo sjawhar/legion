@@ -20,13 +20,18 @@ const DEFAULT_SERVER_URL = "http://localhost:8766";
 export type DispatchEnvironment = EnvoyConfigEnvironment & {
   readonly DISPATCH_TOKEN?: string | undefined;
   readonly DISPATCH_TOKEN_FILE?: string | undefined;
+  readonly DISPATCH_PUBLIC_URL?: string | undefined;
 };
 
-/** Dispatch on: its URL and bearer token, both resolved. */
+/** Dispatch on: its URL and bearer token, both resolved, and `publicUrl`, Dispatch's dashboard as
+ * people open it (DISPATCH_PUBLIC_URL), set only when the variable is: a Legion pod reaches Dispatch
+ * at an in-cluster `url` nobody outside the cluster can open, so every link the `dispatch` command
+ * prints is resolved against `publicUrl` when it is set, and against `url` otherwise. */
 export interface ActiveDispatchConfig {
   readonly enabled: true;
   readonly url: string;
   readonly token: string;
+  readonly publicUrl?: string;
 }
 
 /** Dispatch on, or off with the one notice or error that says why (`SectionOff`). */
@@ -165,7 +170,20 @@ export function dispatchSettings(
     ).replace(/\/+$/, "");
     const token =
       source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
-    return { enabled: true, url, token };
+    // An http(s) URL the URL parser takes whose port, when it names one, is from 1 to 65535. The
+    // daemon accepts at load only values taken here, under a narrower rule (its CheckPod and this
+    // read hold to packages/contracts/fixtures/dispatch-public-url.json).
+    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+    const publicParsed = publicUrl === undefined ? undefined : httpUrl(publicUrl);
+    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+    }
+    return {
+      enabled: true,
+      url,
+      token,
+      ...(publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }),
+    };
   } catch (error) {
     return offWithError(messageFor(error));
   }

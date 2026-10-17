@@ -196,4 +196,16 @@ package api
 // at 27 would pass the boot gate against a plugin whose strict reader then refuses the state. The
 // release that first declares a number must carry your shapes: it does not, so this branch takes
 // the number above it, as the collision note says.)
-const DaemonAPIVersion = 28
+//
+// 29: sjawhar/legion#1998 -- under runtime.kubernetes.agent_secrets the daemon-launched
+// controller's pod carries AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR and its shim the three
+// agent-secrets flags, as every workflow role's does, so its `slack_post` is granted the Legion
+// daemon service's LEGION_SLACK_BOT_TOKEN; and a project's `slack_channels` (which only
+// `controller: daemon` with the broker may set) reach that controller as LEGION_SLACK_CHANNELS,
+// always set (empty for none), which the plugin requires there and subscribes to while the session
+// holds the controller role and which the controller's generation records with its addresses, so a
+// daemon restarted with another list relaunches it, and as the addressing's `Slack channels:` line,
+// which cites the controller skill's Slack reference. A plugin from before 29 subscribes to no
+// channel and ships neither `slack_post` nor the reference, so the boot gate and
+// `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
+const DaemonAPIVersion = 29

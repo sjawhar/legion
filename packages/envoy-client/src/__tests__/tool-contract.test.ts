@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { zodSchemaApi } from "@legion/contracts";
+import { SLACK_POST_TEXT_MAX, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import {
   envoyToolSpecs,
@@ -13,7 +13,7 @@ import { ToolInputError } from "../tool-input-errors";
 const schemaApi = zodSchemaApi(z);
 
 describe("envoyToolSpecs", () => {
-  test("defines the ten canonical Envoy tool names", () => {
+  test("defines the ten canonical Envoy tool names and slack_post", () => {
     expect(envoyToolSpecs.map((spec) => spec.name)).toEqual([
       "envoy_subscribe",
       "envoy_unsubscribe",
@@ -25,6 +25,7 @@ describe("envoyToolSpecs", () => {
       "envoy_role_get",
       "envoy_whoami",
       "envoy_sessions",
+      "slack_post",
     ]);
   });
 
@@ -40,6 +41,7 @@ describe("envoyToolSpecs", () => {
       "getRole",
       "whoami",
       "listSessions",
+      "slackPost",
     ]);
   });
 
@@ -168,5 +170,31 @@ describe("message metadata", () => {
     expect(
       parseEnvoyToolArguments("publish", { topic: "t", message: "m", urgency: "high" })
     ).toEqual({ topic: "t", message: "m", urgency: "high" });
+  });
+
+  test("takes a Slack reply's channel, thread and text, the text at most the listener's cap", () => {
+    const reply = {
+      channel: "C00000000",
+      thread_ts: "1700000000.000100",
+      text: "Filed as ACME-12.",
+    };
+    expect(parseEnvoyToolArguments("slackPost", reply)).toEqual(reply);
+    const failure = (() => {
+      try {
+        parseEnvoyToolArguments("slackPost", {
+          channel: "C00000000",
+          text: "a".repeat(SLACK_POST_TEXT_MAX + 1),
+        });
+        return undefined;
+      } catch (error) {
+        return error;
+      }
+    })();
+    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(failure.problems).toEqual([
+      "thread_ts is required (string)",
+      `text is 1 characters over the ${SLACK_POST_TEXT_MAX}-character limit (${SLACK_POST_TEXT_MAX + 1}/${SLACK_POST_TEXT_MAX})`,
+    ]);
+    expect(failure.message).toContain("slack_post was not called: 2 problems");
   });
 });

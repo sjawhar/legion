@@ -1,0 +1,52 @@
+{
+  "description": "DISPATCH_PUBLIC_URL values for the daemon's CheckPod (packages/daemon/internal/runtime/sandbox/operatorpod.go) and the agents' dispatchSettings (packages/envoy-client/src/dispatch-config.ts). Boot accepts only values the agents accept: `valid` is what both accept and the only values here boot accepts, `invalid` what both refuse, and `agentsOnly` what the agents accept and boot refuses, since boot holds to a narrower rule than the URL standard's parser.",
+  "valid": [
+    "https://dispatch.example.org",
+    "https://dispatch.example.org/",
+    "http://dispatch.example.org:8080",
+    "https://dispatch.example.org:65535/base",
+    "https://dispatch.example.org/base?view=mine#top",
+    "HTTPS://Dispatch.Example.Org",
+    "https://dispatch",
+    "https://10.0.0.1:8443",
+    "https://[2001:db8::1]:8443",
+    "https://[::ffff:192.0.2.1]"
+  ],
+  "invalid": [
+    "dispatch.example.org",
+    "ftp://dispatch.example.org",
+    "https://:443",
+    "http://:8766",
+    "https://dispatch.example.org:65536",
+    "http://dispatch.example.org:99999",
+    "https://dispatch.example.org:0",
+    "https://dispatch.example.org:abc",
+    "http://",
+    "https://dispatch.example.org.8443",
+    "https://dispatch.1",
+    "https://dispatch.example.123",
+    "https://dispatch.example.0x1f",
+    "https://10.0.0.256",
+    "https://192.168.1.256",
+    "https://256.1.1.1",
+    "https://999.1.1.1",
+    "https://300.1.1.1:8443",
+    "https://10.0.0.1.1",
+    "https://1.2.3.4.5",
+    "https://xn--a.org",
+    "https://xn--abc.org",
+    "https://exa<mple.org",
+    "https://a<b.example",
+    "https://a<b.org",
+    "https://[fe80::1%25eth0]"
+  ],
+  "agentsOnly": [
+    "https:dispatch.example.org",
+    "https://reader@dispatch.example.org",
+    "https://dispatch.example.org.",
+    "https://010.0.0.1",
+    "https://0x7f.1",
+    "https://dispatch.example.org\\issues",
+    "https://bücher.example"
+  ]
+}

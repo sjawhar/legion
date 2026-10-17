@@ -105,7 +105,7 @@ async function openAsks(raw: unknown): Promise<void> {
         AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
       ).openAsks(input.session_id)
       process.stdout.write(
-        `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, dispatch.url)}\n`,
+        `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, dispatch.publicUrl ?? dispatch.url)}\n`,
       )
     } catch (error) {
       process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error)}\n`)

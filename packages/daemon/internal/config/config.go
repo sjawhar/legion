@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/url"
 	"os"
@@ -887,6 +888,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := resolveControllerLaunch(file, &cfg); err != nil {
 		return Config{}, err
 	}
+	if err := checkSlackChannels(cfg); err != nil {
+		return Config{}, err
+	}
 	if file.Capabilities != nil {
 		cfg.Capabilities = *file.Capabilities
 	}
@@ -931,6 +935,24 @@ func resolveControllerLaunch(file fileConfig, cfg *Config) error {
 	if k := file.Kubernetes; k != nil && cfg.ControllerLaunch != ControllerLaunchDaemon {
 		if _, sized := k.Resources[claim.RoleController]; sized {
 			return errors.New("runtime.kubernetes.resources.controller sizes the pod of the controller the daemon launches, and controller: operator launches none: set controller: daemon or drop the key")
+		}
+	}
+	return nil
+}
+
+// checkSlackChannels refuses a project's slack_channels unless the daemon launches the
+// controller (`controller: daemon`) enrolled with the secrets broker
+// (`runtime.kubernetes.agent_secrets`): the controller answers a mention with slack_post, whose
+// bot token, LEGION_SLACK_BOT_TOKEN, is the Legion daemon service's secret, which the broker grants
+// only to that service's own pods. Anywhere else the controller would hear mentions it could never
+// answer. Projects are checked in key order, so the refusal names the same one every load.
+func checkSlackChannels(cfg Config) error {
+	if cfg.ControllerLaunch == ControllerLaunchDaemon && cfg.Runtime.Kubernetes != nil && cfg.Runtime.Kubernetes.AgentSecrets != nil {
+		return nil
+	}
+	for _, key := range slices.Sorted(maps.Keys(cfg.Projects)) {
+		if len(cfg.Projects[key].SlackChannels) > 0 {
+			return fmt.Errorf("projects.%s.slack_channels needs controller: daemon and runtime.kubernetes.agent_secrets: Slack replies need the daemon-launched controller enrolled with the secrets broker, which grants the Slack bot token (LEGION_SLACK_BOT_TOKEN) only to the Legion daemon service's own pods", key)
 		}
 	}
 	return nil
