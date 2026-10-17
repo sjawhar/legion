@@ -140,6 +140,7 @@ port 8766, through that Service; the listener binds the pod's loopback either wa
 | Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
 | ClusterIP Service | Port 8766 to the Dispatch pod: the in-cluster path the NetworkPolicy opens to the namespaces `allowedNamespaces` names. |
 | NetworkPolicy | Ingress to the Dispatch pod: no rule at all with `allowedNamespaces` unset or empty, so nothing in the cluster reaches it; otherwise one rule admitting the named namespaces' pods on port 8766. |
+| Project IAM member and secret IAM member | `roles/cloudsql.client`, conditioned to this Cloud SQL instance alone, and `roles/secretmanager.secretAccessor` on the NATS seed secret, each granted to the pod's Workload Identity principal. |
 
 ### Inputs
 
@@ -164,11 +165,14 @@ running Pulumi needs `gke-gcloud-auth-plugin`.
 
 The generated `principal` output is the Kubernetes service account's Workload Identity principal,
 built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
-creates the pool exists. The consumer grants it `roles/cloudsql.client` at project scope from
-`principal` in the same program: a grant built from that output waits for the cluster, so it never
-names a pool that does not exist yet. The component itself grants that principal
-`roles/secretmanager.secretAccessor` only on the NATS seed secret. The pod's Kubernetes Role is
-limited to its Tailscale state Secret.
+creates the pool exists. The component itself grants that principal `roles/cloudsql.client` — at
+project scope with an IAM condition limiting it to this component's Cloud SQL instance, since
+Cloud SQL has no per-instance IAM — and `roles/secretmanager.secretAccessor` only on the NATS seed
+secret; the Deployment waits for both grants, so the pod never starts before it may connect. The
+Cloud SQL grant is an additive IAM member beside whatever the project already holds, and writing
+it needs `resourcemanager.projects.setIamPolicy` on the identity the `gcp` provider runs as
+(`roles/resourcemanager.projectIamAdmin` or equivalent). The pod's Kubernetes Role is limited to
+its Tailscale state Secret.
 
 ### The pod
 
@@ -200,6 +204,11 @@ tailnet Serve for HTTPS, SSE and websockets, the SOCKS5 connection to the hub, t
 user, and the exec-plugin credentials on the machine that runs Pulumi. It also verifies that the
 pod is ready, Dispatch reports a schema version, the site signs in through the configured client,
 and the database retains backups and point-in-time recovery.
+
+The first `pulumi up` needs no out-of-band grant: the component writes the conditioned
+`roles/cloudsql.client` member and the seed accessor itself, and the Deployment waits for both, so
+the only IAM prerequisite is that the `gcp` provider's identity may set the project's IAM policy
+(`resourcemanager.projects.setIamPolicy`, §Inputs).
 
 ### YAML
 

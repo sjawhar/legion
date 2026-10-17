@@ -66,7 +66,6 @@ versions. Never add the module to the root `go.work`.
   with a refused input and one per missing provider, each asserting nothing registered beyond the
   test's providers. The AWS components resolve in `NatsServiceArgs.validate` and
   `WebhookListenerArgs.validate`.
-
 - **Component-built Kubernetes providers.** `gcp:Dispatch` requires the consumer's `gcp` and
   `random` providers before registering anything, then builds a Kubernetes provider from its
   cluster's exec-plugin kubeconfig. Every Kubernetes child uses that explicit provider and depends

@@ -73,6 +73,7 @@ func newMocks() *pulumitest.Mocks {
 				})
 				out["name"] = resource.NewProperty(args.Name)
 			case "gcp:sql/databaseInstance:DatabaseInstance":
+				out["name"] = resource.NewProperty(args.Name)
 				out["connectionName"] = resource.NewProperty("example-project:us-central1:example-dispatch")
 			case "random:index/randomPassword:RandomPassword":
 				out["result"] = resource.NewProperty(args.Name + "-result")

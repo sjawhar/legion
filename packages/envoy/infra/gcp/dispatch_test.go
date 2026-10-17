@@ -252,6 +252,7 @@ func TestDispatchRegistersItsCloudResources(t *testing.T) {
 		"gcp:sql/database:Database":                         1,
 		"gcp:sql/user:User":                                 1,
 		"gcp:secretmanager/secretIamMember:SecretIamMember": 1,
+		"gcp:projects/iAMMember:IAMMember":                  1,
 	}
 	got := map[string]int{}
 	for _, registration := range m.Registrations() {
@@ -274,6 +275,48 @@ func TestDispatchSeedAccessorWaitsForTheCluster(t *testing.T) {
 		"the seed accessor is granted after the cluster that creates its principal's pool")
 	require.Contains(t, member.RPC.GetPropertyDependencies()["member"].GetUrns(), clusterURN,
 		"the principal is built from the cluster's own Workload Identity pool, so it resolves only once the pool exists")
+}
+
+// Dispatch exits when its first Postgres ping through the Auth Proxy fails, and the proxy cannot
+// connect without roles/cloudsql.client, so the component grants the role itself: a consumer's
+// grant built from the `principal` output resolves only after every child, the Deployment's
+// readiness included, so the first deployment would deadlock. Cloud SQL has no per-instance IAM,
+// so the grant is project-scoped with a condition naming this instance alone, and it waits for
+// the cluster that creates the principal's pool, as the seed accessor does.
+func TestDispatchGrantsCloudSQLClientOnItsInstanceAlone(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	member := m.One(t, "gcp:projects/iAMMember:IAMMember")
+	inputs := member.Inputs.Mappable()
+	require.Equal(t, "roles/cloudsql.client", inputs["role"])
+	require.Equal(t, "example-project", inputs["project"])
+	condition := inputs["condition"].(map[string]any)
+	require.Equal(t,
+		"resource.type == 'sqladmin.googleapis.com/Instance' && resource.name == 'projects/example-project/instances/example-dispatch'",
+		condition["expression"])
+	clusterURN := "urn:pulumi:s::p::" + dispatchType + "$gcp:container/cluster:Cluster::example-dispatch"
+	require.Contains(t, member.RPC.GetDependencies(), clusterURN,
+		"the grant is written after the cluster that creates its principal's pool")
+	require.Contains(t, member.RPC.GetPropertyDependencies()["member"].GetUrns(), clusterURN,
+		"the principal is built from the cluster's own Workload Identity pool, so it resolves only once the pool exists")
+}
+
+// The pod is ready only once the Auth Proxy can connect (roles/cloudsql.client) and the seed
+// volume can mount (roles/secretmanager.secretAccessor), so the Deployment registers after both
+// grants rather than racing IAM on the first deployment.
+func TestDispatchDeploymentWaitsForBothGrants(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	deployment := m.One(t, "kubernetes:apps/v1:Deployment")
+	for _, grant := range []string{
+		"$gcp:projects/iAMMember:IAMMember::example-dispatch-cloudsql-client",
+		"$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-nats-seed-accessor",
+	} {
+		require.Contains(t, deployment.RPC.GetDependencies(), "urn:pulumi:s::p::"+dispatchType+grant,
+			"the Deployment's readiness needs the grant, so it registers after it")
+	}
 }
 
 // GKE accepts only the project's own pool, named <project id>.svc.id.goog.

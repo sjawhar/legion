@@ -7,6 +7,7 @@ import (
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/compute"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/container"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/organizations"
+	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/projects"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/secretmanager"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/servicenetworking"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/sql"
@@ -18,12 +19,14 @@ import (
 )
 
 type dispatchCloud struct {
-	cluster    *container.Cluster
-	instance   *sql.DatabaseInstance
-	password   *random.RandomPassword
-	signing    *random.RandomPassword
-	agentToken *random.RandomPassword
-	principal  pulumi.StringOutput
+	cluster      *container.Cluster
+	instance     *sql.DatabaseInstance
+	password     *random.RandomPassword
+	signing      *random.RandomPassword
+	agentToken   *random.RandomPassword
+	principal    pulumi.StringOutput
+	sqlClient    *projects.IAMMember
+	seedAccessor *secretmanager.SecretIamMember
 }
 
 func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption) (pulumi.ProviderResource, error) {
@@ -44,6 +47,7 @@ func providerFor(ctx context.Context, pkg string, opts ...pulumi.ResourceOption)
 }
 
 func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, opts ...pulumi.ResourceOption) (*dispatchCloud, error) {
+	dispatch := dispatchType + " " + name
 	gcpProvider, err := providerFor(ctx.Context(), "gcp", opts...)
 	if err != nil {
 		return nil, err
@@ -130,15 +134,51 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}
 	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
 	// cluster; IAM refuses a member of a pool that does not exist yet. It is built from the
-	// cluster's own WorkloadIdentityConfig, so it resolves only once the pool exists, and a
-	// consumer's grant taken from the `principal` output waits for the cluster instead of racing
-	// it (as a project-scoped roles/cloudsql.client grant in the same program must).
-	principal := pulumi.All(project.Number(), cluster.WorkloadIdentityConfig.WorkloadPool()).ApplyT(func(values []interface{}) string {
-		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", outputString(values[0]), outputString(values[1]), s.namespace, s.hostname)
+	// cluster's own WorkloadIdentityConfig, so it resolves only once the pool exists, and every
+	// grant built from it waits for the cluster instead of racing it.
+	principal := pulumi.All(project.Number(), cluster.WorkloadIdentityConfig.WorkloadPool()).ApplyT(func(values []interface{}) (string, error) {
+		number, err := outputString(values[0])
+		if err != nil {
+			return "", fmt.Errorf("%s: the project's number: %w", dispatch, err)
+		}
+		pool, err := outputString(values[1])
+		if err != nil {
+			return "", fmt.Errorf("%s: the cluster's Workload Identity pool: %w", dispatch, err)
+		}
+		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", number, pool, s.namespace, s.hostname), nil
 	}).(pulumi.StringOutput)
-	_, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.NatsSeedSecret, dispatchType+" "+name, "natsSeedSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
+	seedAccessor, err := secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 	if err != nil {
 		return nil, err
 	}
-	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, principal: principal}, nil
+	// Cloud SQL has no per-instance IAM, so roles/cloudsql.client is a project grant with a
+	// condition limiting it to this instance. The component grants it itself: the pod is ready
+	// only once the Auth Proxy can connect, and a consumer's grant built from the `principal`
+	// output would resolve only after every child — the Deployment's readiness included — so the
+	// first deployment would deadlock. An IAMMember is additive beside the project's other
+	// bindings; writing it needs resourcemanager.projects.setIamPolicy on the provider's identity.
+	expression := pulumi.All(project.ProjectId().Elem(), instance.Name).ApplyT(func(values []interface{}) (string, error) {
+		projectID, err := outputString(values[0])
+		if err != nil {
+			return "", fmt.Errorf("%s: the project's id: %w", dispatch, err)
+		}
+		instanceName, err := outputString(values[1])
+		if err != nil {
+			return "", fmt.Errorf("%s: the instance's name: %w", dispatch, err)
+		}
+		return fmt.Sprintf("resource.type == 'sqladmin.googleapis.com/Instance' && resource.name == 'projects/%s/instances/%s'", projectID, instanceName), nil
+	}).(pulumi.StringOutput)
+	sqlClient, err := projects.NewIAMMember(ctx, s.hostname+"-cloudsql-client", &projects.IAMMemberArgs{
+		Project: project.ProjectId().Elem(),
+		Role:    pulumi.String("roles/cloudsql.client"),
+		Member:  principal,
+		Condition: &projects.IAMMemberConditionArgs{
+			Title:      pulumi.String(s.hostname + "-cloudsql-client"),
+			Expression: expression,
+		},
+	}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
+	if err != nil {
+		return nil, err
+	}
+	return &dispatchCloud{cluster: cluster, instance: instance, password: password, signing: signing, agentToken: agentToken, principal: principal, sqlClient: sqlClient, seedAccessor: seedAccessor}, nil
 }
