@@ -2402,8 +2402,25 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
+          const held = claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
+          const moving = held !== undefined && held !== role;
+          // Moving off a role closes every subscription another plugin opened `whileHolding` it,
+          // so the session would stop taking that role's notices without being told. The model's
+          // tool never does that; a plugin that owns the role moves it through its own claim.
+          if (moving && roleNoticeSubjects.size > 0) {
+            throw new Error(
+              `this session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} ` +
+                `${roleNoticeSubjects.size === 1 ? "lasts" : "last"} only while it does; ` +
+                `envoy_role_set does not move it to ${role}`
+            );
+          }
           await setEnvoyRole(role);
-          return toolSuccess(`Now holding role: ${role}`, { role });
+          return moving
+            ? toolSuccess(`Now holding role: ${role} (released role ${held})`, {
+                role,
+                released: held,
+              })
+            : toolSuccess(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.getRole: {
           const role = await client.getRole(stringFor(parameters, "role"));

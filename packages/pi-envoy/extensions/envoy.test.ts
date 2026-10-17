@@ -4213,13 +4213,85 @@ describe("envoy OMP extension", () => {
     });
     expect(requests).not.toContain("/v1/sessions");
 
-    await roleTool.execute("", { role: "legion-reviewer" });
+    const moved = await roleTool.execute("", { role: "legion-reviewer" });
+    // Moving to another role releases the held one, and the answer says which.
+    expect(moved.isError).toBeFalsy();
+    expect(moved.details).toEqual({ role: "legion-reviewer", released: "legion-controller" });
+    expect(moved.content[0]?.text).toContain("legion-controller");
     expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
     const result = await unsubscribeTool.execute("", {
       topics: ["notifications.role.legion-reviewer"],
     });
     expect(result.content[0]?.text).toBe("Unsubscribed: (none)");
     expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
+  });
+
+  test("envoy_role_set keeps a held role that has role-bound subscriptions, and its subscriptions, instead of moving off it", async () => {
+    const role = "legion-controller";
+    const notice = "notifications.legion.ACME.controller";
+    const roleClaims: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
+      if (url.pathname === "/v1/roles/set") {
+        const claimed = typeof body?.role === "string" ? body.role : "";
+        roleClaims.push(claimed);
+        return response({
+          session_id: "ses_role_bound",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${claimed}`],
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-set-keeps-bound-role");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        injected.resolve();
+      },
+    });
+    const context = sessionContext("ses_role_bound");
+    await fixture.handlers.get("session_start")?.({}, context);
+    await claimEnvoyRole("ses_role_bound", role, context);
+    await subscribeLegionNotice("ses_role_bound", notice, context, role);
+    const bound = natsState.controls.get(notice);
+    if (bound === undefined) throw new Error("the role-bound subject was not subscribed");
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    if (roleTool === undefined) throw new Error("role tool was not registered");
+
+    const refused = await roleTool.execute("", { role: "release-captain" });
+    expect(refused.isError).toBe(true);
+    const reason = refused.content[0]?.text ?? "";
+    expect(reason).toContain(role);
+    expect(reason).toContain(notice);
+    // Nothing was claimed for the refused role, and the held role and its subscription stand.
+    expect(roleClaims).toEqual([role]);
+    expect(bound.active()).toBe(true);
+    bound.push(
+      JSON.stringify({
+        event_id: "evt-still-bound",
+        source: "legion",
+        source_event_id: "source-still-bound",
+        topic: notice,
+        dedupe_key: "legion.notice.still-bound",
+        issued_at: 1,
+        payload_summary: "wake after the refused move",
+        trace_id: "trace-still-bound",
+      })
+    );
+    await injected.promise;
+    expect(fixture.messages.at(-1)).toContain("wake after the refused move");
+
+    // Claiming the role it already holds is no move, and leaves the subscription alone.
+    const again = await roleTool.execute("", { role });
+    expect(again.isError).toBeFalsy();
+    expect(roleClaims).toEqual([role, role]);
+    expect(bound.active()).toBe(true);
   });
 
   test("injects a post-takeover forwarded role event into B only", async () => {

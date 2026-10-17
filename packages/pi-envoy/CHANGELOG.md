@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `envoy_role_set` no longer moves a session off a role that another plugin opened subscriptions
+  for while the session holds it: that move closed those subscriptions, so the session stopped
+  receiving the role's notices without being told. It refuses instead, naming the held role and
+  the subscriptions. A move off any other role still works, and its answer names the role it
+  released (`details.released`).
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
