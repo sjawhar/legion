@@ -22,17 +22,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
-// operator-token: the root pod runs as the operator's ServiceAccount with no API server token, and
-// holds the one projected token the operator's pod asks for — its audience, its lifetime, at its
-// mount. Every expected value is the fixture's. The token is read into the harness's memory and only
-// its claims are printed.
+// operator-token: the root pod runs as the operator's ServiceAccount with no API server token —
+// asserted in every mode, LEGION_E2E_MODEL_ROUTE=key-file included, since neither fact depends on
+// which model route the operator pod fixture carries. Under gateway, it also holds the one
+// projected token the operator's pod asks for — its audience, its lifetime, at its mount, read
+// into the harness's memory with only its claims printed — which key-file's pod-key-file.yml
+// mounts none of (no gateway to authenticate to), so that part is skipped under key-file alone,
+// never because the fixture happens to lack a token for some other reason: a fixture that claims
+// gateway but ships no projected token is a real bug this check must still catch, not a reason to
+// skip silently.
 func (r *liveRig) checkOperatorToken() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
-		return err
-	}
-	want, err := projectedToken(r.pod)
-	if err != nil {
 		return err
 	}
 	name := SandboxName(root.token)
@@ -46,6 +47,22 @@ func (r *liveRig) checkOperatorToken() error {
 			name, pod.Spec.ServiceAccountName, pod.Spec.AutomountServiceAccountToken, r.pod.ServiceAccount)
 	}
 	note("runtime", "pod %s: serviceAccountName %s, automountServiceAccountToken false", name, pod.Spec.ServiceAccountName)
+	apiToken, err := r.exec(root, "sh", "-c", "test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo present || echo absent")
+	if err != nil {
+		return err
+	}
+	note("operator", "exec test -e /var/run/secrets/kubernetes.io/serviceaccount/token: %s", apiToken)
+	if apiToken != "absent" {
+		return errors.New("the pod holds the API server's service account token")
+	}
+	if r.env.modelRoute == "key-file" {
+		note("operator", "LEGION_E2E_MODEL_ROUTE=key-file: no projected ServiceAccount token to check (pod-key-file.yml mounts none)")
+		return nil
+	}
+	want, err := projectedToken(r.pod)
+	if err != nil {
+		return fmt.Errorf("LEGION_E2E_MODEL_ROUTE=%s: %w", r.env.modelRoute, err)
+	}
 	token, err := r.exec(root, "cat", want.file)
 	if err != nil {
 		return err
@@ -76,14 +93,6 @@ func (r *liveRig) checkOperatorToken() error {
 		return fmt.Errorf("the token's subject is %s, want %s", claims.Sub, sub)
 	case lifetime != want.lifetime:
 		return fmt.Errorf("the token lives %s, want %s", lifetime, want.lifetime)
-	}
-	apiToken, err := r.exec(root, "sh", "-c", "test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo present || echo absent")
-	if err != nil {
-		return err
-	}
-	note("operator", "exec test -e /var/run/secrets/kubernetes.io/serviceaccount/token: %s", apiToken)
-	if apiToken != "absent" {
-		return errors.New("the pod holds the API server's service account token")
 	}
 	return nil
 }
@@ -124,16 +133,6 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 	return found[0], nil
 }
 
-// operatorTokenBlocked reports why operator-token cannot run, or "" to run it: the check needs a
-// projected ServiceAccount token in the run's operator pod fixture, which LEGION_E2E_MODEL_ROUTE=
-// key-file's pod-key-file.yml carries none of (no gateway to authenticate to), unlike gateway
-// mode's pod.yml.
-func operatorTokenBlocked(r *liveRig) string {
-	if _, err := projectedToken(r.pod); err != nil {
-		return fmt.Sprintf("the operator pod fixture %s mounts no projected ServiceAccount token (%v); LEGION_E2E_MODEL_ROUTE=key-file needs none", r.env.operatorPodFile, err)
-	}
-	return ""
-}
 
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
 // podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,

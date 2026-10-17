@@ -76,7 +76,7 @@ var liveChecks = []liveCheck{
 	{"root-ready", (*liveRig).checkRootReady, nil},
 	{"gvisor", (*liveRig).checkGVisor, nil},
 	{"resources", (*liveRig).checkResources, nil},
-	{"operator-token", (*liveRig).checkOperatorToken, operatorTokenBlocked},
+	{"operator-token", (*liveRig).checkOperatorToken, nil},
 	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
@@ -145,9 +145,22 @@ var liveOverrides = map[claim.Role]config.RoleResources{
 // defaults as it translates them (reservations, manifest_test.go) with liveOverrides applied field
 // by field, as resolveKubernetes settles a file's `resources` block. Cpu and memory are each the
 // request and the limit alike; the ephemeral-storage limit and request are set apart, as the file
-// sets them. The image probe carries none of these: its own fixed reservation (probeReservation,
-// manifest_test.go), as the daemon hands it.
-func liveResources() map[claim.Role]corev1.ResourceRequirements {
+// sets them, except under GKE: confirmed live, 2026-10-17, a container's ephemeral-storage limit
+// is admitted equal to its request there regardless of what limit was configured (a bare debug pod
+// and a real production pod's six role containers all confirmed this; production's own
+// config.DefaultResources() leaves EphemeralStorageRequest at 1Gi for every role, so a real GKE
+// deployment's issue pods are holding only 1Gi of disk today, not the 10-30Gi
+// config.DefaultResources()/liveOverrides ask for — a capability gap worth raising with whoever
+// owns that deployment, not something this harness can fix from a test rig). What this rig CAN do,
+// since it is itself the stand-in for an operator's own `runtime.kubernetes.resources.<role>`
+// configuration: ask for the ephemeral-storage request an operator who knew this limit would set,
+// equal to the limit, so the disk this run's own pods actually get matches what was configured
+// instead of silently settling for 1Gi. The `resources` check then asserts the configured bound
+// exactly, on every platform, with no clamping tolerance of its own — the image probe's own fixed
+// reservation (probeReservation, manifest_test.go, daemon-hardcoded and not something this rig
+// configures) is the one place a clamping tolerance still belongs (gvisorCPUFloor and
+// gkeEphemeralStorageClamped's doc comments).
+func (r *liveRig) liveResources() map[claim.Role]corev1.ResourceRequirements {
 	resources := reservations()
 	for role, override := range liveOverrides {
 		requirements := resources[role]
@@ -166,6 +179,13 @@ func liveResources() map[claim.Role]corev1.ResourceRequirements {
 			requirements.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorageRequest)
 		}
 		resources[role] = requirements
+	}
+	if r.gke() {
+		for role, requirements := range resources {
+			limit := requirements.Limits[corev1.ResourceEphemeralStorage]
+			requirements.Requests[corev1.ResourceEphemeralStorage] = limit.DeepCopy()
+			resources[role] = requirements
+		}
 	}
 	return resources
 }
@@ -856,7 +876,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 	}
 	opts := Options{
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: r.env.storageClass, IssueVolume: liveIssueVolume,
-		Resources: liveResources(),
+		Resources: r.liveResources(),
 		StreamURL: address,
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
