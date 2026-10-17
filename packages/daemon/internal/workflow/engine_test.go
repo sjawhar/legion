@@ -1040,10 +1040,7 @@ func TestABackwardMovesTaskNamesThePullRequestAndTheReason(t *testing.T) {
 	if _, err := intake.ApplyFact(context.Background(), pool, "api", "merging-reviewing", intake.BackwardMove{Issue: "LEGION-208", Requester: RoleFor(phase.Merging), To: phase.Reviewing, Reason: reason}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact backward: %v", err)
 	}
-	var task string
-	if err := pool.QueryRow(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = $1", string(RoleFor(phase.Reviewing))).Scan(&task); err != nil {
-		t.Fatalf("read the reviewer's start: %v", err)
-	}
+	task := startTask(t, pool, RoleFor(phase.Reviewing))
 	for _, want := range []string{"Phase: reviewing.", "Pull request: #42.", "Reason: " + reason + "."} {
 		if !strings.Contains(task, want) {
 			t.Fatalf("task = %q, want it to carry %q", task, want)

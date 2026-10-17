@@ -40,16 +40,15 @@ retrospective's durable output.
    merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
    owned by the architect and implemented by the same implementer; the parent stays open until it lands.
 
-Retro's commits sit above the reviewer's approved head and the approval stands: commits that
-change only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the
-tree goes from retro to the merger — never back to the tester or reviewer. A conflict merge
-pushed above the approved head with no review round after it brings the base's paths above that
-head, so READY refuses it (`READY_UNREVIEWED_CHANGE`) and the reviewer reviews the new head as a
-new round; one the conflict procedure sends back through `implementing` is confirmed before READY.
-Any round after
-retro (a conflict round, a round a red CI sends back, a re-review) writes `.legion/<issue>/`
-again, and every approval moves the issue to retro once more: each retro ends with the removal
-again, or READY is refused.
+Retro's commits sit above the reviewer's approved head and the approval stands: commits that change
+only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the tree
+goes from retro to the merger — never back to the tester or reviewer. A conflict merge pushed above
+the approved head with no review round after it brings the base's paths above that head, so READY
+refuses it (`READY_UNREVIEWED_CHANGE`) and the reviewer reviews the new head as a new round; one the
+conflict procedure sends back through `implementing` is confirmed before READY. Any round after
+retro (a conflict round, a round a red CI sends back, a re-review) writes `.legion/<issue>/` again,
+and every approval moves the issue to retro once more: each retro ends with the removal again, or
+READY is refused.
 
 Do not start retro before step 2 or skip it because the change seems mechanical; the merger's
 `READY` comes only after step 3. The design gate is not a substitute for review and retro.

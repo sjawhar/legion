@@ -136,16 +136,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   reviewer whose task's `Reason:` names one of them runs a new round, never a fingerprint
   confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming what the refusal found; for
   `READY_NOT_APPROVED` it compares its last approved commit with the head on GitHub and requests
-  changes when it finds no approval, a head off that commit's history, a 300-file compare or a
-  path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`. Either
-  request asks only that the implementer complete so the tester runs the head, and the implementer's
-  prompt says how; the round after it reviews the refused change in full from the last approval,
-  never continued by the fingerprint rule. The merge-gate reference and the architect and retro
-  skills say the same, and
-  the architect's `review_round_cap` judgment does not count those rounds as going in circles.
-  A backward move's task no longer tells the role it starts to resume the requester's phase work;
-  it names that role's phase, the pull request and the move's reason, with the requester's handoff
-  commit when it has one.
+  changes when it finds no approval, a head off that commit's history, no file list, a 300-file
+  compare or a path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`.
+  Either request asks only that the implementer complete so the tester runs the head, and the
+  implementer's prompt says how; the round after it reviews the refused change in full from the last
+  approval, never continued by the fingerprint rule. The merge-gate reference and the architect and
+  retro skills say the same, and the architect's `review_round_cap` judgment does not count those
+  rounds as going in circles. A backward move's task no longer tells the role it starts to resume
+  the requester's phase work; it names that role's phase, the pull request and the move's reason,
+  with the requester's handoff commit when it has one, and a retried worker's task names the pull
+  request too.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the

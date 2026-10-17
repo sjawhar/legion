@@ -215,11 +215,11 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	return answer, true
 }
 
-// readyRecord reads, in one repeatable-read snapshot, issue's recorded pull request (nil when it has none),
-// whether its unfinished disarm keeps an earlier auto-merge arm standing (record.Store.DisarmPending;
-// by-hand READY refuses on that barrier, ordinary READY does not wait for it), and the head its
-// review round approved, "" when it recorded none (record.ApprovedHead), which READY holds the pull
-// request's head to (unreviewedChange).
+// readyRecord reads, in one repeatable-read snapshot, issue's recorded pull request (nil when it
+// has none), whether its unfinished disarm keeps an earlier auto-merge arm standing
+// (record.Store.DisarmPending; by-hand READY refuses on that barrier, ordinary READY does not wait
+// for it), and the head its review round approved, "" when it recorded none (record.ApprovedHead),
+// which READY holds the pull request's head to (unreviewedChange).
 func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, string, error) {
 	if s.pool == nil || s.records == nil {
 		return nil, false, "", errors.New("record dependencies are unavailable")
