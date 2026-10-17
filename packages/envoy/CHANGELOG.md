@@ -20,8 +20,12 @@
   now takes the project's dependency lock, as a reparent does, so two writes cannot together pass
   the limit. An earlier release could build a deeper chain, so migration `0113` refuses to apply
   while any issue sits more than 32 links below its root, or in a parent loop: its census counts
-  them, so the pre-deploy census refuses first, and the migration names up to 20 of them and the
-  repair, `PATCH` an ancestor with `{"parent": null}` on the release still running.
+  them, so the pre-deploy census refuses first, and the migration, holding `repo_projects` and
+  `issues` from before its count to its commit, names up to 20 of them and the repair, `PATCH` an
+  ancestor with `{"parent": null}` on the release still running. From `0113` on, the
+  `issues_parent_depth` trigger refuses such a parent link, or a parent loop, from any writer,
+  an earlier release still serving during the deploy included; the API answers it `409
+  PARENT_INPUT`.
 - The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
   Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
   unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is

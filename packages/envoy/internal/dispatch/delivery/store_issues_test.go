@@ -50,13 +50,6 @@ func seedIssues(t *testing.T, ctx context.Context, pool *store.Pool, project str
 	}
 }
 
-func setParent(t *testing.T, ctx context.Context, pool *store.Pool, key, parent string) {
-	t.Helper()
-	if _, err := pool.Exec(ctx, `update issues set parent_key = $2 where key = $1`, key, parent); err != nil {
-		t.Fatalf("set %s's parent to %s: %v", key, parent, err)
-	}
-}
-
 func keysOf(set map[string]struct{}) []string { return slices.Sorted(maps.Keys(set)) }
 
 // OpenP0Keys is every open P0 across every project: a P0 in any status but done, and no P1, no
@@ -170,7 +163,26 @@ func TestIssueAncestorsStopsAtTheDepthCap(t *testing.T) {
 		{key: "LIVED-2", parent: "LIVED-1"},
 		{key: "LIVED-3", parent: "LIVED-2"},
 	})
-	setParent(t, ctx, pool, "LIVED-1", "LIVED-3")
+	// No write makes a cycle since migration 0113's issues_parent_depth trigger; the walk's own
+	// bound is what this checks, so the cycle is written with the trigger off for that one update,
+	// inside its transaction, so no other session sees the trigger off.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	for _, statement := range []string{
+		`alter table issues disable trigger issues_parent_depth`,
+		`update issues set parent_key = 'LIVED-3' where key = 'LIVED-1'`,
+		`alter table issues enable trigger issues_parent_depth`,
+	} {
+		if _, err := tx.Exec(ctx, statement); err != nil {
+			_ = tx.Rollback(ctx)
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the cycle: %v", err)
+	}
 	for _, maxDepth := range []int{1, 2, 32} {
 		bounded, cancel := context.WithTimeout(ctx, 5*time.Second)
 		ancestors, err := IssueAncestors(bounded, pool, []string{"LIVED-2"}, maxDepth)

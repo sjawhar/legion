@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -153,4 +155,139 @@ func TestMigrationAppliesOverAChain32LinksDeep(t *testing.T) {
 func isSQLState(err error, code string) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == code
+}
+
+// awaitMigrationLockWait waits until a backend of store's database other than the pool's own
+// poll waits on a lock: the migration, queued behind a writer's open transaction.
+func awaitMigrationLockWait(t *testing.T, store *Store) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := store.Pool.QueryRow(context.Background(), `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()
+		`).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the migration never waited on the writer's lock")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A legacy release's create that commits while 0113 waits for its tables is counted: the
+// migration takes its tables' locks before it counts, so a row committed while it waits is in the
+// count, and an issue 33 links down refuses the migration as it would have before it began.
+func TestMigrationCountsAnOverDeepIssueCommittedWhileItWaits(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, repoProjectsDefaultVersion-1)); err != nil {
+		t.Fatalf("migrate through %d: %v", repoProjectsDefaultVersion-1, err)
+	}
+	seedChain(t, store, "EDGE", 33) // EDGE-33 is 32 links below EDGE-1, within the cap
+	if got := censusCount(t, store); got != 0 {
+		t.Fatalf("census = %d, want 0", got)
+	}
+	writer, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the writer: %v", err)
+	}
+	defer writer.Rollback(ctx)
+	if _, err := writer.Exec(ctx, `
+		insert into issues (key, project_key, number, title, parent_key, created_by, rank)
+		values ('EDGE-34', 'EDGE', 34, 'Link 34', 'EDGE-33', '{"kind":"user","id":"alice"}', '00000034')
+	`); err != nil {
+		t.Fatalf("the writer's insert 33 links down: %v", err)
+	}
+	applied := make(chan error, 1)
+	go func() { applied <- store.migrate(ctx, migrationsThrough(t, repoProjectsDefaultVersion)) }()
+	awaitMigrationLockWait(t, store)
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatalf("commit the writer: %v", err)
+	}
+	select {
+	case err := <-applied:
+		var pgErr *pgconn.PgError
+		if !errors.As(err, &pgErr) || pgErr.Code != "23514" || !strings.Contains(err.Error(), "EDGE-34") {
+			t.Fatalf("migrate after a writer committed EDGE-34 33 links down: %v, want 0113 refusing it (23514)", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("the migration never finished after the writer committed")
+	}
+	if got := schemaVersion(t, store); got != repoProjectsDefaultVersion-1 {
+		t.Fatalf("schema version = %d, want %d", got, repoProjectsDefaultVersion-1)
+	}
+}
+
+// insertChildSQL inserts one issue of project as the child of parent.
+const insertChildSQL = `
+	insert into issues (key, project_key, number, title, parent_key, created_by, rank)
+	values ($1, $2, $3::int, $1, $4, '{"kind":"user","id":"alice"}', lpad($3::int::text, 8, '0'))`
+
+// requireDepthRefusal holds err to the issues_parent_depth trigger's refusal.
+func requireDepthRefusal(t *testing.T, what string, err error, want string) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != "issues_parent_depth" || !strings.Contains(pgErr.Message, want) {
+		t.Fatalf("%s: %v, want issues_parent_depth refusing it (23514) with %q", what, err, want)
+	}
+}
+
+// After 0113 the database itself holds the depth cap, so a writer that skips the API's check (an
+// earlier release still serving during a rolling deploy, or plain SQL) cannot pass it: an insert
+// or a reparent that would put an issue more than 32 links below its root, and a parent loop, are
+// refused; an issue exactly 32 links down is not.
+func TestDepthTriggerRefusesAParentPastTheCapFromAnyWriter(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.migrate(ctx, migrationsThrough(t, repoProjectsDefaultVersion)); err != nil {
+		t.Fatalf("migrate to %d: %v", repoProjectsDefaultVersion, err)
+	}
+	if _, err := store.Pool.Exec(ctx, `insert into projects (key, name) values ('CAP', 'Cap')`); err != nil {
+		t.Fatalf("create project: %v", err)
+	}
+	// CAP-1 is the root and CAP-n sits n-1 links below it; every insert through CAP-33 is within the cap.
+	if _, err := store.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('CAP-1', 'CAP', 1, 'CAP-1', '{"kind":"user","id":"alice"}', '00000001')
+	`); err != nil {
+		t.Fatalf("insert CAP-1: %v", err)
+	}
+	for n := 2; n <= 33; n++ {
+		if _, err := store.Pool.Exec(ctx, insertChildSQL, "CAP-"+strconv.Itoa(n), "CAP", n, "CAP-"+strconv.Itoa(n-1)); err != nil {
+			t.Fatalf("insert CAP-%d, %d links down: %v", n, n-1, err)
+		}
+	}
+	_, err := store.Pool.Exec(ctx, insertChildSQL, "CAP-34", "CAP", 34, "CAP-33")
+	requireDepthRefusal(t, "insert CAP-34, 33 links down", err, "CAP-34 under CAP-33 would put CAP-34 more than 32 links below its root")
+
+	// A three-issue subtree, SUB-1 over SUB-2 over SUB-3: moved under CAP-31 its deepest issue
+	// would sit 33 links down; under CAP-30, 32.
+	if _, err := store.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, created_by, rank)
+		values ('SUB-1', 'CAP', 101, 'SUB-1', '{"kind":"user","id":"alice"}', '00000101')
+	`); err != nil {
+		t.Fatalf("insert SUB-1: %v", err)
+	}
+	for n := 2; n <= 3; n++ {
+		if _, err := store.Pool.Exec(ctx, insertChildSQL, "SUB-"+strconv.Itoa(n), "CAP", 100+n, "SUB-"+strconv.Itoa(n-1)); err != nil {
+			t.Fatalf("insert SUB-%d: %v", n, err)
+		}
+	}
+	_, err = store.Pool.Exec(ctx, `update issues set parent_key = 'CAP-31' where key = 'SUB-1'`)
+	requireDepthRefusal(t, "move SUB-1 under CAP-31", err, "SUB-1 under CAP-31 would put the deepest issue under SUB-1 33 links below its root")
+	if _, err := store.Pool.Exec(ctx, `update issues set parent_key = 'CAP-30' where key = 'SUB-1'`); err != nil {
+		t.Fatalf("move SUB-1 under CAP-30, its deepest issue 32 links down: %v", err)
+	}
+	_, err = store.Pool.Exec(ctx, `update issues set parent_key = 'CAP-5' where key = 'CAP-1'`)
+	requireDepthRefusal(t, "make CAP-1 a child of its own descendant CAP-5", err, "parent loop")
+	// A write that leaves the parent alone is not checked.
+	if _, err := store.Pool.Exec(ctx, `update issues set title = 'renamed' where key = 'CAP-33'`); err != nil {
+		t.Fatalf("rename CAP-33: %v", err)
+	}
 }
