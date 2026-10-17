@@ -199,25 +199,31 @@ cleanup() {
   teardown
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
-  # namespace_clean's snapshot is a LIST by label; a brief settle here absorbs the ordinary gap
-  # between a delete landing and the next LIST reflecting it. Three consecutive empty reads, 2s
-  # apart, before trusting it — a non-empty read resets the count. The one run that still failed
-  # namespace-clean after this (2026-10-17) had its operator gcloud auth plugin fail mid-test with
-  # a transient "internal_failure" — this devbox's own intermittent reach to the cluster, not
-  # something a longer local wait fixes. Never a retry loop around namespace_clean itself, shared
-  # with Stage 4b.
+  # namespace_clean's snapshot is a LIST by label, served from this cluster's watch cache — a
+  # direct GET by name (bridge_stop's own check, now reliable) can confirm the bridge pod and
+  # Service NotFound while the SAME-NAMESPACE LIST this settle loop and namespace_clean both issue
+  # still returns the pod, for many minutes, under the churn of deleting five real Sandboxes and
+  # their many child objects at once. Confirmed live, 2026-10-17, by diagnose_leftover's own
+  # capture, twice: the raw API LIST (both with and without resourceVersion=0) and a verbose
+  # kubectl trace all agreed empty within seconds of the leftover being diagnosed, each time well
+  # after teardown's own 300s LIST-based wait had already given up still seeing it. A transient
+  # gcloud auth-plugin failure explained one earlier run's symptom, not this one's: this is the
+  # cluster's own watch cache lagging a real deletion, not a devbox network blip, and no amount of
+  # LIST-based waiting under 15 minutes has cleared it live. Five consecutive empty LIST reads, 2s
+  # apart (a non-empty read resets the count), over up to 15 minutes. Never a retry loop around
+  # namespace_clean itself, shared with Stage 4b.
   local settle_deadline settle_left settle_streak=0
-  settle_deadline=$(($(date +%s) + 60))
+  settle_deadline=$(($(date +%s) + 900))
   while :; do
     settle_left=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name 2>/dev/null) || settle_left=unknown
     if [ -z "$settle_left" ]; then
       settle_streak=$((settle_streak + 1))
-      [ "$settle_streak" -lt 3 ] || break
+      [ "$settle_streak" -lt 5 ] || break
     else
       settle_streak=0
     fi
     [ "$(date +%s)" -lt "$settle_deadline" ] || {
-      echo "   [operator] namespace-clean's own listing still shows $settle_left after 60s; proceeding to the snapshot anyway"
+      echo "   [operator] namespace-clean's own listing still shows $settle_left after 15 minutes; proceeding to the snapshot anyway"
       while IFS= read -r leftover_name; do
         case "$leftover_name" in pod/*) diagnose_leftover "${leftover_name#pod/}" ;; esac
       done <<<"$settle_left"
