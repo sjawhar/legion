@@ -40295,7 +40295,7 @@ var envoyToolSpecs = [
   },
   {
     name: "envoy_role_set",
-    description: "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session. Refused while another plugin holds subscriptions that last only as long as this session keeps its current role.",
+    description: "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session. Moving to a different role is refused while another plugin holds subscriptions that last only as long as this session keeps its current role.",
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.setRole
   },

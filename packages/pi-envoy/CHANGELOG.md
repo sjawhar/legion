@@ -10,10 +10,13 @@
   told. Now `envoy_role_set` refuses to move off such a role, naming the role and the
   subscriptions, and `envoy_unsubscribe` leaves them open, named or not, listing them as kept
   (`details.kept`); an explicit empty `topics` list closes nothing. Every role move (the tool's, a
-  plugin's claim, the reclaim at session start) runs one at a time, and a plugin's role-bound
-  subscription waits for the moves in flight before it checks its role, so concurrent moves
-  cannot close one silently either. A move off any other role still works, and its answer names
-  the role it released (`details.released`).
+  plugin's claim, and the reclaim a session start, switch or drift heal runs) runs one at a time
+  and decides inside its turn, from the session and the role it leaves when it runs: so a reclaim
+  that waited reclaims the role the transcript records by then rather than undo a move that landed
+  first, and a claim whose session changed while it waited is refused, or handed back if it was
+  already at the listener. A plugin's role-bound subscription waits for the moves in flight before
+  it checks its role. A move off any other role still works, and its answer names the role it
+  released (`details.released`).
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

@@ -4347,13 +4347,18 @@ describe("envoy OMP extension", () => {
   // queue in the call itself, so a second call made after `reached` is queued behind the first.
   const gatedRoleFixture = async (label: string, sessionID: string) => {
     const claims: string[] = [];
+    // Each claim as `<role>@<session it was sent for>`.
+    const claimSessions: string[] = [];
+    const handedBack: string[] = [];
     let gated: { role: string; reached: () => void; release: Promise<void> } | undefined;
+    let registered: { session: string; seen: () => void } | undefined;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
         const claimed = typeof body?.role === "string" ? body.role : "";
         claims.push(claimed);
+        claimSessions.push(`${claimed}@${body?.session_id}`);
         if (gated?.role === claimed) {
           const { reached, release } = gated;
           gated = undefined;
@@ -4361,18 +4366,36 @@ describe("envoy OMP extension", () => {
           await release;
         }
         return response({
-          session_id: sessionID,
+          session_id: body?.session_id,
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
           topics: [`notifications.role.${claimed}`],
         });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        for (const topic of body?.topics ?? []) handedBack.push(`${topic}@${body?.session_id}`);
+        return response({});
+      }
+      if (url.pathname === "/v1/interests/subscribe" && registered?.session === body?.session_id) {
+        const { seen } = registered;
+        registered = undefined;
+        seen();
       }
       return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import(`./envoy.ts?${label}`);
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const context = sessionContext(sessionID);
+    // A context whose transcript is the fixture's own, read afresh each time as the host's is, so
+    // a reclaim reads the claims made up to its read.
+    const live = (id: string): SessionContext => {
+      const base = sessionContext(id);
+      return {
+        ...base,
+        sessionManager: { ...base.sessionManager, getBranch: () => [...fixture.entries] },
+      };
+    };
+    const context = live(sessionID);
     await fixture.handlers.get("session_start")?.({}, context);
     await claimEnvoyRole(sessionID, "legion-controller", context);
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
@@ -4383,8 +4406,104 @@ describe("envoy OMP extension", () => {
       gated = { role, reached: reached.resolve, release: release.promise };
       return { reached: reached.promise, release: release.resolve };
     };
-    return { context, roleTool, claims, gate };
+    // Resolves once `session` next registers with the listener, which a re-establishment does
+    // just before it reclaims.
+    const nextRegistration = (session: string) => {
+      const seen = Promise.withResolvers<void>();
+      registered = { session, seen: seen.resolve };
+      return seen.promise;
+    };
+    return {
+      fixture,
+      live,
+      context,
+      roleTool,
+      claims,
+      claimSessions,
+      handedBack,
+      gate,
+      nextRegistration,
+    };
   };
+
+  test("a reclaim that waited behind the model's move reclaims the role that move took", async () => {
+    const { fixture, live, roleTool, claims, gate, nextRegistration } = await gatedRoleFixture(
+      "reclaim-after-tool-move",
+      "ses_reclaim_tool"
+    );
+    const held = gate("release-captain");
+    const moved = roleTool.execute("", { role: "release-captain" });
+    await held.reached;
+    // A tree navigation re-establishes the same session and reclaims its transcript's role; the
+    // transcript is read while the model's move is still at the listener.
+    const registering = nextRegistration("ses_reclaim_tool");
+    const rebound = fixture.handlers.get("session_tree")?.(
+      { newLeafId: "leaf" },
+      live("ses_reclaim_tool")
+    );
+    await registering;
+    held.release();
+    expect((await moved).details).toEqual({
+      role: "release-captain",
+      released: "legion-controller",
+    });
+    await rebound;
+    // The reclaim re-asserts the role the model just took instead of moving it back.
+    expect(claims.at(-1)).toBe("release-captain");
+    const next = await roleTool.execute("", { role: "reviewer" });
+    expect(next.details).toEqual({ role: "reviewer", released: "release-captain" });
+  });
+
+  // The roles the transcript's claim entries record, in order.
+  const claimEntryRoles = (entries: readonly unknown[]): string[] =>
+    entries.flatMap((entry) => {
+      if (typeof entry !== "object" || entry === null) return [];
+      if (!("customType" in entry) || entry.customType !== "envoy-role-claim") return [];
+      if (!("data" in entry) || typeof entry.data !== "object" || entry.data === null) return [];
+      return "role" in entry.data && typeof entry.data.role === "string" ? [entry.data.role] : [];
+    });
+
+  test("a plugin's claim that waited across a /new is refused, and the new session claims nothing", async () => {
+    const { fixture, context, roleTool, claimSessions, gate } = await gatedRoleFixture(
+      "claim-across-new",
+      "ses_claim_old"
+    );
+    const held = gate("release-captain");
+    const moved = roleTool.execute("", { role: "release-captain" });
+    await held.reached;
+    const claimed = claimEnvoyRole("ses_claim_old", "reviewer", context);
+    // A `/new` installs a transcript of its own, which records no role.
+    const switched = fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      sessionContext("ses_claim_new")
+    );
+    held.release();
+    await moved;
+    await switched;
+    await expect(claimed).rejects.toThrow("ses_claim_old");
+    expect(claimSessions.filter((claim) => claim.endsWith("@ses_claim_new"))).toEqual([]);
+    expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");
+  });
+
+  test("a plugin's claim at the listener when the session switches is handed back, not kept for the new session", async () => {
+    const { fixture, context, claimSessions, handedBack, gate, nextRegistration } =
+      await gatedRoleFixture("claim-in-flight-across-new", "ses_flight_old");
+    const held = gate("reviewer");
+    const claimed = claimEnvoyRole("ses_flight_old", "reviewer", context);
+    await held.reached;
+    const registering = nextRegistration("ses_flight_new");
+    const switched = fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      sessionContext("ses_flight_new")
+    );
+    await registering;
+    held.release();
+    await expect(claimed).rejects.toThrow("handed back");
+    await switched;
+    expect(claimSessions.at(-1)).toBe("reviewer@ses_flight_old");
+    expect(handedBack).toContain("notifications.role.reviewer@ses_flight_old");
+    expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");
+  });
 
   test("role moves run one at a time, so a move back and a plugin's subscription after it both stand", async () => {
     const notice = "notifications.legion.ACME.controller";
