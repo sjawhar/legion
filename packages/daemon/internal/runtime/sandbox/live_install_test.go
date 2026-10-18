@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	authnv1 "k8s.io/api/authentication/v1"
@@ -498,15 +497,15 @@ func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
 	// The probe pod is scheduled, then read for its FailedMount, then deleted with its Sandbox,
 	// all inside ProbeImage: the last pod the second runtime's store held is kept for its
 	// PodScheduled transition.
-	var lastSeen atomic.Pointer[corev1.Pod]
 	watching, stopWatching := context.WithCancel(ctx)
 	defer stopWatching()
-	watched := make(chan struct{})
+	lastSeen := make(chan *corev1.Pod, 1)
 	go func() {
-		defer close(watched)
+		var last *corev1.Pod
+		defer func() { lastSeen <- last }()
 		for {
 			if pod := rt.storedPod(probe); pod != nil {
-				lastSeen.Store(pod)
+				last = pod
 			}
 			select {
 			case <-watching.Done():
@@ -520,7 +519,7 @@ func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
 	_, refusal := rt.ProbeImage(ctx, p)
 	refusedAt := time.Now()
 	stopWatching()
-	<-watched
+	pod := <-lastSeen
 	if refusal == nil {
 		return fmt.Errorf("ProbeImage passed with volume operator-missing naming ConfigMap %s, which does not exist", missing)
 	}
@@ -536,15 +535,12 @@ func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
 	if strings.Contains(refusal.Error(), "never completed within its retry budget") {
 		return fmt.Errorf("the probe retried the mount to its budget instead of refusing it on the first read: %v", refusal)
 	}
-	pod := lastSeen.Load()
 	if pod == nil {
 		return fmt.Errorf("the probe pod %s was never read while the probe ran, so the refusal's bound from its scheduling is unproven", probe)
 	}
 	var scheduledAt time.Time
-	for _, condition := range pod.Status.Conditions {
-		if condition.Type == corev1.PodScheduled && condition.Status == corev1.ConditionTrue {
-			scheduledAt = condition.LastTransitionTime.Time
-		}
+	if scheduled := podCondition(pod, corev1.PodScheduled); scheduled != nil && scheduled.Status == corev1.ConditionTrue {
+		scheduledAt = scheduled.LastTransitionTime.Time
 	}
 	if scheduledAt.IsZero() {
 		return fmt.Errorf("the probe pod %s as last read (phase %s) carries no PodScheduled=True condition, so the refusal's bound from its scheduling is unproven", probe, pod.Status.Phase)

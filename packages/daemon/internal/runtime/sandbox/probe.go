@@ -461,8 +461,8 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 		return &unusable
 	}
 	if w != nil && w.Reason == "CreateContainerConfigError" && missingObject(w.Message) {
-		refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot configure its container %s (waiting: CreateContainerConfigError), a ConfigMap or Secret it reads being missing: %s",
-			name, probeContainer, w.Message)}
+		refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot configure its container %s (waiting: %s), a ConfigMap or Secret it reads being missing: %s",
+			name, probeContainer, w.Reason, w.Message)}
 		return &refused
 	}
 	if pod.Status.Phase != corev1.PodPending {
@@ -488,9 +488,10 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 		return nil
 	}
 	if r.mountsProviders() {
-		if failure := providersMountFailure(events, ProvidersSecretName(r.project)); failure != "" {
+		secret := ProvidersSecretName(r.project)
+		if failure := providersMountFailure(events, secret); failure != "" {
 			refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
-				name, ProvidersSecretName(r.project), strings.Join(r.providersKeys(), ", "), failure)}
+				name, secret, strings.Join(r.providersKeys(), ", "), failure)}
 			return &refused
 		}
 	}
@@ -573,15 +574,11 @@ func missingObject(message string) bool {
 // which key to add, or saying the block does not name it, since a volume of that name reached the
 // pod from elsewhere.
 func (r *Runtime) volumeRefusal(name, volume, message string) *bootprobe.Outcome {
-	for _, v := range r.pod.Volumes {
-		if v.Name == volume {
-			refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount volume %q, which runtime.kubernetes.pod.volumes gives it from %s: %s",
-				name, volume, volumeSources(v), message)}
-			return &refused
-		}
+	from := "which runtime.kubernetes.pod.volumes does not name"
+	if i := slices.IndexFunc(r.pod.Volumes, func(v corev1.Volume) bool { return v.Name == volume }); i >= 0 {
+		from = "which runtime.kubernetes.pod.volumes gives it from " + volumeSources(r.pod.Volumes[i])
 	}
-	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount volume %q, which runtime.kubernetes.pod.volumes does not name: %s",
-		name, volume, message)}
+	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount volume %q, %s: %s", name, volume, from, message)}
 	return &refused
 }
 
