@@ -196,6 +196,9 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
+	if spec.Backend == runtime.BackendClaude {
+		return launch{}, refuse("its role runs on claude, and the worker image carries no Claude Code")
+	}
 	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != ""}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}

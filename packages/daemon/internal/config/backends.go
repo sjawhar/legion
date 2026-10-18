@@ -7,18 +7,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-)
-
-// WorkerBackend is the agent a phase worker's role runs on (`worker_backends`).
-type WorkerBackend string
-
-const (
-	// WorkerBackendOmp is Oh My Pi, `omp --mode rpc` behind `legion worker-shim`: every role's
-	// backend unless the file names another.
-	WorkerBackendOmp WorkerBackend = "omp"
-	// WorkerBackendClaude is Claude Code, `claude -p` in stream-json behind `legion claude-bridge`,
-	// which `legion worker-shim` runs in Oh My Pi's place.
-	WorkerBackendClaude WorkerBackend = "claude"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // backendRoles are the roles `worker_backends` may name: the phase workers. The architect is
@@ -28,24 +17,34 @@ const (
 var backendRoles = []claim.Role{claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger}
 
 // BackendFor is the backend role runs on: the one `worker_backends` names, else Oh My Pi.
-func (c Config) BackendFor(role claim.Role) WorkerBackend {
+func (c Config) BackendFor(role claim.Role) runtime.Backend {
 	if backend, ok := c.WorkerBackends[role]; ok {
 		return backend
 	}
-	return WorkerBackendOmp
+	return runtime.BackendOmp
+}
+
+// UsesClaude is whether any role runs on Claude Code, and so whether boot resolves `claude`.
+func (c Config) UsesClaude() bool {
+	for _, role := range backendRoles {
+		if c.BackendFor(role) == runtime.BackendClaude {
+			return true
+		}
+	}
+	return false
 }
 
 // readWorkerBackends is `worker_backends`: a mapping of a phase worker's role to its backend, `omp`
 // or `claude`. A role named twice, a role that is not a phase worker's, and a backend that is not
 // one of the two are each refused naming the entry.
-func readWorkerBackends(value *yaml.Node, key string) (map[claim.Role]WorkerBackend, error) {
+func readWorkerBackends(value *yaml.Node, key string) (map[claim.Role]runtime.Backend, error) {
 	if value.Tag == "!!null" {
 		return nil, nil
 	}
 	if value.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping of a phase worker's role to its backend (omp or claude), e.g. {implementer: claude}", key)
 	}
-	backends := map[claim.Role]WorkerBackend{}
+	backends := map[claim.Role]runtime.Backend{}
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		roleNode, backendNode := value.Content[i], value.Content[i+1]
 		role := claim.Role(roleNode.Value)
@@ -62,9 +61,9 @@ func readWorkerBackends(value *yaml.Node, key string) (map[claim.Role]WorkerBack
 		if backendNode.Kind != yaml.ScalarNode || backendNode.Decode(&backend) != nil {
 			return nil, fmt.Errorf("%s.%s must be omp or claude", key, role)
 		}
-		switch WorkerBackend(backend) {
-		case WorkerBackendOmp, WorkerBackendClaude:
-			backends[role] = WorkerBackend(backend)
+		switch runtime.Backend(backend) {
+		case runtime.BackendOmp, runtime.BackendClaude:
+			backends[role] = runtime.Backend(backend)
 		default:
 			return nil, fmt.Errorf("%s.%s must be omp or claude (got %q)", key, role, backend)
 		}
@@ -79,7 +78,7 @@ func checkWorkerBackends(cfg Config) error {
 		return nil
 	}
 	for _, role := range backendRoles {
-		if cfg.BackendFor(role) == WorkerBackendClaude {
+		if cfg.BackendFor(role) == runtime.BackendClaude {
 			return fmt.Errorf("worker_backends.%s is claude, which runs only under runtime: tmux: the worker image carries no Claude Code", role)
 		}
 	}

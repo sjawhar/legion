@@ -88,6 +88,9 @@ type Options struct {
 	// configured argv prepended to it.
 	OmpInvocation   string
 	OmpLaunchPrefix []string
+	// Claude is how a pane runs Claude Code, for a spec whose Backend is claude; nil when no role
+	// runs on it, and such a spec is then refused.
+	Claude *ClaudeLaunch
 	// StopGrace is how long Suspend and Release wait for a process to end itself after its
 	// shutdown frame, and how long Resume waits for a previous incarnation to be gone
 	// (worker_stop_timeout_seconds).
@@ -130,6 +133,7 @@ type Runtime struct {
 	gitHubCredential runtime.GitHubCredential
 	ompInvocation    string
 	ompPrefix        []string
+	claude           *ClaudeLaunch
 	stopGrace        time.Duration
 	probeInterval    time.Duration
 	adoptTimeout     time.Duration
@@ -229,6 +233,7 @@ func New(opts Options) (*Runtime, error) {
 		gitHubCredential: opts.GitHubCredential,
 		ompInvocation:    opts.OmpInvocation,
 		ompPrefix:        opts.OmpLaunchPrefix,
+		claude:           opts.Claude,
 		stopGrace:        opts.StopGrace,
 		probeInterval:    opts.ProbeInterval,
 		adoptTimeout:     opts.AdoptTimeout,

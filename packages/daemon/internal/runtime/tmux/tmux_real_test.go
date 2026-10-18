@@ -929,7 +929,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
 	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
-		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
+		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded session file is missing: "+missing.ResumeSessionFile {
 		t.Errorf("Resume from a missing session file = %v", err)
 	}
 }
@@ -1493,7 +1493,7 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 		{
 			name:   "a process that is not OMP",
 			loc:    stale(bystander[0], bystander[1], bystanderPid, bystanderTicks),
-			detail: fmt.Sprintf("pane %s pid %d is not running OMP (recorded pid %d start %d)", bystander[1], bystanderPid, bystanderPid, bystanderTicks),
+			detail: fmt.Sprintf("pane %s pid %d is not running a Legion agent (recorded pid %d start %d)", bystander[1], bystanderPid, bystanderPid, bystanderTicks),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

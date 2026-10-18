@@ -71,6 +71,17 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 	if len(spec.Prompt.RolePromptPaths) == 0 {
 		return refuse("no role prompt")
 	}
+	switch spec.Backend {
+	case "", BackendOmp:
+	case BackendClaude:
+		// Only a phase worker runs on Claude Code (config's worker_backends): an architect is woken by
+		// Envoy notices and the controller by its own, which Claude Code's print mode never delivers.
+		if spec.Role == claim.RoleController || spec.Role == claim.RoleArchitect {
+			return refuse("the %s runs only on omp", spec.Role)
+		}
+	default:
+		return refuse("backend %q is neither omp nor claude", spec.Backend)
+	}
 	// A workspace recovered after its volume was lost is recreated with a fresh session: the one
 	// it had went with the volume, so a resume of it fails every attempt (workspace-init checks the
 	// session before it recreates anything).

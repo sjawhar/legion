@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 )
 
 // bootReads is what boot reads from the configuration, the daemon's environment and the files they
@@ -133,20 +134,28 @@ func (c natsConnection) log(log *slog.Logger) {
 }
 
 // tmuxReads is what a daemon on this host needs that readBoot reads: the OMP invocation for its
-// panes, and the host's git and jj its own provisioning runs (daemonTools); no pane is told either.
+// panes, Claude Code for the panes of a role on claude, and the host's git and jj its own
+// provisioning runs (daemonTools); no pane is told the last two.
 type tmuxReads struct {
-	invocation string            // "" when boot does not run the host's Oh My Pi
-	tools      map[string]string // nil without a repository
+	invocation string             // "" when boot does not run the host's Oh My Pi
+	claude     *tmux.ClaudeLaunch // nil when no role runs on claude
+	tools      map[string]string  // nil without a repository
 }
 
 // readTmux is tmux's share of readBoot: the OMP invocation when boot runs the host's Oh My Pi
-// (hostOMP), whose one command is `mise where <tool>` when the invocation names a mise tool, and,
-// for a configuration with a repository, the host's git and jj Legion runs itself.
+// (hostOMP), whose one command is `mise where <tool>` when the invocation names a mise tool; Claude
+// Code (resolveClaude) when worker_backends puts a role on claude; and, for a configuration with a
+// repository, the host's git and jj Legion runs itself.
 func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func(string) string, hostOMP bool) (tmuxReads, error) {
 	var r tmuxReads
 	var err error
 	if hostOMP {
 		if r.invocation, err = omplaunch.ResolveInvocation(cfg.OmpInvocation, getenv); err != nil {
+			return tmuxReads{}, err
+		}
+	}
+	if cfg.UsesClaude() {
+		if r.claude, err = resolveClaude(lookup); err != nil {
 			return tmuxReads{}, err
 		}
 	}

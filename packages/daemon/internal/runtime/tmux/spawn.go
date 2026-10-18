@@ -367,12 +367,12 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 				if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
 					verb = "resurrecting"
 				}
-				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded OMP session file is missing: %s",
+				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded session file is missing: %s",
 					spec.Issue, verb, spec.ResumeSessionFile)
 			}
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 		}
-		r.log.Info("tmux runtime: resuming a recorded OMP session", "claim", spec.Claim, "session", spec.ResumeSessionFile)
+		r.log.Info("tmux runtime: resuming a recorded session", "claim", spec.Claim, "backend", spec.Backend, "session", spec.ResumeSessionFile)
 	}
 	if err := makePaneHome(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -402,12 +402,18 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	path = workerbin.Path(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
+	var backendPairs []string
+	if spec.Backend == runtime.BackendClaude {
+		if inner, backendPairs, err = r.claudeLaunch(spec); err != nil {
+			return runtime.Locator{}, err
+		}
+	}
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHConfigDir: ghConfigDir,
 	}, files)
-	return r.openPane(ctx, spec, paneCommand(pairs, command))
+	return r.openPane(ctx, spec, paneCommand(append(pairs, backendPairs...), command))
 }
 
 // openPane puts the pane on the server under the launch lock: into the window of a pane of the

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 func TestWorkerBackendsDefaultEveryRoleToOmp(t *testing.T) {
@@ -12,7 +13,7 @@ func TestWorkerBackendsDefaultEveryRoleToOmp(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	for _, role := range []claim.Role{claim.RoleArchitect, claim.RolePlanner, claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
-		if got := cfg.BackendFor(role); got != WorkerBackendOmp {
+		if got := cfg.BackendFor(role); got != runtime.BackendOmp {
 			t.Errorf("BackendFor(%s) = %q, want omp", role, got)
 		}
 	}
@@ -23,11 +24,11 @@ func TestWorkerBackendsChooseClaudePerRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got := cfg.BackendFor(claim.RoleImplementer); got != WorkerBackendClaude {
+	if got := cfg.BackendFor(claim.RoleImplementer); got != runtime.BackendClaude {
 		t.Errorf("BackendFor(implementer) = %q, want claude", got)
 	}
 	for _, role := range []claim.Role{claim.RolePlanner, claim.RoleTester, claim.RoleArchitect} {
-		if got := cfg.BackendFor(role); got != WorkerBackendOmp {
+		if got := cfg.BackendFor(role); got != runtime.BackendOmp {
 			t.Errorf("BackendFor(%s) = %q, want omp", role, got)
 		}
 	}

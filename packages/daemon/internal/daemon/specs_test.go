@@ -112,6 +112,67 @@ func TestAMergerIsToldItsProjectsMergeRules(t *testing.T) {
 	}
 }
 
+// A role worker_backends puts on claude is launched on Claude Code and told the Claude Code part
+// after its role's parts; every other role, and every role when the daemon names no backend, on Oh
+// My Pi with its parts alone.
+func TestAClaimsBackendIsItsRolesAndAClaudeRoleIsToldClaudeCodesTools(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	onClaude := func(role claim.Role) runtime.Backend {
+		if role == claim.RoleImplementer {
+			return runtime.BackendClaude
+		}
+		return runtime.BackendOmp
+	}
+	for _, tc := range []struct {
+		name    string
+		role    claim.Role
+		backend func(claim.Role) runtime.Backend
+		want    runtime.Backend
+	}{
+		{"an implementer on claude", claim.RoleImplementer, onClaude, runtime.BackendClaude},
+		{"a tester on omp", claim.RoleTester, onClaude, runtime.BackendOmp},
+		{"a daemon that names no backend", claim.RoleImplementer, nil, runtime.BackendOmp},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			token, err := claim.NewToken("s1", "S1-2", tc.role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, backend: tc.backend}
+			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: tc.role})
+			if err != nil {
+				t.Fatalf("SpawnSpec: %v", err)
+			}
+			if spec.Backend != tc.want {
+				t.Errorf("backend = %q, want %q", spec.Backend, tc.want)
+			}
+			parts, err := composer.Compose(tc.role, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := parts.RolePromptPaths
+			if tc.want == runtime.BackendClaude {
+				want = append(want, composer.ClaudeMechanicsPath())
+			}
+			if !slices.Equal(spec.Prompt.RolePromptPaths, want) {
+				t.Errorf("role prompts = %q, want %q", spec.Prompt.RolePromptPaths, want)
+			}
+		})
+	}
+	body, err := os.ReadFile(composer.ClaudeMechanicsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"`Read`, `Write` and `Edit`", "There is no `grep`, `glob` or `find` tool", "`Agent` tool", "`mcp__legion__legion`", "`Skill` tool"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("the Claude Code part does not say %q", want)
+		}
+	}
+}
+
 // The daemon's controller (`controller: daemon`) is launched with its role part and the headless
 // part, told the project's design gate policy as the operator's controller is, with the
 // deployment's instructions and launch secrets, and with no repository, no git identity and

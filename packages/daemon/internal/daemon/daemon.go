@@ -639,7 +639,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
 	} else {
-		err = prepareTmux(cfg, log, o, reads.dispatchToken, reads.tmux.invocation, &p)
+		err = prepareTmux(cfg, log, o, reads.dispatchToken, reads.tmux, &p)
 	}
 	if err != nil {
 		return plan{}, err
@@ -651,11 +651,16 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 // invocation readBoot resolved, the Dispatch bearer written where every pane reads it, and the
 // provider keys resolved from secretsd into the files every pane's shim reads. The worker stream is
 // a unix socket under the state directory (decision 2 — no configuration key).
-func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken, invocation string, p *plan) error {
+func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, reads tmuxReads, p *plan) error {
+	invocation := reads.invocation
 	p.newRuntime, p.gate = o.runtime, o.gate
 	p.stream = "unix://" + filepath.Join(cfg.StateDir, streamSocket)
 	if p.newRuntime == nil {
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
+		if reads.claude != nil {
+			log.Info("legion daemon resolved Claude Code for the roles worker_backends puts on claude",
+				"claude", reads.claude.Binary, "plugin", reads.claude.PluginDir, "bun", reads.claude.Bun)
+		}
 	}
 	dispatchTokenFile := ""
 	if dispatchToken != "" {
@@ -695,7 +700,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, reads.claude, providerEnvDir, dispatchTokenFile, log)
 	}
 	return nil
 }
@@ -706,9 +711,10 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
 // Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
 // scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+func tmuxRuntime(cfg config.Config, project, invocation string, claude *tmux.ClaudeLaunch, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
+		opts.Claude = claude
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
 			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
@@ -904,7 +910,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, defaultBranch: p.defaultBranch, designGate: cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
-			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
+			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins, backend: cfg.BackendFor,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,

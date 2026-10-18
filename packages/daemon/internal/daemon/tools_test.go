@@ -60,6 +60,46 @@ func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	}
 }
 
+// A configuration that puts a role on claude needs Claude Code, bun for its MCP server, and the
+// built claude-envoy plugin: boot names every gap in one refusal, and takes each tool's override
+// before PATH.
+func TestResolveClaudeNamesEveryGap(t *testing.T) {
+	onPath, plugin := t.TempDir(), t.TempDir()
+	env := map[string]string{"PATH": onPath}
+	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
+	_, err := resolveClaude(lookup)
+	want := "worker_backends runs a role on claude, and boot is missing bun (set LEGION_BUN_PATH to an absolute executable path), " +
+		"claude (set LEGION_CLAUDE_PATH to an absolute executable path), the claude-envoy plugin (set LEGION_CLAUDE_PLUGIN_DIR to its package directory)"
+	if err == nil || err.Error() != want {
+		t.Fatalf("resolveClaude with nothing = %v\nwant %s", err, want)
+	}
+	executable(t, onPath, "bun")
+	pinned := executable(t, t.TempDir(), "claude")
+	env["LEGION_CLAUDE_PATH"], env["LEGION_CLAUDE_PLUGIN_DIR"] = pinned, plugin
+	if _, err := resolveClaude(lookup); err == nil || !strings.Contains(err.Error(), "holds no dist/envoy-channel.js: build the plugin") {
+		t.Fatalf("resolveClaude with an unbuilt plugin = %v", err)
+	}
+	for _, file := range []string{"dist/envoy-channel.js", "legion/.claude-plugin/plugin.json"} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(plugin, file)), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(plugin, file), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	launch, err := resolveClaude(lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Binary != pinned || launch.Bun != filepath.Join(onPath, "bun") || launch.PluginDir != plugin {
+		t.Errorf("resolveClaude = %+v", launch)
+	}
+	env["LEGION_CLAUDE_PLUGIN_DIR"] = "relative"
+	if _, err := resolveClaude(lookup); err == nil || !strings.Contains(err.Error(), "LEGION_CLAUDE_PLUGIN_DIR is not an absolute path") {
+		t.Errorf("a relative plugin dir = %v", err)
+	}
+}
+
 // Provisioning relies on jj 0.38's configuration layout (minimumJJ), so boot refuses a jj older
 // than 0.38, or one whose version it cannot read, naming what it found and LEGION_JJ_PATH, whether
 // the jj came from the override or from PATH; 0.38 itself and later releases, a build's suffix

@@ -56,6 +56,9 @@ type specs struct {
 	// Contract already set to api.DaemonAPIVersion; nil when the daemon knows none
 	// (LEGION-164's degraded mode). Never read under any other runtime.
 	plugins *runtime.PluginInstall
+	// backend is the backend a role runs on (config.Config.BackendFor); nil runs every role on Oh
+	// My Pi.
+	backend func(claim.Role) runtime.Backend
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -85,11 +88,22 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	return spec, nil
 }
 
-// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.
+// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's. A role on Claude
+// Code (backend) is told the daemon's Claude Code part after its role's parts.
 func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
+	}
+	backend := runtime.BackendOmp
+	if s.backend != nil {
+		backend = s.backend(c.Role)
+	}
+	if backend == runtime.BackendClaude {
+		if s.prompts == nil {
+			return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
+		}
+		promptPaths = append(promptPaths, s.prompts.ClaudeMechanicsPath())
 	}
 	addressing, err := AddressingFragment(s.project, c)
 	if err != nil {
@@ -118,6 +132,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			DeploymentInstructionsPath: s.instructions,
 		},
 		Repository: s.repo,
+		Backend:    backend,
 	}
 	if !s.repo.IsZero() {
 		if s.defaultBranch == nil {

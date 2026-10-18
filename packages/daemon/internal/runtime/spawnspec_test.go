@@ -67,6 +67,10 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		// name: a launch on a repository that names none has no base to start a new branch at.
 		{"a repository with no default branch", func(s *SpawnSpec) { s.DefaultBranch = "" },
 			"spawn legion-omp-legion-43-tester: no default branch for repository sjawhar/legion"},
+		{"an unknown backend", func(s *SpawnSpec) { s.Backend = "codex" }, `spawn legion-omp-legion-43-tester: backend "codex" is neither omp nor claude`},
+		{"an architect on Claude Code", func(s *SpawnSpec) {
+			s.Role, s.Claim, s.Backend = claim.RoleArchitect, "legion-omp-legion-43-architect", BackendClaude
+		}, "spawn legion-omp-legion-43-architect: the architect runs only on omp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := spawnSpec()
@@ -82,6 +86,8 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		"with a credential's pointer": func(s *SpawnSpec) { s.Env["GH_TOKEN_FILE"] = "/state/gh-token" },
 		"resuming a session":          func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/tester.jsonl" },
 		"recovering a lost workspace": func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
+		"on Oh My Pi by name":         func(s *SpawnSpec) { s.Backend = BackendOmp },
+		"on Claude Code":              func(s *SpawnSpec) { s.Backend = BackendClaude },
 	} {
 		spec := spawnSpec()
 		mutate(&spec)

@@ -120,6 +120,12 @@ func (c *Composer) ControllerPromptPaths(headless bool) ([]string, error) {
 	return []string{filepath.Join(c.sharedDir, "controller-root.md"), filepath.Join(c.goDir, launch)}, nil
 }
 
+// ClaudeMechanicsPath is the daemon's part a phase worker on Claude Code is told after its role's
+// parts (`worker_backends`): the role prompts' Oh My Pi tool names, as Claude Code names them.
+func (c *Composer) ClaudeMechanicsPath() string {
+	return filepath.Join(c.goDir, "claude-mechanics.md")
+}
+
 // Compose returns the shared role parts followed by this daemon's parts: the role's own, then the
 // text every architect (architect-common.md) or every phase worker (worker-common.md) shares. The
 // runtime appends addressing and deployment instructions after these paths.

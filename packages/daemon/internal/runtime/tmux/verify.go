@@ -97,7 +97,7 @@ const (
 	reasonPidMismatch
 	reasonStatUnreadable
 	reasonStartMismatch
-	reasonNotOmp
+	reasonNotAgent
 )
 
 // verdict is verifyPane's answer: verified, or why not, with what the pane showed instead.
@@ -125,16 +125,16 @@ func describeVerdict(pane string, recorded incarnation, v verdict) string {
 		return fmt.Sprintf("pane %s pid %d has no readable /proc stat (%s)", pane, v.observedPid, identity)
 	case reasonStartMismatch:
 		return fmt.Sprintf("pane %s runs pid %d started at %d (%s)", pane, v.observedPid, v.observedTicks, identity)
-	case reasonNotOmp:
-		return fmt.Sprintf("pane %s pid %d is not running OMP (%s)", pane, v.observedPid, identity)
+	case reasonNotAgent:
+		return fmt.Sprintf("pane %s pid %d is not running a Legion agent (%s)", pane, v.observedPid, identity)
 	default:
 		return fmt.Sprintf("pane %s runs its recorded process", pane)
 	}
 }
 
 // verifyPane asks whether pane still runs the recorded process: its current pid equals the
-// recorded pid, that pid's start ticks equal the recorded ones, and its command line names OMP —
-// the three tiers, in that order (runtime-tmux.ts:729-770). It is the one chokepoint Probe, a stop's
+// recorded pid, that pid's start ticks equal the recorded ones, and its command line names a Legion
+// agent — the three tiers, in that order (runtime-tmux.ts:729-770). It is the one chokepoint Probe, a stop's
 // kill gate, and a spawn's window choice all go through. The error is the runtime's own failure
 // (tmux could not be run, /proc could not be read for a reason other than the process being
 // gone); a listing that failed is a verdict, reasonListingFailed.
@@ -163,12 +163,12 @@ func (r *Runtime) verifyPane(ctx context.Context, pane string, recorded incarnat
 	if ticks != recorded.ticks {
 		return verdict{reason: reasonStartMismatch, observedPid: lookup.pid, observedTicks: ticks}, nil
 	}
-	omp, err := r.runsOmp(lookup.pid)
+	agent, err := r.runsAgent(lookup.pid)
 	if err != nil {
 		return verdict{}, err
 	}
-	if !omp {
-		return verdict{reason: reasonNotOmp, observedPid: lookup.pid}, nil
+	if !agent {
+		return verdict{reason: reasonNotAgent, observedPid: lookup.pid}, nil
 	}
 	return verdict{reason: reasonVerified}, nil
 }
@@ -226,10 +226,11 @@ func (r *Runtime) serverFork(pid int) (bool, error) {
 	return comm == parentComm, nil
 }
 
-// runsOmp is whether pid's command line names OMP. It is asked only just after pid's stat was
-// read, so a command line that has vanished since means the process exited in between — not OMP
-// any more (runtime-tmux.ts:859-873).
-func (r *Runtime) runsOmp(pid int) (bool, error) {
+// runsAgent is whether pid's command line names a Legion agent: OMP, or `legion claude-bridge`,
+// which runs Claude Code in OMP's place. It is asked only just after pid's stat was read, so a
+// command line that has vanished since means the process exited in between — no agent any more
+// (runtime-tmux.ts:859-873).
+func (r *Runtime) runsAgent(pid int) (bool, error) {
 	cmdline, err := r.readProc(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
 		if processGone(err) {
@@ -237,7 +238,7 @@ func (r *Runtime) runsOmp(pid int) (bool, error) {
 		}
 		return false, err
 	}
-	return strings.Contains(string(cmdline), "omp"), nil
+	return strings.Contains(string(cmdline), "omp") || strings.Contains(string(cmdline), "claude-bridge"), nil
 }
 
 // parseProcStatCommAndParent is a /proc/<pid>/stat line's comm (field 2, between the first `(` and
