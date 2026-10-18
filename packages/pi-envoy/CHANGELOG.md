@@ -10,8 +10,10 @@
   told. Now `envoy_role_set` refuses to move off such a role, naming the role and the
   subscriptions, and `envoy_unsubscribe` leaves them open, named or not, listing them as kept
   (`details.kept`); an explicit empty `topics` list closes nothing. Every role move (the tool's, a
-  plugin's claim, and the reclaim a session start, switch or drift heal runs) runs one at a time
-  and decides inside its turn, from the session and the role it leaves when it runs: a reclaim
+  plugin's claim, the heartbeat's role check, and the reclaim a session start, switch or drift
+  heal runs) runs one at a time and decides inside its turn, from the session and the role it
+  leaves when it runs; the heartbeat's check does nothing while a session establishment has yet to
+  finish, leaving the role to that establishment's reclaim. So a reclaim
   that waited reclaims the role the transcript records by then rather than undo a move that landed
   first, and does nothing when a later start or switch has opened another session, which reclaims
   for itself, naming as its predecessor the id the hold is still under. A claim whose session

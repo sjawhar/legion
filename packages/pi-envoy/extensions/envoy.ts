@@ -142,18 +142,24 @@ const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 
 /**
  * Runs tasks one at a time, in the order they were queued; a task that fails does not stop the
- * ones after it. `settled()` resolves once every task queued so far has finished.
+ * ones after it. `settled()` resolves once every task queued so far has finished, and `busy()`
+ * says whether any task queued so far has yet to finish.
  */
 function serialQueue() {
   let tail: Promise<unknown> = Promise.resolve();
+  let unfinished = 0;
   return {
     run<T>(task: () => Promise<T>): Promise<T> {
+      unfinished += 1;
       // `tail` never rejects (it is always `next.catch(…)`), so a failed task never stops the next.
-      const next = tail.then(task);
+      const next = tail.then(task).finally(() => {
+        unfinished -= 1;
+      });
       tail = next.catch(() => undefined);
       return next;
     },
     settled: (): Promise<unknown> => tail,
+    busy: (): boolean => unfinished > 0,
   };
 }
 
@@ -1397,12 +1403,25 @@ export default function envoyExtension(pi: PiApi): void {
    * (`"reregistered"`), fires legion.ts's hook so the role's daemon ready call runs again. The
    * listener calls here propagate to the heartbeat's warn-once path; the hook runs detached
    * from that chain (see below).
+   *
+   * It may claim the role or end it, so it runs in its turn of the role moves, and does nothing
+   * if a session establishment has yet to finish then: that establishment reclaims for the
+   * session it opens, naming the predecessor this check would not, and a check that ran instead
+   * would claim for the new session without it and drop the role on the listener's 409. It
+   * answers whether it ran, so a check owed after an outage is kept for the next tick.
    */
-  const reassertRole = async (afterOutage: boolean, context: SessionContext): Promise<void> => {
+  const reassertRole = (afterOutage: boolean, context: SessionContext): Promise<boolean> =>
+    roleMoves.run(async () => {
+      if (sessionEstablishment.busy()) return false;
+      await reassertRoleNow(afterOutage, context);
+      return true;
+    });
+
+  const reassertRoleNow = async (afterOutage: boolean, context: SessionContext): Promise<void> => {
     const topic = claimedRoleTopic;
     if (topic === undefined) return;
-    // Both captured at entry: a session rebind or an explicit envoy_role_set
-    // racing this tick changes them mid-flight, and that call is the truth.
+    // Both captured at entry: a session rebind racing this tick changes them mid-flight, and the
+    // establishment it queues is the truth.
     const id = sessionID;
     const role = topic.slice(ROLE_TOPIC_PREFIX.length);
     const { client } = requireEnvoy();
@@ -1500,8 +1519,9 @@ export default function envoyExtension(pi: PiApi): void {
             throw error;
           }
         )
-        .then(() => {
-          registrationFailed = false;
+        .then((checked) => {
+          // A role check skipped for a session establishment still owes the regain, if any.
+          if (checked !== false) registrationFailed = false;
           heartbeatOutageNotified = false;
         })
         .catch((error) => {
@@ -1725,6 +1745,9 @@ export default function envoyExtension(pi: PiApi): void {
     establishedFor: string
   ): Promise<void> => {
     const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
+    // Ends the outgoing role at once rather than in the role moves' turn, so a `/new` never waits
+    // on a slow listener call: a move still in flight for the old session re-checks the session
+    // when its call returns, and hands back what it claimed (`setEnvoyRole`, `reassertRoleNow`).
     if (options.carryPreviousSessionRole === false) endOutgoingRole();
     restoreLocalSessionState(context);
     const branch = context.sessionManager.getBranch?.() ?? [];

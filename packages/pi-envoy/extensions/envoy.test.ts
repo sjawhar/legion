@@ -4389,6 +4389,15 @@ describe("envoy OMP extension", () => {
           topics: [`notifications.role.${claimed}`],
         });
       }
+      const roleRead = /^\/v1\/roles\/([^/]+)$/.exec(url.pathname);
+      if (roleRead !== null && (init?.method ?? "GET") === "GET") {
+        const role = decodeURIComponent(roleRead[1] ?? "");
+        const holder = holders.get(role);
+        if (holder === undefined) {
+          return new Response(JSON.stringify({ error: "no live holder" }), { status: 404 });
+        }
+        return response({ role, holder, last_seen: 1 });
+      }
       if (url.pathname === "/v1/interests/unsubscribe") {
         for (const topic of body?.topics ?? []) {
           handedBack.push(`${topic}@${body?.session_id}`);
@@ -4416,7 +4425,22 @@ describe("envoy OMP extension", () => {
         sessionManager: { ...base.sessionManager, getBranch: () => [...fixture.entries] },
       };
     };
-    const context = live(sessionID);
+    // The session start's context reads the host's one session manager, whose id a test moves in
+    // place, and keeps the heartbeat the extension registers on it, which `tick` runs once.
+    const manager = { id: sessionID };
+    let heartbeat: (() => void) | undefined;
+    const startContext = live(sessionID);
+    const context: SessionContext = {
+      ...startContext,
+      sessionManager: { ...startContext.sessionManager, getSessionId: () => manager.id },
+      setInterval: (callback: () => void) => {
+        heartbeat = callback;
+      },
+    };
+    const tick = () => {
+      if (heartbeat === undefined) throw new Error("no heartbeat was registered");
+      heartbeat();
+    };
     await fixture.handlers.get("session_start")?.({}, context);
     await claimEnvoyRole(sessionID, "legion-controller", context);
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
@@ -4442,6 +4466,9 @@ describe("envoy OMP extension", () => {
       claims,
       claimSessions,
       handedBack,
+      holders,
+      manager,
+      tick,
       gate,
       nextRegistration,
     };
@@ -4577,6 +4604,45 @@ describe("envoy OMP extension", () => {
     expect(claimSessions.at(-1)).toBe("legion-controller@ses_ff_fork2");
     const next = await roleTool.execute("", { role: "reviewer" });
     expect(next.details).toEqual({ role: "reviewer", released: "legion-controller" });
+  });
+
+  test("a heartbeat's role check in a fork-over-fork gap leaves the role to the second fork's reclaim", async () => {
+    const { fixture, live, context, roleTool, handedBack, manager, tick, gate, nextRegistration } =
+      await gatedRoleFixture("heartbeat-fork-gap", "ses_hb");
+    const held = gate("legion-controller");
+    const claimed = claimEnvoyRole("ses_hb", "legion-controller", context).catch(() => undefined);
+    await held.reached;
+    const registering = nextRegistration("ses_hb_fork");
+    manager.id = "ses_hb_fork";
+    const forked = fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      live("ses_hb_fork")
+    );
+    await registering;
+    manager.id = "ses_hb_fork2";
+    const forkedAgain = fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      live("ses_hb_fork2")
+    );
+    // Each drain lets everything that can run do so (no real I/O runs here): first the second
+    // fork's handler as far as its queue, so the heartbeat sees a steady session; then the tick's
+    // registration, the only one of the second fork before the claim lands, and its role check
+    // into the role-move queue, ahead of the second fork's reclaim.
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    await drain();
+    const tickRegistered = nextRegistration("ses_hb_fork2");
+    tick();
+    await tickRegistered;
+    await drain();
+    held.release();
+    await claimed;
+    await forked;
+    await forkedAgain;
+    // The tool's move runs after both, so its answer is the end state: the role is still held,
+    // under the second fork, whose hold the move hands back.
+    const next = await roleTool.execute("", { role: "reviewer" });
+    expect(next.details).toEqual({ role: "reviewer", released: "legion-controller" });
+    expect(handedBack).toContain("notifications.role.legion-controller@ses_hb_fork2");
   });
 
   test("an establishment's reclaim belongs to the session it was queued for, though the host's one session manager moves on", async () => {
