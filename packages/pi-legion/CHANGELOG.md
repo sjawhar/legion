@@ -59,6 +59,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The daemon client, the handoff-commit lookup and the jj lock come from `@legion/pi-shared`
+  (`./daemon-client`, `./handoff-commit`, `./git-lock`), so `claude-envoy`'s Legion tool uses the
+  same code (sjawhar/legion#2032). No behavior change.
+
 - The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
   `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no
   userinfo, a host that is a plain DNS name, a dotted-quad IPv4 or a bracketed IPv6 address, a
