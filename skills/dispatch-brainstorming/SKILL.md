@@ -28,8 +28,8 @@ no open answer goes out at once, whatever its stage.
 
 Read `skill://dispatch` before the first version: its "Writing a spec", "Decision blocks",
 "Writing for the human" and "Approval of a spec" sections define the spec's shape, each block's
-shape, and when approval is requested. A Legion phase worker never writes the spec; it sends a
-decision to its architect (`skill://legion-worker`).
+shape, and when approval is requested. A Legion phase worker never writes the issue's spec
+document; it sends a decision to its architect (`skill://legion-worker`).
 
 ## Where the spec lives
 
@@ -98,7 +98,7 @@ reactions, and so do corrections to it. Neither your model nor theirs is the sta
 
 Once the spec is approved — or, when the issue needed no spec at all (a bug fix with no design
 decision), once you have enough to plan from — the implementation plan is the issue's `plan.md`
-document, never its spec and never a repository file:
+document, never its spec:
 
 ```bash
 dispatch artifact --issue <KEY> --name plan.md --content-file - <<'EOF'
@@ -108,7 +108,8 @@ EOF
 
 Uploading `plan.md` again writes its next version. `writing-plans`'s content rules still apply in
 full — file structure, task right-sizing, bite-sized steps, no placeholders, the header, and its
-self-review — only where the plan lives changes: the issue's `plan.md`, never a repository file.
+self-review — only where the plan lives changes: the issue's `plan.md`, in place of a plan file. A
+copy in the repository, or spec code there, goes in only when the issue or the repository asks for it.
 Technical choices inside the approved design are made in the plan and need no question. A plan
 never changes a decision the human made in the spec: a change to one goes back to the spec as a
 decision block, with the evidence for it.

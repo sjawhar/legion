@@ -8,7 +8,7 @@ The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document
 
 ## A departure from the spec
 
-When what you measure or read makes the plan build something differently from the spec's design, the plan departs from the spec; never edit the spec. Record each departure in `plan.md` and in the handoff's `specDepartures` (below), and name each one in your completion summary: the architect decides whether the spec changes.
+When what you measure or read makes the plan build something differently from the spec's design, the plan departs from the spec; never edit the issue's spec document. Record each departure in `plan.md` and in the handoff's `specDepartures` (below), and name each one in your completion summary: the architect decides whether the spec changes.
 
 ## Workspace restrictions
 

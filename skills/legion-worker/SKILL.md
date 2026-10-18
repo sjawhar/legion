@@ -256,7 +256,7 @@ gate below.
 A plan that departs from the spec's design records the departure in `plan.md` and in the required
 `.legion/<issue>/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
 the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
-never edits the spec. Whether the spec changes is the architect's decision
+never edits the issue's spec document. Whether the spec changes is the architect's decision
 (`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
 
 ## Implementer push and pull request
