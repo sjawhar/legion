@@ -122,6 +122,48 @@ file through whichever `gh` the pane's `PATH` resolves. A box whose login `PATH`
 wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in the shell that starts
 the daemon, or every pane's `gh` and push act as whoever the wrapper routes to.
 
+## Phase workers on Claude Code
+
+`worker_backends` in `legion.yaml` runs a phase worker's role on Claude Code instead of Oh My Pi:
+
+```yaml
+worker_backends:
+  implementer: claude
+```
+
+Each key is one of the phase workers' roles (`planner`, `implementer`, `tester`, `reviewer`,
+`merger`) and each value `omp` or `claude`; a role left out runs on Oh My Pi. The loader refuses the
+architect (it is woken by notices on its Envoy role topic, and Claude Code's print mode delivers no
+channel notification), the controller and any other role, a role named twice, any other backend,
+and `claude` under `runtime: kubernetes`, since the worker image carries no Claude Code. Only the
+tmux runtime runs a Claude Code role.
+
+For such a role the pane's shim runs `legion claude-bridge -- claude -p --input-format stream-json
+--output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config …`.
+The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is the pane's
+`CLAUDE_CONFIG_DIR`: it holds the transcript, the MCP configuration the daemon writes (one server,
+`legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,
+and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
+relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
+comes back as the same Claude Code session.
+
+Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
+the same refusals:
+
+- `LEGION_CLAUDE_PATH`, the `claude` executable, else the first `claude` on `PATH`;
+- `LEGION_BUN_PATH`, the `bun` the MCP server runs on, else the first `bun` on `PATH`;
+- `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`: it must hold
+  `dist/envoy-channel.js` and the generated Legion plugin's `legion/.claude-plugin/plugin.json`
+  (`bun run build` in that package writes both).
+
+A missing one refuses the boot, naming every gap in one line. The daemon names no model for Claude
+Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for example
+`ANTHROPIC_API_KEY: <secretsd key>`) is exported by the shim into `legion claude-bridge`'s
+environment, which Claude Code inherits, and into every Oh My Pi pane's as well. A key meant for the
+Claude Code roles alone goes in the claim's directory instead, before the claim first launches: a
+`settings.json` there whose `apiKeyHelper` prints the key, as `scripts/e2e/claude-backend-tmux.sh`,
+the live proof, writes it.
+
 ## Rotating the App keys
 
 When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless

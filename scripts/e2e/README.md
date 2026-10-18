@@ -16,6 +16,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; every container of its pod reserves its role's cpu and memory with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are the summed reservation; a second role joins the root's issue pod; suspend, resume, a same-agent refusal, a pod killed in place, and a relaunch before registration each hold; a new tree's root and child spawned at once each provision an issue pod and a volume of their own, neither able to read the other's workspace; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace and takes the swept issue's volume with its Sandbox; releasing one role leaves the issue's Sandbox and volume; a launch that replaces an issue pod another role still runs in names the replaced pod on its Sandbox, and the running role is observed displaced and resumes into the new pod; and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
+| `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the implementer `memory_request: 8Gi` under `memory: 32Gi` is admitted, scheduled and recorded `Burstable` with exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable role and refuses a request past its limit or that is no quantity, naming the key |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
@@ -522,6 +523,66 @@ goes first or the transcript's disk fills, as in [stage 3](#stage3-devbox-workfl
 evidence directory is under the scratch work directory, whose processes the teardown kills by path,
 so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ([`lib/transcript.sh`](#libtranscriptsh)).
+
+## claude-backend-tmux.sh
+
+```sh
+LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+  bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
+```
+
+**Devbox only; CI does not run this script.** It proves `worker_backends` on the tmux runtime: a
+real Go daemon whose `legion.yaml` puts the implementer on Claude Code (`worker_backends:
+{implementer: claude}`) drives one scratch Dispatch issue, a real Oh My Pi architect and planner
+take it to implementing, and the implementer runs as `legion claude-bridge -- claude -p …` in its
+pane. The checks:
+
+- `claude-implementer-registers`: the implementer's claim registers its Claude Code transcript,
+  `<state>/claude/<claim token>/projects/<cwd>/<session id>.jsonl`, as its session file and the
+  session id as its session; its `claude` runs as a child of `legion claude-bridge`, started with
+  `--session-id <that id>`.
+- `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write
+  and push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records
+  the completion's commit, which the implement App authored and committed, which is on
+  `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the transcript holds the
+  `mcp__legion__legion` call with a result that is not an error. No pull request is opened.
+- `kill-resumes-the-same-claude-session`: its pane killed, the claim relaunches one generation on,
+  registers the same session id and transcript path, runs `claude --resume <that id>`, and the
+  transcript's bytes from before the kill are unchanged. The resumed session, asked to quote the
+  marker its earlier instruction carried, quotes it, so the earlier turns are in its context and
+  not only on disk.
+- `every-launch-endpoint-checked`: every pane the daemon launched, Oh My Pi or Claude Code, was
+  checked by the watcher before it registered.
+
+Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
+Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
+the variable, before anything else, and refuses a key Anthropic's `GET /v1/models` does not accept
+(the key goes by a 0600 header file, never an argv). The run copies the key once into its work
+directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
+the daemon creates only when missing) before the claim exists: a `settings.json` whose
+`apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
+pane's environment carries `ANTHROPIC_API_KEY`, which the watcher checks for every agent process,
+and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is the Oh My
+Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
+([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
+the evidence directory; by default it is a fresh one under `/tmp`.
+
+The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
+native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
+[`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, and the design gate off, so the
+architect's gate registration starts planning with no approval. The daemon is started with
+`LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` set to the `claude` and `bun` on the operator's `PATH`,
+and `LEGION_CLAUDE_PLUGIN_DIR` set to this checkout's `packages/claude-envoy`, whose
+`dist/envoy-channel.js` and generated `legion/` must be built. Legion's role Apps resolve as Stage
+3's do: the daemon runs `secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
+GH_REVIEW_APP_PRIVATE_KEY_B64 -- …` as each App's `private_key_command`, and `prerequisites`
+checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, and
+refuses one that does not resolve to the agent tier. The proof human is the devbox's ordinary
+`gh` acting as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh)), so the run starts
+from the operator's own Oh My Pi session. The `EXIT` trap stops every process and container,
+copies every Oh My Pi session and Claude Code transcript into the evidence directory's
+`transcripts/`, closes any pull request of the run's project, and deletes the issue's branch on
+the smoke repository.
 
 ## Port admission
 
