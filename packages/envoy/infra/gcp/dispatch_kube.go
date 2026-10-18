@@ -1,12 +1,6 @@
 package gcp
 
 import (
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/base64"
-	"encoding/pem"
 	"errors"
 	"fmt"
 	"strings"
@@ -101,24 +95,11 @@ func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi
 	}).(pulumi.StringOutput)
 }
 
-// keyKind names a parsed private key's algorithm for a refusal, never its value.
-func keyKind(key any) string {
-	switch key.(type) {
-	case *ecdsa.PrivateKey:
-		return "an ECDSA"
-	case ed25519.PrivateKey:
-		return "an Ed25519"
-	default:
-		return "a non-RSA"
-	}
-}
-
 // refuseDispatchSecret is the one check every secret credential input of the component runs once
-// it resolves (tailnetAuthKey, signInClientSecret, agentSecretsToken, appPrivateKey): a blank or
-// whitespace-only value is a credential that cannot work (the sidecar cannot join the tailnet,
-// Dispatch refuses a blank sign-in secret or broker token at boot, and a blank App key turns the
-// App off), so it is refused here, and so is one holding an nkey seed. Each refusal names input
-// and never the value.
+// it resolves (tailnetAuthKey, signInClientSecret): a blank or whitespace-only value is a
+// credential that cannot work (the sidecar cannot join the tailnet, Dispatch refuses a blank
+// sign-in secret at boot), so it is refused here, and so is one holding an nkey seed. Each
+// refusal names input and never the value.
 func refuseDispatchSecret(v, dispatch, input string) error {
 	if strings.TrimSpace(v) == "" {
 		return fmt.Errorf("%s: %w", dispatch, core.InputErrorf(input, "%s is blank, which no credential is", input))
@@ -139,37 +120,6 @@ func refuseDispatchSeedInSecret(value pulumi.StringInput, dispatch, input string
 			return "", err
 		}
 		return v, nil
-	})).(pulumi.StringOutput)
-}
-
-// dispatchAppPEM is appPrivateKey once it resolves, rendered as the base64 Dispatch reads from
-// DISPATCH_APP_PEM_B64. Dispatch boots on this key only when its first PEM block parses as a
-// PKCS#1 RSA private key, or else as PKCS#8 holding an *rsa.PrivateKey — the rule mirrors
-// githubapp.parsePrivateKey (packages/envoy/internal/dispatch/githubapp/client.go), copied here
-// because the plugin compiles no Envoy package but bus and contracts — so anything else (a blank
-// value, a seed, no PEM block, an RSA public key, garbage in a PEM frame, an EC or Ed25519 key)
-// is refused naming appPrivateKey and never the value, failing the preview or update rather than
-// the pod's boot. ApplyT keeps the input's secretness, and ToSecret marks the result secret
-// whatever its own marking.
-func dispatchAppPEM(value pulumi.StringInput, dispatch string) pulumi.StringOutput {
-	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
-		if err := refuseDispatchSecret(v, dispatch, "appPrivateKey"); err != nil {
-			return "", err
-		}
-		block, _ := pem.Decode([]byte(v))
-		if block == nil {
-			return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey does not parse as a PEM block (not echoed)"))
-		}
-		if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
-			parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-			if err != nil {
-				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block is not a PKCS#1 or PKCS#8 RSA private key, which Dispatch's GitHub App needs to boot (not echoed)"))
-			}
-			if _, ok := parsed.(*rsa.PrivateKey); !ok {
-				return "", fmt.Errorf("%s: %w", dispatch, core.InputErrorf("appPrivateKey", "appPrivateKey's PEM block holds %s key, and Dispatch's GitHub App needs an RSA private key to boot (not echoed)", keyKind(parsed)))
-			}
-		}
-		return base64.StdEncoding.EncodeToString([]byte(v)), nil
 	})).(pulumi.StringOutput)
 }
 
@@ -256,12 +206,6 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	dispatchSecretData := pulumi.StringMap{
 		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret"),
 	}
-	if s.agentSecretsURL != "" {
-		dispatchSecretData["DISPATCH_AGENT_SECRETS_TOKEN"] = refuseDispatchSeedInSecret(args.AgentSecretsToken, dispatch, "agentSecretsToken")
-	}
-	if s.appClientID != "" {
-		dispatchSecretData["DISPATCH_APP_PEM_B64"] = dispatchAppPEM(args.AppPrivateKey, dispatch)
-	}
 	if _, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: dispatchSecretData}, child...); err != nil {
 		return nil, err
 	}
@@ -278,6 +222,18 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": seedPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: nats-seed\n" }).(pulumi.StringOutput)}}},
 	}, child...); err != nil {
 		return nil, err
+	}
+	tokenClassName := s.hostname + "-agent-secrets-token"
+	if s.agentSecretsURL != "" {
+		tokenPath := refuseDispatchSeed(args.AgentSecretsTokenSecret, dispatch, "agentSecretsTokenSecret").ApplyT(func(secret string) string {
+			return strings.TrimSuffix(secret, "/") + "/versions/latest"
+		}).(pulumi.StringOutput)
+		if _, err := apiextensions.NewCustomResource(ctx, tokenClassName, &apiextensions.CustomResourceArgs{
+			ApiVersion: pulumi.String("secrets-store.csi.x-k8s.io/v1"), Kind: pulumi.String("SecretProviderClass"), Metadata: metadata(tokenClassName),
+			OtherFields: kubernetes.UntypedArgs{"spec": pulumi.Map{"provider": pulumi.String("gke"), "parameters": pulumi.Map{"secrets": tokenPath.ApplyT(func(path string) string { return "- resourceName: " + path + "\n  path: agent-secrets-token\n" }).(pulumi.StringOutput)}}},
+		}, child...); err != nil {
+			return nil, err
+		}
 	}
 
 	// natsURL is the one NATS URL once checked: every container reads this output rather than the
@@ -307,14 +263,17 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}},
 	}
 	if s.agentSecretsURL != "" {
-		// The token is one key of the <hostname>-dispatch Secret, mounted alone as a read-only
-		// file of a volume of its own; DISPATCH_AGENT_SECRETS_TOKEN_FILE names that file.
+		// The token is read at run time from Secret Manager through a SecretProviderClass of its
+		// own, mounted as a read-only file of a volume of its own into envoy-dispatch alone;
+		// DISPATCH_AGENT_SECRETS_TOKEN_FILE names that file.
 		dispatchEnv = append(dispatchEnv, valueEnv("DISPATCH_AGENT_SECRETS_URL", s.agentSecretsURL), valueEnv("DISPATCH_AGENT_SECRETS_TOKEN_FILE", "/var/run/secrets/dispatch/agent-secrets-token"))
 		dispatchMounts = append(dispatchMounts, corev1.VolumeMountArgs{Name: pulumi.String("agent-secrets-token"), MountPath: pulumi.String("/var/run/secrets/dispatch"), ReadOnly: pulumi.Bool(true)})
-		volumes = append(volumes, corev1.VolumeArgs{Name: pulumi.String("agent-secrets-token"), Secret: &corev1.SecretVolumeSourceArgs{SecretName: pulumi.String(dispatchSecretName), Items: corev1.KeyToPathArray{corev1.KeyToPathArgs{Key: pulumi.String("DISPATCH_AGENT_SECRETS_TOKEN"), Path: pulumi.String("agent-secrets-token")}}}})
+		volumes = append(volumes, corev1.VolumeArgs{Name: pulumi.String("agent-secrets-token"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(tokenClassName)}}})
 	}
 	if s.appClientID != "" {
-		dispatchEnv = append(dispatchEnv, valueEnv("DISPATCH_APP_CLIENT_ID", s.appClientID), secretEnv("DISPATCH_APP_PEM_B64", dispatchSecretName, "DISPATCH_APP_PEM_B64"))
+		// The App key is one key of a Kubernetes Secret this component never creates: it exists at
+		// run time (GKE SecretSync), so the Deployment does not wait on it.
+		dispatchEnv = append(dispatchEnv, valueEnv("DISPATCH_APP_CLIENT_ID", s.appClientID), valueEnv("DISPATCH_APP_ID", s.appID), secretEnv("DISPATCH_APP_PEM_B64", s.appKeySecretName, s.appKeySecretKey))
 	}
 
 	// The pod is ready only once the Auth Proxy can connect (roles/cloudsql.client) and the seed
@@ -323,7 +282,11 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 	// deployment.
 	deploymentOptions := make([]pulumi.ResourceOption, 0, len(child)+1)
 	deploymentOptions = append(deploymentOptions, child...)
-	deploymentOptions = append(deploymentOptions, pulumi.DependsOn([]pulumi.Resource{cloud.sqlClient, cloud.seedAccessor}))
+	deploymentDeps := []pulumi.Resource{cloud.sqlClient, cloud.seedAccessor}
+	if cloud.tokenAccessor != nil {
+		deploymentDeps = append(deploymentDeps, cloud.tokenAccessor)
+	}
+	deploymentOptions = append(deploymentOptions, pulumi.DependsOn(deploymentDeps))
 
 	if _, err := appsv1.NewDeployment(ctx, s.hostname, &appsv1.DeploymentArgs{
 		Metadata: metadata(s.hostname),

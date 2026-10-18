@@ -104,11 +104,15 @@
             "value": "example-app-client-id"
           },
           {
+            "name": "DISPATCH_APP_ID",
+            "value": "123456"
+          },
+          {
             "name": "DISPATCH_APP_PEM_B64",
             "valueFrom": {
               "secretKeyRef": {
-                "key": "DISPATCH_APP_PEM_B64",
-                "name": "example-dispatch-dispatch"
+                "key": "private-key.b64",
+                "name": "example-app-key"
               }
             }
           }
@@ -345,16 +349,14 @@
         "name": "serve"
       },
       {
-        "name": "agent-secrets-token",
-        "secret": {
-          "items": [
-            {
-              "key": "DISPATCH_AGENT_SECRETS_TOKEN",
-              "path": "agent-secrets-token"
-            }
-          ],
-          "secretName": "example-dispatch-dispatch"
-        }
+        "csi": {
+          "driver": "secrets-store-gke.csi.k8s.io",
+          "readOnly": true,
+          "volumeAttributes": {
+            "secretProviderClass": "example-dispatch-agent-secrets-token"
+          }
+        },
+        "name": "agent-secrets-token"
       }
     ]
   }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -29,6 +30,7 @@ var (
 	tailnetDNSNameRule = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.ts\.net$`)
 	signInDomainRule   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$`)
 	namespaceRule      = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	secretKeyRule      = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
 )
 
 // DispatchArgs are the inputs of an envoy-infra:gcp:Dispatch. Every field of a plain Go type is a
@@ -52,18 +54,26 @@ type DispatchArgs struct {
 	SignInClientSecret pulumi.StringInput `pulumi:"signInClientSecret" provider:"secret"`
 	SignInDomain       string             `pulumi:"signInDomain"`
 
-	// AgentSecretsUrl and agentSecretsToken turn on Dispatch's secrets-broker relay together:
-	// DISPATCH_AGENT_SECRETS_URL (an absolute http(s) URL with no path; a trailing slash is
-	// trimmed, as Dispatch trims it) and the token the pod reads from the file
-	// DISPATCH_AGENT_SECRETS_TOKEN_FILE names. Set both or neither.
-	AgentSecretsUrl   string             `pulumi:"agentSecretsUrl,optional"`
-	AgentSecretsToken pulumi.StringInput `pulumi:"agentSecretsToken,optional" provider:"secret"`
+	// AgentSecretsUrl and agentSecretsTokenSecret turn on Dispatch's secrets-broker relay
+	// together: DISPATCH_AGENT_SECRETS_URL (an absolute http(s) URL with no path; a trailing
+	// slash is trimmed, as Dispatch trims it) and the token the pod reads at run time from the
+	// file DISPATCH_AGENT_SECRETS_TOKEN_FILE names. The token is never an input:
+	// AgentSecretsTokenSecret is the Secret Manager secret's resource path
+	// (projects/<project>/secrets/<id>), mounted through the Secret Manager CSI driver, so its
+	// value never enters the component or its state. Set both or neither.
+	AgentSecretsUrl         string             `pulumi:"agentSecretsUrl,optional"`
+	AgentSecretsTokenSecret pulumi.StringInput `pulumi:"agentSecretsTokenSecret,optional"`
 
-	// AppClientId and appPrivateKey turn on Dispatch's GitHub App together:
-	// DISPATCH_APP_CLIENT_ID and, as the base64 of the PEM appPrivateKey holds,
-	// DISPATCH_APP_PEM_B64. Set both or neither; nothing sends a numeric App ID.
-	AppClientId   string             `pulumi:"appClientId,optional"`
-	AppPrivateKey pulumi.StringInput `pulumi:"appPrivateKey,optional" provider:"secret"`
+	// AppClientId, appId, appPrivateKeySecretName and appPrivateKeySecretKey turn on Dispatch's
+	// GitHub App together: DISPATCH_APP_CLIENT_ID and DISPATCH_APP_ID as plain values, and
+	// DISPATCH_APP_PEM_B64 read from the key AppPrivateKeySecretKey of the Kubernetes Secret
+	// AppPrivateKeySecretName in the component's namespace. That Secret is created at run time
+	// (GKE SecretSync), never by this component, and the key never enters it or its state. Set
+	// all four or none.
+	AppClientId             string `pulumi:"appClientId,optional"`
+	AppId                   string `pulumi:"appId,optional"`
+	AppPrivateKeySecretName string `pulumi:"appPrivateKeySecretName,optional"`
+	AppPrivateKeySecretKey  string `pulumi:"appPrivateKeySecretKey,optional"`
 
 	DatabaseVersion    *string `pulumi:"databaseVersion,optional"`
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
@@ -94,6 +104,9 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 		{"signInDomain", args.SignInDomain},
 		{"agentSecretsUrl", args.AgentSecretsUrl},
 		{"appClientId", args.AppClientId},
+		{"appId", args.AppId},
+		{"appPrivateKeySecretName", args.AppPrivateKeySecretName},
+		{"appPrivateKeySecretKey", args.AppPrivateKeySecretKey},
 	} {
 		if bus.HoldsSeed(value.value) {
 			return value.input, true
@@ -141,7 +154,8 @@ type dispatchSettings struct {
 	images                                      struct{ envoy, tailscale, proxy string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
-	agentSecretsURL, appClientID                string
+	agentSecretsURL, appClientID, appID         string
+	appKeySecretName, appKeySecretKey           string
 	deletionProtection                          bool
 	serveConfig                                 string
 }
@@ -196,13 +210,13 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.SignInClientSecret == nil {
 		return dispatchSettings{}, errors.New("signInClientSecret is required")
 	}
-	if args.AgentSecretsToken != nil && args.AgentSecretsUrl == "" {
-		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsToken is set")
+	if args.AgentSecretsTokenSecret != nil && args.AgentSecretsUrl == "" {
+		return dispatchSettings{}, errors.New("agentSecretsUrl is required when agentSecretsTokenSecret is set")
 	}
 	agentSecretsURL := strings.TrimSuffix(args.AgentSecretsUrl, "/")
 	if args.AgentSecretsUrl != "" {
-		if args.AgentSecretsToken == nil {
-			return dispatchSettings{}, errors.New("agentSecretsToken is required when agentSecretsUrl is set")
+		if args.AgentSecretsTokenSecret == nil {
+			return dispatchSettings{}, errors.New("agentSecretsTokenSecret is required when agentSecretsUrl is set")
 		}
 		// The shape Dispatch itself requires of DISPATCH_AGENT_SECRETS_URL, checked here so a bad
 		// URL fails the resolver rather than the pod's boot.
@@ -216,11 +230,33 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, errors.New("agentSecretsUrl must carry no user, password, query or fragment: it is rendered as a plain environment variable (not echoed)")
 		}
 	}
-	if args.AppPrivateKey != nil && args.AppClientId == "" {
-		return dispatchSettings{}, errors.New("appClientId is required when appPrivateKey is set")
+	var appSet, appMissing []string
+	for _, in := range []struct{ input, value string }{
+		{"appClientId", args.AppClientId},
+		{"appId", args.AppId},
+		{"appPrivateKeySecretName", args.AppPrivateKeySecretName},
+		{"appPrivateKeySecretKey", args.AppPrivateKeySecretKey},
+	} {
+		if in.value != "" {
+			appSet = append(appSet, in.input)
+		} else {
+			appMissing = append(appMissing, in.input)
+		}
 	}
-	if args.AppClientId != "" && args.AppPrivateKey == nil {
-		return dispatchSettings{}, errors.New("appPrivateKey is required when appClientId is set")
+	if len(appSet) > 0 && len(appMissing) > 0 {
+		return dispatchSettings{}, fmt.Errorf("%s required when %s is set: appClientId, appId, appPrivateKeySecretName and appPrivateKeySecretKey are set together or not at all",
+			strings.Join(appMissing, ", "), appSet[0])
+	}
+	if len(appSet) > 0 {
+		if id, err := strconv.ParseUint(args.AppId, 10, 64); err != nil || id == 0 {
+			return dispatchSettings{}, errors.New("appId must be the GitHub App's numeric ID: digits only, not 0 (not echoed)")
+		}
+		if !dnsSubdomain(args.AppPrivateKeySecretName) {
+			return dispatchSettings{}, fmt.Errorf("appPrivateKeySecretName %q must be a DNS subdomain", args.AppPrivateKeySecretName)
+		}
+		if !secretKeyRule.MatchString(args.AppPrivateKeySecretKey) {
+			return dispatchSettings{}, fmt.Errorf("appPrivateKeySecretKey %q must match %s", args.AppPrivateKeySecretKey, secretKeyRule)
+		}
 	}
 
 	s := dispatchSettings{
@@ -240,6 +276,9 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	s.signIn.domain = args.SignInDomain
 	s.agentSecretsURL = agentSecretsURL
 	s.appClientID = args.AppClientId
+	s.appID = args.AppId
+	s.appKeySecretName = args.AppPrivateKeySecretName
+	s.appKeySecretKey = args.AppPrivateKeySecretKey
 	if args.DatabaseVersion != nil {
 		if *args.DatabaseVersion == "" {
 			return dispatchSettings{}, errors.New("databaseVersion is empty; leave it unset for " + defaultDispatchDatabaseVersion)
@@ -274,6 +313,20 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 // dnsLabel reports whether value is a DNS-1123 label: namespaceRule's shape, at most 63 characters.
 func dnsLabel(value string) bool {
 	return len(value) <= 63 && namespaceRule.MatchString(value)
+}
+
+// dnsSubdomain reports whether value is a DNS-1123 subdomain, the shape of a Kubernetes Secret's
+// name: dot-separated DNS labels, at most 253 characters.
+func dnsSubdomain(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if !dnsLabel(label) {
+			return false
+		}
+	}
+	return true
 }
 
 // NewDispatch registers a Dispatch component after resolving all plain inputs and requiring the

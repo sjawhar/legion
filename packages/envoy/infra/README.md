@@ -136,11 +136,11 @@ port 8766, through that Service; the listener binds the pod's loopback either wa
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
 | Autopilot cluster | Enables the Secret Manager add-on and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
+| Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and the NATS seed mount (and, with `agentSecretsTokenSecret`, a second SecretProviderClass for the broker token). |
 | Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
 | ClusterIP Service | Port 8766 to the Dispatch pod: the in-cluster path the NetworkPolicy opens to the namespaces `allowedNamespaces` names. |
 | NetworkPolicy | Ingress to the Dispatch pod: no rule at all with `allowedNamespaces` unset or empty, so no other pod reaches it (Kubernetes still admits the pod's own node); otherwise one rule admitting the named namespaces' pods on port 8766. |
-| Project IAM member and secret IAM member | `roles/cloudsql.client`, conditioned to this Cloud SQL instance alone, and `roles/secretmanager.secretAccessor` on the NATS seed secret, each granted to the pod's Workload Identity principal. |
+| Project IAM member and secret IAM member | `roles/cloudsql.client`, conditioned to this Cloud SQL instance alone, and `roles/secretmanager.secretAccessor` on the NATS seed secret (and on the broker token secret when `agentSecretsTokenSecret` is set), each granted to the pod's Workload Identity principal. |
 
 ### Inputs
 
@@ -157,41 +157,52 @@ replacement from deleting the database first.
 pod's own cluster, whose pods the NetworkPolicy admits on port 8766; unset or empty, the policy
 admits no ingress at all.
 
-Two optional pairs each come as both inputs or neither. `agentSecretsUrl` (plain) with
-`agentSecretsToken` (a secret Pulumi input) turns on Dispatch's secrets-broker relay: the URL must
-be absolute http(s) with a host and no path, as Dispatch requires of `DISPATCH_AGENT_SECRETS_URL`
-(a trailing slash is trimmed, as Dispatch trims it), and is rendered as that plain env var, while
-the token becomes the `DISPATCH_AGENT_SECRETS_TOKEN` key of the `<hostname>-dispatch` Secret,
-mounted alone as a read-only file of a volume of its own at
+Two optional groups each come as all their inputs or none. Neither takes a secret value: workloads
+read secrets at run time, so no broker token or App key ever enters the component or its Pulumi
+state.
+
+`agentSecretsUrl` (plain) with `agentSecretsTokenSecret` (a Secret Manager secret's resource path,
+`projects/<project>/secrets/<id>`, a Pulumi input that is not secret, as `natsSeedSecret` is) turns
+on Dispatch's secrets-broker relay: the URL must be absolute http(s) with a host and no path, as
+Dispatch requires of `DISPATCH_AGENT_SECRETS_URL` (a trailing slash is trimmed, as Dispatch trims
+it), and is rendered as that plain env var. The token is read at run time through a second
+SecretProviderClass (provider `gke`, `/versions/latest` appended to the path) and its own CSI
+volume, mounted read-only into `envoy-dispatch` alone, not the listener, at
 `/var/run/secrets/dispatch/agent-secrets-token`, which `DISPATCH_AGENT_SECRETS_TOKEN_FILE` names.
-The URL must be reachable from the pod's own network, because Dispatch's broker client dials it
-directly, never through the Tailscale sidecar's SOCKS5 proxy (which only the NATS clients use): an
-Internet host through Cloud NAT, an in-cluster Service, or a name a private DNS zone on the
-cluster's VPC resolves to one. A name only the tailnet resolves fails at request time, not at boot.
-The URL is rendered as a plain environment variable, so one carrying a user, a password, a query
-or a fragment is refused, and no refusal quotes it.
-`appClientId` (plain) with `appPrivateKey` (the key's PEM text, a secret Pulumi input) turns on
-Dispatch's GitHub App: `DISPATCH_APP_CLIENT_ID` is a plain env var, and `DISPATCH_APP_PEM_B64`,
-the base64 of the PEM, is a new key of the same Secret, computed without unmarking the key's
-secretness and read as a secret env var; no numeric App ID is sent. The key must be an RSA private
-key, as PKCS#1 (the form GitHub serves an App's key in) or PKCS#8 — the one kind Dispatch's
-GitHub App boots on. Setting the App also starts Dispatch's webhook redelivery sweep, which needs
-the NATS redelivery bucket the hub's Dispatch user is granted (`DispatchPermissions`): a pod whose
-NATS user lacks it exits at boot. With either pair unset, nothing renders and the pod template is
-unchanged.
+The component grants the pod's principal `roles/secretmanager.secretAccessor` on that secret, as it
+does for the NATS seed, and the Deployment waits for the grant. The URL must be reachable from the
+pod's own network, because Dispatch's broker client dials it directly, never through the Tailscale
+sidecar's SOCKS5 proxy (which only the NATS clients use): an Internet host through Cloud NAT, an
+in-cluster Service, or a name a private DNS zone on the cluster's VPC resolves to one. A name only
+the tailnet resolves fails at request time, not at boot. The URL is rendered as a plain environment
+variable, so one carrying a user, a password, a query or a fragment is refused, and no refusal
+quotes it.
+
+`appClientId`, `appId` (the App's numeric ID, as a string of digits), `appPrivateKeySecretName`
+and `appPrivateKeySecretKey` (plain: the name and key of an existing Kubernetes Secret in the
+component's namespace holding the base64 of the App's PEM private key) turn on Dispatch's GitHub
+App: `DISPATCH_APP_CLIENT_ID` and `DISPATCH_APP_ID` are plain env vars, and `DISPATCH_APP_PEM_B64`
+is a `secretKeyRef` to that Secret and key. The component never creates that Secret and the
+Deployment does not wait on it: GKE SecretSync creates it at run time from Secret Manager, so the
+pod starts once the Secret exists. The key is never parsed here; Dispatch checks it at boot (an RSA
+private key, PKCS#1 or PKCS#8). Setting the App also starts Dispatch's webhook redelivery sweep,
+which needs the NATS redelivery bucket the hub's Dispatch user is granted
+(`DispatchPermissions`): a pod whose NATS user lacks it exits at boot. With either group unset,
+nothing renders and the pod template is unchanged.
 
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
 names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
 and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses an
-`agentSecretsUrl` or an `appClientId` whose partner input is missing, and an `agentSecretsUrl`
-that is not an absolute http(s) URL with no path. Once each secret input resolves, before any
-child takes it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret`,
-`agentSecretsToken` and `appPrivateKey`; a blank or whitespace-only `tailnetAuthKey`,
-`signInClientSecret`, `agentSecretsToken` or `appPrivateKey`, none of which can work blank (the
-sidecar cannot join the tailnet, Dispatch refuses a blank sign-in secret or broker token at boot,
-and a blank App key would turn the App off); and an `appPrivateKey` whose first PEM block is not
-a PKCS#1 or PKCS#8 RSA private key, the one key Dispatch boots on — each a refusal naming the
-input and never echoing it. It refuses a `natsUrl` that holds a seed, is local (the pod reaches
+`agentSecretsUrl` or an `agentSecretsTokenSecret` whose partner input is missing, an `appClientId`,
+`appId`, `appPrivateKeySecretName` or `appPrivateKeySecretKey` set without the others (each missing
+input named), an `appId` that is not digits or is 0, an `appPrivateKeySecretName` that is not a DNS
+subdomain, an `appPrivateKeySecretKey` outside `[-._a-zA-Z0-9]+`, and an `agentSecretsUrl` that is
+not an absolute http(s) URL with no path. Once each secret input resolves, before any child takes
+it, it refuses a seed in `tailnetAuthKey`, `signInClientSecret`, `natsSeedSecret` and
+`agentSecretsTokenSecret`; a blank or whitespace-only `tailnetAuthKey` or `signInClientSecret`,
+neither of which can work blank (the sidecar cannot join the tailnet, Dispatch refuses a blank
+sign-in secret at boot) — each a refusal naming the input and never echoing it. It refuses a
+`natsUrl` that holds a seed, is local (the pod reaches
 NATS only through the Tailscale sidecar's SOCKS5 proxy), is empty, or holds a comma or a control
 character once it resolves, each a refusal naming `natsUrl`. It requires both `gcp` and `random`
 providers. It creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so
