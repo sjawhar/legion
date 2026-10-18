@@ -414,7 +414,7 @@ type userKind struct {
 func userKinds(u NATSUserArgs) [4]userKind {
 	return [4]userKind{
 		{input: "machineId", id: u.MachineID, set: u.MachineID != nil, grant: core.HostPermissions},
-		{input: "dispatchMachineId", id: u.DispatchMachineID, set: u.DispatchMachineID != nil, fixed: []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable}, grant: core.DispatchPermissions},
+		{input: "dispatchMachineId", id: u.DispatchMachineID, set: u.DispatchMachineID != nil, fixed: core.DispatchDurables(), grant: core.DispatchPermissions},
 		{input: "daemon", set: u.Daemon, grant: func(string) core.Permissions { return core.DaemonPermissions() }},
 		{input: "permissions", set: u.Permissions != nil, grant: func(string) core.Permissions {
 			return core.Permissions{Publish: *u.Permissions.Publish.Core(), Subscribe: *u.Permissions.Subscribe.Core()}
