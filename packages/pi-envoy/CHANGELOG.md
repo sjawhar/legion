@@ -20,7 +20,8 @@
   through a switch Oh My Pi rolls back, before or after its event; a `/new` or resume that fails
   in that gap ends the role with a warning that says who claims it again. The agent is told of
   each id change a fork or branch makes once, in the session it names, never in a later `/new`
-  session.
+  session. A resumed session whose records name the role the session it replaced held takes the
+  role back rather than be refused by that session's hold.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

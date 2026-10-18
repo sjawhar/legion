@@ -1386,13 +1386,21 @@ export default function envoyExtension(pi: PiApi): void {
   // not carried into `openedID`, the session it opened (`switchSession`). A role claimed under that
   // id is not the outgoing one's: legion.ts's handler for the same switch can claim for the new
   // session first, and that claim, with the notice subjects it opened, stays. Answers the role it
-  // ended, if any.
+  // ended, if any, and keeps it with the id its hold was under (`endedHold`): that hold is this
+  // process's own, so the session opened may supersede it when its own records name the role.
   const endOutgoingRole = (openedID: string): string | undefined => {
     if (claimedRoleSessionID === openedID) return undefined;
     const ended = heldRole();
+    const holdID = claimedRoleSessionID;
     endRole();
+    if (ended !== undefined && holdID !== undefined) endedHold = { role: ended, id: holdID };
     return ended;
   };
+
+  // The last role a `/new` or resume ended here and the id its hold at the listener was under, so
+  // a later session whose records name the role may supersede that hold: the listener names that
+  // id until a claim moves the role, and naming it after that supersedes nothing.
+  let endedHold: { readonly role: string; readonly id: string } | undefined;
 
   // The host's own session id. Oh My Pi moves its one session manager before it dispatches the
   // session event that moves `sessionID`, so between the two only this names the session open.
@@ -1609,13 +1617,9 @@ export default function envoyExtension(pi: PiApi): void {
       // A session whose establishment gave way to a host move the host then undid with no event
       // (a resume that failed after its move): the host is on it again, so it is settled here by
       // the rule of the switch that opened it and from what it continued, closing the subject of
-      // the session pi-envoy had moved to.
+      // the session pi-envoy had moved to. A rollback the tick undoes settles it there instead.
       const resettle =
-        switchWithoutEvent === undefined &&
-        rolledBack === undefined &&
-        unsettled?.id === liveSessionID
-          ? unsettled
-          : undefined;
+        switchWithoutEvent === undefined && unsettled?.id === liveSessionID ? unsettled : undefined;
       if (healing) return;
       healing = true;
       // The host minted an id with no session event (a fresh TUI's first, or a session file it
@@ -1922,15 +1926,22 @@ export default function envoyExtension(pi: PiApi): void {
       // session holds. The listener decides that atomically for a soft claim;
       // the id this session continues is the one live holder it may supersede.
       //
-      // That id is the one this process's hold is under: usually the one this session continues,
-      // but the id an earlier establishment came from when that establishment gave way to this
-      // one before it carried the role.
+      // That id is the one this process's hold is under at the listener: the hold it still has;
+      // or, for the role a `/new` or resume ended here (`endedHold`), the id the listener still
+      // names, which a session that gave way before claiming left in place; otherwise the id this
+      // session continues. A carrying switch supersedes it. A `/new` or resume continues nothing,
+      // but when its own records name the role that hold is for, the hold is this process's own,
+      // so its claim may supersede it too.
+      const ownEnded =
+        endedHold?.role === role && endedHold.id !== establishedFor ? endedHold.id : undefined;
       const holdingID =
         claimedRoleSessionID !== undefined && claimedRoleSessionID !== establishedFor
           ? claimedRoleSessionID
-          : continuing;
+          : (ownEnded ?? continuing);
       const continued =
-        carryPreviousSessionRole && holdingID !== "" && holdingID !== establishedFor
+        (carryPreviousSessionRole || ownEnded !== undefined) &&
+        holdingID !== "" &&
+        holdingID !== establishedFor
           ? holdingID
           : undefined;
       await setEnvoyRole(role, establishedFor, { soft: true, previousSessionID: continued }).catch(
@@ -2249,41 +2260,33 @@ export default function envoyExtension(pi: PiApi): void {
   // switch left, after that switch moved pi-envoy on (Oh My Pi rolls a resume back after its event
   // ran, or the heartbeat had run it as a resume that threw): it undoes the switch. A role held
   // under the session undone stays when the records of the session returned to name it (a plugin
-  // that claims at every session event claimed it there too), and the claim that follows names
-  // the undone session as its predecessor; any other role it holds is that session's alone, so it
-  // ends here and at the listener. The session returned to is then established again, from the
-  // session pi-envoy had moved to, by the rule of the switch that opened it when it never settled.
-  // One warning says what the undo ended, and that notices a plugin opened before the switch stay
-  // closed: only that plugin reopens them. No id-change notice: the agent's transcript is the one
-  // it had before.
+  // that claims at every session event claimed it there too), and the establishment that follows
+  // carries it, so its claim names the undone session as its predecessor whatever the returned
+  // session's own rule; any other role it holds is that session's alone, so it ends here and at
+  // the listener. The session returned to is then established again, from the session pi-envoy
+  // had moved to: by the rule of the switch that opened it when it never settled, otherwise by the
+  // rolled-back switch's own (a resume carries nothing back). Everything is decided before the
+  // hand-back; a switch that lands while it waits on the listener establishes its own session, so
+  // the undo establishes nothing then. One warning says what the undo ended, and that notices a
+  // plugin opened before the switch stay closed: only that plugin reopens them. No id-change
+  // notice: the agent's transcript is the one it had before.
   const undoSwitch = async (
     left: { readonly id: string; readonly reason: SessionSwitchReason | undefined },
     context: SessionContext
   ): Promise<void> => {
     const undoneID = sessionID;
     restoreLocalSessionState(context);
+    const returnedID = sessionID;
     const closedBySwitch = noticesClosedBy?.by === undoneID ? noticesClosedBy : undefined;
     noticesClosedBy = undefined;
+    const settle = unsettled?.id === left.id ? unsettled : undefined;
     const held = heldRole();
-    let ended: { role: string; pluginHeld: boolean } | undefined;
-    if (held !== undefined && claimedRoleSessionID === undoneID) {
-      const recorded = transcriptClaimedRole(context.sessionManager.getBranch?.() ?? []);
-      if (recorded !== held) {
-        ended = { role: held, pluginHeld: roleNoticeSubjects.size > 0 };
-        endRole();
-        // The session undone is this process's, and abandoned: hand its hold back, so the
-        // listener does not keep naming it, before the session returned to reads the listener.
-        await requireEnvoy()
-          .client.unsubscribe({ sessionID: undoneID, topics: [ROLE_TOPIC_PREFIX + held] })
-          .catch((error: unknown) =>
-            logger.warn("envoy: a rolled-back session's role was not handed back", {
-              role: held,
-              undone: undoneID,
-              error: messageFor(error),
-            })
-          );
-      }
-    }
+    const heldUndone = held !== undefined && claimedRoleSessionID === undoneID;
+    const kept =
+      heldUndone && transcriptClaimedRole(context.sessionManager.getBranch?.() ?? []) === held;
+    const ended =
+      heldUndone && !kept ? { role: held, pluginHeld: roleNoticeSubjects.size > 0 } : undefined;
+    if (ended !== undefined) endRole();
     // The switch's closing of a plugin's notices still matters only while none are open again (a
     // plugin that claimed at its event reopened them) and the role ended here is another.
     const closed =
@@ -2294,7 +2297,7 @@ export default function envoyExtension(pi: PiApi): void {
         : undefined;
     if (ended !== undefined || closed !== undefined) {
       const parts = [
-        `envoy: the switch to session ${undoneID} was rolled back to session ${sessionID}`,
+        `envoy: the switch to session ${undoneID} was rolled back to session ${returnedID}`,
       ];
       if (ended !== undefined) {
         parts.push(
@@ -2310,24 +2313,35 @@ export default function envoyExtension(pi: PiApi): void {
       }
       logger.warn("envoy: a session switch was rolled back", {
         undone: undoneID,
-        sessionID,
+        sessionID: returnedID,
         ended: ended?.role,
         noticesClosed: closed?.role,
       });
       context.ui.notify(parts.join("; "), "warning");
     }
-    if (!inbound) return;
-    const settle = unsettled?.id === left.id ? unsettled : undefined;
-    await establishSession(
-      context,
+    const options: EstablishSessionOptions =
       settle === undefined
-        ? { carryPreviousSessionRole: true }
+        ? { carryPreviousSessionRole: kept || carriesSession(left.reason) }
         : {
-            carryPreviousSessionRole: settle.carryPreviousSessionRole,
+            carryPreviousSessionRole: kept || settle.carryPreviousSessionRole,
             continues: settle.continues,
-          },
-      undoneID
-    );
+          };
+    if (ended !== undefined) {
+      // The session undone is this process's, and abandoned: hand its hold back, so the listener
+      // does not keep naming it, before the session returned to reads the listener.
+      await requireEnvoy()
+        .client.unsubscribe({ sessionID: undoneID, topics: [ROLE_TOPIC_PREFIX + ended.role] })
+        .catch((error: unknown) =>
+          logger.warn("envoy: a rolled-back session's role was not handed back", {
+            role: ended.role,
+            undone: undoneID,
+            error: messageFor(error),
+          })
+        );
+      if (!sessionOpen(returnedID)) return;
+    }
+    if (!inbound) return;
+    await establishSession(context, options, undoneID);
   };
 
   const rebind = async (
