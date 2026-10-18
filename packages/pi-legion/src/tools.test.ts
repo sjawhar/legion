@@ -55,7 +55,7 @@ function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession
   return {
     kind: role === "architect" ? "architect" : "phase-worker",
     role,
-    sessionId: "ses_208",
+    sessionID: "ses_208",
     tree: "LEGION-208",
     issue,
     secret: "claim-secret",
@@ -547,7 +547,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
     },
     handoffCommit: noHandoffCommit,
     resolveDocument: noDocumentLookup,
-    session: () => ({ kind: "controller", sessionId: "ses_controller" }),
+    session: () => ({ kind: "controller", sessionID: "ses_controller" }),
   });
   const run = (parameters: Record<string, unknown>) =>
     tool.execute("", parameters, undefined, undefined, context("ses_controller"));

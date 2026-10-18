@@ -346,17 +346,10 @@ export default function legionExtension(pi: PiApi): void {
           const sessionID = context.sessionManager.getSessionId();
           const active = claimSession.capability(sessionID);
           if (active !== undefined) {
-            return {
-              kind: active.role === "architect" ? "architect" : "phase-worker",
-              role: active.role,
-              sessionId: active.sessionID,
-              tree: active.tree,
-              issue: active.issue,
-              secret: active.secret,
-            };
+            return { kind: active.role === "architect" ? "architect" : "phase-worker", ...active };
           }
           if (controllerSession.isClaimedSession(sessionID)) {
-            return { kind: "controller", sessionId: sessionID };
+            return { kind: "controller", sessionID };
           }
           throw new Error("legion is available only to this session's registered claim");
         },
