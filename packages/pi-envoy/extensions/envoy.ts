@@ -494,11 +494,14 @@ export default function envoyExtension(pi: PiApi): void {
   let recordedSessionKey: string | undefined;
   let heartbeatRegistered = false;
   // The session the last switch or branch the host began was leaving (`session_before_switch`,
-  // `session_before_branch`), whether that switch carries it on (a fork, a branch) rather than
-  // replace it (`/new`, a resume), and whether a heartbeat tick has already left a drift to it:
-  // the host moves its manager before the switch's event.
+  // `session_before_branch`), that switch's reason (none for a branch), and whether a heartbeat
+  // tick has already left a drift to it: the host moves its manager before the switch's event.
   let leavingSession:
-    | { readonly id: string; readonly carries: boolean; waited: boolean }
+    | {
+        readonly id: string;
+        readonly reason: SessionSwitchReason | undefined;
+        waited: boolean;
+      }
     | undefined;
   let claimedRoleTopic: string | undefined;
   // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
@@ -1109,10 +1112,11 @@ export default function envoyExtension(pi: PiApi): void {
   // between. A fork or branch carries the session on, so its frames arrive. A subject the role
   // holds is addressed to the role, not the session: its notices still arrive until the switch
   // ends the role, since the controller, the one plugin that opens such subjects, claims its role
-  // again for whatever session the pane is left on, and a wake dropped here would be lost.
+  // again for the session its pane is left on when the switch's event runs, and a wake dropped
+  // here would be lost.
   const replacedSessionTopic = (topic: string): boolean =>
     leavingSession !== undefined &&
-    !leavingSession.carries &&
+    !carriesSession(leavingSession.reason) &&
     hostSessionID() !== leavingSession.id &&
     topic === agentSubject(leavingSession.id);
 
@@ -1362,11 +1366,10 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // A `new` or `resume` switch installs an unrelated transcript, so the outgoing session's role is
-  // not carried into `openedID`, the session it opened (`rebind`, or the heartbeat's heal of a
-  // switch that sent no event). A role claimed under that id is not the outgoing one's:
-  // legion.ts's handler for the same switch can claim for the new session first, and that claim,
-  // with the notice subjects it opened, stays.
-  const endOutgoingRole = (openedID = sessionID): void => {
+  // not carried into `openedID`, the session it opened (`switchSession`). A role claimed under that
+  // id is not the outgoing one's: legion.ts's handler for the same switch can claim for the new
+  // session first, and that claim, with the notice subjects it opened, stays.
+  const endOutgoingRole = (openedID: string): void => {
     if (claimedRoleSessionID !== openedID) endRole();
   };
 
@@ -1556,31 +1559,37 @@ export default function envoyExtension(pi: PiApi): void {
       const drifted = liveSessionID !== sessionID;
       // A switch the host has begun moves its manager before its event, which establishes the
       // session it opens: a drift seen meanwhile is most likely that switch, not an id the host
-      // minted on its own, so the first such tick leaves it to the event. A switch that throws
-      // after the move sends none, so a later tick heals by that switch's own rule: a `/new` or
-      // resume ends the role here and carries nothing into the session it opened.
-      let carryPreviousSessionRole = true;
+      // minted on its own, so the first such tick leaves it to the event. One whose event has not
+      // come by a later tick (a slow switch, or one that threw after its move) is run from here,
+      // as its event would run it (`switchSession`); an event that comes after finds it done.
+      let switchWithoutEvent: { reason: SessionSwitchReason | undefined } | undefined;
       if (drifted && leavingSession?.id === sessionID) {
         if (!leavingSession.waited) {
           leavingSession.waited = true;
           return;
         }
-        carryPreviousSessionRole = leavingSession.carries;
+        switchWithoutEvent = { reason: leavingSession.reason };
       }
       if (healing) return;
       healing = true;
       if (drifted) {
         // The host minted an id with no session event (a fresh TUI's first, or a session file
-        // it moved off), so it refreshed no shell environment: name the live id, and refresh
-        // the snapshot the shell takes, as the host does after a session event.
+        // it moved off), or its switch's event has not come, so it refreshed no shell environment:
+        // name the live id, and refresh the snapshot the shell takes, as the host does after a
+        // session event.
         bindDispatchSession(liveSessionID);
         procmgr.refreshShellConfigCache();
-        if (!carryPreviousSessionRole) endOutgoingRole(liveSessionID);
       }
       // A drifted id re-establishes the whole session (reclaimHeldRoles included); a steady one
       // re-registers, then checks the listener still resolves this session's role.
       const afterOutage = registrationFailed;
-      void (drifted ? establishSession(context, { carryPreviousSessionRole }) : registerSession())
+      void (
+        switchWithoutEvent !== undefined
+          ? switchSession(switchWithoutEvent.reason, context)
+          : drifted
+            ? establishSession(context)
+            : registerSession()
+      )
         .then(
           () => (drifted ? undefined : reassertRole(afterOutage, context)),
           (error: unknown) => {
@@ -2037,23 +2046,70 @@ export default function envoyExtension(pi: PiApi): void {
     }
   });
 
-  const rebind = async (
+  // Whether a switch carries the session on (a fork, a branch, a tree navigation) rather than
+  // replace it (`/new`, a resume). The reclaim's carry, the heartbeat's heal and the frame drop all
+  // follow it.
+  const carriesSession = (reason: SessionSwitchReason | undefined): boolean =>
+    reason !== "new" && reason !== "resume";
+
+  // What a switch does once the host has moved its session manager: the switch's event runs it
+  // (`rebind`), and so does the heartbeat for a switch whose event has not come by its next tick.
+  // It throws what the establishment threw.
+  const switchSession = async (
     reason: SessionSwitchReason | undefined,
     context: SessionContext
   ): Promise<void> => {
-    if (await isSubagent(context)) return;
     const previousID = sessionID;
     restoreLocalSessionState(context);
-    const carryPreviousSessionRole = reason !== "new" && reason !== "resume";
+    const carryPreviousSessionRole = carriesSession(reason);
     // Ended here, as the switch lands, rather than in its establishment: a `/new` never waits on
     // an earlier establishment or a slow listener call, and the heartbeat's role check, which names
     // the id the hold is under, never carries the outgoing hold into the new session. A move still
     // in flight for the old session re-checks the session when its call returns, and hands back
     // what it claimed (`setEnvoyRole`, `reassertRoleNow`).
-    if (!carryPreviousSessionRole) endOutgoingRole();
+    if (!carryPreviousSessionRole) endOutgoingRole(sessionID);
     if (!inbound) return;
     try {
       await establishSession(context, { carryPreviousSessionRole }, previousID);
+    } finally {
+      // A branch or fork carries the transcript — and a handoff its
+      // agent-written summary — forward under a freshly minted session id. The
+      // extension tracks the change, but any identity already baked into that
+      // carried context — envoy_whoami output, ids the agent named in sent
+      // messages — silently rots, and peers who saved the old id can no longer
+      // reach this session. Tell the agent without starting a turn; the notice
+      // lands when it next runs. A "new" or "resume" switch replaces the
+      // transcript with one that matches its own id, so those stay silent. Told
+      // once: a switch run again for the same id finds it unchanged.
+      if (carryPreviousSessionRole && previousID !== "" && previousID !== sessionID) {
+        pi.sendMessage(
+          {
+            customType: "envoy-message",
+            content: encode({
+              envoy: {
+                notice: "session id changed",
+                previous_session_id: previousID,
+                session_id: sessionID,
+                detail:
+                  "This conversation now lives under a new session id. Any identity you shared earlier (envoy_whoami output, session ids named in messages) is stale, and peers using the old id cannot reach you. Re-run envoy_whoami before identifying yourself and re-announce the new id to peers you already introduced yourself to.",
+              },
+            }),
+            display: true,
+            details: LOCAL_ENVOY_NOTICE,
+          },
+          { deliverAs: "steer", triggerTurn: false }
+        );
+      }
+    }
+  };
+
+  const rebind = async (
+    reason: SessionSwitchReason | undefined,
+    context: SessionContext
+  ): Promise<void> => {
+    if (await isSubagent(context)) return;
+    try {
+      await switchSession(reason, context);
     } catch (error) {
       // A switch during a network outage must degrade, not fail the handler;
       // the next switch or the NATS client's own reconnect re-establishes.
@@ -2062,33 +2118,6 @@ export default function envoyExtension(pi: PiApi): void {
         "warning"
       );
     }
-    // A branch or fork carries the transcript — and a handoff its
-    // agent-written summary — forward under a freshly minted session id. The
-    // extension tracks the change, but any identity already baked into that
-    // carried context — envoy_whoami output, ids the agent named in sent
-    // messages — silently rots, and peers who saved the old id can no longer
-    // reach this session. Tell the agent without starting a turn; the notice
-    // lands when it next runs. A "new" or "resume" switch replaces the
-    // transcript with one that matches its own id, so those stay silent.
-    if (previousID === "" || previousID === sessionID) return;
-    if (reason === "new" || reason === "resume") return;
-    pi.sendMessage(
-      {
-        customType: "envoy-message",
-        content: encode({
-          envoy: {
-            notice: "session id changed",
-            previous_session_id: previousID,
-            session_id: sessionID,
-            detail:
-              "This conversation now lives under a new session id. Any identity you shared earlier (envoy_whoami output, session ids named in messages) is stale, and peers using the old id cannot reach you. Re-run envoy_whoami before identifying yourself and re-announce the new id to peers you already introduced yourself to.",
-          },
-        }),
-        display: true,
-        details: LOCAL_ENVOY_NOTICE,
-      },
-      { deliverAs: "steer", triggerTurn: false }
-    );
   };
 
   // Only a switch reports why the session changed; a branch or a tree
@@ -2109,13 +2138,11 @@ export default function envoyExtension(pi: PiApi): void {
   // the host has yet to give an id have nothing to leave. A switch another extension cancels
   // changes nothing: only a switch or a branch moves the host's id once it has one, so no drift
   // follows it, and the session it would have left stays the host's.
-  const leaveSession = (carries: boolean): void => {
-    if (sessionID !== "") leavingSession = { id: sessionID, carries, waited: false };
+  const leaveSession = (reason: SessionSwitchReason | undefined): void => {
+    if (sessionID !== "") leavingSession = { id: sessionID, reason, waited: false };
   };
-  pi.on("session_before_switch", async (event) =>
-    leaveSession(event.reason !== "new" && event.reason !== "resume")
-  );
-  pi.on("session_before_branch", async () => leaveSession(true));
+  pi.on("session_before_switch", async (event) => leaveSession(event.reason));
+  pi.on("session_before_branch", async () => leaveSession(undefined));
 
   pi.on("session_shutdown", async (_event, context) => {
     shuttingDown = true;
