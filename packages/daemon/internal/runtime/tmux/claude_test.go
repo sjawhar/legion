@@ -106,42 +106,28 @@ func TestClaudeEnvironment(t *testing.T) {
 	}
 }
 
-// A Claude Code launch on a runtime that resolved no Claude Code is refused, and one resuming a
-// recorded Oh My Pi session is refused before anything is written.
-func TestClaudeLaunchRefusals(t *testing.T) {
+// A Claude Code launch resuming a recorded Oh My Pi session is refused before anything is written;
+// a fresh one writes its claim's directory and runs the bridge.
+func TestClaudeLauncherLaunch(t *testing.T) {
 	spec := testSpec()
 	spec.Backend = runtime.BackendClaude
-	r := &Runtime{stateDir: t.TempDir(), legion: "/opt/legion/legion"}
-	if _, _, err := r.claudeLaunch(spec); err == nil || !strings.Contains(err.Error(), "resolved no Claude Code") {
-		t.Errorf("no Claude Code: %v", err)
-	}
-	r.claude = &testClaude
+	host := Host{StateDir: t.TempDir(), Legion: "/opt/legion/legion"}
+	launcher := NewClaudeLauncher(testClaude)
 	spec.ResumeSessionFile = "/state/trees/x/.omp/session.jsonl"
-	if _, _, err := r.claudeLaunch(spec); err == nil || !strings.Contains(err.Error(), "the role's backend changed") {
+	if _, _, err := launcher.Launch(spec, host); err == nil || !strings.Contains(err.Error(), "the role's backend changed") {
 		t.Errorf("an Oh My Pi session: %v", err)
 	}
 	spec.ResumeSessionFile = ""
-	inner, pairs, err := r.claudeLaunch(spec)
+	inner, pairs, err := launcher.Launch(spec, host)
 	if err != nil {
 		t.Fatal(err)
 	}
-	configDir := ClaudeConfigDir(r.stateDir, spec.Claim)
+	configDir := ClaudeConfigDir(host.StateDir, spec.Claim)
+	if configDir != filepath.Join(host.StateDir, "claude", string(spec.Claim)) {
+		t.Errorf("ClaudeConfigDir = %s", configDir)
+	}
 	if !strings.Contains(inner, " claude-bridge -- ") || !strings.Contains(inner, "--mcp-config "+filepath.Join(configDir, "mcp.json")) ||
 		!strings.Contains(strings.Join(pairs, " "), "CLAUDE_CONFIG_DIR="+configDir) {
-		t.Errorf("claudeLaunch = %s, %q", inner, pairs)
-	}
-}
-
-// verifyPane's command-line tier accepts the bridge as it accepts OMP, and nothing else.
-func TestRunsAgent(t *testing.T) {
-	for cmdline, want := range map[string]bool{
-		"/opt/omp/bin/omp\x00--mode\x00rpc\x00":                        true,
-		"/opt/legion/legion\x00claude-bridge\x00--\x00/opt/claude\x00": true,
-		"/bin/sh\x00-c\x00sleep 1\x00":                                 false,
-	} {
-		r := &Runtime{readProc: func(string) ([]byte, error) { return []byte(cmdline), nil }}
-		if got, err := r.runsAgent(1); err != nil || got != want {
-			t.Errorf("runsAgent(%q) = %v, %v", cmdline, got, err)
-		}
+		t.Errorf("Launch = %s, %q", inner, pairs)
 	}
 }

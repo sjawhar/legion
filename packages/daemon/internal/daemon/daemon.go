@@ -650,16 +650,22 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 // prepareTmux is what panes on this host need beyond readBoot's: the plugin gate on the OMP
 // invocation readBoot resolved, the Dispatch bearer written where every pane reads it, and the
 // provider keys resolved from secretsd into the files every pane's shim reads. The worker stream is
-// a unix socket under the state directory (decision 2 — no configuration key).
+// a unix socket under the state directory (decision 2 — no configuration key). The runtime gets a
+// Launcher for each backend readBoot resolved (tmuxReads.launches); the gate and the model-fallback
+// read are Oh My Pi's, since the architect runs on it alone (runtime.Backends).
 func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken string, reads tmuxReads, p *plan) error {
-	invocation := reads.invocation
+	invocation := reads.launches[runtime.BackendOmp].invocation
 	p.newRuntime, p.gate = o.runtime, o.gate
 	p.stream = "unix://" + filepath.Join(cfg.StateDir, streamSocket)
-	if p.newRuntime == nil {
-		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
-		if reads.claude != nil {
-			log.Info("legion daemon resolved Claude Code for the roles worker_backends puts on claude",
-				"claude", reads.claude.Binary, "plugin", reads.claude.PluginDir, "bun", reads.claude.Bun)
+	launchers := map[runtime.Backend]tmux.Launcher{}
+	for _, backend := range cfg.Backends() {
+		read, ok := reads.launches[backend]
+		if !ok {
+			continue
+		}
+		launchers[backend] = read.launcher
+		if p.newRuntime == nil {
+			read.log(log)
 		}
 	}
 	dispatchTokenFile := ""
@@ -700,7 +706,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, reads.claude, providerEnvDir, dispatchTokenFile, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, launchers, providerEnvDir, dispatchTokenFile, log)
 	}
 	return nil
 }
@@ -711,10 +717,9 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
 // Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
 // scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation string, claude *tmux.ClaudeLaunch, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+func tmuxRuntime(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
-		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
-		opts.Claude = claude
+		opts := tmuxOptions(cfg, project, launchers, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
 			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
@@ -736,7 +741,7 @@ func tmuxRuntime(cfg config.Config, project, invocation string, claude *tmux.Cla
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
 // stream and the GitHub credential function, which boot hands the factory.
-func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
+func tmuxOptions(cfg config.Config, project string, launchers map[runtime.Backend]tmux.Launcher, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	return tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
@@ -745,8 +750,7 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		NatsURLs:          cfg.NatsURLs,
 		DispatchURL:       cfg.DispatchURL,
 		DispatchTokenFile: dispatchTokenFile,
-		OmpInvocation:     invocation,
-		OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
+		Launchers:         launchers,
 		StopGrace:         cfg.WorkerStopTimeout,
 		ProbeInterval:     cfg.ProbeInterval,
 		AdoptTimeout:      cfg.SlowCommandTimeout,

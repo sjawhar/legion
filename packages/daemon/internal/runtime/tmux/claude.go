@@ -24,16 +24,28 @@ type ClaudeLaunch struct {
 	Binary, PluginDir, Bun string
 }
 
+// NewClaudeLauncher is Claude Code's launch, from what boot resolved.
+func NewClaudeLauncher(launch ClaudeLaunch) Launcher {
+	return claudeLauncher{launch: launch}
+}
+
+type claudeLauncher struct{ launch ClaudeLaunch }
+
+// Marker is " claude-bridge -- ", the `legion` subcommand and its separator that the pane's
+// command line runs Claude Code under (claudeInnerCommand).
+func (claudeLauncher) Marker() string { return " claude-bridge -- " }
+
 // ClaudeMCPServer is the name the pane's one MCP server is configured under, which prefixes each of
 // its tools in Claude Code: `mcp__legion__legion`, `mcp__legion__envoy_publish`, …
 const ClaudeMCPServer = "legion"
 
 // ClaudeConfigDir is a claim's own Claude Code directory, its CLAUDE_CONFIG_DIR: the session
 // transcripts `--resume` reads, the MCP configuration, the bridge's phase-stall state. It is named
-// for the claim token, under the state directory but outside its secrets, so it outlives every
-// launch of the claim and no secret pruning removes it.
+// for the claim token, under Claude Code's session directory in the state directory
+// (runtime.BackendInfo.SessionDir) but outside its secrets, so it outlives every launch of the
+// claim and no secret pruning removes it.
 func ClaudeConfigDir(stateDir string, token claim.Token) string {
-	return filepath.Join(stateDir, "claude", string(token))
+	return filepath.Join(stateDir, runtime.Backends[runtime.BackendClaude].SessionDir, string(token))
 }
 
 // claudeTranscript is a transcript Claude Code writes: `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session>.jsonl`.
@@ -115,13 +127,10 @@ func claudeEnvironment(configDir string) []string {
 	}
 }
 
-// claudeLaunch is the inner command and the extra -e pairs of a Claude Code launch: the claim's
+// Launch is the inner command and the extra -e pairs of a Claude Code launch: the claim's
 // directory made, its MCP configuration written, and the session it starts or continues.
-func (r *Runtime) claudeLaunch(spec runtime.SpawnSpec) (inner string, pairs []string, err error) {
-	if r.claude == nil {
-		return "", nil, fmt.Errorf("spawn %s: its role runs on claude and the daemon resolved no Claude Code (worker_backends)", spec.Claim)
-	}
-	configDir := ClaudeConfigDir(r.stateDir, spec.Claim)
+func (l claudeLauncher) Launch(spec runtime.SpawnSpec, host Host) (inner string, pairs []string, err error) {
+	configDir := ClaudeConfigDir(host.StateDir, spec.Claim)
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("spawn %s: the Claude Code directory: %w", spec.Claim, err)
 	}
@@ -132,9 +141,9 @@ func (r *Runtime) claudeLaunch(spec runtime.SpawnSpec) (inner string, pairs []st
 		}
 		resume = true
 	}
-	mcpConfig, err := writeClaudeMCPConfig(configDir, *r.claude)
+	mcpConfig, err := writeClaudeMCPConfig(configDir, l.launch)
 	if err != nil {
 		return "", nil, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
-	return claudeInnerCommand(r.legion, *r.claude, mcpConfig, session, resume, spec.Prompt), claudeEnvironment(configDir), nil
+	return claudeInnerCommand(host.Legion, l.launch, mcpConfig, session, resume, spec.Prompt), claudeEnvironment(configDir), nil
 }

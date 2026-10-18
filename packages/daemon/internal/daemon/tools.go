@@ -8,13 +8,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 )
 
 // daemonTools are the binaries Legion itself runs on the host: the git and jj of workspace
@@ -71,48 +69,6 @@ func findTool(lookupEnv func(string) (string, bool), tool string) (string, error
 		}
 	}
 	return "", nil
-}
-
-// claudePluginDirEnv names the claude-envoy plugin's package root a Claude Code pane loads.
-const claudePluginDirEnv = "LEGION_CLAUDE_PLUGIN_DIR"
-
-// resolveClaude is how a pane runs Claude Code, for a configuration whose worker_backends puts a role
-// on claude: `claude` and the `bun` its MCP server runs on, each by its LEGION_<TOOL>_PATH override
-// or on PATH, and the claude-envoy plugin at LEGION_CLAUDE_PLUGIN_DIR, which must hold its built
-// channel server and the generated Legion plugin (`bun run build` in packages/claude-envoy). Every
-// gap is named in one refusal.
-func resolveClaude(lookupEnv func(string) (string, bool)) (*tmux.ClaudeLaunch, error) {
-	var launch tmux.ClaudeLaunch
-	var missing []string
-	for tool, into := range map[string]*string{"claude": &launch.Binary, "bun": &launch.Bun} {
-		found, err := findTool(lookupEnv, tool)
-		if err != nil {
-			return nil, err
-		}
-		if found == "" {
-			missing = append(missing, fmt.Sprintf("%s (set %s to an absolute executable path)", tool, toolEnv(tool)))
-		}
-		*into = found
-	}
-	dir, _ := lookupEnv(claudePluginDirEnv)
-	switch {
-	case dir == "":
-		missing = append(missing, fmt.Sprintf("the claude-envoy plugin (set %s to its package directory)", claudePluginDirEnv))
-	case !filepath.IsAbs(dir):
-		return nil, fmt.Errorf("%s is not an absolute path: %q", claudePluginDirEnv, dir)
-	default:
-		for _, file := range []string{filepath.Join("dist", "envoy-channel.js"), filepath.Join("legion", ".claude-plugin", "plugin.json")} {
-			if _, err := os.Stat(filepath.Join(dir, file)); err != nil {
-				return nil, fmt.Errorf("%s %s holds no %s: build the plugin (bun run build in packages/claude-envoy)", claudePluginDirEnv, dir, file)
-			}
-		}
-		launch.PluginDir = dir
-	}
-	if len(missing) > 0 {
-		slices.Sort(missing)
-		return nil, fmt.Errorf("worker_backends runs a role on claude, and boot is missing %s", strings.Join(missing, ", "))
-	}
-	return &launch, nil
 }
 
 // minimumJJ is the oldest jj the daemon runs, as major and minor: 0.38, the release that moved a

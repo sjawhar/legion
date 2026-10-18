@@ -5,14 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"slices"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
-	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 )
 
 // bootReads is what boot reads from the configuration, the daemon's environment and the files they
@@ -135,31 +132,22 @@ func (c natsConnection) log(log *slog.Logger) {
 	log.Info("legion daemon connects to NATS", "user", c.user, "paneUser", c.paneUser, "seed", string(c.source))
 }
 
-// tmuxReads is what a daemon on this host needs that readBoot reads: the OMP invocation for its
-// panes, Claude Code for the panes of a role on claude, and the host's git and jj its own
-// provisioning runs (daemonTools); no pane is told the last two.
+// tmuxReads is what a daemon on this host needs that readBoot reads: a launch for each harness its
+// roles run on (resolveLaunchers), and the host's git and jj its own provisioning runs
+// (daemonTools), which no pane is told.
 type tmuxReads struct {
-	invocation string             // "" when boot does not run the host's Oh My Pi
-	claude     *tmux.ClaudeLaunch // nil when no role runs on claude
-	tools      map[string]string  // nil without a repository
+	launches map[runtime.Backend]launchReads // Oh My Pi's absent when boot does not run the host's Oh My Pi
+	tools    map[string]string               // nil without a repository
 }
 
-// readTmux is tmux's share of readBoot: the OMP invocation when boot runs the host's Oh My Pi
-// (hostOMP), whose one command is `mise where <tool>` when the invocation names a mise tool; Claude
-// Code (resolveClaude) when worker_backends puts a role on claude; and, for a configuration with a
-// repository, the host's git and jj Legion runs itself.
+// readTmux is tmux's share of readBoot: each backend's launch (resolveLaunchers), Oh My Pi's only
+// when boot runs the host's Oh My Pi (hostOMP), and, for a configuration with a repository, the
+// host's git and jj Legion runs itself.
 func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func(string) string, hostOMP bool) (tmuxReads, error) {
 	var r tmuxReads
 	var err error
-	if hostOMP {
-		if r.invocation, err = omplaunch.ResolveInvocation(cfg.OmpInvocation, getenv); err != nil {
-			return tmuxReads{}, err
-		}
-	}
-	if slices.Contains(cfg.Backends(), runtime.BackendClaude) {
-		if r.claude, err = resolveClaude(lookup); err != nil {
-			return tmuxReads{}, err
-		}
+	if r.launches, err = resolveLaunchers(cfg, lookup, getenv, hostOMP); err != nil {
+		return tmuxReads{}, err
 	}
 	if _, ok := cfg.Projects[cfg.Project]; ok {
 		if r.tools, err = resolveTools(lookup); err != nil {

@@ -505,7 +505,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		DaemonURL:        r.daemon.server.URL,
 		EnvoyURL:         "http://127.0.0.1:9020",
 		NatsURLs:         []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:    shellprefix.Word(r.omp),
+		Launchers:        ompOnly(shellprefix.Word(r.omp)),
 		StopGrace:        5 * time.Second,
 		ProbeInterval:    100 * time.Millisecond,
 		AdoptTimeout:     5 * time.Second,
@@ -929,7 +929,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	missing := r.spec("LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
 	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
-		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded session file is missing: "+missing.ResumeSessionFile {
+		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
 		t.Errorf("Resume from a missing session file = %v", err)
 	}
 }
