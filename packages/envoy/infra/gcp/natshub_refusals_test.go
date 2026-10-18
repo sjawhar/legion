@@ -247,45 +247,22 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 	requireResolverRefusals(t, cases)
 }
 
-// Every machine id of the hub goes through core's one rule, machineId and dispatchMachineId alike:
-// the id names the durable listener-<id> and the queue group envoy-listener-<id>. The rule refuses
-// an empty id, leading or trailing whitespace, and every character those names cannot carry. A
-// refused printable delimiter is quoted; a control or non-space whitespace character is not. The
-// seed check runs first (TestNatsHubRefusesASeedInAnyPlainInput), so no refusal echoes a seed.
+// Every machine id of the hub goes through core.CheckMachineID, machineId and dispatchMachineId
+// alike; core's own table holds every spelling it refuses. Here one row per field shows the hub
+// passes the refusal on as a core.InputError naming that field, and an interior space, which
+// both names turn into a hyphen, is accepted.
 func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
-	kinds := []struct {
-		field, where string
-		set          func(*gcp.NatsHubArgs, string)
-	}{
-		{"machineId", "users[0]", func(a *gcp.NatsHubArgs, id string) { a.Users[0].MachineID = pulumi.StringRef(id) }},
-		{"dispatchMachineId", "users[2]", func(a *gcp.NatsHubArgs, id string) { a.Users[2].DispatchMachineID = pulumi.StringRef(id) }},
-	}
 	const carry = ", which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"
-	for _, kind := range kinds {
-		for _, row := range []struct{ name, id, want string }{
-			{"empty", "", "is empty"},
-			{"only ordinary spaces", "   ", "has leading or trailing whitespace"},
-			{"leading ordinary space", " example-host", "has leading or trailing whitespace"},
-			{"trailing ordinary space", "example-host ", "has leading or trailing whitespace"},
-			{"leading non-breaking space", "\u00a0example-host", "has leading or trailing whitespace"},
-			{"a dot", "a.b", `contains '.'` + carry},
-			{"a star", "a*", `contains '*'` + carry},
-			{"a full wildcard", "a>", `contains '>'` + carry},
-			{"a slash", "a/b", `contains '/'` + carry},
-			{"a backslash", `a\b`, `contains '\\'` + carry},
-			{"an interior tab", "a\tb", "contains a control character" + carry},
-			{"an interior newline", "a\nb", "contains a control character" + carry},
-			{"interior non-breaking space", "a\u00a0b", "contains whitespace other than a space" + carry},
-		} {
-			t.Run(kind.field+" with "+row.name, func(t *testing.T) {
-				args := exampleArgs()
-				kind.set(args, row.id)
-				input := kind.where + "." + kind.field
-				requireMachineIDRefusal(t, args, input, input+" "+row.want)
-			})
-		}
-	}
-	// An interior ordinary space is accepted: both names turn it into a hyphen.
+	t.Run("machineId", func(t *testing.T) {
+		args := exampleArgs()
+		args.Users[0].MachineID = pulumi.StringRef("a.b")
+		requireMachineIDRefusal(t, args, "users[0].machineId", "users[0].machineId contains '.'"+carry)
+	})
+	t.Run("dispatchMachineId", func(t *testing.T) {
+		args := exampleArgs()
+		args.Users[2].DispatchMachineID = pulumi.StringRef("a.b")
+		requireMachineIDRefusal(t, args, "users[2].dispatchMachineId", "users[2].dispatchMachineId contains '.'"+carry)
+	})
 	t.Run("an id with an interior ordinary space is accepted", func(t *testing.T) {
 		args := exampleArgs()
 		args.Users[0].MachineID = pulumi.StringRef("example host a")
