@@ -782,6 +782,65 @@ func TestProbeImageRefusesAnOperatorVolumeThePodCannotMount(t *testing.T) {
 	}
 }
 
+// The kubelet's first FailedMount lands after the probe's first event read, as a rule: the pod is
+// bound, the store shows its node, and stuck reads events on that pass, before the kubelet has
+// tried the mount. The event is then found on the next read, mountRecheck later, rather than
+// waited out to the budget: with no event yet, the first read leaves the attempt waiting and no
+// read follows while the clock stands; once the event exists and the clock has moved past
+// mountRecheck, the next pass reads again and refuses, one Sandbox created, two event reads made.
+func TestProbeImageFindsAFailedMountOnTheRecheck(t *testing.T) {
+	volume := corev1.Volume{Name: "operator-route", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-route"}}}}
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{volume}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: volume.Name, MountPath: "/etc/legion-operator/" + volume.Name, ReadOnly: true}}
+	}))
+	var eventReads atomic.Int32
+	g.kube.PrependReactor("list", "events", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		eventReads.Add(1)
+		return false, nil, nil
+	})
+	g.waits("ContainerCreating")
+	message := `MountVolume.SetUp failed for volume "operator-route" : configmap "legion-operator-route" not found`
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		// The kubelet's turn: after the first read, the event, then time passes.
+		for eventReads.Load() == 0 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		time.Sleep(50 * time.Millisecond) // a few passes of the wait loop with the clock still
+		if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+			Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
+		}, metav1.CreateOptions{}); err != nil {
+			t.Error(err)
+			return
+		}
+		g.advance(mountRecheck)
+		if pod := g.pod(probeSandboxName); pod != nil {
+			g.update(pod, func(*corev1.Pod) {}) // nudge the wait loop rather than waiting on its tick
+		}
+	}()
+
+	err := g.probe(probeOptions(t))
+
+	wantContains(t, err, `cannot mount volume "operator-route"`, `ConfigMap "legion-operator-route"`, message)
+	if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+		t.Errorf("ProbeImage = %v, waited a FailedMount that landed after the first read out to the budget", err)
+	}
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("ran the probe %d times for a volume the pod cannot mount, want once", n)
+	}
+	if n := eventReads.Load(); n != 2 {
+		t.Errorf("read the pod's events %d times, want the first pass's read and the one recheck", n)
+	}
+}
+
 // A container the kubelet cannot configure — its environment or a mount reading a ConfigMap or
 // Secret that is missing, or a key of one — leaves the probe pod Pending with the container
 // waiting CreateContainerConfigError, never Failed: a waiting message saying the ConfigMap or
