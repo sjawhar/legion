@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -8,9 +9,10 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 )
 
-// CheckMachineID refuses the ids a listener name or hub grant entry cannot carry, and any over 246 bytes: an
-// interior ordinary space is accepted because both names replace it with a hyphen; every character
-// class either name cannot carry is refused without echoing an unsafe character.
+// CheckMachineID refuses the ids a hub grant entry or the watchdog's files cannot carry, the
+// characters nats-server refuses in a durable name, and any id over 246 bytes: an interior ordinary
+// space is accepted because both generated names replace it with a hyphen; a refused character is
+// never echoed unless it is a printable delimiter.
 func TestCheckMachineID(t *testing.T) {
 	const carry = ", which the listener's NATS names or the hub's grant entries cannot carry"
 	for _, row := range []struct {
@@ -31,6 +33,8 @@ func TestCheckMachineID(t *testing.T) {
 		{name: "an interior tab", id: "example\thost", want: "users[0].machineId contains a control character" + carry},
 		{name: "an interior newline", id: "example\nhost", want: "users[0].machineId contains a control character" + carry},
 		{name: "an interior non-breaking space", id: "example\u00a0host", want: "users[0].machineId contains whitespace other than a space" + carry},
+		{name: "the longest id the durable name allows", id: strings.Repeat("a", 246)},
+		{name: "an id one byte too long", id: strings.Repeat("a", 247), want: "users[0].machineId is 247 bytes, over the 246 the durable name listener-<id> allows within NATS's 255-byte consumer-name limit"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			err := core.CheckMachineID("users[0].machineId", row.id)

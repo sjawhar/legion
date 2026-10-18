@@ -74,7 +74,9 @@ versions. Never add the module to the root `go.work`.
 - **Refusals.** Every refusal names the input. `core.CheckMachineID` is the one machine-id rule
   shared by `core.ListenerConfig.Check` and the hub's users. It refuses an empty id; leading or
   trailing whitespace; `.`, `*`, `>`, `/` or `\`; control characters; and whitespace other than
-  an ordinary space. An ordinary space is accepted only inside the id and becomes a hyphen in
+  an ordinary space; and any id over 246 bytes, so `listener-<id>` fits NATS's 255-byte consumer-name
+  limit. The hub also refuses a second `dispatchMachineId` user, since every one binds Dispatch's
+  fixed durables. An ordinary space is accepted only inside the id and becomes a hyphen in
   `bus.ListenerDurable`'s `listener-<id>` and `bus.ListenerQueue`'s
   `envoy-listener-<id>`. A seed check that already precedes this rule stays first.
   `core.ListenerConfig.Check` also holds the checks of the listener's environment that the
