@@ -601,7 +601,7 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 		{
 			name: "a dot in --machine-id",
 			args: listenerFlags([]string{"machine-id"}, "--machine-id", "example.machine"),
-			want: "refused: --machine-id: machineId contains '.', which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>",
+			want: "refused: --machine-id: machineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry",
 		},
 		{
 			name: "a line break in --host-bridge",

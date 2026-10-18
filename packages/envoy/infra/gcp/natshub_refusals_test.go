@@ -252,7 +252,7 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 // passes the refusal on as a core.InputError naming that field, and an interior space, which
 // both names turn into a hyphen, is accepted.
 func TestNatsHubRefusesAMachineIdItsDurableCannotCarry(t *testing.T) {
-	const carry = ", which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"
+	const carry = ", which the listener's NATS names or the hub's grant entries cannot carry"
 	t.Run("machineId", func(t *testing.T) {
 		args := exampleArgs()
 		args.Users[0].MachineID = pulumi.StringRef("a.b")
@@ -301,6 +301,14 @@ func TestNatsHubRefusesMachineIdsWhoseDurablesCollide(t *testing.T) {
 		{"a dispatchMachineId on the hub's own listener's durable", "users[2].dispatchMachineId",
 			"users[2]: dispatchMachineId gives the same durable name as the hub's own listener",
 			func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("example-hub") }},
+		{"a second Dispatch user", "users[3].dispatchMachineId",
+			"users[3]: only one user may name dispatchMachineId: users[2] already does, and every such user would share Dispatch's fixed durables and bucket",
+			func(a *gcp.NatsHubArgs) {
+				a.Users = append(a.Users, gcp.NATSUserArgs{Name: "example-dispatch-b", NKey: key, DispatchMachineID: pulumi.StringRef("example-dispatch-b")})
+			}},
+		{"a machine id too long for the durable name", "users[0].machineId",
+			"users[0].machineId is 247 bytes, over the 246 the durable name listener-<id> allows within NATS's 255-byte consumer-name limit",
+			func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(strings.Repeat("a", 247)) }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := exampleArgs()

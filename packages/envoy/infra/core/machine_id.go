@@ -5,9 +5,14 @@ import (
 	"unicode"
 )
 
-const machineIDNameRefusal = ", which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"
+// maxMachineIDBytes keeps "listener-"+id within 255 bytes.
+const maxMachineIDBytes = 246
 
-// CheckMachineID refuses a machine id that cannot name both of a listener's NATS identities.
+const machineIDNameRefusal = ", which the listener's NATS names or the hub's grant entries cannot carry"
+
+// CheckMachineID refuses a machine id that cannot safely name a listener's NATS identities or
+// ride in a hub grant entry or the watchdog's files. It also caps the id so that the durable
+// listener-<id> fits NATS's 255-byte consumer-name limit. The refusal text states exactly this.
 // bus.ListenerDurable and bus.ListenerQueue replace each ordinary space with a hyphen and produce
 // listener-<id> and envoy-listener-<id>. nats.go's checkConsumerName refuses an empty consumer name
 // and a name containing a dot or space; the generated durable contains no space. NATS subjects and
@@ -22,6 +27,9 @@ func CheckMachineID(input, id string) error {
 	}
 	if strings.TrimSpace(id) != id {
 		return InputErrorf(input, "%s has leading or trailing whitespace", input)
+	}
+	if len(id) > maxMachineIDBytes {
+		return InputErrorf(input, "%s is %d bytes, over the %d the durable name listener-<id> allows within NATS's 255-byte consumer-name limit", input, len(id), maxMachineIDBytes)
 	}
 	for _, r := range id {
 		switch r {
