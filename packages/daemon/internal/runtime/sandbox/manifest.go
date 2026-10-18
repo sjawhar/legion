@@ -176,6 +176,10 @@ type launch struct {
 	sessionsInDatabase bool
 }
 
+// configName is the runtime as `legion.yaml` names it (`runtime: kubernetes`), the name a backend's
+// entry lists when this runtime launches it (runtime.Backends).
+const configName = "kubernetes"
+
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
 // shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A secret named for the
@@ -196,8 +200,10 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	if spec.Backend == runtime.BackendClaude {
-		return launch{}, refuse("its role runs on claude, and the worker image carries no Claude Code")
+	// A pod's agent is the worker image's Oh My Pi (agentArgv): a backend whose entry does not name
+	// this runtime is refused.
+	if backend := runtime.Of(spec.Backend); !runtime.Backends[backend].LaunchedBy(configName) {
+		return launch{}, refuse("its role runs on %s, which the worker image does not carry: a pod runs Oh My Pi alone", backend)
 	}
 	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != ""}
 	if spec.Role == claim.RoleController {

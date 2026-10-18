@@ -70,9 +70,10 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository with that repository's default branch; for a claim
 // whose workspace was lost with its session, the issue's branch the recreated workspace is
-// recovered from. The controller's launch (controllerSpawnSpec) is its own. Plugins carries the
-// plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the same way for both —
-// the controller the daemon launches (`controller: daemon`) is covered like any claim.
+// recovered from. The controller's launch (controllerSpawnSpec) is its own. Both name the backend
+// the role runs on and are told its prompt part after the role's parts (launchBackend). Plugins
+// carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the same way
+// for both — the controller the daemon launches (`controller: daemon`) is covered like any claim.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	var spec runtime.SpawnSpec
 	var err error
@@ -84,26 +85,42 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
+	var part string
+	if spec.Backend, part, err = s.launchBackend(c.Role); err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	if part != "" {
+		spec.Prompt.RolePromptPaths = append(spec.Prompt.RolePromptPaths, part)
+	}
 	spec.Plugins = s.stalePluginInstall(c)
 	return spec, nil
 }
 
-// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's. A role on Claude
-// Code (backend) is told the daemon's Claude Code part after its role's parts.
+// launchBackend is the backend role runs on (backend; Oh My Pi when nil) and the path of the
+// daemon prompt part its entry names (runtime.Backends), "" when it names none.
+func (s specs) launchBackend(role claim.Role) (runtime.Backend, string, error) {
+	backend := runtime.BackendOmp
+	if s.backend != nil {
+		backend = s.backend(role)
+	}
+	info, err := runtime.LookupBackend(backend)
+	if err != nil {
+		return "", "", fmt.Errorf("the %s's backend: %w", role, err)
+	}
+	if info.PromptPart == "" {
+		return backend, "", nil
+	}
+	if s.prompts == nil {
+		return "", "", errors.New("the daemon prompt bundle was not constructed at boot")
+	}
+	return backend, s.prompts.Part(info.PromptPart), nil
+}
+
+// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.
 func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
-	}
-	backend := runtime.BackendOmp
-	if s.backend != nil {
-		backend = s.backend(c.Role)
-	}
-	if backend == runtime.BackendClaude {
-		if s.prompts == nil {
-			return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
-		}
-		promptPaths = append(promptPaths, s.prompts.ClaudeMechanicsPath())
 	}
 	addressing, err := AddressingFragment(s.project, c)
 	if err != nil {
@@ -132,7 +149,6 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			DeploymentInstructionsPath: s.instructions,
 		},
 		Repository: s.repo,
-		Backend:    backend,
 	}
 	if !s.repo.IsZero() {
 		if s.defaultBranch == nil {

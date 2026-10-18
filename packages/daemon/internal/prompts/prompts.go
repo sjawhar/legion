@@ -120,10 +120,10 @@ func (c *Composer) ControllerPromptPaths(headless bool) ([]string, error) {
 	return []string{filepath.Join(c.sharedDir, "controller-root.md"), filepath.Join(c.goDir, launch)}, nil
 }
 
-// ClaudeMechanicsPath is the daemon's part a phase worker on Claude Code is told after its role's
-// parts (`worker_backends`): the role prompts' Oh My Pi tool names, as Claude Code names them.
-func (c *Composer) ClaudeMechanicsPath() string {
-	return filepath.Join(c.goDir, "claude-mechanics.md")
+// Part is the daemon's prompt part name, as boot snapshotted it: what a backend's launch is told
+// after its role's parts (runtime.BackendInfo.PromptPart).
+func (c *Composer) Part(name string) string {
+	return filepath.Join(c.goDir, name)
 }
 
 // Compose returns the shared role parts followed by this daemon's parts: the role's own, then the

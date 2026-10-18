@@ -174,9 +174,8 @@ func (k Known) Validate() error {
 // image's own copies; nil for every launch that installs nothing — every tmux launch, and every
 // Kubernetes launch that is not replacing a process on another plugin contract. The tmux runtime
 // ignores it: a pane always resumes on the plugin installed on the daemon's host, which the boot
-// gate already holds to the daemon's contract. Backend is the agent the process runs (`worker_backends`):
-// Oh My Pi, the zero value's meaning too, or Claude Code behind `legion claude-bridge`, which only the
-// tmux runtime launches.
+// gate already holds to the daemon's contract. Backend is the harness the process runs
+// (`worker_backends`, Backends); "" is Oh My Pi (Of).
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string
@@ -195,17 +194,6 @@ type SpawnSpec struct {
 	Plugins                *PluginInstall
 	Backend                Backend
 }
-
-// Backend is the agent a launch runs.
-type Backend string
-
-const (
-	// BackendOmp is Oh My Pi, `omp --mode rpc` behind `legion worker-shim`.
-	BackendOmp Backend = "omp"
-	// BackendClaude is Claude Code, `claude -p` in stream-json behind `legion claude-bridge`, which
-	// `legion worker-shim` runs in Oh My Pi's place.
-	BackendClaude Backend = "claude"
-)
 
 // PluginInstall is the plugin pair a Kubernetes launch installs before Oh My Pi starts, and the
 // contract the installed pi-legion must declare. Each of PiLegion and PiEnvoy is the daemon's own

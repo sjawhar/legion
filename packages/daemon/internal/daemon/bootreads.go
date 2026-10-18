@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 )
 
@@ -154,7 +156,7 @@ func readTmux(cfg config.Config, lookup func(string) (string, bool), getenv func
 			return tmuxReads{}, err
 		}
 	}
-	if cfg.UsesClaude() {
+	if slices.Contains(cfg.Backends(), runtime.BackendClaude) {
 		if r.claude, err = resolveClaude(lookup); err != nil {
 			return tmuxReads{}, err
 		}

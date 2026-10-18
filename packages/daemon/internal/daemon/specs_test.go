@@ -155,14 +155,14 @@ func TestAClaimsBackendIsItsRolesAndAClaudeRoleIsToldClaudeCodesTools(t *testing
 			}
 			want := parts.RolePromptPaths
 			if tc.want == runtime.BackendClaude {
-				want = append(want, composer.ClaudeMechanicsPath())
+				want = append(want, composer.Part(runtime.Backends[runtime.BackendClaude].PromptPart))
 			}
 			if !slices.Equal(spec.Prompt.RolePromptPaths, want) {
 				t.Errorf("role prompts = %q, want %q", spec.Prompt.RolePromptPaths, want)
 			}
 		})
 	}
-	body, err := os.ReadFile(composer.ClaudeMechanicsPath())
+	body, err := os.ReadFile(composer.Part(runtime.Backends[runtime.BackendClaude].PromptPart))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +214,9 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	}
 	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
 		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
+	}
+	if spec.Backend != runtime.BackendOmp {
+		t.Errorf("backend = %q, want omp, named", spec.Backend)
 	}
 	if !maps.Equal(spec.Secrets, s.secrets) {
 		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
