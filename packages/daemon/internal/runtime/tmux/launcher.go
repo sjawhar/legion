@@ -3,6 +3,7 @@ package tmux
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -44,6 +45,19 @@ func (l ompLauncher) Launch(spec runtime.SpawnSpec, _ Host) (string, []string, e
 
 // Marker is "omp", which the invocation in an Oh My Pi pane's command line names.
 func (ompLauncher) Marker() string { return "omp" }
+
+// agentMarkers are the markers of launchers, sorted, and the harnesses they run as one phrase, in
+// the order their names sort: what verifyPane accepts and what it says a pane is not running.
+func agentMarkers(launchers map[runtime.Backend]Launcher) (markers []string, agents string) {
+	var names []string
+	for backend, launcher := range launchers {
+		markers = append(markers, launcher.Marker())
+		names = append(names, runtime.Backends[backend].Name)
+	}
+	slices.Sort(markers)
+	slices.Sort(names)
+	return slices.Compact(markers), strings.Join(names, " or ")
+}
 
 // refuseAnotherBackendsSession refuses to resume a launch on backend from a recorded session kept
 // in another backend's session directory (runtime.BackendInfo.SessionDir): one recorded before the

@@ -7,7 +7,7 @@
 // never known by its id alone — a recreated server reissues ids from %0, and the kernel reissues
 // pids — so every locator records the pane's root pid and that process's /proc start ticks at
 // launch (its incarnation), and nothing is reported alive, killed, or shared until pid, start
-// ticks, and a command line naming a Legion agent all check out again.
+// ticks, and a command line naming a configured harness all check out again.
 //
 // The tmux runtime launches nothing but its Launchers: a third harness is an entry in
 // runtime.Backends, a Launcher here, and a boot resolver in the daemon.
@@ -132,6 +132,8 @@ type Runtime struct {
 	dispatchToken    string
 	gitHubCredential runtime.GitHubCredential
 	launchers        map[runtime.Backend]Launcher
+	markers          []string
+	agents           string
 	stopGrace        time.Duration
 	probeInterval    time.Duration
 	adoptTimeout     time.Duration
@@ -224,6 +226,7 @@ func New(opts Options) (*Runtime, error) {
 			return nil, fmt.Errorf("tmux runtime: a launcher for %q, which the tmux runtime does not launch", backend)
 		}
 	}
+	markers, agents := agentMarkers(opts.Launchers)
 	r := &Runtime{
 		socket:           "legion-" + opts.Project,
 		stateDir:         opts.StateDir,
@@ -235,6 +238,8 @@ func New(opts Options) (*Runtime, error) {
 		dispatchToken:    opts.DispatchTokenFile,
 		gitHubCredential: opts.GitHubCredential,
 		launchers:        opts.Launchers,
+		markers:          markers,
+		agents:           agents,
 		stopGrace:        opts.StopGrace,
 		probeInterval:    opts.ProbeInterval,
 		adoptTimeout:     opts.AdoptTimeout,

@@ -35,6 +35,79 @@ func TestOmpLauncherLaunchIsInnerCommand(t *testing.T) {
 	}
 }
 
+// The live pane's root process, as /proc/<pane pid>/cmdline held it on a real tmux server: `sh -c`
+// on the pane's whole shell command, with the shim's inner command spliced in. The harness itself
+// is a descendant, never the pane's pid. Every pane's command holds "omp", if only in
+// `--append-system-prompt`; a Claude Code pane's alone holds ` claude-bridge -- ` (its Marker).
+const (
+	livePaneOmp = "/bin/sh\x00-c\x00tmux set-option -w -t \"$TMUX_PANE\" @legion_owner legion-t1 && export PATH=/state/bin:/usr/bin:/bin && " +
+		"cd /state/workspaces/LEGION-1 && /opt/legion/legion worker-shim --connect unix:///state/stream.sock " +
+		"--boot-token-file /state/secrets/legion-t1-legion-1-architect -- /opt/bin/omp --mode rpc --append-system-prompt \"$(cat /roles/architect.md)\"\x00"
+	livePaneClaude = "/bin/sh\x00-c\x00tmux set-option -w -t \"$TMUX_PANE\" @legion_owner legion-t1 && export PATH=/state/bin:/usr/bin:/bin && " +
+		"cd /state/workspaces/LEGION-2 && /opt/legion/legion worker-shim --connect unix:///state/stream.sock " +
+		"--boot-token-file /state/secrets/legion-t1-legion-2-implementer -- /opt/legion/legion claude-bridge -- /opt/claude/bin/claude -p " +
+		"--input-format stream-json --output-format stream-json --verbose --permission-mode bypassPermissions --strict-mcp-config " +
+		"--mcp-config /state/claude/legion-t1-legion-2-implementer/mcp.json --plugin-dir /opt/claude-envoy --plugin-dir /opt/claude-envoy/legion " +
+		"--session-id a1917bc9-2989-441e-9eef-c65e0d51bfbf --append-system-prompt \"$(cat /roles/implementer.md)\"\x00"
+)
+
+// verifyPane's command-line tier accepts a pane holding the marker of a harness the daemon launches,
+// and nothing else. An omp-only daemon accepts exactly what `strings.Contains(cmdline, "omp")`
+// accepts, as it always has; a daemon with Claude Code's launcher beside it accepts a Claude Code
+// pane too, and a process that merely names claude-bridge is still no agent.
+func TestRunsAgentAcceptsTheConfiguredHarnessesMarkers(t *testing.T) {
+	runsAgent := func(launchers map[runtime.Backend]Launcher, cmdline string) bool {
+		markers, _ := agentMarkers(launchers)
+		r := &Runtime{markers: markers, readProc: func(string) ([]byte, error) { return []byte(cmdline), nil }}
+		got, err := r.runsAgent(1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	cmdlines := []string{
+		livePaneOmp, livePaneClaude,
+		"/usr/bin/unrelated-claude-bridge\x00300\x00", "/usr/bin/unrelated-omp\x00300\x00",
+		"/bin/sh\x00-c\x00sleep 300\x00", "/bin/sh\x00-c\x00exec /opt/legion/legion worker-shim -- /opt/bin/agent\x00",
+	}
+	for _, cmdline := range cmdlines {
+		if got, main := runsAgent(ompOnly("omp"), cmdline), strings.Contains(cmdline, "omp"); got != main {
+			t.Errorf("omp-only runsAgent(%q) = %v, main's = %v", cmdline, got, main)
+		}
+	}
+	both := map[runtime.Backend]Launcher{runtime.BackendOmp: NewOmpLauncher(nil, "omp"), runtime.BackendClaude: NewClaudeLauncher(testClaude)}
+	claudeOnly := map[runtime.Backend]Launcher{runtime.BackendClaude: NewClaudeLauncher(testClaude)}
+	for _, tc := range []struct {
+		name      string
+		launchers map[runtime.Backend]Launcher
+		cmdline   string
+		want      bool
+	}{
+		{"both, an Oh My Pi pane", both, livePaneOmp, true},
+		{"both, a Claude Code pane", both, livePaneClaude, true},
+		{"Claude Code's launcher alone, a Claude Code pane", claudeOnly, livePaneClaude, true},
+		{"Claude Code's launcher alone, an Oh My Pi pane", claudeOnly, livePaneOmp, false},
+		{"Claude Code's launcher alone, a process naming claude-bridge", claudeOnly, "/usr/bin/unrelated-claude-bridge\x00300\x00", false},
+		{"both, a bystander", both, "/bin/sh\x00-c\x00sleep 300\x00", false},
+	} {
+		if got := runsAgent(tc.launchers, tc.cmdline); got != tc.want {
+			t.Errorf("%s: runsAgent = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// What a pane that verifies as no agent is said not to run: every configured harness, by name.
+func TestAgentMarkersNameEveryConfiguredHarness(t *testing.T) {
+	markers, agents := agentMarkers(ompOnly("omp"))
+	if strings.Join(markers, ",") != "omp" || agents != "OMP" {
+		t.Errorf("omp-only = %q, %q", markers, agents)
+	}
+	markers, agents = agentMarkers(map[runtime.Backend]Launcher{runtime.BackendOmp: NewOmpLauncher(nil, "omp"), runtime.BackendClaude: NewClaudeLauncher(testClaude)})
+	if strings.Join(markers, ",") != " claude-bridge -- ,omp" || agents != "Claude Code or OMP" {
+		t.Errorf("both = %q, %q", markers, agents)
+	}
+}
+
 // An Oh My Pi launch refuses a recorded session in Claude Code's directory, one recorded before
 // the role moved back from claude, which `omp --resume` cannot continue; a session anywhere else is
 // left to Oh My Pi, and a Claude Code launch is not refused its own.
