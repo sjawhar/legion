@@ -1,6 +1,11 @@
 import { unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
-import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
+import {
+  agentSubject,
+  type DeliveryCapability,
+  ROLE_TOPIC_PREFIX,
+  zodSchemaApi,
+} from "@legion/contracts"
 import {
   type DispatchDelivery,
   expectsLaneReceipt,
@@ -50,8 +55,15 @@ import {
 } from "./channel-forwarder"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
-import { type LegionClaim, legionPane, startLegionClaim, stopPane } from "./legion-claim"
-import { createInboxNotifier, INBOX_VARIABLE } from "./legion-inbox"
+import {
+  endPane,
+  type LegionClaim,
+  legionPane,
+  logLegion,
+  startLegionClaim,
+  stopPane,
+} from "./legion-claim"
+import { createInboxNotifier, INBOX_CAPABILITIES, INBOX_VARIABLE } from "./legion-inbox"
 import {
   executeLegionTool,
   LEGION_TOOL_NAME,
@@ -103,6 +115,12 @@ function undefinedOnNotFound(error: unknown): undefined {
 
 /** The MCP `serverInfo`; the version is the package's, so it is spelled once. */
 export const MCP_SERVER_INFO = { name: "envoy", version: packageVersion } as const
+
+/**
+ * The delivery modes a session whose deliveries are channel notifications advertises: Claude Code
+ * queues a notification for the model's next turn, which is an aside and cannot be a steer.
+ */
+export const CHANNEL_CAPABILITIES = ["aside"] as const satisfies readonly DeliveryCapability[]
 
 export interface ChannelNotification {
   readonly method: typeof CHANNEL_NOTIFICATION_METHOD
@@ -163,6 +181,12 @@ export interface ChannelSessionOptions {
   readonly identity: SessionIdentity
   readonly connection: ChannelForwarderConnection
   readonly notifier: ChannelNotifier
+  /**
+   * The delivery modes the session advertises to the listener, which Dispatch checks every
+   * targeted delivery against: the ones `notifier` honours (`CHANNEL_CAPABILITIES`, or
+   * `INBOX_CAPABILITIES` for the Legion bridge's inbox).
+   */
+  readonly capabilities: readonly DeliveryCapability[]
   readonly client: Pick<
     EnvoyClient,
     "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
@@ -464,7 +488,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       topics: forwarder.topics(),
       port: 0,
       title: "",
-      capabilities: ["aside"],
+      capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
     })
@@ -978,6 +1002,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   })
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
   const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket)
+  const capabilities = inboxSocket === undefined ? CHANNEL_CAPABILITIES : INBOX_CAPABILITIES
   const booting = new AbortController()
 
   const stopped = Promise.withResolvers<void>()
@@ -1024,6 +1049,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         identity,
         connection,
         notifier,
+        capabilities,
         client,
         heartbeatMs: envoy.heartbeatMs,
         configFile,
@@ -1041,7 +1067,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
         client,
         session,
         signal: booting.signal,
-        stopPane,
+        log: logLegion,
+        stop: endPane,
       })
     }
     if (stopping) await session.shutdown()

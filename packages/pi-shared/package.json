@@ -45,6 +45,14 @@
       "types": "./src/git-lock.ts",
       "bun": "./src/git-lock.ts"
     },
+    "./legion-phase-ops": {
+      "types": "./src/legion-phase-ops.ts",
+      "bun": "./src/legion-phase-ops.ts"
+    },
+    "./legion-claim-core": {
+      "types": "./src/legion-claim-core.ts",
+      "bun": "./src/legion-claim-core.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"

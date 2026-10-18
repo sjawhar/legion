@@ -62,6 +62,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - The daemon client, the handoff-commit lookup and the jj lock come from `@legion/pi-shared`
   (`./daemon-client`, `./handoff-commit`, `./git-lock`), so `claude-envoy`'s Legion tool uses the
   same code (sjawhar/legion#2032). No behavior change.
+- The `legion` tool's phase ops (`read_record`, `handoff_complete`, `request_backward_move`) run
+  on the schema, description template and executor `@legion/pi-shared/legion-phase-ops` shares
+  with `claude-envoy`'s Legion tool, and the claim session boots through the claim boot both share
+  (`@legion/pi-shared/legion-claim-core`), in the same order and with the same log lines. The
+  tool's description is unchanged, pinned word for word in `src/tools.test.ts`. A phase op's
+  refusal names every problem with its arguments, joined by `; `, and `request_backward_move`
+  refuses a `to` that is not a backward target before it mints a grant.
 
 - The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
   `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no

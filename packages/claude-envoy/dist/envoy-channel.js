@@ -43773,6 +43773,63 @@ async function serveEnvoyOff(serverInfo, refusal) {
 import { readdir as readdir2, stat } from "fs/promises";
 import { join as join3 } from "path";
 import { setTimeout as delay } from "timers/promises";
+
+// ../pi-shared/src/legion-claim-core.ts
+async function bootLegionClaim(host) {
+  const { daemon } = host;
+  let claim;
+  try {
+    claim = await daemon.register(host.registration);
+  } catch (error48) {
+    if (!(error48 instanceof LegionDaemonApiError))
+      throw error48;
+    host.log(`claims/register registration failed (${error48.status}): ${error48.detail}`);
+    if (error48.status < 400 || error48.status >= 500)
+      throw error48;
+    host.stop();
+    return;
+  }
+  const { measure } = host;
+  const measuring = measure === undefined ? undefined : Promise.resolve().then(() => measure(claim)).catch((error48) => {
+    host.log(`capability measurement failed; ready carries no report: ${messageFor(error48)}`);
+    return;
+  });
+  try {
+    await host.afterRegister?.(claim);
+    host.setCapability({
+      sessionID: host.registration.sessionId,
+      tree: claim.tree,
+      issue: claim.issue,
+      role: claim.role,
+      secret: claim.secret
+    });
+    await host.claimRole(claim.claimToken);
+    const capabilities = await measuring;
+    const ready = {
+      claimToken: claim.claimToken,
+      sessionId: host.registration.sessionId,
+      secret: claim.secret,
+      generation: claim.generation,
+      ...capabilities === undefined ? {} : { capabilities }
+    };
+    await callReadyWithRetry("claims/ready", () => daemon.ready(ready));
+    host.onRoleRegained(async (role, reason) => {
+      if (role !== claim.claimToken)
+        return;
+      try {
+        await callReadyWithRetry("claims/ready after role regain", () => daemon.ready(ready));
+        host.log(`re-ran claims/ready after role ${role} was ${reason}`);
+      } catch (error48) {
+        host.log(`claims/ready after role ${role} was ${reason} failed; the daemon's queued task stays undelivered until the next regain or boot: ${messageFor(error48)}`);
+      }
+    });
+  } catch (error48) {
+    host.log(`claim boot failed after claims/register registered ${claim.claimToken}; ${host.stopping}: ${messageFor(error48)}`);
+    host.stop();
+  }
+}
+
+// src/legion-claim.ts
 function legionPane(env) {
   const pointer = env["LEGION_BOOT_TOKEN_FILE"];
   if (pointer === undefined && configuredValue(env["LEGION_BOOT_TOKEN"]) === undefined) {
@@ -43791,10 +43848,16 @@ function legionPane(env) {
     bootToken: pointer === undefined ? required2("LEGION_BOOT_TOKEN") : readSecretFile("LEGION_BOOT_TOKEN_FILE", pointer)
   };
 }
-function stopPane(why) {
-  process.stderr.write(`[legion] ${why}; stopping the pane so the daemon launches it again
+function logLegion(line) {
+  process.stderr.write(`[legion] ${line}
 `);
+}
+function endPane() {
   process.kill(process.ppid, "SIGTERM");
+}
+function stopPane(why) {
+  logLegion(`${why}; stopping the pane so the daemon launches it again`);
+  endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
   const projects = join3(configDir, "projects");
@@ -43811,66 +43874,38 @@ async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
 }
 function startLegionClaim(deps) {
   let capability;
-  const { daemon, sessionID } = deps;
+  const { sessionID } = deps;
   const boot = async () => {
     const transcript = await waitForTranscript(deps.pane.configDir, sessionID, deps.signal, deps.pollMs);
-    let claim;
-    try {
-      claim = await daemon.register({
+    await bootLegionClaim({
+      daemon: deps.daemon,
+      registration: {
         bootToken: deps.pane.bootToken,
         sessionId: sessionID,
         ompSessionFile: transcript,
         agentId: sessionID,
         pluginContract: legion.daemonApiVersion
-      });
-    } catch (error48) {
-      if (!(error48 instanceof LegionDaemonApiError) || error48.status >= 500)
-        throw error48;
-      deps.stopPane(`claims/register registration failed (${error48.status}): ${error48.detail}`);
-      return;
-    }
-    try {
-      capability = {
-        sessionID,
-        claimToken: claim.claimToken,
-        tree: claim.tree,
-        issue: claim.issue,
-        role: claim.role,
-        secret: claim.secret
-      };
-      const role = await deps.client.setRole({ sessionID, role: claim.claimToken, soft: true });
-      if (!role.claimed) {
-        throw new Error(`Envoy role ${claim.claimToken} is held by live session ${role.holder}`);
-      }
-      await deps.session.rememberRole(claim.claimToken);
-      const ready = {
-        claimToken: claim.claimToken,
-        sessionId: sessionID,
-        secret: claim.secret,
-        generation: claim.generation
-      };
-      await callReadyWithRetry("claims/ready", () => daemon.ready(ready));
-      deps.session.onRoleRegained(async (regained, reason) => {
-        if (regained !== claim.claimToken)
-          return;
-        try {
-          await callReadyWithRetry("claims/ready after role regain", () => daemon.ready(ready));
-          process.stderr.write(`[legion] re-ran claims/ready after role ${regained} was ${reason}
-`);
-        } catch (error48) {
-          process.stderr.write(`[legion] claims/ready after role ${regained} was ${reason} failed; the daemon's queued task stays undelivered until the next regain or boot: ${messageFor(error48)}
-`);
+      },
+      setCapability: (registered) => {
+        capability = registered;
+      },
+      claimRole: async (role) => {
+        const claimed = await deps.client.setRole({ sessionID, role, soft: true });
+        if (!claimed.claimed) {
+          throw new Error(`Envoy role ${role} is held by live session ${claimed.holder}`);
         }
-      });
-    } catch (error48) {
-      deps.stopPane(`claim boot failed after claims/register registered ${claim.claimToken}: ${messageFor(error48)}`);
-    }
+        await deps.session.rememberRole(role);
+      },
+      onRoleRegained: (listener) => deps.session.onRoleRegained(listener),
+      log: deps.log,
+      stopping: "stopping the pane so the daemon launches it again",
+      stop: deps.stop
+    });
   };
   const booted = boot().catch((error48) => {
     if (deps.signal.aborted)
       return;
-    process.stderr.write(`[legion] claim boot failed before a registration; the daemon's registration deadline relaunches the pane: ${messageFor(error48)}
-`);
+    deps.log(`claim boot failed before a registration; the daemon's registration deadline relaunches the pane: ${messageFor(error48)}`);
   });
   return { capability: () => capability, booted };
 }
@@ -43879,6 +43914,10 @@ function startLegionClaim(deps) {
 import { randomUUID } from "crypto";
 import { createConnection } from "net";
 var INBOX_VARIABLE = "LEGION_CLAUDE_INBOX";
+var INBOX_CAPABILITIES = [
+  "aside",
+  "steer"
+];
 function createInboxNotifier(socketPath) {
   let socket;
   let buffered = "";
@@ -43941,37 +43980,69 @@ function createInboxNotifier(socketPath) {
   };
 }
 
-// src/legion-tool.ts
-var LEGION_TOOL_NAME = "legion";
-var LegionToolArguments = exports_external.discriminatedUnion("op", [
-  exports_external.strictObject({ op: exports_external.literal("read_record"), issue: exports_external.string().trim().min(1) }),
-  exports_external.strictObject({
-    op: exports_external.literal("handoff_complete"),
-    summary: exports_external.string().trim().min(1),
-    verdict: exports_external.enum(["pass", "fail"]).optional(),
-    ready: exports_external.boolean().optional()
+// ../pi-shared/src/legion-phase-ops.ts
+var PHASE_OPS = ["read_record", "handoff_complete", "request_backward_move"];
+var requiredString = (op, field) => {
+  const message = `${op} requires ${field}`;
+  return exports_external.string({ error: message }).refine((value) => value.trim() !== "", { error: message });
+};
+var operation = (op, shape) => exports_external.strictObject({ op: exports_external.literal(op), ...shape }, {
+  error: (issue2) => issue2.code === "unrecognized_keys" ? issue2.keys.map((key) => `${op} does not accept field "${key}"`).join("; ") : undefined
+});
+var PhaseOpArguments = exports_external.discriminatedUnion("op", [
+  operation("read_record", { issue: requiredString("read_record", "issue") }),
+  operation("handoff_complete", {
+    summary: requiredString("handoff_complete", "summary"),
+    verdict: exports_external.enum(["pass", "fail"], { error: "handoff_complete's verdict is pass or fail" }).optional(),
+    ready: exports_external.boolean({ error: "handoff_complete's ready is true or false" }).optional()
   }),
-  exports_external.strictObject({
-    op: exports_external.literal("request_backward_move"),
-    to: exports_external.enum(LEGION_PHASE_BACKWARD_TARGETS),
-    reason: exports_external.string().trim().min(1)
+  operation("request_backward_move", {
+    to: exports_external.enum(LEGION_PHASE_BACKWARD_TARGETS, {
+      error: (issue2) => issue2.input === undefined ? "request_backward_move requires to" : `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}`
+    }),
+    reason: requiredString("request_backward_move", "reason")
   })
-]);
-var DESCRIPTION = "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + "read_record returns an issue's record from the daemon's state. " + "handoff_complete reports this phase complete (the daemon accepts a completion only from the role working the issue's current phase): " + "`summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's instructions require one, " + "`ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found " + "here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call refuses, posting " + "nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet on " + "`legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " + "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed nothing, " + "so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. " + "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
-function legionToolDefinition() {
-  return {
-    name: LEGION_TOOL_NAME,
-    description: DESCRIPTION,
-    inputSchema: exports_external.toJSONSchema(exports_external.object({
-      op: exports_external.enum(["read_record", "handoff_complete", "request_backward_move"]),
-      issue: exports_external.string().describe("read_record's issue key").optional(),
-      summary: exports_external.string().optional(),
-      verdict: exports_external.enum(["pass", "fail"]).optional(),
-      ready: exports_external.boolean().optional(),
-      to: exports_external.enum(LEGION_PHASE_BACKWARD_TARGETS).optional(),
-      reason: exports_external.string().optional()
-    }))
-  };
+], {
+  error: (issue2) => issue2.code === "invalid_union" ? `op is one of ${PHASE_OPS.join(", ")}` : undefined
+});
+function phaseOpParameters(zod) {
+  const api2 = zodSchemaApi(zod);
+  const fields = {};
+  for (const option of PhaseOpArguments.options) {
+    for (const [name, declared] of Object.entries(option.shape)) {
+      if (name === "op")
+        continue;
+      const field = declared instanceof exports_external.ZodOptional ? declared.unwrap() : declared;
+      if (field instanceof exports_external.ZodString)
+        fields[name] = api2.string().optional();
+      else if (field instanceof exports_external.ZodBoolean)
+        fields[name] = api2.boolean().optional();
+      else if (field instanceof exports_external.ZodEnum) {
+        const [first, ...rest] = field.options.map(String);
+        if (first === undefined)
+          throw new Error(`phase op field ${name} has no values`);
+        fields[name] = api2.enum([first, ...rest]).optional();
+      } else
+        throw new Error(`phase op field ${name} has a kind phaseOpParameters does not map`);
+    }
+  }
+  return fields;
+}
+var PHASE_OP_SENTENCES = {
+  readRecord: "read_record returns the record of `issue` from the daemon's state. ",
+  requestBackwardMove: "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. "
+};
+function legionToolDescription(host) {
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " + "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " + "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " + "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " + "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " + "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " + "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " + "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+}
+async function mintClaimGrant(daemon, claim) {
+  const { grantId } = await daemon.grant({
+    sessionId: claim.sessionID,
+    secret: claim.secret,
+    tree: claim.tree,
+    issue: claim.issue
+  });
+  return grantId;
 }
 function recordFrom(state, issue2) {
   const record3 = state.issues[issue2];
@@ -43979,30 +44050,24 @@ function recordFrom(state, issue2) {
     throw new Error(`The daemon has no record for ${issue2}`);
   return record3;
 }
-async function executeLegionTool(runtime, input) {
-  const active = runtime.claim();
-  if (active === undefined) {
-    throw new Error("this session has no Legion claim yet: the pane registers with the daemon once its first turn starts");
+async function executePhaseOp(runtime, input) {
+  const parsed = PhaseOpArguments.safeParse(input);
+  if (!parsed.success) {
+    throw new Error(parsed.error.issues.map((issue2) => issue2.message).join("; "));
   }
-  const args = LegionToolArguments.parse(input);
-  const { daemon } = runtime;
-  const grant = async () => (await daemon.grant({
-    sessionId: active.sessionID,
-    secret: active.secret,
-    tree: active.tree,
-    issue: active.issue
-  })).grantId;
+  const args = parsed.data;
+  const { daemon, claim } = runtime;
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete": {
-      if (active.role === "architect" && active.issue === active.tree) {
+      if (claim.role === "architect" && claim.issue === claim.tree) {
         throw new Error("handoff_complete is not available to a root architect session, which runs no phase");
       }
-      const { phase } = recordFrom(await daemon.state(), active.issue);
-      const commit = await runtime.handoffCommit(phase, active.role);
+      const { phase } = recordFrom(await daemon.state(), claim.issue);
+      const commit = await runtime.handoffCommit(phase, claim.role);
       return daemon.handoffComplete({
-        grantId: await grant(),
+        grantId: await mintClaimGrant(daemon, claim),
         summary: args.summary,
         verdict: args.verdict ?? "",
         ready: args.ready ?? false,
@@ -44010,9 +44075,34 @@ async function executeLegionTool(runtime, input) {
       });
     }
     case "request_backward_move":
-      await daemon.phaseBackward({ grantId: await grant(), to: args.to, reason: args.reason });
+      await daemon.phaseBackward({
+        grantId: await mintClaimGrant(daemon, claim),
+        to: args.to,
+        reason: args.reason
+      });
       return {};
   }
+}
+
+// src/legion-tool.ts
+var LEGION_TOOL_NAME = "legion";
+function legionToolDefinition() {
+  return {
+    name: LEGION_TOOL_NAME,
+    description: legionToolDescription({
+      envoyPublish: "mcp__legion__envoy_publish",
+      before: PHASE_OP_SENTENCES.readRecord,
+      after: PHASE_OP_SENTENCES.requestBackwardMove
+    }),
+    inputSchema: exports_external.toJSONSchema(exports_external.object({ op: exports_external.enum(PHASE_OPS), ...phaseOpParameters(exports_external) }))
+  };
+}
+async function executeLegionTool(runtime, input) {
+  const claim = runtime.claim();
+  if (claim === undefined) {
+    throw new Error("this session has no Legion claim yet: the pane registers with the daemon once its first turn starts");
+  }
+  return executePhaseOp({ daemon: runtime.daemon, claim, handoffCommit: runtime.handoffCommit }, input);
 }
 
 // src/envoy-channel-server.ts
@@ -44039,6 +44129,7 @@ function undefinedOnNotFound(error48) {
   throw error48;
 }
 var MCP_SERVER_INFO = { name: "envoy", version: version2 };
+var CHANNEL_CAPABILITIES = ["aside"];
 var argumentSchemas = new WeakMap;
 function argumentsSchema(spec) {
   let schema = argumentSchemas.get(spec);
@@ -44220,7 +44311,7 @@ async function startChannelSession(options) {
       topics: forwarder.topics(),
       port: 0,
       title: "",
-      capabilities: ["aside"],
+      capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true
     });
@@ -44599,6 +44690,7 @@ async function runEnvoyChannelServer() {
   });
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
   const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
+  const capabilities = inboxSocket === undefined ? CHANNEL_CAPABILITIES : INBOX_CAPABILITIES;
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
   let stopping = false;
@@ -44640,6 +44732,7 @@ async function runEnvoyChannelServer() {
         identity,
         connection,
         notifier,
+        capabilities,
         client,
         heartbeatMs: envoy.heartbeatMs,
         configFile,
@@ -44656,7 +44749,8 @@ async function runEnvoyChannelServer() {
         client,
         session,
         signal: booting.signal,
-        stopPane
+        log: logLegion,
+        stop: endPane
       });
     }
     if (stopping)

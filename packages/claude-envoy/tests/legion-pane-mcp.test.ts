@@ -21,7 +21,8 @@ async function daemonFixture(name: string): Promise<Record<string, unknown>> {
 // A Legion pane's MCP server as Claude Code runs it under `legion claude-bridge`: a boot token,
 // the daemon's address, its own CLAUDE_CONFIG_DIR and the bridge's inbox socket on its
 // environment. It registers once the transcript exists, claims the claim token's role, says
-// ready, offers the `legion` tool beside the Envoy tools, and hands an Envoy delivery to the inbox.
+// ready, offers the `legion` tool beside the Envoy tools, advertises the Send (steer) the bridge
+// serves, and hands an Envoy delivery to the inbox.
 test("a Legion pane's server registers on its transcript, claims its role, serves the legion tool and delivers through the inbox", async () => {
   const root = await mkdtemp(join(tmpdir(), "claude-envoy-legion-pane-"))
   const configDir = join(root, "claude")
@@ -43,6 +44,7 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
     },
   })
   const roles: unknown[] = []
+  const advertised: unknown[] = []
   const holders = new Map<string, string>()
   const listener = Bun.serve({
     port: 0,
@@ -50,6 +52,8 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
       const url = new URL(request.url)
       const interest = { session_id: SESSION, machine_id: "test", dir: root, topics: [] }
       if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
+        const registration = (await request.json()) as { readonly capabilities?: unknown }
+        advertised.push(registration.capabilities)
         return Response.json(interest)
       }
       if (request.method === "POST" && url.pathname === "/v1/roles/set") {
@@ -149,6 +153,10 @@ test("a Legion pane's server registers on its transcript, claims its role, serve
       },
     ])
     expect(roles).toEqual([{ session_id: SESSION, role: claimToken, soft: true }])
+    // Dispatch refuses a mode the session does not advertise, and sends a Send by default: every
+    // registration of the session carries both modes the bridge serves.
+    expect(advertised.length).toBeGreaterThan(0)
+    for (const modes of advertised) expect(modes).toEqual(["aside", "steer"])
 
     const record = await client.callTool({
       name: "legion",
