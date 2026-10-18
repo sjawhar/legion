@@ -16,7 +16,8 @@
   claim the session moved away from is handed back. A `/fork` keeps the role whatever overtakes it;
   a `/new` or resume never carries it, ends it as the switch lands, and receives no message
   addressed to the session it replaced. This holds through the gap where Oh My Pi has moved to
-  the new session but not yet sent its switch event, and through a switch that fails in that gap.
+  the new session but not yet sent its switch event, and through a switch that fails in that gap;
+  a `/new` or resume that fails there ends the role with a warning, since nothing claims it again.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

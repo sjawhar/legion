@@ -4424,6 +4424,14 @@ describe("envoy OMP extension", () => {
             status: 409,
           });
         }
+        // The listener moves the role's interest row off the holder a claim replaces.
+        const replaced = rows.get(holder ?? "");
+        if (holder !== undefined && holder !== claimant && replaced !== undefined) {
+          rows.set(
+            holder,
+            replaced.filter((topic) => topic !== `notifications.role.${claimed}`)
+          );
+        }
         holders.set(claimed, claimant);
         return response({
           session_id: claimant,
@@ -4452,6 +4460,13 @@ describe("envoy OMP extension", () => {
           handedBack.push(`${topic}@${body?.session_id}`);
           const role = String(topic).replace("notifications.role.", "");
           if (holders.get(role) === body?.session_id) holders.delete(role);
+          const listed = rows.get(body?.session_id ?? "");
+          if (listed !== undefined) {
+            rows.set(
+              body?.session_id,
+              listed.filter((each) => each !== topic)
+            );
+          }
         }
         return response({});
       }
@@ -4501,6 +4516,7 @@ describe("envoy OMP extension", () => {
       branch: () => [...fixture.entries],
     };
     let heartbeat: (() => void) | undefined;
+    const notifications: string[] = [];
     const host = (): SessionContext => {
       const base = sessionContext(sessionID);
       return {
@@ -4513,6 +4529,7 @@ describe("envoy OMP extension", () => {
         setInterval: (callback: () => void) => {
           heartbeat = callback;
         },
+        ui: { ...base.ui, notify: (message: string) => notifications.push(message) },
       };
     };
     // The context a session event for `id` carries: the host has moved its manager to `id`, and a
@@ -4592,6 +4609,7 @@ describe("envoy OMP extension", () => {
       handedBack,
       holders,
       manager,
+      notifications,
       refuseRegistrations,
       registrations,
       tick,
@@ -4980,7 +4998,7 @@ describe("envoy OMP extension", () => {
 
   test("a /new ends the outgoing role as it lands, while an earlier establishment still waits on a move", async () => {
     const notice = "notifications.legion.ACME.controller";
-    const { fixture, live, context, claimSessions, gate, nextRegistration } =
+    const { fixture, live, context, claimSessions, gate, nextRegistration, notifications } =
       await gatedRoleFixture("new-ends-role-at-once", "ses_ne");
     await subscribeLegionNotice("ses_ne", notice, context, "legion-controller");
     const bound = natsState.controls.get(notice);
@@ -5006,6 +5024,8 @@ describe("envoy OMP extension", () => {
     await switched;
     expect(bound.active()).toBe(false);
     expect(claimSessions.filter((claim) => claim.endsWith("@ses_ne_new"))).toEqual([]);
+    // The switch's event ended the role, so pi-legion's handler for it can claim again: no warning.
+    expect(notifications.filter((message) => message.includes("sent no event"))).toEqual([]);
   });
 
   test("a heartbeat's role check after a fork whose reclaim failed claims for the fork over the parent's hold", async () => {
@@ -5056,6 +5076,106 @@ describe("envoy OMP extension", () => {
     expect(claimSessions).toEqual(["legion-controller@ses_rs_fork"]);
     expect(holders.get("legion-controller")).toBe("ses_rs_fork");
   });
+
+  // A session can be overtaken at any point of its establishment: before it begins, at its
+  // reclaim's turn, during the reclaim's listener reads, or once its claim returns. Each hands the
+  // session that overtook it what it continued, so a fork keeps the role.
+  test("an establishment that begins in a later fork's window acts for no session and hands the fork its role", async () => {
+    const { fixture, live, context, claimSessions, holders, started, startReached, releaseStart } =
+      await gatedRoleFixture("establishment-in-fork-window", "ses_ew", {
+        claimAtStart: false,
+        transcriptRole: "legion-controller",
+        holdStart: true,
+      });
+    // A resumed start registers, held; a tree navigation queues an establishment behind it; then
+    // a fork is announced and the host moves to it, and only then does the start finish.
+    await startReached;
+    const navigated = fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, context);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+    const moved = live("ses_ew_fork");
+    releaseStart();
+    await started;
+    await navigated;
+    // Neither queued establishment registered or subscribed the fork before its event, and the
+    // parent's subject still takes the frames the fork carries on.
+    expect(natsState.controls.get("notifications.agent.ses_ew_fork")).toBeUndefined();
+    natsState.controls
+      .get("notifications.agent.ses_ew")
+      ?.push(forwardedRoleEnvelope("legion-controller", "frame for the parent", "parent-frame"));
+    for (let drain = 0; drain < 5; drain += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(fixture.messages.some((message) => message.includes("frame for the parent"))).toBe(true);
+    await fixture.handlers.get("session_switch")?.({ reason: "fork" }, moved);
+    expect(claimSessions).toEqual(["legion-controller@ses_ew_fork"]);
+    expect(holders.get("legion-controller")).toBe("ses_ew_fork");
+    // The fork's event still finds the id it changed from, and tells the agent once.
+    const idNotices = fixture.deliveries.filter((delivery) =>
+      String(delivery.content).includes("session id changed")
+    );
+    expect(idNotices).toHaveLength(1);
+  });
+
+  test("a fork's establishment that begins in a second fork's window passes the role on and closes the subject it left", async () => {
+    const { fixture, live, context, claimSessions, holders, started, startReached, releaseStart } =
+      await gatedRoleFixture("establishment-in-second-fork-window", "ses_ef", {
+        claimAtStart: false,
+        transcriptRole: "legion-controller",
+        holdStart: true,
+      });
+    await startReached;
+    const parent = natsState.controls.get("notifications.agent.ses_ef");
+    if (parent === undefined) throw new Error("the parent's agent subject was not subscribed");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+    const first = fixture.handlers.get("session_switch")?.({ reason: "fork" }, live("ses_ef_f1"));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // The second fork moves the host while the first fork's establishment still waits.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+    const second = live("ses_ef_f2");
+    releaseStart();
+    await started;
+    await first;
+    await fixture.handlers.get("session_switch")?.({ reason: "fork" }, second);
+    expect(claimSessions).toEqual(["legion-controller@ses_ef_f2"]);
+    expect(holders.get("legion-controller")).toBe("ses_ef_f2");
+    expect(parent.active()).toBe(false);
+    expect(natsState.controls.get("notifications.agent.ses_ef_f1")).toBeUndefined();
+  });
+
+  for (const phase of ["listener read", "claim"] as const) {
+    test(`a fork whose reclaim's ${phase} a second fork outlasts hands that fork the role it found`, async () => {
+      const slug = phase.replace(" ", "-");
+      const { fixture, live, claimSessions, holders, rows, gate, gateInterest } =
+        await gatedRoleFixture(`reclaim-${slug}-overtaken`, `ses_${slug}`, {
+          claimAtStart: false,
+        });
+      // Only the listener's rows for the parent name the role: no transcript entry, no hold.
+      rows.set(`ses_${slug}`, ["notifications.role.legion-controller"]);
+      holders.set("legion-controller", `ses_${slug}`);
+      const held =
+        phase === "claim"
+          ? gate("legion-controller")
+          : gateInterest(`ses_${slug}`, ["notifications.role.legion-controller"]);
+      const forked = fixture.handlers.get("session_switch")?.(
+        { reason: "fork" },
+        live(`ses_${slug}_f1`)
+      );
+      await held.reached;
+      const forkedAgain = fixture.handlers.get("session_switch")?.(
+        { reason: "fork" },
+        live(`ses_${slug}_f2`)
+      );
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      held.release();
+      await forked;
+      await forkedAgain;
+      // A claim at the listener when the second fork landed is handed back; either way the second
+      // fork claims the role the first one found.
+      expect(claimSessions.at(-1)).toBe(`legion-controller@ses_${slug}_f2`);
+      expect(holders.get("legion-controller")).toBe(`ses_${slug}_f2`);
+    });
+  }
 
   test("a branch to before the last role move whose reclaim fails keeps no role its transcript does not record", async () => {
     const { fixture, live, manager, roleTool, claimSessions, failClaims, tick, nextRegistration } =
@@ -5265,7 +5385,7 @@ describe("envoy OMP extension", () => {
     for (const event of ["never comes", "comes late"] as const) {
       test(`a ${reason === "new" ? "/new" : "fork"} whose event ${event} after the host's move is run by the next tick by its own rule`, async () => {
         const notice = "notifications.legion.ACME.controller";
-        const { fixture, live, context, claimSessions, registrations, tick } =
+        const { fixture, live, context, claimSessions, registrations, tick, notifications } =
           await gatedRoleFixture(
             `switch-without-event-${reason}-${event.replace(" ", "-")}`,
             "ses_se"
@@ -5295,15 +5415,21 @@ describe("envoy OMP extension", () => {
             String(delivery.content).includes("session id changed") &&
             String(delivery.content).includes("ses_se_next")
         );
+        // The heal says what it ended, since the controller claims its role again only from the
+        // event; a role it carries needs no word.
+        const warned = notifications.filter((message) => message.includes("sent no event"));
         if (reason === "new") {
           expect(claimSessions.filter((claim) => claim.endsWith("@ses_se_next"))).toEqual([]);
           expect(bound.active()).toBe(false);
           expect(idNotices).toHaveLength(0);
+          expect(warned).toHaveLength(1);
+          expect(warned[0]).toContain("legion-controller");
         } else {
           expect(claimSessions.at(-1)).toBe("legion-controller@ses_se_next");
           expect(bound.active()).toBe(true);
           // Told once, whether or not the event comes after.
           expect(idNotices).toHaveLength(1);
+          expect(warned).toEqual([]);
         }
       });
     }
