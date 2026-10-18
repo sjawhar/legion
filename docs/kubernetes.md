@@ -199,7 +199,34 @@ is refused naming that (`Succeeded without checking the capability list (its leg
 check): build the image from this daemon's commit`), and a probe pod that exits 1 on a missing capability
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
-pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). The runtime keeps the line's `model-fallback`
+pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). A volume of the operator's pod block
+(`runtime.kubernetes.pod.volumes`) naming a ConfigMap or Secret that does not exist in the daemon's
+namespace, or asking a key it lacks, leaves the probe pod `Pending` with the kubelet's `FailedMount`
+(`configmap "<name>" not found` or `configmaps "<name>" not found`, `secret "<name>" not found` or
+`secrets "<name>" not found`, `configmap references non-existent config key: <key>`, `references
+non-existent secret key: <key>`); the daemon reads the pod's events once the pod is scheduled, at most
+every 15 s (`mountRecheck`), and refuses on the first such event, with no retry, naming the probe pod,
+the volume, the object the pod block gives it from and the kubelet's message — `the probe pod <name>
+cannot mount volume "<volume>", which runtime.kubernetes.pod.volumes gives it from ConfigMap "<name>":
+<kubelet message>` (or `Secret "<name>"`; a `projected` volume lists each ConfigMap and Secret source
+joined with `and`; a volume the block does not name reads `the probe pod <name> cannot mount volume
+"<volume>", which runtime.kubernetes.pod.volumes does not name: <kubelet message>`) — within one event
+read (15 s plus the wait loop's 500 ms tick) of the kubelet's first `FailedMount`, minutes into the
+boot rather than after the six attempts of the retry budget (about 71 minutes at the production
+budget), so a daemon under its Deployment's startup probe refuses, exits and is restarted with its
+usual back-off, each restart's probe refusing the same way in the log, until the object exists. A
+container waiting `CreateContainerConfigError` whose message names such an object (one its
+environment reads: `couldn't find key <key> in ConfigMap <ns>/<name>` or `… in Secret <ns>/<name>`, or
+the not-found forms above) is refused the same way from the pod's status: `the probe pod <name>
+cannot configure its container probe (waiting: CreateContainerConfigError), a ConfigMap or Secret it
+reads being missing: <kubelet message>`. The `FailedMount` forms the kubelet retries itself and heals
+(`failed to sync configmap cache: timed out waiting for the condition` and the secret form, `object
+"<ns>"/"<name>" not registered`, `Unable to attach or mount volumes … timed out waiting for the
+condition`) stay under the six-attempt budget, and the providers Secret, which every pod mounts, keeps
+its own earlier rule and wording (`cannot mount the providers Secret …`); the stage 4a harness's
+`image-probe-missing-volume-negative` check drives the refusal with a volume `operator-missing` from
+a ConfigMap `<operator ConfigMap>-missing` that does not exist, mounted at
+`/etc/legion-operator-missing`. The runtime keeps the line's `model-fallback`
 mark for the deployment's capability report ([The deployment's capability report](#the-deployments-capability-report)). To run it yourself:
 `docker run --rm ghcr.io/sjawhar/legion-worker@sha256:… probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models`
 (both roots are required: the Legion and Envoy plugin roots a Sandbox pod loads the plugins from, so the probe loads them the same way; without
@@ -1198,7 +1225,10 @@ the file leaves unset from the defaults.
 Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
-worker image's. `provider_keys` names keys of the providers Secret, which every pod mounts, those
+worker image's. A ConfigMap or Secret a volume names must exist in the daemon's namespace, with every
+key the volume asks of it: the image probe refuses the boot at once, naming it, when it does not
+([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
+`provider_keys` names keys of the providers Secret, which every pod mounts, those
 keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
 Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
 overlay, and the pod that mounts them; the operator keeps their own copies of the two files in a
@@ -2446,8 +2476,11 @@ run as the daemon's identity, on a cluster that admits Legion's pods before any 
 it: a pod the cluster would not admit, mount or start fails here as it would fail the daemon's boot.
 A pass holds only against the cluster's objects as they are at the run, since the probe mounts the
 ConfigMaps, Secrets, ServiceAccount and providers Secret that exist then. A change that adds one of
-them applies it first, and fails here until it does; a change that removes or renames one the pod
-still names passes here and fails at the restart.
+them applies it first, and fails here at once until it does, naming the object — the missing
+ConfigMap or Secret and the volume the pod block gives it to (`the probe pod <name> cannot mount
+volume "<volume>", which runtime.kubernetes.pod.volumes gives it from ConfigMap "<name>": …`), as
+the daemon's boot would; a change that removes or renames one the pod still names passes here and
+fails at the restart.
 
 ## Kubernetes runtime (TypeScript daemon)
 
