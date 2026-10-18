@@ -41,6 +41,13 @@ events to the right session.
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 | Pulumi components      | `infra/`                                  | the `envoy-infra` Pulumi plugin and the `envoy-infra` command (`seed`, `render`), a Go module with a `go.work` of its own; see `packages/envoy/infra/AGENTS.md` |
 
+`pmdoc.Update` writes a block's new text as one span of the old text's UTF-16 units replaced
+(`simpleDiff`). The span never starts or ends inside a surrogate pair, so an emoji that shares one
+half of its pair with the one it replaces (U+1F4CA and U+1F4CB share a high surrogate) is replaced
+whole; a span cut there would store each half as U+FFFD. A splice refuses a range with an edge
+inside a pair (`slice16`), and a quote's ambiguity context rounds outward to whole characters
+(`context16`).
+
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
 and `EnsureBlockIDs` repairs missing and duplicate IDs (an id holding a NUL, which a hand-built
 client can set and no ask row or anchor can store, counts as missing; `storedBlockID`) before agent

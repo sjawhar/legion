@@ -894,6 +894,13 @@
 
 ### Fixed
 
+- `dispatch doc-edit` no longer stores two U+FFFD in place of an emoji. An edit rewrites a block's
+  text as one span of its old text replaced, found by the UTF-16 units the old and new text share
+  at their start and end; two emoji that share a high surrogate (📊 and 📋) or a low one (😊 and
+  U+1FA0A) share a unit of their pair, so the span began or ended inside it and each half was
+  stored as U+FFFD. Rows a table edit moves are rewritten this way too, so an emoji in a row the
+  edit never named could break. The span now moves out to the edges of a pair.
+
 - A Mermaid sequence, class, ER or xychart diagram in a Dispatch document renders. The editor's
   Mermaid preview ran its flowchart checks on every diagram, so every type other than a flowchart
   or state diagram was refused with "Unable to render Mermaid diagram: Invalid mermaid header";
