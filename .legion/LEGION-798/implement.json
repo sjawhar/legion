@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-798",
+  "completed": "2026-10-18T23:58:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2043",
+  "headSha": "d027e7499a28f981038e3d957df86c80380ee474",
+  "proof": [
+    {
+      "criterion": "A probe pod whose events show FailedMount for a ConfigMap or Secret that doesn't exist ends the probe at once with a refusal naming the object; it isn't retried and doesn't wait out its attempt.",
+      "surface": "The daemon's probe code (Runtime.ProbeImage, packages/daemon/internal/runtime/sandbox) under the package's fake-clientset rig, driven in real time with the production retry (bootprobe.Image: six attempts, 10 s to 5 min waits) and the AGENTC deployment's 660 s attempt budget, a FailedMount event in the kubelet v1.35.8 form planted on a scheduled Pending probe pod.",
+      "command": "cd packages/daemon && go test ./internal/runtime/sandbox -run TestSmokeMissingVolumeLatency -count=1 -v  (throwaway smoke_latency_test.go, written from the plan's Task 5 and deleted before the commit; ImageProbe{Contract: 3, Budget: 660 * time.Second, Retry: bootprobe.Image, RoleReferences: testRoleReferences}; event `MountVolume.SetUp failed for volume \"operator-route\" : configmap \"legion-operator-route\" not found`)",
+      "observed": "elapsed=16.887182ms creates=1 err=the probe pod legion-probe-legion-1d10089a0000 cannot mount volume \"operator-route\", which runtime.kubernetes.pod.volumes gives it from ConfigMap \"legion-operator-route\": MountVolume.SetUp failed for volume \"operator-route\" : configmap \"legion-operator-route\" not found — one Sandbox create, no `never completed within its retry budget`. (At the pre-simplify head 172fa159c916: elapsed=9.739029ms creates=1, same refusal.)",
+      "headSha": "d027e7499a28f981038e3d957df86c80380ee474",
+      "negativeControl": "The same rig with the kubelet-retried form `MountVolume.SetUp failed for volume \"operator-route\" : failed to sync configmap cache: timed out waiting for the condition`, Budget 2 s, Retry{1 ms, 1 ms, Attempts: 2} → elapsed=4.006847943s creates=2 err=the worker image probe never completed within its retry budget (2 attempts): probe pod legion-probe-legion-1d10089a0000 still Pending after 2s (container probe waiting: ContainerCreating); events: Warning FailedMount: … failed to sync configmap cache … — retried to the budget, not refused as a missing object."
+    },
+    {
+      "criterion": "A test drives a probe whose pod reports that event and gets the named refusal within one poll interval; it fails today.",
+      "surface": "probe_test.go: TestProbeImageRefusesAnOperatorVolumeThePodCannotMount (10 cases: 7 refused forms including the API server's plural, a projected volume's two sources, a volume the pod block does not name; 3 kubelet-retried forms) and TestProbeImageRefusesAContainerTheKubeletCannotConfigure (4 refused CreateContainerConfigError messages, 1 retried); each refused case asserts the refusal text, creates == 1 and no budget message, the rig's fake clock standing in for the interval.",
+      "command": "cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestProbeImageRefusesAnOperatorVolumeThePodCannotMount|TestProbeImageRefusesAContainerTheKubeletCannotConfigure' -count=1 -v",
+      "observed": "Red at 6bb747a2f75e (the tests' own commit, before the code): every refused subtest failed with `the worker image probe never completed within its retry budget (2 attempts)` and `ran the probe 2 times … want once`; every retried subtest passed. Green at 1cbbcb3ce333 and at d027e7499a28, probe_test.go unchanged since 6bb747a2f75e; the whole package `go test ./internal/runtime/sandbox -count=1` ok (84.6 s), `go test ./internal/bootprobe` ok, `go vet -tags e2e ./...` ok, `go build ./cmd/legion` ok, gofmt clean.",
+      "headSha": "d027e7499a28f981038e3d957df86c80380ee474",
+      "negativeControl": "The three retried FailedMount cases and the retried CreateContainerConfigError case in the same tables: each gets the budget message after two creates and never `cannot mount volume` / `cannot configure its container`; TestProbeImageRefusesAProvidersSecretThePodCannotMount, TestProbeImageWaitsOnAProbePodThePoolCannotPlace, TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout and TestProbeImageRetriesAProbeThatNeverFinished pass unchanged."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/runtime/sandbox/probe.go — mountRecheck (renamed providersMountRecheck); probeWaiting returns the waiting state; stuck: CreateContainerConfigError stop, events read for every scheduled (NodeName != \"\") Pending probe pod at most every 15 s, one podEvents read feeding providersMountFailure (now a pure function over the list) then missingVolume; missingObject, missingVolume, volumeRefusal, volumeSources; doc comments",
+    "packages/daemon/internal/runtime/sandbox/probe_test.go — TestProbeImageRefusesAnOperatorVolumeThePodCannotMount, TestProbeImageRefusesAContainerTheKubeletCannotConfigure",
+    "packages/daemon/internal/runtime/sandbox/live_install_test.go, live_test.go — stage 4a check image-probe-missing-volume-negative (checkImageProbeMissingVolumeRefusal)",
+    "scripts/e2e/README.md — the check's row",
+    "docs/kubernetes.md — the refusal in 'The image is probed before it publishes', the pod-block paragraph, the probe-boot paragraph",
+    "docs/site/src/content/docs/legion/troubleshooting.md — the remedy bullet"
+  ],
+  "trickyParts": [
+    "Scheduled is pod.Spec.NodeName != \"\" (plan decision 1): the rig's waits() sets NodeName and no PodScheduled condition, and the kubelet mounts only a bound pod; the Unschedulable capacity path keeps NodeName empty so it costs no event read.",
+    "The kubelet skips a pod volume no container mounts (desired_state_of_world_populator.go), so the live check adds both the volume and a volume_mounts entry at /etc/legion-operator-missing on slices.Clone'd slices.",
+    "missingObject matches the object's name as a wildcard (one regexp) and every other piece literally, so a reworded kubelet message falls back to the budget; the providers rule keeps its exact-name match and wording and runs first on the same event list.",
+    "unfinished's detail is byte-identical (probe_test.go:429 guards it): probeWaiting now returns *ContainerStateWaiting and unfinished reads .Reason."
+  ],
+  "deviations": [],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "go test ./internal/daemon cannot run in this pod (testcontainers needs Docker: `rootless Docker not found`); CI's Tests workflow runs it. The sandbox and bootprobe packages ran locally.",
+    "Done-when bullets 3 and 4 (the route's negative control inside its 45-minute budget; the refusal before the production startup probe restarts the daemon) have no in-tree surface: they are closed in the production check through the legion-deploy holder (plan Task 7) and stand in the PR body's Not proven / risk until then.",
+    "The stage 4a check image-probe-missing-volume-negative compiles under -tags e2e but no pod of this tree can run it (no Sandbox create permission); the legion-deploy holder runs it on a devbox, expected `CHECK image-probe-missing-volume-negative: PASS` with the refusal substring `cannot mount volume \"operator-missing\"`."
+  ],
+  "simplifyPass": "ce-simplify-code once at 172fa159c916 with three reviewer subagents (reuse, quality, efficiency): 5 applied (volumeRefusal single template via slices.IndexFunc, the waiting reason quoted from w.Reason, ProvidersSecretName bound once, podCondition in the live check, channel handoff for the last pod seen), 3 skipped (a shared failedMount rig helper and a shared deletion-poll helper would edit tests outside the diff; widening providersMountFailure to missingObject would change the providers rule the plan keeps exact); applied → new head d027e7499a28, checks and the smoke re-run there."
+}
