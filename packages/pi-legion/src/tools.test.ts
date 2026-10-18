@@ -120,27 +120,131 @@ const OMP_LEGION_TOOL_DESCRIPTION =
   "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
   "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
+/** Every session kind the tool answers for: a root architect, a sub-architect, each phase worker,
+ * and the controller. */
+const EVERY_SESSION: readonly LegionToolSession[] = [
+  claimSession("architect"),
+  claimSession("architect", "LEGION-209"),
+  ...(["planner", "implementer", "tester", "reviewer", "merger"] as const).map((role) =>
+    claimSession(role)
+  ),
+  { kind: "controller", sessionID: "ses_controller" },
+];
+
+const toolFor = (active: LegionToolSession) =>
+  createLegionTool({
+    pi,
+    daemon: recordingDaemon({}).daemon,
+    controllerGrant: noControllerGrant,
+    onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
+    resolveDocument: noDocumentLookup,
+    session: () => active,
+  });
+
 test("the legion tool's description is the exact text Oh My Pi agents read, for every session", () => {
-  const sessions: readonly LegionToolSession[] = [
-    claimSession("architect"),
-    claimSession("architect", "LEGION-209"),
-    ...(["planner", "implementer", "tester", "reviewer", "merger"] as const).map((role) =>
-      claimSession(role)
-    ),
-    { kind: "controller", sessionID: "ses_controller" },
-  ];
-  for (const active of sessions) {
-    const tool = createLegionTool({
-      pi,
-      daemon: recordingDaemon({}).daemon,
-      controllerGrant: noControllerGrant,
-      onPhaseCompleted: () => undefined,
-      handoffCommit: noHandoffCommit,
-      resolveDocument: noDocumentLookup,
-      session: () => active,
-    });
-    expect(tool.description).toBe(OMP_LEGION_TOOL_DESCRIPTION);
+  for (const active of EVERY_SESSION) {
+    expect(toolFor(active).description).toBe(OMP_LEGION_TOOL_DESCRIPTION);
   }
+});
+
+/** The `legion` tool's parameter schema as Oh My Pi agents are given it, serialized whole: every
+ * property and every `op` value in the order the tool has always declared them. */
+const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: {
+    op: {
+      type: "string",
+      enum: [
+        "register_gate",
+        "release_children",
+        "request_backward_move",
+        "retry_or_escalate",
+        "sign_off",
+        "close_root",
+        "park_child",
+        "rerun_child",
+        "read_record",
+        "handoff_complete",
+        "read_state",
+        "set_status",
+      ],
+    },
+    issue: { type: "string" },
+    artifactId: {
+      type: "string",
+      description:
+        "register_gate's root spec document: its artifact id, slug, or filename, as a dispatch command's --artifact takes it",
+    },
+    version: { type: "number" },
+    issues: { type: "array", items: { type: "string" } },
+    to: {
+      type: "string",
+      enum: [
+        "admitted",
+        "planning",
+        "implementing",
+        "testing",
+        "reviewing",
+        "retro",
+        "merging",
+        "awaiting_merge",
+        "production_check",
+        "done",
+        "held",
+      ],
+    },
+    reason: { type: "string" },
+    decision: { type: "string", enum: ["retry", "escalate"] },
+    summary: { type: "string" },
+    verdict: { type: "string", enum: ["pass", "fail"] },
+    ready: { type: "boolean" },
+    status: { type: "string", enum: ["todo", "backlog", "icebox"] },
+  },
+  required: ["op"],
+  additionalProperties: false,
+});
+
+test("the legion tool's parameter schema serializes to the exact schema Oh My Pi agents are given, for every session", () => {
+  for (const active of EVERY_SESSION) {
+    expect(JSON.stringify(z.toJSONSchema(toolFor(active).parameters as z.ZodType))).toBe(
+      OMP_LEGION_TOOL_SCHEMA
+    );
+  }
+});
+
+test("a root architect's handoff_complete is refused as unavailable before its arguments are read", async () => {
+  const root = toolFor(claimSession("architect"));
+  for (const parameters of [
+    {},
+    { summary: "" },
+    { summary: "x", verdict: "maybe", ready: "yes" },
+  ]) {
+    await expect(
+      root.execute("", { op: "handoff_complete", ...parameters }, undefined, undefined, context())
+    ).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: "handoff_complete is not available to a root architect session, which runs no phase",
+        },
+      ],
+      details: {},
+      isError: true,
+    });
+  }
+  // A field handoff_complete never takes is named first, as the operation's field check names it.
+  await expect(
+    root.execute("", { op: "handoff_complete", phase: "plan" }, undefined, undefined, context())
+  ).resolves.toMatchObject({
+    content: [
+      {
+        type: "text",
+        text: 'handoff_complete does not accept field "phase"; handoff_complete is not available to a root architect session, which runs no phase',
+      },
+    ],
+  });
 });
 
 test("the legion tool exposes only the workflow operations each role owns", async () => {

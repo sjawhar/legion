@@ -11,7 +11,6 @@ import {
   isPhaseOp,
   legionToolDescription,
   mintClaimGrant,
-  PHASE_OPS,
   phaseOpParameters,
 } from "@legion/pi-shared/legion-phase-ops";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "@legion/pi-shared/pi-types";
@@ -35,23 +34,23 @@ export interface LegionControllerToolSession {
 
 export type LegionToolSession = LegionClaimToolSession | LegionControllerToolSession;
 
-/** The architect's operations beyond the phase ops (`@legion/pi-shared/legion-phase-ops`), which
- * an architect has too. */
-const ARCHITECT_OPS = [
-  "register_gate",
-  "release_children",
-  "retry_or_escalate",
-  "sign_off",
-  "close_root",
-  "park_child",
-  "rerun_child",
-] as const;
-const CONTROLLER_OPS = ["read_state", "set_status"] as const;
-
+/** Each session kind's operations, in the order the tool's `op` enum lists them. The phase ops
+ * (`@legion/pi-shared/legion-phase-ops`) are an architect's too. */
 const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
-  architect: [...ARCHITECT_OPS, ...PHASE_OPS],
-  "phase-worker": PHASE_OPS,
-  controller: CONTROLLER_OPS,
+  architect: [
+    "register_gate",
+    "release_children",
+    "request_backward_move",
+    "retry_or_escalate",
+    "sign_off",
+    "close_root",
+    "park_child",
+    "rerun_child",
+    "read_record",
+    "handoff_complete",
+  ],
+  "phase-worker": ["request_backward_move", "read_record", "handoff_complete"],
+  controller: ["read_state", "set_status"],
 };
 
 /** The fields each operation beyond the phase ops takes; a phase op's are `PhaseOpArguments`'. */
@@ -72,11 +71,14 @@ const ISSUE_STATUSES = ["todo", "backlog", "icebox"] as const;
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
+/** The tool's one object schema, `op` choosing the operation; its fields and the `op` values are
+ * in the order the tool has always declared them, which `tools.test.ts` pins. */
 function toolSchema(pi: PiApi): unknown {
   const z = pi.zod;
+  const phase = phaseOpParameters(z);
   return z.object({
-    op: z.enum([...ARCHITECT_OPS, ...PHASE_OPS, ...CONTROLLER_OPS]),
-    ...phaseOpParameters(z),
+    op: z.enum([...OPERATIONS.architect, ...OPERATIONS.controller]),
+    issue: phase.issue,
     artifactId: z
       .string()
       .describe(
@@ -85,7 +87,12 @@ function toolSchema(pi: PiApi): unknown {
       .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
+    to: phase.to,
+    reason: phase.reason,
     decision: z.enum(["retry", "escalate"]).optional(),
+    summary: phase.summary,
+    verdict: phase.verdict,
+    ready: phase.ready,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }

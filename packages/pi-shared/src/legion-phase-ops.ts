@@ -67,9 +67,9 @@ export const PhaseOpArguments = z.discriminatedUnion(
     operation("request_backward_move", {
       to: z.enum(LEGION_PHASE_BACKWARD_TARGETS, {
         error: (issue) =>
-          issue.input === undefined
-            ? "request_backward_move requires to"
-            : `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}`,
+          typeof issue.input === "string" && issue.input.trim() !== ""
+            ? `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}`
+            : "request_backward_move requires to",
       }),
       reason: requiredString("request_backward_move", "reason"),
     }),
@@ -80,13 +80,20 @@ export const PhaseOpArguments = z.discriminatedUnion(
   }
 );
 
+/** Every key a member of a union has. */
+type KeysOf<T> = T extends unknown ? keyof T : never;
+
+/** The fields the phase ops take, every op's but `op` itself. */
+export type PhaseOpField = Exclude<KeysOf<z.input<typeof PhaseOpArguments>>, "op">;
+
 /**
  * The fields of `PhaseOpArguments` as a host declares them in its `legion` tool's one object
  * schema, where `op` chooses the operation: each field once, optional, built with the host's Zod
  * (`zod`: Oh My Pi's `pi.zod`, whose converter reads only schemas its own Zod built, or
- * claude-envoy's). A field of a kind this does not map throws, so a new field is mapped on purpose.
+ * claude-envoy's), keyed by name so a host lays them out in the order its schema lists them. A
+ * field of a kind this does not map throws, so a new field is mapped on purpose.
  */
-export function phaseOpParameters(zod: unknown): Record<string, z.ZodType> {
+export function phaseOpParameters(zod: unknown): Record<PhaseOpField, z.ZodType> {
   const api = zodSchemaApi(zod);
   const fields: Record<string, z.ZodType> = {};
   for (const option of PhaseOpArguments.options) {
@@ -102,7 +109,9 @@ export function phaseOpParameters(zod: unknown): Record<string, z.ZodType> {
       } else throw new Error(`phase op field ${name} has a kind phaseOpParameters does not map`);
     }
   }
-  return fields;
+  // Built from the options' shapes, whose keys are exactly `PhaseOpField`.
+  const byField = fields as Record<PhaseOpField, z.ZodType>;
+  return byField;
 }
 
 /** The `legion` tool's sentences on `read_record` and `request_backward_move`, which a host whose
@@ -170,31 +179,46 @@ function recordFrom(state: LegionState, issue: string): LegionIssue {
   return record;
 }
 
+const ROOT_COMPLETION_REFUSAL =
+  "handoff_complete is not available to a root architect session, which runs no phase";
+
 /**
  * Runs one phase op and answers its JSON result: `{ record }` for `read_record`, the daemon's
- * answer for `handoff_complete`, `{}` for `request_backward_move`. Arguments `PhaseOpArguments`
- * refuses, a root architect's completion and a refused handoff-commit lookup throw before any
- * write, minting nothing and posting nothing; a daemon refusal throws its code and sentence.
+ * answer for `handoff_complete`, `{}` for `request_backward_move`. A refusal throws before any
+ * write, minting nothing and posting nothing: each problem `PhaseOpArguments` finds, joined by
+ * `; `, a field the operation does not take named first, then a root architect's completion,
+ * then each problem with the operation's own fields in the order it takes them; then a refused
+ * handoff-commit lookup. A daemon refusal throws its code and sentence.
  */
 export async function executePhaseOp(
   runtime: PhaseOpRuntime,
   input: unknown
 ): Promise<Readonly<Record<string, unknown>>> {
+  const { daemon, claim } = runtime;
   const parsed = PhaseOpArguments.safeParse(input);
+  const issues = parsed.success ? [] : parsed.error.issues;
+  const unknownFields = issues.filter((issue) => issue.code === "unrecognized_keys");
+  const fieldProblems = issues.filter((issue) => issue.code !== "unrecognized_keys");
+  const rootCompletion =
+    typeof input === "object" &&
+    input !== null &&
+    "op" in input &&
+    input.op === "handoff_complete" &&
+    claim.role === "architect" &&
+    claim.issue === claim.tree;
+  if (rootCompletion) {
+    throw new Error(
+      [...unknownFields.map((issue) => issue.message), ROOT_COMPLETION_REFUSAL].join("; ")
+    );
+  }
   if (!parsed.success) {
-    throw new Error(parsed.error.issues.map((issue) => issue.message).join("; "));
+    throw new Error([...unknownFields, ...fieldProblems].map((issue) => issue.message).join("; "));
   }
   const args = parsed.data;
-  const { daemon, claim } = runtime;
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete": {
-      if (claim.role === "architect" && claim.issue === claim.tree) {
-        throw new Error(
-          "handoff_complete is not available to a root architect session, which runs no phase"
-        );
-      }
       // The commit is found before the grant is minted: a refusal here posts nothing and mints
       // nothing. The phase is the issue record's, the role the claim's.
       const { phase } = recordFrom(await daemon.state(), claim.issue);

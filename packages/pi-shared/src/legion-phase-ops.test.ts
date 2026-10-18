@@ -115,6 +115,12 @@ test("each op refuses its arguments whole before any daemon request, naming ever
     ],
     [{ op: "read_record" }, "read_record requires issue"],
     [{ op: "request_backward_move", reason: "r" }, "request_backward_move requires to"],
+    [{ op: "request_backward_move", to: " ", reason: "r" }, "request_backward_move requires to"],
+    [{ op: "request_backward_move", to: 44, reason: "r" }, "request_backward_move requires to"],
+    [
+      { op: "request_backward_move" },
+      "request_backward_move requires to; request_backward_move requires reason",
+    ],
     [
       { op: "request_backward_move", to: "integrating", reason: "r" },
       `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}`,
@@ -128,17 +134,28 @@ test("each op refuses its arguments whole before any daemon request, naming ever
   expect(routes).toEqual([]);
 });
 
-test("handoff_complete reads the issue's phase, finds the commit for it and the claim's role, then mints its grant and posts; a root architect is refused first", async () => {
+test("handoff_complete reads the issue's phase, finds the commit for it and the claim's role, then mints its grant and posts", async () => {
   const { ops, routes, lookups } = runtime();
   await expect(
     executePhaseOp(ops, { op: "handoff_complete", summary: "Done.", verdict: "pass" })
   ).resolves.toEqual(daemonFixture("handoff-complete.json"));
   expect(lookups).toEqual(["implementing implementer"]);
   expect(routes).toEqual(["/legion/v1/state", "/legion/v1/grants", "/legion/v1/handoff/complete"]);
+});
 
+test("a root architect's handoff_complete is refused as unavailable before its own fields are checked, after any field it never takes", async () => {
   const root = runtime({ ...implementer, role: "architect" });
-  await expect(executePhaseOp(root.ops, { op: "handoff_complete", summary: "x" })).rejects.toThrow(
-    "handoff_complete is not available to a root architect session, which runs no phase"
+  const refusal =
+    "handoff_complete is not available to a root architect session, which runs no phase";
+  for (const input of [
+    { op: "handoff_complete" },
+    { op: "handoff_complete", summary: "x" },
+    { op: "handoff_complete", summary: " ", verdict: "maybe", ready: "yes" },
+  ]) {
+    await expect(executePhaseOp(root.ops, input)).rejects.toThrow(new Error(refusal));
+  }
+  await expect(executePhaseOp(root.ops, { op: "handoff_complete", phase: "plan" })).rejects.toThrow(
+    new Error(`handoff_complete does not accept field "phase"; ${refusal}`)
   );
   expect(root.routes).toEqual([]);
 });

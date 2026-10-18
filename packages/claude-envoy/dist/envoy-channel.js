@@ -43998,7 +43998,7 @@ var PhaseOpArguments = exports_external.discriminatedUnion("op", [
   }),
   operation("request_backward_move", {
     to: exports_external.enum(LEGION_PHASE_BACKWARD_TARGETS, {
-      error: (issue2) => issue2.input === undefined ? "request_backward_move requires to" : `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}`
+      error: (issue2) => typeof issue2.input === "string" && issue2.input.trim() !== "" ? `request_backward_move's to is one of ${LEGION_PHASE_BACKWARD_TARGETS.join(", ")}` : "request_backward_move requires to"
     }),
     reason: requiredString("request_backward_move", "reason")
   })
@@ -44026,7 +44026,8 @@ function phaseOpParameters(zod) {
         throw new Error(`phase op field ${name} has a kind phaseOpParameters does not map`);
     }
   }
-  return fields;
+  const byField = fields;
+  return byField;
 }
 var PHASE_OP_SENTENCES = {
   readRecord: "read_record returns the record of `issue` from the daemon's state. ",
@@ -44050,20 +44051,25 @@ function recordFrom(state, issue2) {
     throw new Error(`The daemon has no record for ${issue2}`);
   return record3;
 }
+var ROOT_COMPLETION_REFUSAL = "handoff_complete is not available to a root architect session, which runs no phase";
 async function executePhaseOp(runtime, input) {
+  const { daemon, claim } = runtime;
   const parsed = PhaseOpArguments.safeParse(input);
+  const issues = parsed.success ? [] : parsed.error.issues;
+  const unknownFields = issues.filter((issue2) => issue2.code === "unrecognized_keys");
+  const fieldProblems = issues.filter((issue2) => issue2.code !== "unrecognized_keys");
+  const rootCompletion = typeof input === "object" && input !== null && "op" in input && input.op === "handoff_complete" && claim.role === "architect" && claim.issue === claim.tree;
+  if (rootCompletion) {
+    throw new Error([...unknownFields.map((issue2) => issue2.message), ROOT_COMPLETION_REFUSAL].join("; "));
+  }
   if (!parsed.success) {
-    throw new Error(parsed.error.issues.map((issue2) => issue2.message).join("; "));
+    throw new Error([...unknownFields, ...fieldProblems].map((issue2) => issue2.message).join("; "));
   }
   const args = parsed.data;
-  const { daemon, claim } = runtime;
   switch (args.op) {
     case "read_record":
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete": {
-      if (claim.role === "architect" && claim.issue === claim.tree) {
-        throw new Error("handoff_complete is not available to a root architect session, which runs no phase");
-      }
       const { phase } = recordFrom(await daemon.state(), claim.issue);
       const commit = await runtime.handoffCommit(phase, claim.role);
       return daemon.handoffComplete({
