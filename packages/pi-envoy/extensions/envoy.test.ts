@@ -5152,6 +5152,180 @@ describe("envoy OMP extension", () => {
     expect(claimSessions).toEqual(["release-captain@ses_io"]);
   });
 
+  // Oh My Pi announces a switch (`session_before_switch`), moves its one session manager, and
+  // only then dispatches the switch event. `hostMoves` stops in that window: the announcement
+  // has run and the manager names the new session, and the test fires the event itself later.
+  const hostMoves = async (
+    fixture: {
+      readonly handlers: Map<string, (event: unknown, context: SessionContext) => unknown>;
+    },
+    live: (id: string, options?: { fresh?: boolean }) => SessionContext,
+    context: SessionContext,
+    id: string
+  ): Promise<SessionContext> => {
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    return live(id, { fresh: true });
+  };
+
+  test("a heartbeat tick between the host's move to a /new session and its switch event carries no role into it", async () => {
+    const notice = "notifications.legion.ACME.controller";
+    const { fixture, live, context, claimSessions, tick } = await gatedRoleFixture(
+      "tick-in-host-window",
+      "ses_hw"
+    );
+    await subscribeLegionNotice("ses_hw", notice, context, "legion-controller");
+    const bound = natsState.controls.get(notice);
+    if (bound === undefined) throw new Error("the role-bound subject was not subscribed");
+    const moved = await hostMoves(fixture, live, context, "ses_hw_new");
+    tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+    expect(claimSessions.filter((claim) => claim.endsWith("@ses_hw_new"))).toEqual([]);
+    expect(bound.active()).toBe(false);
+  });
+
+  test("a heartbeat tick after a switch another extension cancelled still checks the role", async () => {
+    const { fixture, context, roleTool, claims, holders, tick, nextRegistration } =
+      await gatedRoleFixture("cancelled-switch", "ses_cs");
+    // The switch was announced, then cancelled: the manager never moved and no event follows.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    // The listener lost the claim, so the check claims the role again.
+    holders.delete("legion-controller");
+    const before = claims.length;
+    const tickRegistered = nextRegistration("ses_cs");
+    tick();
+    await tickRegistered;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // A re-claim of the held role queues behind the check, so the check has run when it returns.
+    await roleTool.execute("", { role: "legion-controller" });
+    expect(claims.slice(before)).toEqual(["legion-controller", "legion-controller"]);
+  });
+
+  test("a fresh session's first id, minted after a switch another extension cancelled, is still healed", async () => {
+    const { fixture, context, manager, registrations, tick } = await gatedRoleFixture(
+      "cancelled-switch-fresh",
+      "",
+      { claimAtStart: false }
+    );
+    // A fresh terminal has no id yet; a switch is announced and cancelled before it gets one.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    // The host then mints the session's first id, with no session event.
+    manager.id = "ses_minted";
+    tick();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(registrations).toContain("ses_minted");
+  });
+
+  test("a claim that returns between the host's move and its switch event is handed back and recorded nowhere", async () => {
+    const { fixture, live, context, handedBack, gate } = await gatedRoleFixture(
+      "claim-in-host-window",
+      "ses_cw"
+    );
+    const held = gate("reviewer");
+    const claimed = claimEnvoyRole("ses_cw", "reviewer", context);
+    await held.reached;
+    const moved = await hostMoves(fixture, live, context, "ses_cw_new");
+    held.release();
+    await expect(claimed).rejects.toThrow("handed back");
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+    expect(handedBack).toContain("notifications.role.reviewer@ses_cw");
+    expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");
+  });
+
+  test("a claim whose turn comes between the host's move and its switch event sends nothing", async () => {
+    const { fixture, live, context, roleTool, claimSessions, gate } = await gatedRoleFixture(
+      "queued-claim-in-host-window",
+      "ses_qw"
+    );
+    // The model's move holds the role-move queue, and a plugin's claim waits behind it.
+    const held = gate("release-captain");
+    const moving = roleTool.execute("", { role: "release-captain" });
+    await held.reached;
+    const claimed = claimEnvoyRole("ses_qw", "reviewer", context);
+    const moved = await hostMoves(fixture, live, context, "ses_qw_new");
+    held.release();
+    await moving;
+    await expect(claimed).rejects.toThrow("nothing was claimed");
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+    expect(claimSessions.filter((claim) => claim.startsWith("reviewer@"))).toEqual([]);
+  });
+
+  for (const phase of ["read", "claim"] as const) {
+    test(`a heartbeat's role check whose ${phase} the host's move to a /new outlasts fires no regain`, async () => {
+      const { fixture, live, context, holders, refuseRegistrations, tick, gate, gateRoleRead } =
+        await gatedRoleFixture(`heartbeat-${phase}-in-host-window`, `ses_${phase}w`);
+      const regained: string[] = [];
+      onEnvoyRoleRegained(async (role: string, reason: string) => {
+        regained.push(`${role}:${reason}`);
+      });
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const refused = refuseRegistrations(2);
+      tick();
+      await refused;
+      await drain();
+      if (phase === "claim") holders.delete("legion-controller");
+      const held = phase === "read" ? gateRoleRead("legion-controller") : gate("legion-controller");
+      tick();
+      await held.reached;
+      const moved = await hostMoves(fixture, live, context, `ses_${phase}w_new`);
+      held.release();
+      await drain();
+      await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+      await drain();
+      expect(regained).toEqual([]);
+    });
+  }
+
+  test("a reclaim whose turn comes between the host's move and its switch event does nothing", async () => {
+    const { fixture, live, context, roleTool, gate, nextRegistration } = await gatedRoleFixture(
+      "reclaim-in-host-window",
+      "ses_rw"
+    );
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(entry.message);
+    });
+    try {
+      // A tree navigation's reclaim waits behind the model's held move.
+      const held = gate("release-captain");
+      const moving = roleTool.execute("", { role: "release-captain" });
+      await held.reached;
+      const registering = nextRegistration("ses_rw");
+      const rebound = fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rw"));
+      await registering;
+      const moved = await hostMoves(fixture, live, context, "ses_rw_new");
+      held.release();
+      await moving.catch(() => undefined);
+      await rebound;
+      await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+      expect(warnings).not.toContain("envoy: role reclaim failed");
+    } finally {
+      stopSink();
+    }
+  });
+
+  for (const { name, reason, moves, arrives } of [
+    { name: "a /new replaces", reason: "new", moves: true, arrives: false },
+    { name: "a fork carries on", reason: "fork", moves: true, arrives: true },
+    { name: "a cancelled /new keeps", reason: "new", moves: false, arrives: true },
+  ] as const) {
+    test(`a frame for the session ${name}, arriving before the switch's event, ${arrives ? "arrives" : "is left undelivered"}`, async () => {
+      const slug = name.replaceAll(/[^a-z]+/g, "-");
+      const { fixture, live, context } = await gatedRoleFixture(`inbound-${slug}`, "ses_in");
+      const subject = natsState.controls.get("notifications.agent.ses_in");
+      if (subject === undefined) throw new Error("the agent subject was not subscribed");
+      await fixture.handlers.get("session_before_switch")?.({ reason }, context);
+      if (moves) live("ses_in_next", { fresh: reason === "new" });
+      const inbox = `_INBOX.${slug}`;
+      subject.push(forwardedRoleEnvelope("legion-controller", `frame ${slug}`, slug), inbox);
+      for (let drain = 0; drain < 5; drain += 1) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      expect(fixture.messages.some((message) => message.includes(`frame ${slug}`))).toBe(arrives);
+      expect(natsState.published.some((each) => each.subject === inbox)).toBe(arrives);
+    });
+  }
+
   test("role moves run one at a time, so a move back and a plugin's subscription after it both stand", async () => {
     const notice = "notifications.legion.ACME.controller";
     const { context, roleTool, gate } = await gatedRoleFixture("role-moves-back", "ses_role_back");

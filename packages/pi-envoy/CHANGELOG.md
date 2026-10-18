@@ -27,6 +27,11 @@
   carries the role to the fork instead of dropping it on the listener's 409. A plugin's
   role-bound subscription waits for the moves in flight before it checks its role. A move off any
   other role still works, and its answer names the role it released (`details.released`).
+- A heartbeat tick or a role claim that lands while Oh My Pi switches sessions no longer carries
+  the role into a `/new` or resume, or records a claim in the new session's transcript. Oh My Pi
+  moves its session manager before it fires the switch event; pi-envoy now checks every role
+  decision against the host's session id as well as its own, and a heartbeat tick after
+  `session_before_switch` or `session_before_branch` leaves the session to the switch's event.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

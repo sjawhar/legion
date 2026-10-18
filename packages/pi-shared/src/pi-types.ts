@@ -211,6 +211,14 @@ export interface PiEventContract {
     readonly event: unknown;
     readonly result: ResourcesDiscoverResult;
   };
+  /** A switch the host is about to make, emitted before it moves its session manager; a handler
+   *  that answers nothing never cancels it. */
+  readonly session_before_switch: {
+    readonly event: SessionSwitchEvent;
+    readonly result: undefined;
+  };
+  /** A branch the host is about to make, emitted before it moves its session manager. */
+  readonly session_before_branch: { readonly event: unknown; readonly result: undefined };
   readonly session_start: { readonly event: unknown; readonly result: undefined };
   readonly session_switch: { readonly event: SessionSwitchEvent; readonly result: undefined };
   readonly session_branch: { readonly event: unknown; readonly result: undefined };
