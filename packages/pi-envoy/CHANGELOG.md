@@ -17,9 +17,10 @@
   a `/new` or resume never carries it, ends it as the switch lands, and receives no message
   addressed to the session it replaced. This holds through the gap where Oh My Pi has moved to
   the new session but not yet sent its switch event, through a switch that fails in that gap, and
-  through a resume Oh My Pi rolls back after its move; a `/new` or resume that fails in that gap
-  ends the role with a warning that says who claims it again. The agent is told of each id change
-  a fork or branch makes once, in the session it names, never in a later `/new` session.
+  through a switch Oh My Pi rolls back, before or after its event; a `/new` or resume that fails
+  in that gap ends the role with a warning that says who claims it again. The agent is told of
+  each id change a fork or branch makes once, in the session it names, never in a later `/new`
+  session.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

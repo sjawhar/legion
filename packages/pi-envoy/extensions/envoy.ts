@@ -1605,6 +1605,17 @@ export default function envoyExtension(pi: PiApi): void {
       // continued, closing the subject of the session pi-envoy had moved to.
       const resettle =
         switchWithoutEvent === undefined && unsettled?.id === liveSessionID ? unsettled : undefined;
+      // The host came back to the session the last switch left, after pi-envoy had moved on (a
+      // switch Oh My Pi rolled back after its event ran): that switch is undone by its own rule,
+      // from the session pi-envoy had moved to — a `/new` or resume ends the role that session took
+      // and the session returned to reclaims its own; a fork carries the role back.
+      const rolledBack =
+        drifted &&
+        switchWithoutEvent === undefined &&
+        resettle === undefined &&
+        leavingSession?.id === liveSessionID
+          ? leavingSession
+          : undefined;
       if (healing) return;
       healing = true;
       // The host minted an id with no session event (a fresh TUI's first, or a session file it
@@ -1617,6 +1628,7 @@ export default function envoyExtension(pi: PiApi): void {
         if (switchWithoutEvent !== undefined) {
           return switchSession(switchWithoutEvent.reason, context, true);
         }
+        if (rolledBack !== undefined) return switchSession(rolledBack.reason, context, true);
         if (resettle !== undefined) {
           return establishSession(context, {
             carryPreviousSessionRole: resettle.carryPreviousSessionRole,
@@ -1790,8 +1802,8 @@ export default function envoyExtension(pi: PiApi): void {
   // reads may still name (the listener's rows, once a claim the overtaken session made was handed
   // back). `from` holds every session that gave way in one chain, since two establishments can be
   // queued from one previous session (a drift heal and a switch, or a plugin's subscribe and the
-  // switch's own handler) and each continues what it did. An establishment that reaches its
-  // reclaim with its session open clears it.
+  // switch's own handler) and each continues what it did. An establishment that goes ahead
+  // consumes it (`establishSessionNow`).
   let overtaken: Continuation | undefined;
 
   // What a session established after `previousSessionID` continues: the previous session itself,
@@ -1838,11 +1850,10 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const reclaimHeldRoles = async (
-    previousSessionID: string,
     readBranch: () => readonly unknown[],
     carryPreviousSessionRole: boolean,
     establishedFor: string,
-    continues: Continuation | undefined
+    continuation: Continuation
   ): Promise<void> => {
     // A role claim outlives the process it was made in, and the process that
     // resumes or rebinds the session must hold it again under its current
@@ -1872,13 +1883,11 @@ export default function envoyExtension(pi: PiApi): void {
     // session's, and its own establishment reclaims for it (`setEnvoyRole` refuses, or hands back,
     // a claim for a session left).
     await roleMoves.run(async () => {
-      const continuation = continues ?? continuationOf(previousSessionID);
       const continuing = continuation.predecessor;
       if (!sessionOpen(establishedFor)) {
         giveWay(establishedFor, continuation, carryPreviousSessionRole);
         return;
       }
-      overtaken = undefined;
       const remembered = transcriptClaimedRole(readBranch());
       if (remembered === null) {
         endRole();
@@ -1950,6 +1959,9 @@ export default function envoyExtension(pi: PiApi): void {
     establishedFor: string
   ): Promise<void> => {
     const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
+    // What this session continues, read now: an establishment that goes ahead consumes the
+    // handover record, so one that fails before its reclaim (an outage) leaves no stale chain.
+    const continues = options.continues ?? continuationOf(previousSessionID);
     // The host left this session before its establishment began: the switch that moved it on, or
     // the heartbeat for one whose event never comes, establishes the session the host is on, and
     // the heartbeat settles this one if the host comes back to it. This establishment acts for no
@@ -1961,13 +1973,10 @@ export default function envoyExtension(pi: PiApi): void {
       if (previousTopic !== undefined && previousSessionID !== sessionID) {
         closeIntentionally(previousTopic);
       }
-      giveWay(
-        establishedFor,
-        options.continues ?? continuationOf(previousSessionID),
-        options.carryPreviousSessionRole ?? true
-      );
+      giveWay(establishedFor, continues, options.carryPreviousSessionRole ?? true);
       return;
     }
+    overtaken = undefined;
     if (unsettled?.id === establishedFor) unsettled = undefined;
     restoreLocalSessionState(context);
     const branch = context.sessionManager.getBranch?.() ?? [];
@@ -1994,11 +2003,10 @@ export default function envoyExtension(pi: PiApi): void {
     await registerSession();
     if (resumed || previousSessionID !== "") {
       await reclaimHeldRoles(
-        previousSessionID,
         () => context.sessionManager.getBranch?.() ?? [],
         options.carryPreviousSessionRole ?? true,
         establishedFor,
-        options.continues
+        continues
       );
     }
     ensureHeartbeat(context);
