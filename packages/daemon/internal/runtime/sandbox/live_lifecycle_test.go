@@ -219,7 +219,7 @@ func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements,
 				return fmt.Errorf("container %s reserves no %s: requests %v, limits %v", c.Name, resourceName, c.Resources.Requests, c.Resources.Limits)
 			}
 			if request.Cmp(limit) != 0 {
-				return fmt.Errorf("container %s requests %s %s but is limited to %s; a reservation is one value as both", c.Name, resourceName, request.String(), limit.String())
+				return fmt.Errorf("container %s requests %s %s but is limited to %s; this run configures request = limit", c.Name, resourceName, request.String(), limit.String())
 			}
 			if request.Cmp(reserved) != 0 {
 				return fmt.Errorf("container %s reserves %s %s, not the %s configured for %s", c.Name, resourceName, request.String(), reserved.String(), source)

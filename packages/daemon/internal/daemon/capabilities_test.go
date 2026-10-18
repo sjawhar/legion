@@ -21,6 +21,10 @@ var reserved = config.RoleResources{CPU: "500m", CPURequest: "500m", Memory: "1G
 // compare, so only the memory makes it Burstable.
 var bursting = config.RoleResources{CPU: "1", CPURequest: "1000m", Memory: "32Gi", MemoryRequest: "8Gi"}
 
+// spelledApart requests what it is limited to, each spelled two ways (1000m against 1, 1024Mi
+// against 1Gi): a string compare would read it Burstable, a quantity compare reads it Guaranteed.
+var spelledApart = config.RoleResources{CPU: "1", CPURequest: "1000m", Memory: "1Gi", MemoryRequest: "1024Mi"}
+
 // Deployment reads the configuration alone: the decisions, the runtime, whether a broker is
 // configured, the roles whose pods reserve no CPU and memory — a role lacking either quantity
 // counts, in claim.Roles' order, and the controller only under controller: daemon (a Kubernetes
@@ -66,6 +70,11 @@ func TestDeploymentReadsTheConfigurationAlone(t *testing.T) {
 			claim.RoleArchitect: reserved, claim.RolePlanner: reserved, claim.RoleImplementer: reserved,
 			claim.RoleTester: reserved, claim.RoleReviewer: reserved, claim.RoleMerger: reserved, claim.RoleController: bursting,
 		}, nil, config.ControllerLaunchOperator),
+			capabilities.Deployment{Runtime: "kubernetes", Decided: decided}},
+		{"a request spelled apart from its equal limit", kubernetes(map[claim.Role]config.RoleResources{
+			claim.RoleArchitect: reserved, claim.RolePlanner: reserved, claim.RoleImplementer: spelledApart,
+			claim.RoleTester: reserved, claim.RoleReviewer: reserved, claim.RoleMerger: reserved, claim.RoleController: spelledApart,
+		}, nil, config.ControllerLaunchDaemon),
 			capabilities.Deployment{Runtime: "kubernetes", Decided: decided}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

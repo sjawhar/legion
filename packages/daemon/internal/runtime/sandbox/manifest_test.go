@@ -174,7 +174,8 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 // A role whose reservation requests less memory than its limit — the implementer at 8Gi under
 // 32Gi — runs its launcher container with exactly that request and limit, and every issue pod it
 // is a container of is Burstable, whichever role's launch created it; the init containers carry the
-// launching role's reservation as before, so a pod the implementer's launch creates runs them at the
+// launching role's reservation as before: the root's, created by the architect's launch, the
+// architect's default Guaranteed 250m and 1Gi, and a pod the implementer's launch creates the
 // implementer's 8Gi request and 32Gi limit. The controller's pod, which holds no implementer, and
 // the image probe's, sized by the probe's own reservation, stay Guaranteed.
 func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
@@ -189,12 +190,16 @@ func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
 		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("20Gi")},
 	}
+	architect := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("10Gi")},
+	}
 	for name, tc := range map[string]struct {
 		pod  corev1.PodSpec
-		init bool
+		init corev1.ResourceRequirements
 	}{
-		"root":        {podOf(t, r, rootSpec(t)), false},
-		"implementer": {podOf(t, r, childSpec(t)), true},
+		"root":        {podOf(t, r, rootSpec(t)), architect},
+		"implementer": {podOf(t, r, childSpec(t)), want},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := containerNamed(t, tc.pod, string(claim.RoleImplementer)).Resources; !reflect.DeepEqual(got, want) {
@@ -203,9 +208,12 @@ func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
 			if qos := podQOS(tc.pod); qos != corev1.PodQOSBurstable {
 				t.Errorf("the issue pod is %s, want %s", qos, corev1.PodQOSBurstable)
 			}
+			if len(tc.pod.InitContainers) == 0 {
+				t.Fatal("the issue pod has no init containers")
+			}
 			for _, c := range tc.pod.InitContainers {
-				if got := reflect.DeepEqual(c.Resources, want); got != tc.init {
-					t.Errorf("init container %s carries %+v; carrying the implementer's reservation = %t, want %t", c.Name, c.Resources, got, tc.init)
+				if !reflect.DeepEqual(c.Resources, tc.init) {
+					t.Errorf("init container %s carries %+v, want the launching role's %+v", c.Name, c.Resources, tc.init)
 				}
 			}
 		})

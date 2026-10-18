@@ -1283,8 +1283,10 @@ Two notes on what the script had to learn about its own surface:
 LEGION_E2E_IMAGE=<worker image@sha256> bash scripts/e2e/burstable-kind.sh     # → "burstable kind e2e: PASS in <n>s", exit 0
 ```
 
-Needs `docker`, `go`, `kubectl`, `curl`, `jq` and `kind` (`LEGION_E2E_KIND` names the binary when it
-is not on `PATH`). It creates a kind cluster of its own, `legion-burstable-<pid>`, whose kubeconfig
+Runs on an amd64 (x86_64) Linux host only: the gVisor release it installs and the static test binary
+it builds are amd64. Needs `docker`, `go`, `kubectl`, `curl`, `zstd`, a `tar` that supports `--zstd`
+(GNU tar 1.31 or later) and `kind` (`LEGION_E2E_KIND` names the binary when it is not on `PATH`).
+It creates a kind cluster of its own, `legion-burstable-<pid>`, whose kubeconfig
 is a file in the run's work directory: every `kubectl` call names that file and the cluster's
 `kind-…` context, and the Go driver refuses any other context, so the caller's kubeconfig and its
 current context are never read. The cluster is deleted on any exit.

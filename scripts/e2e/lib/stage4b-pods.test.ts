@@ -353,7 +353,7 @@ describe("the pod shape's reservation rule", () => {
         })
       )
     ).toEqual([
-      'container tester requests {"cpu":"750m","memory":"3Gi","ephemeral-storage":"1Gi"} but is limited to {"cpu":"1","memory":"3Gi","ephemeral-storage":"20Gi"}; a reservation is one value as both',
+      'container tester requests {"cpu":"750m","memory":"3Gi","ephemeral-storage":"1Gi"} but is limited to {"cpu":"1","memory":"3Gi","ephemeral-storage":"20Gi"}; this run configures request = limit',
     ]);
   });
 

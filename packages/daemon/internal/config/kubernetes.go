@@ -119,21 +119,15 @@ func (r RoleResources) Reserved() bool {
 
 // Burstable reports whether the settled reservation requests less cpu or memory than its limit,
 // which makes the pod holding it Burstable rather than Guaranteed. It reads quantities, so 1 and
-// 1000m are one value; a field that is no quantity reports nothing, since the loader refuses one.
+// 1000m are one value. Every field it reads is a quantity the loader settled (Reserved holds first
+// for the caller), so a value that is no quantity panics rather than reading as Guaranteed.
 func (r RoleResources) Burstable() bool {
 	return below(r.CPURequest, r.CPU) || below(r.MemoryRequest, r.Memory)
 }
 
-// below reports whether request is a smaller quantity than limit; false when either is none.
+// below reports whether request is a smaller quantity than limit.
 func below(request, limit string) bool {
-	requested, err := resource.ParseQuantity(request)
-	if err != nil {
-		return false
-	}
-	limited, err := resource.ParseQuantity(limit)
-	if err != nil {
-		return false
-	}
+	requested, limited := resource.MustParse(request), resource.MustParse(limit)
 	return requested.Cmp(limited) < 0
 }
 
@@ -786,13 +780,13 @@ func readPodMounts(value *yaml.Node, volumes []corev1.Volume) ([]corev1.VolumeMo
 // resolveKubernetes settles `runtime: kubernetes`: the keys outside the block every pod needs, and
 // the block, its kubeconfig resolved against the file's directory and every role's reservation
 // filled — the file's cpu, memory, ephemeral storage and their requests where it set them, the
-// default for each limit it left out, and the settled limit for a cpu or memory request it left
-// out (so a file that raises a limit alone keeps the role Guaranteed) — so the daemon translates
-// seven complete reservations and never one with a side missing. A role whose settled request
-// exceeds its limit is refused naming both keys, since the API server would refuse the pod (the
-// file set one of the two, or both: the defaults never exceed). The file's own block
-// (file.Kubernetes) keeps only what the file set, which resolveControllerLaunch reads to tell a
-// controller the operator sized from one the default sized.
+// default for each field it left out, except a cpu or memory request beside a limit the file set,
+// which takes that limit (settledRequest: a file that raises a limit alone keeps the role
+// Guaranteed) — so the daemon translates seven complete reservations and never one with a side
+// missing. A role whose settled request exceeds its limit is refused naming both keys, since the
+// API server would refuse the pod (the file set one of the two, or both: the defaults never
+// exceed). The file's own block (file.Kubernetes) keeps only what the file set, which
+// resolveControllerLaunch reads to tell a controller the operator sized from one the default sized.
 func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	if err := checkKubernetesKeys(file); err != nil {
 		return err
@@ -804,10 +798,9 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	block.Resources = DefaultResources()
 	for role, set := range file.Kubernetes.Resources {
 		settled := block.Resources[role]
-		cpu, memory := cmp.Or(set.CPU, settled.CPU), cmp.Or(set.Memory, settled.Memory)
 		block.Resources[role] = RoleResources{
-			CPU: cpu, CPURequest: cmp.Or(set.CPURequest, cpu),
-			Memory: memory, MemoryRequest: cmp.Or(set.MemoryRequest, memory),
+			CPU: cmp.Or(set.CPU, settled.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, settled.CPURequest),
+			Memory: cmp.Or(set.Memory, settled.Memory), MemoryRequest: settledRequest(set.MemoryRequest, set.Memory, settled.MemoryRequest),
 			EphemeralStorage:        cmp.Or(set.EphemeralStorage, settled.EphemeralStorage),
 			EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, settled.EphemeralStorageRequest),
 		}
@@ -827,6 +820,14 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
 	return nil
+}
+
+// settledRequest is a cpu or memory request as resolveKubernetes settles it for a role the file
+// names: the file's request where it set one; else the file's limit where it set that, so a raised
+// limit alone is requested in full; else the default's request, so a field the file never touched
+// keeps the default's shape, whatever request it carries.
+func settledRequest(request, limit, defaultRequest string) string {
+	return cmp.Or(request, limit, defaultRequest)
 }
 
 // secretDataKey is what Kubernetes accepts as a Secret's data key.

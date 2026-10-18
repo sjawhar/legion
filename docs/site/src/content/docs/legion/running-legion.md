@@ -97,11 +97,15 @@ on the same repositories.
   kubelet evicts a `Burstable` pod using more than its request before any `Guaranteed` one, or the
   kernel OOM-kills it, which stalls the tree until the pod is relaunched and its roles resume. The
   `resource-limits` row of `legion state --json` and `legion start --check-config` both name the
-  roles that make a pod `Burstable`. GKE Autopilot honours a request below the limit only in a
-  cluster that supports bursting (1.30.2-gke.1394000 or later on cgroup v2, with the
-  `efficiency-daemon` DaemonSet running), and otherwise sets each limit to the request; see
+  roles that make a pod `Burstable`. On GKE Autopilot's general-purpose, `Balanced` and `Scale-Out`
+  pods, a request below the limit is honoured only in a cluster that supports bursting
+  (1.30.2-gke.1394000 or later on cgroup v2, with the `efficiency-daemon` DaemonSet running), and
+  otherwise each limit is set to the request; even then such a pod, alone on its node, bursts only
+  to about its own summed requests (21Gi for the implementer example above, never its 32Gi limit).
+  General-purpose saves money but caps the burst at the pod's summed requests; `Performance` allows
+  the burst to the limit but saves nothing, since Autopilot bills the whole node there. See
   [Issue sizing](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
-  for how far a pod can burst there. The image probe pod, which every
+  for the sources. The image probe pod, which every
   boot runs before anything is served, carries a fixed reservation of its own and no role's share:
   250m and 1Gi over 5Gi of disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi
   at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from

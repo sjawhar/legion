@@ -1975,27 +1975,32 @@ sessions, but the turn in flight is lost. Request at least what a role needs to 
 and set `Burstable` roles only where losing a turn under pressure is cheaper than reserving the
 peak.
 
-On GKE Autopilot, which bills a pod by its requests, a request below the limit is honoured only in
-a cluster that supports bursting: GKE 1.30.2-gke.1394000 or later on cgroup v2, with the
-GKE-managed `efficiency-daemon` DaemonSet running (`kubectl get daemonset -n kube-system
-efficiency-daemon`); a cluster that does not support it sets each limit to the request, so the
-implementer above would run `Guaranteed` at an 8Gi limit
+On GKE Autopilot, which bills a pod by its requests, a pod on the default general-purpose platform
+or the `Balanced` or `Scale-Out` class is honoured a request below its limit only in a cluster that
+supports bursting: GKE 1.30.2-gke.1394000 or later on cgroup v2, with the GKE-managed
+`efficiency-daemon` DaemonSet running (`kubectl get daemonset -n kube-system efficiency-daemon`); a
+cluster that does not support it sets each limit to the request, so the implementer above would run
+`Guaranteed` at an 8Gi limit
 ([Resource requests in Autopilot](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests#resource-limits),
-"Setting resource limits in Autopilot"). Where bursting is supported, a pod on the default
-general-purpose platform or the `Balanced` or `Scale-Out` class can burst only into the node's
-burstable capacity, the sum of the requests of the pods on that node, and GKE terminates containers
-in lower-QoS pods first when memory use passes it; a pod that requests a specific machine series
-(the `Performance` class) or an accelerator bursts into the node's allocatable instead
+"Setting resource limits in Autopilot"). A pod that requests an accelerator or a specific machine
+series (the `Performance` class) can burst on any GKE version that supports that hardware. Where it
+can burst, a general-purpose, `Balanced` or `Scale-Out` pod bursts only into the node's burstable
+capacity — the sum of the requests of the pods on that node, plus a small buffer Autopilot adds for
+its system pods — and GKE terminates containers in lower-QoS pods first when memory use passes it;
+a `Performance`-class or accelerator pod bursts into the node's allocatable instead
 ([Configure Pod bursting in GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-bursting-gke#burstable-capacity),
-"Burstable capacity in GKE"; both pages read 2026-10-18). Legion's issue and controller pods carry
-`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, which on Autopilot gives each a node of
-its own whenever possible ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so on the
-general-purpose platform an issue pod alone on its node has little burstable capacity beyond its
-own summed requests: a `Burstable` role there saves on the bill but can use its limit only while
-its siblings in the pod leave their requests idle. To burst toward the limit itself, place the pods
-on a `Performance`-class or machine-series node (`runtime.kubernetes.scheduling.node_selector`, for
-example `cloud.google.com/compute-class: Performance` with `cloud.google.com/machine-family`), where
-the node's allocatable is the ceiling and the node, not the requests, is what Autopilot bills.
+"Bursting availability in GKE" and "Burstable capacity in GKE"; both pages read 2026-10-18).
+Legion's issue and controller pods carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`,
+which on Autopilot gives each a node of its own whenever possible
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so on the general-purpose platform an
+issue pod's ceiling is about its own summed requests, whatever its limits say: with the implementer
+at `memory_request: 8Gi` and every other role at its default, the pod requests 1 + 1 + 8 + 6 + 4 +
+1 = 21Gi, so the implementer peaks near 21Gi even while every sibling idles, and never reaches its
+32Gi limit. General-purpose saves money but caps the burst at the pod's summed requests;
+`Performance` allows the burst to the limit but saves nothing, since Autopilot bills the whole node
+there. To burst toward the limit, place the pods on a `Performance`-class node
+(`runtime.kubernetes.scheduling.node_selector`, for example `cloud.google.com/compute-class:
+Performance` with `cloud.google.com/machine-family`).
 
 The defaults were sized from an issue pod on the production cluster (measured 2026-10-09, under
 `GOMAXPROCS=3`): `go test ./...` of `packages/daemon` peaks at about 1.45 GiB of summed RSS, a cold

@@ -249,6 +249,21 @@ func TestARoleCanRequestLessMemoryThanItsLimit(t *testing.T) {
 	}
 }
 
+// A cpu or memory request settles to the file's request where it set one, else to the file's limit
+// where it set that, else to the default's request: a role the file names for another field keeps
+// the default's request shape, Burstable or not, rather than taking the default's limit.
+func TestSettledRequestFallsBackToTheDefaultsRequest(t *testing.T) {
+	for _, tc := range []struct{ name, request, limit, defaultRequest, want string }{
+		{"the file's request", "8Gi", "32Gi", "6Gi", "8Gi"},
+		{"the file's limit alone", "", "32Gi", "6Gi", "32Gi"},
+		{"neither set: the default's request", "", "", "2Gi", "2Gi"},
+	} {
+		if got := settledRequest(tc.request, tc.limit, tc.defaultRequest); got != tc.want {
+			t.Errorf("%s: settledRequest(%q, %q, %q) = %q, want %q", tc.name, tc.request, tc.limit, tc.defaultRequest, got, tc.want)
+		}
+	}
+}
+
 // A file that raises a limit alone settles its request to that limit, never to the default's
 // smaller request: setting `memory: 8Gi` keeps the role Guaranteed at 8Gi.
 func TestARoleRaisingALimitAloneStaysGuaranteed(t *testing.T) {

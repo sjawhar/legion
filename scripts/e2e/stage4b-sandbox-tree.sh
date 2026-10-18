@@ -1177,7 +1177,7 @@ EOF
 # override_ephemeral_storage_request), with only the fields it sets, so the daemon fills the rest
 # from config.DefaultResources() and the file exercises both paths; and, while controller_cpu is set
 # (daemon-controller-liveness, under `controller: daemon`), the controller's entry with that cpu as
-# both request and limit — the reservation's one shape — and 1Gi of memory. The data is the
+# both request and limit — this run configures request = limit — and 1Gi of memory. The data is the
 # reservations' (run_resources), so the file and the checks cannot drift apart.
 resources_block() {
   local role fields

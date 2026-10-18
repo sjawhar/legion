@@ -9,11 +9,13 @@
 # on two broken variants. Each check prints `== <name>`, what it observed and `ok <name> (<s>s)`;
 # the first that fails ends the run non-zero, naming it.
 #
-# Run it from a checkout as
+# Run it from a checkout on an amd64 (x86_64) Linux host — the gVisor release and the static test
+# binary it builds are amd64 only — as
 #   LEGION_E2E_IMAGE=<worker image@sha256> bash scripts/e2e/burstable-kind.sh
-# with docker, go, kubectl, curl, jq and kind (LEGION_E2E_KIND names the binary when it is not on
-# PATH) installed. The cluster is the run's own, and every kubectl call names its kubeconfig and
-# context, so the caller's kubeconfig is never read. The cluster is deleted on any exit;
+# with docker, go, kubectl, curl, zstd, a tar that supports --zstd, and kind (LEGION_E2E_KIND names
+# the binary when it is not on PATH) installed. The cluster is the run's own, and every kubectl
+# call names its kubeconfig and context, so the caller's kubeconfig is never read. The cluster is
+# deleted on any exit;
 # BURSTABLE_EVIDENCE_DIR (default a fresh /tmp directory, kept and printed) keeps the transcript,
 # the two legion.yaml files and each pod's manifest as the API server holds it.
 set -euo pipefail
@@ -74,9 +76,11 @@ cleanup() {
 trap cleanup EXIT
 
 begin prerequisites
-for tool in docker go kubectl curl jq sha256sum sha512sum "$kind_bin"; do
+[ "$(uname -m)" = x86_64 ] || fail "the proof runs on amd64 (x86_64) only, since the gVisor release it installs and the driver it builds are amd64; this host is $(uname -m)"
+for tool in docker go kubectl curl zstd tar sha256sum sha512sum "$kind_bin"; do
   command -v "$tool" >/dev/null || fail "$tool is not on PATH"
 done
+tar --help 2>/dev/null | grep -q -- '--zstd' || fail "this tar has no --zstd; install GNU tar 1.31 or later"
 image=${LEGION_E2E_IMAGE:-}
 [[ $image == *@sha256:* ]] || fail "LEGION_E2E_IMAGE must name the worker image by digest (<image>@sha256:<64 hex>)"
 note "kind $("$kind_bin" version), worker image $image"
