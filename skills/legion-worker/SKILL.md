@@ -248,10 +248,10 @@ gh pr comment <pr-number> \
 ## Planner artifact
 
 The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document, never in the issue's
-primary document, which is its spec. Legion sets no rule on what else goes in the repository: the
-planner commits a plan, a spec or spec code when the issue, its spec or the repository asks for it.
-A skill step that says "save the plan to a file" is satisfied by the handoff write in the completion
-gate below.
+primary document, which is its spec. Legion sets no rule on whether a plan or spec goes in the
+repository: the planner commits a plan, a spec or spec code when the issue, its spec or the
+repository asks for it. Otherwise, a skill step that says "save the plan to a file" is satisfied by
+the handoff write in the completion gate below.
 
 A plan that departs from the spec's design records the departure in `plan.md` and in the required
 `.legion/<issue>/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names

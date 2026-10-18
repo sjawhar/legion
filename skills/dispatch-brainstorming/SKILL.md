@@ -20,7 +20,8 @@ follows is a document on the same issue. This skill replaces superpowers' `brain
   nothing about where the conversation happens.
 - The spec is the issue's primary document and the plan is its `plan.md` document, in place of
   superpowers' spec and plan files (`docs/superpowers/specs/`, `docs/superpowers/plans/`). A copy
-  also goes in the repository only when the issue or the repository asks for one.
+  also goes in the repository only when the person, the issue, its spec or the repository asks for
+  one.
 
 The brainstorming stages still shape what you ask: clarifying questions, then two or three
 approaches with a recommendation, then the design section by section. A question that depends on
@@ -108,8 +109,9 @@ EOF
 
 Uploading `plan.md` again writes its next version. `writing-plans`'s content rules still apply in
 full — file structure, task right-sizing, bite-sized steps, no placeholders, the header, and its
-self-review — only where the plan lives changes: the issue's `plan.md`, in place of a plan file. A
-copy in the repository, or spec code there, goes in only when the issue or the repository asks for it.
+self-review — only where the plan lives changes: the issue's `plan.md`, in place of a plan file.
+A copy in the repository, or spec code there, goes in only when the person, the issue, its spec or
+the repository asks for it.
 Technical choices inside the approved design are made in the plan and need no question. A plan
 never changes a decision the human made in the spec: a change to one goes back to the spec as a
 decision block, with the evidence for it.
