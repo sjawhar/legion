@@ -97,9 +97,9 @@ type ImageProbe struct {
 	RoleReferences promptrefs.Names
 	// Resources are the probe container's requirements, as the daemon hands them: the probe's own
 	// fixed reservation (internal/daemon/kubernetes.go, probeReservation), its cpu and memory the
-	// request and the limit alike so the probe pod is Guaranteed as every Legion pod is. It runs Oh
-	// My Pi three times, one at a time (pi.agents, the plugin's load, the session-storage setting),
-	// and exits, so it is sized for that and not for a role's work.
+	// request and the limit alike, so the probe pod is Guaranteed whatever the roles request. It
+	// runs Oh My Pi three times, one at a time (pi.agents, the plugin's load, the session-storage
+	// setting), and exits, so it is sized for that and not for a role's work.
 	Resources corev1.ResourceRequirements
 }
 

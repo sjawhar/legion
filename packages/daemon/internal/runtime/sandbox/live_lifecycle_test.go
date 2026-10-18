@@ -197,13 +197,13 @@ func (r *liveRig) checkResources() error {
 	return nil
 }
 
-// guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity, its
-// qosClass is Guaranteed, and every container — the init containers included — reserves cpu and
-// memory with the request equal to the limit and equal to the reservation configured for it, and
-// carries the ephemeral-storage request and limit configured for it, the request under the limit:
-// want's entry for each regular container by name, and init for every init container (nil when the
-// pod has none to hold). A container want does not name is a refusal: nothing a Legion pod runs is
-// unreserved.
+// guaranteedPod is the reservation rule the rig's pods are held to, since the rig configures no
+// request below a limit (liveOverrides): it carries no affinity, its qosClass is Guaranteed, and
+// every container — the init containers included — reserves cpu and memory with the request equal
+// to the limit and equal to the reservation configured for it, and carries the ephemeral-storage
+// request and limit configured for it, the request under the limit: want's entry for each regular
+// container by name, and init for every init container (nil when the pod has none to hold). A
+// container want does not name is a refusal: nothing a Legion pod runs is unreserved.
 func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements, init *corev1.ResourceRequirements) error {
 	if pod.Spec.Affinity != nil {
 		return fmt.Errorf("carries an affinity, which no Legion pod asks for: %+v", pod.Spec.Affinity)
@@ -219,7 +219,7 @@ func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements,
 				return fmt.Errorf("container %s reserves no %s: requests %v, limits %v", c.Name, resourceName, c.Resources.Requests, c.Resources.Limits)
 			}
 			if request.Cmp(limit) != 0 {
-				return fmt.Errorf("container %s requests %s %s but is limited to %s; a reservation is one value as both", c.Name, resourceName, request.String(), limit.String())
+				return fmt.Errorf("container %s requests %s %s but is limited to %s; this run configures request = limit", c.Name, resourceName, request.String(), limit.String())
 			}
 			if request.Cmp(reserved) != 0 {
 				return fmt.Errorf("container %s reserves %s %s, not the %s configured for %s", c.Name, resourceName, request.String(), reserved.String(), source)

@@ -79,16 +79,36 @@ on the same repositories.
 - **A node pool for Legion.** Every pod selects nodes labelled `legion.dev/pool=legion` and
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
-- **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod reserves cpu and memory
-  with its request equal to its limit, so every pod is `Guaranteed`, and bounds its ephemeral
-  storage — the node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go
-  and Bun caches a build fills — with a per-role limit over a smaller request. A role's reservation
-  is `runtime.kubernetes.resources.<role>` (`cpu`, `memory`, `ephemeral_storage` the disk limit,
-  `ephemeral_storage_request` what the scheduler reserves of it, each optional, the request at most
-  the limit), and the daemon's defaults fill the rest — 750m and 6Gi for the implementer and
+- **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod carries a
+  cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
+  node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go and Bun caches a
+  build fills — with a per-role limit over a smaller request. A role's reservation is
+  `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
+  `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
+  `ephemeral_storage_request` what the scheduler reserves of it, each optional, each request at most
+  its limit), and the daemon's defaults fill the rest — 750m and 6Gi for the implementer and
   tester; 750m and 4Gi for the reviewer; 250m and 1Gi for the architect, planner and merger; 1 CPU
-  and 4Gi for the controller (`controller: daemon` only); 20Gi of disk for the implementer and
-  tester and 10Gi for every other role, over a 1Gi request each. The image probe pod, which every
+  and 4Gi for the controller (`controller: daemon` only), each both request and limit; 20Gi of disk
+  for the implementer and tester and 10Gi for every other role, over a 1Gi request each. A cpu or
+  memory request the file leaves out equals the role's limit, so a deployment that sets none runs
+  only `Guaranteed` pods. A lower request — `implementer: {memory: 32Gi, memory_request: 8Gi}` for
+  an agent whose memory comes in bursts — makes every pod holding that role `Burstable`: more pods
+  fit a node and a cluster that bills by requests bills less, but under node memory pressure the
+  kubelet evicts a `Burstable` pod using more than its request before any `Guaranteed` one, or the
+  kernel OOM-kills it, which stalls the tree until the pod is relaunched and its roles resume. The
+  `resource-limits` row of `legion state --json` and `legion start --check-config` both name the
+  roles that make a pod `Burstable`. On GKE Autopilot's general-purpose, `Balanced` and `Scale-Out`
+  pods, a request below the limit is honoured only in a cluster that supports bursting
+  (1.30.2-gke.1394000 or later on cgroup v2, with the `efficiency-daemon` DaemonSet running), and
+  otherwise each limit is set to the request; even then such a pod, alone on its node, bursts only
+  to about its own summed requests (21Gi for the implementer example above, never its 32Gi limit).
+  A `Performance`-class pod bursts into its node's allocatable, but GKE sizes that node from the
+  summed requests of its pods and DaemonSets, rounded up to a machine type, and bills that VM, so
+  every Autopilot class sets the burst ceiling from the requests. To give a role real headroom on
+  Autopilot, raise the pod's summed requests (the role's own request, or an idle sibling's) rather
+  than its limit alone. See
+  [Issue sizing](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
+  for the sources. The image probe pod, which every
   boot runs before anything is served, carries a fixed reservation of its own and no role's share:
   250m and 1Gi over 5Gi of disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi
   at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from

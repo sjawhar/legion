@@ -37,8 +37,8 @@ func goldenOptions() Options {
 
 // reservations are the daemon's default reservations (config.DefaultResources) as the daemon
 // translates them for the runtime (internal/daemon/kubernetes.go, roleRequirements): every role,
-// the controller included, its cpu and memory the request and the limit alike, and its ephemeral
-// storage the limit over the smaller request.
+// the controller included, its cpu and memory requested as the defaults set them — each equal to
+// its limit — and its ephemeral storage the limit over the smaller request.
 func reservations() map[claim.Role]corev1.ResourceRequirements {
 	translated := map[claim.Role]corev1.ResourceRequirements{}
 	for role, reservation := range config.DefaultResources() {
@@ -51,26 +51,74 @@ func reservations() map[claim.Role]corev1.ResourceRequirements {
 // (internal/daemon/kubernetes.go, probeReservation), translated the same way: 250m and 1Gi, with a
 // 5Gi disk bound over a 1Gi request — not a role's share, written here as data as the defaults are.
 func probeReservation() corev1.ResourceRequirements {
-	return requirementsOf(config.RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
+	return requirementsOf(config.RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
 }
 
 // requirementsOf is reservation as a container's requirements, translated as roleRequirements
 // translates it.
 func requirementsOf(reservation config.RoleResources) corev1.ResourceRequirements {
-	cpu, memory := resource.MustParse(reservation.CPU), resource.MustParse(reservation.Memory)
 	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest)},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage)},
+		Requests: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse(reservation.CPURequest), corev1.ResourceMemory: resource.MustParse(reservation.MemoryRequest),
+			corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest),
+		},
+		Limits: corev1.ResourceList{
+			corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
+			corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage),
+		},
 	}
 }
 
-// Every container of every pod the runtime builds reserves cpu and memory and bursts past neither:
-// each has a non-zero request for both, equal to its limit, which is the kubelet's rule for the
-// Guaranteed class — judged over every container of the pod, the init containers included — and
-// each is bounded on the node's disk, an ephemeral-storage request under its limit. An issue pod's
-// six launchers each carry their role's reservation and its two init containers the launching
-// role's; the controller's pod carries the controller's on both its containers; and the image
-// probe's one container carries the probe's own, which the daemon hands it.
+// podQOS is the QoS class the API server records for a pod of spec (status.qosClass), by the
+// kubelet's rule over cpu and memory alone: no request or limit anywhere is BestEffort; every
+// container, init containers included, limited in both and the pod's summed requests equal to its
+// summed limits is Guaranteed; anything else is Burstable.
+func podQOS(spec corev1.PodSpec) corev1.PodQOSClass {
+	requests, limits := corev1.ResourceList{}, corev1.ResourceList{}
+	guaranteed := true
+	for _, c := range slices.Concat(spec.InitContainers, spec.Containers) {
+		limited := 0
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			if request, ok := c.Resources.Requests[name]; ok && !request.IsZero() {
+				sum := requests[name]
+				sum.Add(request)
+				requests[name] = sum
+			}
+			if limit, ok := c.Resources.Limits[name]; ok && !limit.IsZero() {
+				limited++
+				sum := limits[name]
+				sum.Add(limit)
+				limits[name] = sum
+			}
+		}
+		if limited != 2 {
+			guaranteed = false
+		}
+	}
+	if len(requests) == 0 && len(limits) == 0 {
+		return corev1.PodQOSBestEffort
+	}
+	if guaranteed && len(requests) == len(limits) {
+		for name, request := range requests {
+			if limit, ok := limits[name]; !ok || limit.Cmp(request) != 0 {
+				guaranteed = false
+			}
+		}
+		if guaranteed {
+			return corev1.PodQOSGuaranteed
+		}
+	}
+	return corev1.PodQOSBurstable
+}
+
+// Every container of every pod the runtime builds at the daemon's default reservations reserves cpu
+// and memory and bursts past neither: each has a non-zero request for both, equal to its limit,
+// which is the kubelet's rule for the Guaranteed class — judged over every container of the pod,
+// the init containers included — and each is bounded on the node's disk, an ephemeral-storage
+// request under its limit. An issue pod's six launchers each carry their role's reservation and its
+// two init containers the launching role's; the controller's pod carries the controller's on both
+// its containers; and the image probe's one container carries the probe's own, which the daemon
+// hands it. A deployment with no `resources` block therefore runs only Guaranteed pods.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -91,6 +139,9 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if qos := podQOS(tc.pod); qos != corev1.PodQOSGuaranteed {
+				t.Errorf("the pod is %s, want %s", qos, corev1.PodQOSGuaranteed)
+			}
 			containers := slices.Concat(tc.pod.InitContainers, tc.pod.Containers)
 			if len(containers) != tc.containers {
 				t.Fatalf("the pod runs %d containers, want %d", len(containers), tc.containers)
@@ -117,6 +168,62 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A role whose reservation requests less memory than its limit — the implementer at 8Gi under
+// 32Gi — runs its launcher container with exactly that request and limit, and every issue pod it
+// is a container of is Burstable, whichever role's launch created it; the init containers carry the
+// launching role's reservation as before: the root's, created by the architect's launch, the
+// architect's default Guaranteed 250m and 1Gi, and a pod the implementer's launch creates the
+// implementer's 8Gi request and 32Gi limit. The controller's pod, which holds no implementer, and
+// the image probe's, sized by the probe's own reservation, stay Guaranteed.
+func TestARequestBelowItsLimitRendersABurstablePod(t *testing.T) {
+	opts := goldenOptions()
+	bursting := config.RoleResources{CPU: "750m", CPURequest: "750m", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
+	opts.Resources[claim.RoleImplementer] = requirementsOf(bursting)
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatalf("configure with the implementer requesting 8Gi under a 32Gi limit: %v", err)
+	}
+	want := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m"), corev1.ResourceMemory: resource.MustParse("32Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("20Gi")},
+	}
+	architect := corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("10Gi")},
+	}
+	for name, tc := range map[string]struct {
+		pod  corev1.PodSpec
+		init corev1.ResourceRequirements
+	}{
+		"root":        {podOf(t, r, rootSpec(t)), architect},
+		"implementer": {podOf(t, r, childSpec(t)), want},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := containerNamed(t, tc.pod, string(claim.RoleImplementer)).Resources; !reflect.DeepEqual(got, want) {
+				t.Errorf("the implementer's container carries %+v, want %+v", got, want)
+			}
+			if qos := podQOS(tc.pod); qos != corev1.PodQOSBurstable {
+				t.Errorf("the issue pod is %s, want %s", qos, corev1.PodQOSBurstable)
+			}
+			if len(tc.pod.InitContainers) == 0 {
+				t.Fatal("the issue pod has no init containers")
+			}
+			for _, c := range tc.pod.InitContainers {
+				if !reflect.DeepEqual(c.Resources, tc.init) {
+					t.Errorf("init container %s carries %+v, want the launching role's %+v", c.Name, c.Resources, tc.init)
+				}
+			}
+		})
+	}
+	if qos := podQOS(podOf(t, r, controllerSpec(t))); qos != corev1.PodQOSGuaranteed {
+		t.Errorf("the controller's pod is %s, want %s", qos, corev1.PodQOSGuaranteed)
+	}
+	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Now())
+	if qos := podQOS(probe.Spec.PodTemplate.Spec); qos != corev1.PodQOSGuaranteed {
+		t.Errorf("the probe pod is %s, want %s", qos, corev1.PodQOSGuaranteed)
 	}
 }
 
@@ -724,9 +831,10 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
 // does not choose, no source for the provisioning token or the roles' gh files, and a Resources
 // map that would leave a container unreserved — a role or the controller without an entry, or an
-// entry that is no reservation: a cpu limit its request falls short of, no memory, an
+// entry that is no reservation: a cpu or memory request past its limit, no memory, an
 // ephemeral-storage request past its limit or none at all, or a resource the daemon never sizes —
-// each refusal naming the role.
+// each refusal naming the role. A request below its limit is a reservation
+// (TestARequestBelowItsLimitRendersABurstablePod).
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
@@ -746,11 +854,17 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"no gh credential":          {func(o *Options) { o.GitHubCredential = nil }, "no github credential function"},
 		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
 		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
-		"cpu limit past request": {
+		"cpu request past limit": {
 			func(o *Options) {
-				o.Resources[claim.RoleReviewer].Limits[corev1.ResourceCPU] = resource.MustParse("1500m")
+				o.Resources[claim.RoleReviewer].Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
 			},
-			"role reviewer requests cpu 750m but is limited to 1500m",
+			"role reviewer requests cpu 1500m past its limit 750m",
+		},
+		"memory request past limit": {
+			func(o *Options) {
+				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceMemory] = resource.MustParse("7Gi")
+			},
+			"role implementer requests memory 7Gi past its limit 6Gi",
 		},
 		"no memory": {
 			func(o *Options) {

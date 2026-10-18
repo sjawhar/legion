@@ -1096,13 +1096,14 @@ runtime:
       node_selector: {}         # merged over legion.dev/pool=legion, which it may not name
       tolerations: []
       priority_class: legion
-    resources:                  # optional; a role's reservation: cpu and memory each both request and limit,
-                                # so every role is covered for the resource-limits capability with or without
-                                # this block, and an ephemeral-storage limit over a small request (the role's
-                                # bound on the node's disk)
-      tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # the disk request stays the default 1Gi
+    resources:                  # optional; a role's reservation: cpu and memory limits, each requested in full
+                                # unless cpu_request or memory_request sets less (Issue sizing: Guaranteed or
+                                # Burstable), so every role is covered for the resource-limits capability with or
+                                # without this block, and an ephemeral-storage limit over a small request (the
+                                # role's bound on the node's disk)
+      tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # requests 1 and 6Gi; the disk request stays the default 1Gi
       reviewer: { memory: 2Gi }            # cpu stays the default, 750m; disk bound the default, 10Gi over 1Gi
-      implementer: { ephemeral_storage_request: 8Gi }   # reserves 8Gi of the node's disk under the 20Gi default
+      implementer: { memory: 32Gi, memory_request: 8Gi }   # Burstable: reserves 8Gi, may use 32Gi
       controller: { cpu: 2, memory: 8Gi }  # controller: daemon only
     pod:                        # the operator's: env, volumes, mounts, ServiceAccount (below)
       service_account: legion-worker
@@ -1117,13 +1118,17 @@ capabilities:                   # optional: the deployment capabilities decided 
   decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>", pool-capacity: "<reason>" }
 ```
 
-Every container of every Legion pod reserves cpu and memory with its request equal to its limit, so
-every pod is `Guaranteed` and bursts past nothing ([Issue sizing](#issue-sizing-one-reservation-per-pod)),
-and carries an ephemeral-storage limit, its bound on the node's disk, over a smaller
-ephemeral-storage request. `runtime.kubernetes.resources.<role>` sets a role's reservation: `cpu`,
-`memory`, `ephemeral_storage` (the limit) and `ephemeral_storage_request`, any of them; what the
-file leaves out, a field or a whole role, takes the daemon's default (`config.DefaultResources()`,
-`packages/daemon/internal/config/kubernetes.go`):
+Every container of every Legion pod carries a cpu and memory limit and a request no greater than it,
+and an ephemeral-storage limit, its bound on the node's disk, over a smaller ephemeral-storage
+request. `runtime.kubernetes.resources.<role>` sets a role's reservation: `cpu` and `memory` (the
+limits), `cpu_request` and `memory_request`, `ephemeral_storage` (the limit) and
+`ephemeral_storage_request`, any of them. A limit the file leaves out takes the daemon's default
+(`config.DefaultResources()`, `packages/daemon/internal/config/kubernetes.go`); a `cpu_request` or
+`memory_request` it leaves out takes the file's limit where it set one, else the default's request
+(`settledRequest`), so a file that raises `memory` alone keeps the role's request equal to it.
+With no request set below a limit, as at the defaults, every
+Legion pod is `Guaranteed`; a role with a lower request makes every pod holding its container
+`Burstable` ([Issue sizing](#issue-sizing-one-reservation-per-pod), "Guaranteed or Burstable").
 
 | role | cpu | memory | ephemeral-storage (limit / request) |
 | :--- | :--- | :--- | :--- |
@@ -1132,6 +1137,8 @@ file leaves out, a field or a whole role, takes the daemon's default (`config.De
 | `architect`, `planner`, `merger` | 250m | 1Gi | 10Gi / 1Gi |
 | `controller` (`controller: daemon`) | 1 | 4Gi | 10Gi / 1Gi |
 | the image probe (fixed, not a `resources` key) | 250m | 1Gi | 5Gi / 1Gi |
+
+Each default cpu and memory is both the request and the limit.
 
 The image probe pod's reservation is the daemon's own and no role's share (`probeReservation`,
 `packages/daemon/internal/daemon/kubernetes.go`): `legion probe-image` starts one Oh My Pi at a
@@ -1159,8 +1166,8 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 - `tree_volume`, the tree-volume layout's key: `runtime.kubernetes.tree_volume is now issue_volume:
   one volume per issue`;
 - `role_profiles`: `unknown key runtime.kubernetes.role_profiles: a role's reservation is
-  runtime.kubernetes.resources.<role>, a cpu and a memory each both request and limit, and a role
-  absent there takes the daemon's default`;
+  runtime.kubernetes.resources.<role>, its cpu and memory limits with optional lower cpu_request and
+  memory_request, and a role absent there takes the daemon's default`;
 - a `resources` key that is none of the seven roles: `runtime.kubernetes.resources key "small" must
   be a role (architect, planner, implementer, tester, reviewer, merger, controller)`; and
   `resources.controller` unless `controller: daemon`, the one setting under which the daemon
@@ -1168,15 +1175,15 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
   controller the daemon launches, and controller: operator launches none: set controller: daemon or
   drop the key`);
 - the earlier shape inside a role's entry: `runtime.kubernetes.resources.<role>.requests is gone: a
-  role's reservation is one cpu and one memory, each both its request and its limit` (`limits`
-  likewise); any other member of a role's entry but `cpu`, `memory`, `ephemeral_storage` and
-  `ephemeral_storage_request` is an unknown key, and a `cpu`, `memory`, `ephemeral_storage`,
-  `ephemeral_storage_request` or `issue_volume` that is not a positive Kubernetes quantity is
-  refused as such (`… must be a positive Kubernetes quantity (e.g. 20Gi or 500m)`);
-- an ephemeral-storage request past its limit, once both are settled — the file set one side or
-  both, since the defaults never exceed:
-  `runtime.kubernetes.resources.<role>.ephemeral_storage_request <request> exceeds ephemeral_storage
-  <limit>`;
+  role's reservation is its cpu and memory limits, with cpu_request and memory_request below them
+  where set` (`limits` likewise); any other member of a role's entry but `cpu`, `cpu_request`,
+  `memory`, `memory_request`, `ephemeral_storage` and `ephemeral_storage_request` is an unknown key,
+  and any of those six or `issue_volume` that is not a positive Kubernetes quantity is refused as
+  such (`… must be a positive Kubernetes quantity (e.g. 20Gi or 500m)`);
+- a request past its limit, once both are settled — the file set one side or both, since the
+  defaults never exceed: `runtime.kubernetes.resources.<role>.memory_request <request> exceeds
+  memory <limit>`, and likewise `cpu_request … exceeds cpu …` and `ephemeral_storage_request …
+  exceeds ephemeral_storage …`;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
 - `agent_secrets.operator`, removed with LEGION-664: the daemon logs in with its own ServiceAccount
   token (`token_file`), which no person approves, so it names no approver;
@@ -1192,9 +1199,15 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 `legion start --check-config` shows each of these before anything starts: a file carrying
 `tree_volume: 20Gi` is refused naming `issue_volume`; one carrying `resources: {tester: {limits:
 {memory: 8Gi}}}` naming `limits`; one carrying `resources: {small: {cpu: 500m}}` naming the seven
-roles; and a file with no `resources` block passes, as does one with `resources: {tester: {cpu: 2,
-memory: 8Gi}}` or `resources: {tester: {ephemeral_storage: 40Gi}}`, the daemon filling every field
-the file leaves unset from the defaults.
+roles; one carrying `resources: {implementer: {memory: 32Gi, memory_request: 40Gi}}` naming
+`memory_request`; and a file with no `resources` block passes, as does one with `resources:
+{tester: {cpu: 2, memory: 8Gi}}` or `resources: {tester: {ephemeral_storage: 40Gi}}`, the daemon
+filling every field the file leaves unset. A file that gives a role a request below its limit
+passes and prints, after the capability gaps, which pods that makes `Burstable`:
+
+```text
+resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed
+```
 
 Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `secret`,
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
@@ -1419,9 +1432,14 @@ configuration and its own boot, since no image or pod can show them:
   Pi settings (the probe pod's log says why), and the daemon's report shows the row open.
 - `resource-limits`: every workflow role — and the controller's, under `controller: daemon` —
   reserves CPU and memory (`config.RoleResources.Reserved`: `runtime.kubernetes.resources.<role>`
-  or the daemon's default, each both request and limit, [Issue sizing](#issue-sizing-one-reservation-per-pod)),
-  which a loaded Kubernetes configuration always satisfies; the row would name each role that did
-  not. Under tmux it is open unless decided: a pane has no requests or limits.
+  or the daemon's default, a limit with a request no greater than it,
+  [Issue sizing](#issue-sizing-one-reservation-per-pod)), which a loaded Kubernetes configuration
+  always satisfies; the row would name each role that did not. Its detail also says each pod's QoS
+  class: `each request equal to its limit, so every pod is Guaranteed`, or `Burstable roles (a
+  request below the limit): <roles>, so every issue pod is Burstable; every other pod is
+  Guaranteed` (the controller's pod in place of the issue pods when the role is the controller), so
+  `legion state --json` shows which roles reserve less than they may use. Under tmux it is open
+  unless decided: a pane has no requests or limits.
 - `pool-capacity`: the Legion pool had room for the image probe pod's own 250m / 1Gi reservation at
   boot — the probe pod scheduled at its first attempt. While it did not (`stuck`,
   `internal/runtime/sandbox/probe.go`: the pod `Pending` with `PodScheduled=False Unschedulable`
@@ -1601,12 +1619,14 @@ container, the first role's lock would block every other role's broker, and thei
 would fail (`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's
 own filesystem. `workspace-init`, which runs alone, keeps the plain `/home/legion/.local/state`.
 
-Every container carries a reservation, cpu and memory with request equal to limit, and an
-ephemeral-storage limit over a smaller request: each role container its role's
+Every container carries a reservation, a cpu and memory limit with a request no greater than it,
+and an ephemeral-storage limit over a smaller request: each role container its role's
 (`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init containers the
-reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). So
-the pod is `Guaranteed`, each container is bounded on the node's disk, and Legion sets no affinity
-on it (GKE Autopilot adds its own, below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
+reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). At
+the default reservations every request equals its limit and the pod is `Guaranteed`; a role whose
+`cpu_request` or `memory_request` is below its limit makes the pod `Burstable`. Each container is
+bounded on the node's disk, and Legion sets no affinity on the pod (GKE Autopilot adds its own,
+below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 Every role container is told `GH_CONFIG_DIR=/var/run/legion/gh`, so the image's plain `gh` reads
 its App token from the files there, and `git` reads the same file through the shared clone's
@@ -1677,9 +1697,10 @@ Every pod runs:
   privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
 - on the Legion pool, with its node selector and toleration, and nothing else of its placement that
   Legion itself sets: no affinity (GKE Autopilot adds its own to an annotated pod, below);
-- `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
-  kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
-  ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
+- `Guaranteed` at the default reservations: every container's cpu and memory request equal to its
+  limit (the two quantities the kubelet's QoS class reads); `Burstable` when a role the pod holds
+  sets a lower `cpu_request` or `memory_request`; and its ephemeral storage a 1Gi request under a
+  per-role limit ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
 - annotated against autoscaler eviction:
   - `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own, which GKE's cluster-autoscaler ignores;
   - the issue pod and the project controller's additionally carry
@@ -1920,23 +1941,71 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 
 ### Issue sizing: one reservation per pod
 
-Every container of a Legion pod reserves cpu and memory with its request equal to its limit
-(`roleRequirements`, `internal/daemon/kubernetes.go`), and carries an ephemeral-storage limit over a
-smaller ephemeral-storage request (the node-disk bound, below): each role container its role's
-reservation (`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none
-— [Configuration](#configuration)), both init containers the reservation of the role whose launch
+Every container of a Legion pod carries a cpu and memory limit with a request no greater than it
+(`roleRequirements`, `internal/daemon/kubernetes.go`), and an ephemeral-storage limit over a smaller
+ephemeral-storage request (the node-disk bound, below): each role container its role's reservation
+(`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none —
+[Configuration](#configuration)), both init containers the reservation of the role whose launch
 created the pod (`issuePod.initContainers`, `internal/runtime/sandbox/podkind.go`), the controller's
 launcher and init container the controller's, and the image probe's one container the probe's own
-fixed 250m / 1Gi (`probeReservation`, [Configuration](#configuration)), no role's share. So every
-Legion pod is `Guaranteed` — the kubelet's QoS reads cpu and memory alone, so the
-disk bound's request under its limit changes no pod's class — and the pod bursts past its summed
-reservation nowhere; inside it, under gVisor, one role may use what its idle siblings reserved
-(below). At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, the init containers adding
-nothing: a pod's effective request is the larger of its containers' sum and its largest init
-container, and no one role's reservation exceeds the sum of the six. Every role reserved is what
-the `resource-limits` row of
-[The deployment's capability report](#the-deployments-capability-report) measures, so on a
-Kubernetes deployment it is `present` with or without a `resources` block.
+fixed 250m / 1Gi, request equal to limit (`probeReservation`, [Configuration](#configuration)), no
+role's share. Inside a pod, under gVisor, one role may use what its idle siblings reserved (below).
+At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, the init containers adding nothing: a
+pod's effective request is the larger of its containers' sum and its largest init container, and no
+one role's reservation exceeds the sum of the six. Every role reserved is what the `resource-limits`
+row of [The deployment's capability report](#the-deployments-capability-report) measures, so on a
+Kubernetes deployment it is `present` with or without a `resources` block; its detail names the
+roles, if any, that make a pod `Burstable`.
+
+**Guaranteed or Burstable.** The kubelet's QoS class reads cpu and memory alone (the disk bound's
+request under its limit changes no pod's class). A deployment that sets no `cpu_request` or
+`memory_request` below its limit runs only `Guaranteed` pods: each reserves its peak for its whole
+life and bursts past nothing, and it is never the class the kubelet evicts first under node memory
+pressure. A role given a lower request — `implementer: {memory: 32Gi, memory_request: 8Gi}`, for an
+agent whose `lean` processes each map a few GiB at import and can pass 20 GiB on a large proof, but
+which uses little between builds — makes every pod holding its container `Burstable`: every issue
+pod for a workflow role, since each holds all six, and the controller's pod for the controller; the
+image probe pod stays `Guaranteed`. The init containers take the launching role's reservation as
+they always do, so they never raise the pod's effective request above its containers' sum. The
+scheduler and the pool's limits count the requests, so more pods fit a node and a request-billed
+cluster bills less. The cost is that the burst is not reserved: a node whose pods together use more
+memory than it has is under memory pressure, and the kubelet evicts `Burstable` pods using more than
+their request before any `Guaranteed` pod, or the kernel OOM-kills a container. Either stalls the
+tree as an OOM kill of a `Guaranteed` pod does — the pod is relaunched and its roles resume their
+sessions, but the turn in flight is lost. Request at least what a role needs to boot and to idle,
+and set `Burstable` roles only where losing a turn under pressure is cheaper than reserving the
+peak.
+
+On GKE Autopilot, which bills a pod by its requests, a pod on the default general-purpose platform
+or the `Balanced` or `Scale-Out` class is honoured a request below its limit only in a cluster that
+supports bursting: GKE 1.30.2-gke.1394000 or later on cgroup v2, with the GKE-managed
+`efficiency-daemon` DaemonSet running (`kubectl get daemonset -n kube-system efficiency-daemon`); a
+cluster that does not support it sets each limit to the request, so the implementer above would run
+`Guaranteed` at an 8Gi limit
+([Resource requests in Autopilot](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/autopilot-resource-requests#resource-limits),
+"Setting resource limits in Autopilot"). A pod that requests an accelerator or a specific machine
+series (the `Performance` class) can burst on any GKE version that supports that hardware. Where it
+can burst, a general-purpose, `Balanced` or `Scale-Out` pod bursts only into the node's burstable
+capacity — the sum of the requests of the pods on that node, plus a small buffer Autopilot adds for
+its system pods — and GKE terminates containers in lower-QoS pods first when memory use passes it;
+a `Performance`-class or accelerator pod bursts into the node's allocatable instead
+([Configure Pod bursting in GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-bursting-gke#burstable-capacity),
+"Bursting availability in GKE" and "Burstable capacity in GKE"). That node is itself sized from the
+requests: GKE adds up the cpu, memory and ephemeral-storage requests of the pods and DaemonSets that
+will run on the new node and rounds them up to the nearest machine type in the series that holds
+them, and Autopilot bills that VM
+([Optimize Autopilot Pod performance by choosing a machine series](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/performance-pods#how-gke-selects-machine-type),
+"How GKE selects a machine type" and "Pricing"; all three pages read 2026-10-18). So on Autopilot
+every class sets the burst ceiling from the requests. Legion's issue and controller pods carry
+`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, which on Autopilot gives each a node of
+its own whenever possible ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so on the
+general-purpose platform an issue pod's ceiling is about its own summed requests, whatever its
+limits say: with the implementer at `memory_request: 8Gi` and every other role at its default, the
+pod requests 1 + 1 + 8 + 6 + 4 + 1 = 21Gi, so the implementer peaks near 21Gi even while every
+sibling idles, and never reaches its 32Gi limit. On a `Performance` node the ceiling is those
+requests rounded up to a machine type, and a lower request still picks a smaller, cheaper VM. To
+give a role real headroom on Autopilot, raise the pod's summed requests — the role's own request,
+or that of a sibling that sits idle while it works — rather than its limit alone.
 
 The defaults were sized from an issue pod on the production cluster (measured 2026-10-09, under
 `GOMAXPROCS=3`): `go test ./...` of `packages/daemon` peaks at about 1.45 GiB of summed RSS, a cold
@@ -1964,15 +2033,17 @@ volume to detach from the old one, which shows as transient `FailedAttachVolume`
 events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
-from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
-is about Σ memory of the pod's containers, and an active role may use the pod's whole reservation
-while its siblings idle. The reservation is the pod's working set, not one container's; each
-container's own request and limit are what the API shows and the scheduler counts.
+from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) and `/proc/meminfo`'s
+`MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's
+whole reservation while its siblings idle. The reservation is the pod's working set, not one
+container's; each container's own request and limit are what the API shows, and its requests are
+what the scheduler counts.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
-`limits.memory` leave for pods of the per-pod sum: at the defaults, two pods fit a floor node and
-`limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold), and
-`limits.memory` divided by 19 GiB bounds them too when that is the smaller — where the
+`limits.memory` leave for pods of the per-pod sum of requests: at the defaults, two pods fit a floor
+node and `limits.cpu: 256` places about 80 three-CPU pods (less what the nodes' daemonsets hold),
+and `limits.memory` divided by 19 GiB bounds them too when that is the smaller (a `Burstable` role's
+lower request lowers the sum, and so places more) — where the
 tree-volume layout ran one tree per node, each pinned to a node of its own. `admission_cap` bounds
 roots alone: a tree of N children runs N+1 pods at once, and nothing caps concurrent child pods. A
 pod the pool cannot place stays `Pending`, unscheduled; once it has been for longer than
@@ -3143,8 +3214,10 @@ prompt, a part saying it runs headless in a pod, the daemon's `Design gate polic
 project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
 instructions. Both its containers, the init container and the launcher, carry the
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
-the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike, so the pod is
-`Guaranteed`, never the class the kubelet evicts first under node memory pressure; the image probe
+the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike unless the file sets a
+lower `cpu_request` or `memory_request`, so at the default the pod is `Guaranteed`, never the class
+the kubelet evicts first under node memory pressure (a lower request makes it `Burstable`,
+[Issue sizing](#issue-sizing-one-reservation-per-pod), "Guaranteed or Burstable"); the image probe
 pod carries its own, smaller reservation, not the controller's, so a controller reservation the
 pool cannot place leaves the probe, and the boot, unaffected
 ([Issue sizing](#issue-sizing-one-reservation-per-pod)).

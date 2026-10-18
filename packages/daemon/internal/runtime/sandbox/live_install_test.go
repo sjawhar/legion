@@ -263,10 +263,10 @@ func (r *liveRig) checkBootRefusal() error {
 // image-probe: the probe Sandbox, carrying the operator's pod, passes on the stage image, confirms
 // the daemon API contract, resolved the model of every task agent the prompts dispatch, and checked
 // the capability list, every image-site capability present; the report carries the model-fallback
-// mark the pod read. Its pod is read while the probe runs: the one container carries the
-// controller's reservation as both request and limit (imageProbe), so the probe pod is Guaranteed
-// as every Legion pod is, and it asks nothing of its placement. The negative control is the same
-// pod with its container's cpu limit raised past its request, which the reservation rule refuses
+// mark the pod read. Its pod is read while the probe runs: the one container carries the probe's
+// own reservation as both request and limit (imageProbe), so the probe pod is Guaranteed whatever
+// the roles request, and it asks nothing of its placement. The negative control is the same pod
+// with its container's cpu limit raised past its request, which the reservation rule refuses
 // naming the container.
 func (r *liveRig) checkImageProbe() error {
 	if err := r.startRuntimeOnce(); err != nil {
@@ -462,7 +462,7 @@ func (r *liveRig) checkImageProbeCapabilityRefusal() error {
 // prompts it hands every pod (prompts.RoleReferences), and the probe's own fixed reservation
 // (internal/daemon/kubernetes.go imageProbe, probeReservation) — 250m and 1Gi, not a role's share,
 // so a probe pod fits a pool with little room — with cpu and memory the request and the limit
-// alike, so the probe pod is Guaranteed as every Legion pod is. The probe command it sends, with
+// alike, so the probe pod is Guaranteed whatever the roles request. The probe command it sends, with
 // --role-references and, the run having a provider key, --provider-env-dir, is noted.
 func (r *liveRig) imageProbe() ImageProbe {
 	p := ImageProbe{
