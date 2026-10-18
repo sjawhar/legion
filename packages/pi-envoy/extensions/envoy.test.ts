@@ -4464,25 +4464,70 @@ describe("envoy OMP extension", () => {
     });
 
   test("a plugin's claim that waited across a /new is refused, and the new session claims nothing", async () => {
-    const { fixture, context, roleTool, claimSessions, gate } = await gatedRoleFixture(
-      "claim-across-new",
-      "ses_claim_old"
-    );
+    const { fixture, context, roleTool, claimSessions, gate, nextRegistration } =
+      await gatedRoleFixture("claim-across-new", "ses_claim_old");
     const held = gate("release-captain");
     const moved = roleTool.execute("", { role: "release-captain" });
     await held.reached;
     const claimed = claimEnvoyRole("ses_claim_old", "reviewer", context);
     // A `/new` installs a transcript of its own, which records no role.
+    const registering = nextRegistration("ses_claim_new");
     const switched = fixture.handlers.get("session_switch")?.(
       { reason: "new" },
       sessionContext("ses_claim_new")
     );
+    await registering;
     held.release();
     await moved;
     await switched;
     await expect(claimed).rejects.toThrow("ses_claim_old");
     expect(claimSessions.filter((claim) => claim.endsWith("@ses_claim_new"))).toEqual([]);
     expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");
+  });
+
+  test("a reclaim still waiting when a /new opens another session claims nothing for it", async () => {
+    const { fixture, live, roleTool, claimSessions, gate, nextRegistration } =
+      await gatedRoleFixture("reclaim-across-new", "ses_rq_old");
+    const held = gate("release-captain");
+    const moved = roleTool.execute("", { role: "release-captain" });
+    await held.reached;
+    // A tree navigation's reclaim for the old session waits behind the held move.
+    const registering = nextRegistration("ses_rq_old");
+    const rebound = fixture.handlers.get("session_tree")?.(
+      { newLeafId: "leaf" },
+      live("ses_rq_old")
+    );
+    await registering;
+    // A `/new` sets the new id at once; its own establishment waits behind the tree's.
+    const switched = fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      sessionContext("ses_rq_new")
+    );
+    held.release();
+    await moved;
+    await rebound;
+    await switched;
+    expect(claimSessions.filter((claim) => claim.endsWith("@ses_rq_new"))).toEqual([]);
+  });
+
+  test("a re-claim of a held role at the listener across a /fork keeps the old hold for the fork to carry", async () => {
+    const { fixture, live, context, handedBack, claimSessions, gate, nextRegistration } =
+      await gatedRoleFixture("reclaim-held-across-fork", "ses_rh_parent");
+    const held = gate("legion-controller");
+    const claimed = claimEnvoyRole("ses_rh_parent", "legion-controller", context);
+    await held.reached;
+    const registering = nextRegistration("ses_rh_child");
+    const forked = fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      live("ses_rh_child")
+    );
+    await registering;
+    held.release();
+    await expect(claimed).rejects.toThrow("the hold it already had stays");
+    await forked;
+    expect(handedBack).not.toContain("notifications.role.legion-controller@ses_rh_parent");
+    // The fork carries the role over to the child.
+    expect(claimSessions.at(-1)).toBe("legion-controller@ses_rh_child");
   });
 
   test("a plugin's claim at the listener when the session switches is handed back, not kept for the new session", async () => {

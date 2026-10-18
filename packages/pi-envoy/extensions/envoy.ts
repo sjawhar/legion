@@ -148,7 +148,8 @@ function serialQueue() {
   let tail: Promise<unknown> = Promise.resolve();
   return {
     run<T>(task: () => Promise<T>): Promise<T> {
-      const next = tail.then(task, task);
+      // `tail` never rejects (it is always `next.catch(…)`), so a failed task never stops the next.
+      const next = tail.then(task);
       tail = next.catch(() => undefined);
       return next;
     },
@@ -500,8 +501,7 @@ export default function envoyExtension(pi: PiApi): void {
   // at a session start, switch or drift heal) runs one at a time and decides inside its turn: it
   // reads the session and the role it leaves when it runs, so its checks and its `released`
   // describe the role it actually ends. A role-bound subscribe waits for the moves in flight.
-  const roleMoveQueue = serialQueue();
-  const moveRole = <T>(task: () => Promise<T>): Promise<T> => roleMoveQueue.run(task);
+  const roleMoves = serialQueue();
   const isRoleBound = (subject: string): boolean => roleNoticeSubjects.has(subject);
   // The role this session holds, if any.
   const heldRole = (): string | undefined => claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
@@ -1571,6 +1571,9 @@ export default function envoyExtension(pi: PiApi): void {
     const topic = ROLE_TOPIC_PREFIX + role;
     const previousTopic = claimedRoleTopic;
     const id = sessionID;
+    // The old session already held this role under this id before the claim: a re-claim, which
+    // leaves its hold as it was if the session moves meanwhile.
+    const alreadyHeld = previousTopic === topic && claimedRoleSessionID === id;
     const { client } = requireEnvoy();
     const result = await client.setRole({
       sessionID: id,
@@ -1580,11 +1583,17 @@ export default function envoyExtension(pi: PiApi): void {
     });
     if (sessionID !== id) {
       // The session moved while the claim was in flight: what it claimed belongs to a session no
-      // longer open here, so a claim that landed is handed straight back and nothing is recorded
-      // in the transcript now open.
-      if (result.claimed) await client.unsubscribe({ sessionID: id, topics: [topic] });
+      // longer open here, so a claim that landed is handed straight back, unless it only renewed
+      // a hold the old session already had, and nothing is recorded in the transcript now open.
+      const handBack = result.claimed && !alreadyHeld;
+      if (handBack) await client.unsubscribe({ sessionID: id, topics: [topic] });
+      const outcome = !result.claimed
+        ? "nothing was claimed"
+        : handBack
+          ? "the claim was handed back"
+          : "the hold it already had stays";
       throw new Error(
-        `the session moved from ${id} to ${sessionID} while its claim of role ${role} was in flight; the claim was handed back`
+        `the session moved from ${id} to ${sessionID} while its claim of role ${role} was in flight; ${outcome}`
       );
     }
     if (!result.claimed) {
@@ -1633,7 +1642,8 @@ export default function envoyExtension(pi: PiApi): void {
   const reclaimHeldRoles = async (
     previousSessionID: string,
     readBranch: () => readonly unknown[],
-    carryPreviousSessionRole: boolean
+    carryPreviousSessionRole: boolean,
+    establishedFor: string
   ): Promise<void> => {
     // A role claim outlives the process it was made in, and the process that
     // resumes or rebinds the session must hold it again under its current
@@ -1656,9 +1666,12 @@ export default function envoyExtension(pi: PiApi): void {
     //
     // All of it is decided as a role move, once the moves before it have landed: a move the
     // model or a plugin made while this one waited is in the transcript by then, so it is the
-    // role reclaimed, never undone. (The session cannot change while it waits: every change of
-    // session id is an establishment, those run one at a time, and this runs inside one.)
-    await moveRole(async () => {
+    // role reclaimed, never undone. A later start or switch sets the session id before it queues
+    // its own establishment, so a reclaim that finds another session open when its turn comes
+    // does nothing: this switch's rules are not that session's, and its own establishment
+    // reclaims for it.
+    await roleMoves.run(async () => {
+      if (sessionID !== establishedFor) return;
       if (!carryPreviousSessionRole) endOutgoingRole();
       const remembered = transcriptClaimedRole(readBranch());
       if (remembered === null) {
@@ -1700,8 +1713,9 @@ export default function envoyExtension(pi: PiApi): void {
 
   const establishSessionNow = async (
     context: SessionContext,
-    options: EstablishSessionOptions = {},
-    previousSessionID = sessionID
+    options: EstablishSessionOptions,
+    previousSessionID: string,
+    establishedFor: string
   ): Promise<void> => {
     const previousTopic = previousSessionID === "" ? undefined : agentSubject(previousSessionID);
     if (options.carryPreviousSessionRole === false) endOutgoingRole();
@@ -1732,7 +1746,8 @@ export default function envoyExtension(pi: PiApi): void {
       await reclaimHeldRoles(
         previousSessionID,
         () => context.sessionManager.getBranch?.() ?? [],
-        options.carryPreviousSessionRole ?? true
+        options.carryPreviousSessionRole ?? true,
+        establishedFor
       );
     }
     ensureHeartbeat(context);
@@ -1742,8 +1757,13 @@ export default function envoyExtension(pi: PiApi): void {
     context: SessionContext,
     options: EstablishSessionOptions = {},
     previousSessionID = sessionID
-  ): Promise<void> =>
-    sessionEstablishment.run(() => establishSessionNow(context, options, previousSessionID));
+  ): Promise<void> => {
+    // The session this establishment is for, as it stands when the caller queues it.
+    const establishedFor = context.sessionManager.getSessionId();
+    return sessionEstablishment.run(() =>
+      establishSessionNow(context, options, previousSessionID, establishedFor)
+    );
+  };
 
   // The bridge's state is read through `legionRoleClaimBridge()` at each use; only the instance
   // list is this instance's own entry on the object it published into.
@@ -1764,7 +1784,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    await moveRole(async () => {
+    await roleMoves.run(async () => {
       // A switch while the claim waited for earlier moves opened another session.
       if (sessionID !== targetSessionID) {
         throw new Error(
@@ -1789,18 +1809,15 @@ export default function envoyExtension(pi: PiApi): void {
     }
     if (sessionID !== targetSessionID) await establishSession(context);
     const marked: string[] = [];
-    // The role-end count when this call marked its subjects (read just after the role check).
-    let endsAtMark = roleEnds;
     if (whileHolding !== undefined) {
       // A role move still in flight could end the role just after the subscription opens, so the
       // role is read once every move started before this call has landed.
-      await roleMoveQueue.settled();
+      await roleMoves.settled();
       if (claimedRoleTopic !== ROLE_TOPIC_PREFIX + whileHolding) {
         throw new Error(
           `Envoy session ${targetSessionID} does not hold role ${whileHolding} for a notice subscription`
         );
       }
-      endsAtMark = roleEnds;
       // Marked before the subscription opens, so no registration ever carries it, and a move the
       // model starts from here on sees it.
       for (const subject of expandSubscriptionTopics([topic])) {
@@ -1809,12 +1826,16 @@ export default function envoyExtension(pi: PiApi): void {
         marked.push(subject);
       }
     }
+    // Taken once the subjects are marked: nothing awaits between the two.
+    const snapshot = roleSnapshot(topic);
     try {
-      if (!(await subscribeUnlessRoleEnds(topic, roleSnapshot(topic)))) return;
+      if (!(await subscribeUnlessRoleEnds(topic, snapshot))) return;
     } catch (error) {
       // Nothing opened, so nothing may keep the session's role in place on its behalf. A role that
       // ended meanwhile already dropped these marks, and a newer subscription may hold them now.
-      if (roleEnds === endsAtMark) for (const subject of marked) roleNoticeSubjects.delete(subject);
+      if (roleEnds === snapshot.endsBefore) {
+        for (const subject of marked) roleNoticeSubjects.delete(subject);
+      }
       throw error;
     }
     await registerSession();
@@ -2485,7 +2506,7 @@ export default function envoyExtension(pi: PiApi): void {
         case EnvoyToolOperation.setRole: {
           const role = stringFor(parameters, "role");
           // Read and checked inside the move, so a move landing first is the role this one leaves.
-          const released = await moveRole(async () => {
+          const released = await roleMoves.run(async () => {
             const held = heldRole();
             const moving = held !== undefined && held !== role;
             // Moving off a role closes every subscription another plugin opened `whileHolding`
