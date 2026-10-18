@@ -14,10 +14,10 @@ const machineIDNameRefusal = ", which the listener's NATS names or the hub's gra
 // ride in a hub grant entry or the watchdog's files. It also caps the id so that the durable
 // listener-<id> fits NATS's 255-byte consumer-name limit. The refusal text states exactly this.
 // bus.ListenerDurable and bus.ListenerQueue replace each ordinary space with a hyphen and produce
-// listener-<id> and envoy-listener-<id>. nats.go's checkConsumerName refuses an empty consumer name
-// and a name containing a dot or space; the generated durable contains no space. NATS subjects and
-// queue groups additionally cannot carry a wildcard, slash, backslash, control character, or
-// whitespace other than an ordinary space. The listener trims ENVOY_MACHINE_ID while loading it,
+// listener-<id> and envoy-listener-<id>. nats-server refuses a durable name holding a dot, wildcard,
+// path separator or whitespace. The rule is stricter than NATS where a hub grant entry
+// (core/nats_auth.go) or the watchdog's heredoc and environment file could not carry the
+// character: a control character or whitespace other than an ordinary space. The listener trims ENVOY_MACHINE_ID while loading it,
 // so leading or trailing whitespace is refused rather than allowed to change either generated
 // name. Each refusal is an InputError naming input. Only a printable delimiter is quoted; control
 // and whitespace characters are described without being echoed.

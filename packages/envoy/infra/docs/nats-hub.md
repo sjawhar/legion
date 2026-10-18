@@ -142,13 +142,15 @@ and `permissions`, or none, or when its `nkey` is empty, named by its index alon
 `machineId` or `dispatchMachineId` names the durable consumer `listener-<id>` and queue group
 `envoy-listener-<id>`. The shared machine-ID rule refuses an empty id; leading or trailing
 whitespace; `.`, `*`, `>`, `/` or `\`; a control character; and any whitespace other than an
-ordinary space. An ordinary space is accepted only inside the id and becomes a hyphen in both
-names. The refusal names the field itself, as
+ordinary space; and any id over 246 bytes, so `listener-<id>` fits NATS's 255-byte consumer-name
+limit. An ordinary space is accepted only inside the id and becomes a hyphen in both names. The refusal names the field itself, as
 `users[1].dispatchMachineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry`. Two ids that give one durable name, of either kind
 (`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would put
 two listeners on one durable and queue group, so the later one is refused, as
 `users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
-`… as the hub's own listener`. It is refused too for each of the
+`… as the hub's own listener`. Every `dispatchMachineId` user also binds Dispatch's fixed durables
+`delivery-events` and `delivery-jobs`, so a second one is refused the same way, as
+`users[3]: dispatchMachineId gives the same durable name as users[2].dispatchMachineId`. It is refused too for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
