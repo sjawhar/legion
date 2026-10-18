@@ -457,6 +457,7 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 		return core.Authorization{}, errors.New("users: at least one user is required, or a listener")
 	}
 	durables := map[string]string{}
+	dispatchUser := ""
 	if l != nil {
 		durables[bus.ListenerDurable(hostname)] = "the hub's own listener"
 	}
@@ -476,6 +477,12 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 			input := where + "." + kind.input
 			if err := core.CheckMachineID(input, id); err != nil {
 				return core.Authorization{}, err
+			}
+			if kind.input == "dispatchMachineId" {
+				if dispatchUser != "" {
+					return core.Authorization{}, core.InputErrorf(input, "%s: only one user may name dispatchMachineId: %s already does, and every such user would share Dispatch's fixed durables and bucket", where, dispatchUser)
+				}
+				dispatchUser = where
 			}
 			durable := bus.ListenerDurable(id)
 			if prior, ok := durables[durable]; ok {

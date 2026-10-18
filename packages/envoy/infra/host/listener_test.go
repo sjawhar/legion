@@ -309,7 +309,7 @@ func TestListenerRefusesInvalidInputs(t *testing.T) {
 			edit: func(a *host.ListenerArgs) {
 				a.MachineID = "example.host-a"
 			},
-			err:   []string{"envoy-infra:host:Listener example-host-a: machineId contains '.', which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"},
+			err:   []string{"envoy-infra:host:Listener example-host-a: machineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry"},
 			input: "machineId",
 		},
 	}

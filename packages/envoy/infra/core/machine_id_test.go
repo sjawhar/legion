@@ -8,11 +8,11 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 )
 
-// CheckMachineID accepts exactly the ids that make valid listener durable and queue names: an
+// CheckMachineID refuses the ids a listener name or hub grant entry cannot carry, and any over 246 bytes: an
 // interior ordinary space is accepted because both names replace it with a hyphen; every character
 // class either name cannot carry is refused without echoing an unsafe character.
 func TestCheckMachineID(t *testing.T) {
-	const carry = ", which cannot appear in the durable name listener-<id> or the queue group envoy-listener-<id>"
+	const carry = ", which the listener's NATS names or the hub's grant entries cannot carry"
 	for _, row := range []struct {
 		name, id, want string
 	}{

@@ -144,8 +144,7 @@ and `permissions`, or none, or when its `nkey` is empty, named by its index alon
 whitespace; `.`, `*`, `>`, `/` or `\`; a control character; and any whitespace other than an
 ordinary space. An ordinary space is accepted only inside the id and becomes a hyphen in both
 names. The refusal names the field itself, as
-`users[1].dispatchMachineId contains '.', which cannot appear in the durable name listener-<id>
-or the queue group envoy-listener-<id>`. Two ids that give one durable name, of either kind
+`users[1].dispatchMachineId contains '.', which the listener's NATS names or the hub's grant entries cannot carry`. Two ids that give one durable name, of either kind
 (`a b` and `a-b` collide), or one giving the hub's own listener's (the `hostname`'s), would put
 two listeners on one durable and queue group, so the later one is refused, as
 `users[2]: dispatchMachineId gives the same durable name as users[0].machineId` or
