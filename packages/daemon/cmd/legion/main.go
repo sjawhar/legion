@@ -75,6 +75,7 @@ var commands = map[string]commandEntry{
 	"legions":        {runLegions, "list the daemons registered on this machine"},
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
+	"claude-bridge":  {runClaudeBridge, "run Claude Code in Oh My Pi's place under worker-shim, for a role worker_backends puts on claude"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
 	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
