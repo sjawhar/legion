@@ -1576,21 +1576,30 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   /**
-   * Claim `role` for this session. A hard claim (the default; what
-   * envoy_role_set does) is last-claim-wins. A soft claim is what automatic
+   * Claim `role` for `forSession`, the session the move was decided for. A hard claim (the
+   * default; what envoy_role_set does) is last-claim-wins. A soft claim is what automatic
    * recovery uses: the listener grants it only when the role is unheld, its
    * holder is no longer live, or its holder is the id this session continues
    * (`previousSessionID` — a fork's parent is still heartbeating), and answers
    * with the live holder otherwise — atomically, so two resumers cannot both
    * believe they won. Returns whether the claim landed.
+   *
+   * Refused, with nothing sent, when another session is open by the time the claim runs: every
+   * caller decides its claim for one session, and a switch can land while it reads first.
    */
   const setEnvoyRole = async (
     role: string,
+    forSession: string,
     options: { soft?: boolean; previousSessionID?: string } = {}
   ): Promise<boolean> => {
+    if (sessionID !== forSession) {
+      throw new Error(
+        `the session moved from ${forSession} to ${sessionID} before its claim of role ${role} ran; nothing was claimed`
+      );
+    }
     const topic = ROLE_TOPIC_PREFIX + role;
     const previousTopic = claimedRoleTopic;
-    const id = sessionID;
+    const id = forSession;
     // The old session already held this role under this id before the claim: a re-claim, which
     // leaves its hold as it was if the session moves meanwhile.
     const alreadyHeld = previousTopic === topic && claimedRoleSessionID === id;
@@ -1652,12 +1661,13 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const roleSources = (
+    forSession: string,
     previousSessionID: string,
     carryPreviousSessionRole: boolean
   ): readonly string[] =>
-    previousSessionID === "" || previousSessionID === sessionID || !carryPreviousSessionRole
-      ? [sessionID]
-      : [sessionID, previousSessionID];
+    previousSessionID === "" || previousSessionID === forSession || !carryPreviousSessionRole
+      ? [forSession]
+      : [forSession, previousSessionID];
 
   const reclaimHeldRoles = async (
     previousSessionID: string,
@@ -1686,12 +1696,10 @@ export default function envoyExtension(pi: PiApi): void {
     //
     // All of it is decided as a role move, once the moves before it have landed: a move the
     // model or a plugin made while this one waited is in the transcript by then, so it is the
-    // role reclaimed, never undone. A later start or switch sets the session id before it queues
-    // its own establishment, so a reclaim that finds another session open when its turn comes
-    // does nothing: this switch's rules are not that session's, and its own establishment
-    // reclaims for it.
+    // role reclaimed, never undone. The claim is for `establishedFor`, so a later start or
+    // switch, which sets the session id before it queues its own establishment, leaves this one
+    // nothing to claim (`setEnvoyRole` refuses), and its own establishment reclaims for it.
     await roleMoves.run(async () => {
-      if (sessionID !== establishedFor) return;
       if (!carryPreviousSessionRole) endOutgoingRole();
       const remembered = transcriptClaimedRole(readBranch());
       if (remembered === null) {
@@ -1701,7 +1709,11 @@ export default function envoyExtension(pi: PiApi): void {
       let role = remembered ?? heldRole();
       if (role === undefined) {
         const { client } = requireEnvoy();
-        for (const source of roleSources(previousSessionID, carryPreviousSessionRole)) {
+        for (const source of roleSources(
+          establishedFor,
+          previousSessionID,
+          carryPreviousSessionRole
+        )) {
           const registry = await client.getInterest(source).catch(() => undefined);
           const topic = registry?.topics.find((candidate) =>
             candidate.startsWith(ROLE_TOPIC_PREFIX)
@@ -1719,20 +1731,23 @@ export default function envoyExtension(pi: PiApi): void {
       // the same transcript), and it must not take a role a different live
       // session holds. The listener decides that atomically for a soft claim;
       // the id this session continues is the one live holder it may supersede.
-      // The id this process's hold is under. Usually the previous session's; but when an earlier
-      // establishment gave way to this one before it carried the role, the hold is still under the
-      // id that establishment came from.
+      //
+      // That id is the one this process's hold is under: usually the previous session's, but the
+      // id an earlier establishment came from when that establishment gave way to this one before
+      // it carried the role.
       const holdingID =
-        claimedRoleSessionID !== undefined && claimedRoleSessionID !== sessionID
+        claimedRoleSessionID !== undefined && claimedRoleSessionID !== establishedFor
           ? claimedRoleSessionID
           : previousSessionID;
       const continued =
-        carryPreviousSessionRole && holdingID !== "" && holdingID !== sessionID
+        carryPreviousSessionRole && holdingID !== "" && holdingID !== establishedFor
           ? holdingID
           : undefined;
-      await setEnvoyRole(role, { soft: true, previousSessionID: continued }).catch((error) => {
-        logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
-      });
+      await setEnvoyRole(role, establishedFor, { soft: true, previousSessionID: continued }).catch(
+        (error) => {
+          logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
+        }
+      );
     });
   };
 
@@ -1814,15 +1829,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    await roleMoves.run(async () => {
-      // A switch while the claim waited for earlier moves opened another session.
-      if (sessionID !== targetSessionID) {
-        throw new Error(
-          `Envoy session moved from ${targetSessionID} to ${sessionID} before its Legion role claim ran`
-        );
-      }
-      await setEnvoyRole(role);
-    });
+    await roleMoves.run(() => setEnvoyRole(role, targetSessionID));
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (
@@ -2547,7 +2554,7 @@ export default function envoyExtension(pi: PiApi): void {
                 `This session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
               );
             }
-            await setEnvoyRole(role);
+            await setEnvoyRole(role, sessionID);
             return moving ? held : undefined;
           });
           return toolSuccess(

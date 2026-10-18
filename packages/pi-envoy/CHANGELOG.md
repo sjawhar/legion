@@ -12,15 +12,16 @@
   (`details.kept`); an explicit empty `topics` list closes nothing. Every role move (the tool's, a
   plugin's claim, the heartbeat's role check, and the reclaim a session start, switch or drift
   heal runs) runs one at a time and decides inside its turn, from the session and the role it
-  leaves when it runs; the heartbeat's check does nothing while a session establishment has yet to
-  finish, leaving the role to that establishment's reclaim. So a reclaim
-  that waited reclaims the role the transcript records by then rather than undo a move that landed
-  first, and does nothing when a later start or switch has opened another session, which reclaims
-  for itself, naming as its predecessor the id the hold is still under. A claim whose session
-  changed while it waited is refused, or handed back if it was already at the listener, except a
-  re-claim of a role the old session already held, whose hold stays for a `/fork` to carry. A
-  plugin's role-bound subscription waits for the moves in flight before it checks its role. A
-  move off any other role still works, and its answer names the role it released
+  leaves when it runs, and every claim is for the session the move was decided for: one whose
+  session is no longer open when it runs is refused before anything is sent, and one still at the
+  listener when the session moves is handed back, except a re-claim of a role the old session
+  already held, whose hold stays for a `/fork` to carry. So a reclaim that waited reclaims the
+  role the transcript records by then rather than undo a move that landed first, and claims
+  nothing once a later start or switch has opened another session, which reclaims for itself,
+  naming as its predecessor the id the hold is still under. The heartbeat's check does nothing
+  while a session establishment has yet to finish, leaving the role to that establishment's
+  reclaim. A plugin's role-bound subscription waits for the moves in flight before it checks its
+  role. A move off any other role still works, and its answer names the role it released
   (`details.released`).
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
