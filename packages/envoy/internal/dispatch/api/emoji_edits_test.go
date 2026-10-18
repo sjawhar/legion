@@ -8,18 +8,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// An edit rewrites a block's text by diffing it against the text the block held, in UTF-16 units,
-// because that is how Yjs counts. Two characters outside the Basic Multilingual Plane that share a
-// high surrogate (U+1F4CA and U+1F4CB, both D83D xxxx) or a low one (U+1F60A and U+1FA0A, both
-// xxxx DE0A) share a unit at the start or the end of their pairs, so a diff that stops at that unit
-// splits the pair, and a half pair stores as U+FFFD. These tests send the edit through the route and
-// read the document back, so the stored text is what they hold, not a helper's return value.
-
-func emojiTableEdit(t *testing.T, handler http.Handler, artifactID string, ops func(table string) []map[string]any) {
-	t.Helper()
-	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/blocks", nil, "alice"))
-	applyEdits(t, handler, artifactID, ops(tableBlockOf(t, blocks).ID))
-}
+// An edit rewrites a block's text as one span of the text the block held, counted in the UTF-16
+// units Yjs counts in. Two characters outside the Basic Multilingual Plane that share a high
+// surrogate (U+1F4CA and U+1F4CB, both D83D xxxx) or a low one (U+1F60A and U+1FA0A, both xxxx DE0A)
+// agree on one unit of their pairs, so a span placed by comparing units would begin or end inside a
+// pair, and half a pair stores as U+FFFD. These tests send the edit through the route and read the
+// document back, so the stored text is what they hold, not a helper's return value.
 
 func applyEdits(t *testing.T, handler http.Handler, artifactID string, ops []map[string]any) {
 	t.Helper()
@@ -29,14 +23,15 @@ func applyEdits(t *testing.T, handler http.Handler, artifactID string, ops []map
 	}
 }
 
-func requireRows(t *testing.T, markdown string, rows ...string) {
+// requireStored fails unless the stored markdown holds no U+FFFD and holds every one of parts.
+func requireStored(t *testing.T, markdown string, parts ...string) {
 	t.Helper()
 	if strings.ContainsRune(markdown, '\uFFFD') {
 		t.Fatalf("the stored document holds U+FFFD:\n%s", markdown)
 	}
-	for _, row := range rows {
-		if !strings.Contains(markdown, row) {
-			t.Fatalf("the stored document lacks the row %q:\n%s", row, markdown)
+	for _, part := range parts {
+		if !strings.Contains(markdown, part) {
+			t.Fatalf("the stored document lacks %q:\n%s", part, markdown)
 		}
 	}
 }
@@ -55,17 +50,17 @@ func TestDocumentEditsKeepEmojiWhenRowsAreReplacedInPlace(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Emoji table rows", emojiTable)
 
-	emojiTableEdit(t, handler, issue.PrimaryArtifactID, func(table string) []map[string]any {
-		return []map[string]any{
-			{"op": "delete_row", "block": table, "index": 4},
-			{"op": "delete_row", "block": table, "index": 3},
-			{"op": "delete_row", "block": table, "index": 2},
-			{"op": "delete_row", "block": table, "index": 1},
-			{"op": "insert", "after": "title", "markdown": "| n1 | b1 | 🚰 PIPE: task pipeline |\n| n2 | b2 | 🔍 VERIF: oss verifier |\n| n3 | b3 | 📋 TASK: task workflow |\n| n4 | b4 | 📊 GRADE: grading tool |"},
-		}
+	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
+	table := tableBlockOf(t, blocks).ID
+	applyEdits(t, handler, issue.PrimaryArtifactID, []map[string]any{
+		{"op": "delete_row", "block": table, "index": 4},
+		{"op": "delete_row", "block": table, "index": 3},
+		{"op": "delete_row", "block": table, "index": 2},
+		{"op": "delete_row", "block": table, "index": 1},
+		{"op": "insert", "after": "title", "markdown": "| n1 | b1 | 🚰 PIPE: task pipeline |\n| n2 | b2 | 🔍 VERIF: oss verifier |\n| n3 | b3 | 📋 TASK: task workflow |\n| n4 | b4 | 📊 GRADE: grading tool |"},
 	})
 
-	requireRows(t, documentMarkdown(t, handler, issue.PrimaryArtifactID),
+	requireStored(t, documentMarkdown(t, handler, issue.PrimaryArtifactID),
 		"| n1 | b1 | 🚰 PIPE: task pipeline |",
 		"| n2 | b2 | 🔍 VERIF: oss verifier |",
 		"| n3 | b3 | 📋 TASK: task workflow |",
@@ -82,14 +77,14 @@ func TestDocumentEditsKeepEmojiInRowsNoOperationNames(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Emoji shifted rows", emojiTable)
 
-	emojiTableEdit(t, handler, issue.PrimaryArtifactID, func(table string) []map[string]any {
-		return []map[string]any{
-			{"op": "delete_row", "block": table, "index": 1},
-			{"op": "insert", "after": "📈 TREND: trends", "markdown": "| s7 | a7 | 🏉 SCRUM: scrum master |"},
-		}
+	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
+	table := tableBlockOf(t, blocks).ID
+	applyEdits(t, handler, issue.PrimaryArtifactID, []map[string]any{
+		{"op": "delete_row", "block": table, "index": 1},
+		{"op": "insert", "after": "📈 TREND: trends", "markdown": "| s7 | a7 | 🏉 SCRUM: scrum master |"},
 	})
 
-	requireRows(t, documentMarkdown(t, handler, issue.PrimaryArtifactID),
+	requireStored(t, documentMarkdown(t, handler, issue.PrimaryArtifactID),
 		"| s2 | a2 | 🚰 PIPE: task pipeline |",
 		"| s3 | a3 | 🔍 VERIF: oss verifier |",
 		"| s4 | a4 | 📋 TASK: task workflow |",
@@ -116,7 +111,7 @@ func TestDocumentEditsKeepEmojiWhenOneReplacesAnotherSharingASurrogate(t *testin
 			applyEdits(t, handler, issue.PrimaryArtifactID, []map[string]any{
 				{"op": "replace", "find": test.was, "with": test.now},
 			})
-			requireRows(t, documentMarkdown(t, handler, issue.PrimaryArtifactID), "before "+test.now+" after")
+			requireStored(t, documentMarkdown(t, handler, issue.PrimaryArtifactID), "before "+test.now+" after")
 		})
 	}
 }

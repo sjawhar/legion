@@ -8,20 +8,21 @@ import (
 )
 
 // Characters outside the Basic Multilingual Plane whose UTF-16 pairs agree on one unit: pairA and
-// pairB share a high surrogate (D83D), pairD and pairE share a low one (DE0A) under different high
+// pairB share a high surrogate (D83D), pairC and pairD share a low one (DE0A) under different high
 // ones (D83D, D83E).
 const (
 	pairA = "\U0001F4CA" // D83D DCCA
 	pairB = "\U0001F4CB" // D83D DCCB
-	pairD = "\U0001F60A" // D83D DE0A
-	pairE = "\U0001FA0A" // D83E DE0A
+	pairC = "\U0001F60A" // D83D DE0A
+	pairD = "\U0001FA0A" // D83E DE0A
 )
 
 // simpleDiff's span replaces whole characters: applied to current's UTF-16 units it yields want,
 // with neither end of it inside a surrogate pair, over every pair of texts of up to three
-// characters drawn from the pairs above, a BMP character and a character of one UTF-16 unit.
+// characters drawn from the pairs above, an ASCII character and a non-ASCII character of one UTF-16
+// unit.
 func TestSimpleDiffNeverCutsAPair(t *testing.T) {
-	alphabet := []string{pairA, pairB, pairD, pairE, "x", "\u26A1"}
+	alphabet := []string{pairA, pairB, pairC, pairD, "x", "\u26A1"}
 	var texts []string
 	var build func(prefix string, depth int)
 	build = func(prefix string, depth int) {
@@ -66,9 +67,9 @@ func TestSimpleDiffKeepsWhatTheTextsShare(t *testing.T) {
 		"equal":                        {current: "a" + pairA + "b", want: "a" + pairA + "b", index: 4, remove: 0},
 		"a character in the middle":    {current: "a" + pairA + "b", want: "a" + pairB + "b", index: 1, remove: 2, insert: pairB},
 		"a shared high surrogate":      {current: pairA, want: pairB, index: 0, remove: 2, insert: pairB},
-		"a shared low surrogate":       {current: pairD, want: pairE, index: 0, remove: 2, insert: pairE},
+		"a shared low surrogate":       {current: pairC, want: pairD, index: 0, remove: 2, insert: pairD},
 		"a pair after a shared prefix": {current: "ab" + pairA, want: "ab" + pairB, index: 2, remove: 2, insert: pairB},
-		"a pair before a shared tail":  {current: pairD + "ab", want: pairE + "ab", index: 0, remove: 2, insert: pairE},
+		"a pair before a shared tail":  {current: pairC + "ab", want: pairD + "ab", index: 0, remove: 2, insert: pairD},
 		"a pair added":                 {current: "ab", want: "a" + pairA + "b", index: 1, remove: 0, insert: pairA},
 		"a pair removed":               {current: "a" + pairA + "b", want: "ab", index: 1, remove: 2},
 	} {
@@ -82,8 +83,9 @@ func TestSimpleDiffKeepsWhatTheTextsShare(t *testing.T) {
 }
 
 // A splice cuts a text node at the edges of its range, which fall between characters. An edge
-// inside a pair is refused, since half a character cannot be kept and a splice around it would
-// write the other half twice or not at all.
+// inside a pair is a bug of this package's, not a fault in the caller's write, so it is an error
+// that is not ErrSchema (a verdict on the write, answered 400): half a character cannot be kept, and
+// a splice around it would write the other half twice or not at all.
 func TestSlice16RefusesARangeInsideAPair(t *testing.T) {
 	value := "a" + pairA + "b" // a, D83D, DCCA, b
 	for name, test := range map[string]struct {
@@ -105,8 +107,9 @@ func TestSlice16RefusesARangeInsideAPair(t *testing.T) {
 		"an end inside the pair":  {0, 2},
 		"an empty cut inside":     {2, 2},
 	} {
-		if got, err := slice16(value, edges[0], edges[1]); !errors.Is(err, ErrSchema) {
-			t.Errorf("%s: slice16(%q, %d, %d) = %q, %v, want ErrSchema", name, value, edges[0], edges[1], got, err)
+		got, err := slice16(value, edges[0], edges[1])
+		if err == nil || errors.Is(err, ErrSchema) {
+			t.Errorf("%s: slice16(%q, %d, %d) = %q, %v, want an error that is not ErrSchema", name, value, edges[0], edges[1], got, err)
 		}
 	}
 }

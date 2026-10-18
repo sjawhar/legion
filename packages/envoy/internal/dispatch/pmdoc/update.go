@@ -5,7 +5,6 @@ import (
 	"maps"
 	"reflect"
 	"slices"
-	"unicode/utf16"
 	"unsafe"
 
 	"github.com/reearth/ygo/crdt"
@@ -543,33 +542,21 @@ func yTextStart(text *crdt.YXmlText) *crdt.Item {
 	return reflect.NewAt(start.Type(), unsafe.Pointer(start.UnsafeAddr())).Elem().Interface().(*crdt.Item)
 }
 
-// simpleDiff is the one change that turns current into want: the span of current's UTF-16 units
-// from index, remove units long, replaced by insert. Yjs counts text in UTF-16 units, and so does
-// the span, but it never starts or ends inside a surrogate pair. Two characters outside the Basic
-// Multilingual Plane that share a high surrogate (U+1F4CA and U+1F4CB) or a low one (U+1F60A and
-// U+1FA0A) agree on one unit of their pair, so a prefix or suffix that stops at that unit would
-// replace half a pair: the other half stays in the text, and the half sent as `insert` decodes to
-// U+FFFD. A boundary inside a pair moves to the pair's edge, so each character the two texts
-// disagree on is replaced whole.
+// simpleDiff is the characters current and want do not share, between their common prefix and
+// suffix: current's from index, remove long, are replaced by insert. index and remove are in UTF-16
+// units, because Yjs counts them.
 func simpleDiff(current, want string) (index, remove int, insert string) {
-	left := utf16.Encode([]rune(current))
-	right := utf16.Encode([]rune(want))
-	for index < len(left) && index < len(right) && left[index] == right[index] {
-		index++
-	}
-	if splitsPair(left, index) || splitsPair(right, index) {
-		index--
+	left, right := []rune(current), []rune(want)
+	start := 0
+	for start < len(left) && start < len(right) && left[start] == right[start] {
+		start++
 	}
 	currentEnd, wantEnd := len(left), len(right)
-	for currentEnd > index && wantEnd > index && left[currentEnd-1] == right[wantEnd-1] {
+	for currentEnd > start && wantEnd > start && left[currentEnd-1] == right[wantEnd-1] {
 		currentEnd--
 		wantEnd--
 	}
-	if splitsPair(left, currentEnd) || splitsPair(right, wantEnd) {
-		currentEnd++
-		wantEnd++
-	}
-	return index, currentEnd - index, string(utf16.Decode(right[index:wantEnd]))
+	return units16(left[:start]), units16(left[start:currentEnd]), string(right[start:wantEnd])
 }
 
 // yjsAttributeValue returns the Yjs "Any" encoding of a tree attribute value. The tree keeps
