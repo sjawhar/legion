@@ -16,13 +16,17 @@
   session is no longer open when it runs is refused before anything is sent, and one still at the
   listener when the session moves is handed back, except a re-claim of a role the old session
   already held, whose hold stays for a `/fork` to carry. So a reclaim that waited reclaims the
-  role the transcript records by then rather than undo a move that landed first, and claims
-  nothing once a later start or switch has opened another session, which reclaims for itself,
-  naming as its predecessor the id the hold is still under. The heartbeat's check does nothing
-  while a session establishment has yet to finish, leaving the role to that establishment's
-  reclaim. A plugin's role-bound subscription waits for the moves in flight before it checks its
-  role. A move off any other role still works, and its answer names the role it released
-  (`details.released`).
+  role the transcript records by then rather than undo a move that landed first, and does nothing
+  once a later start or switch has opened another session, which reclaims for itself, naming as
+  its predecessor the id the hold is still under, or, when this process holds no role, the id the
+  overtaken reclaim would have named. A `/new` or resume ends the outgoing role as the switch
+  lands, not once earlier establishments finish. The heartbeat's check does nothing while a
+  session establishment has yet to finish, leaving the role to that establishment's reclaim; it
+  stops when a switch lands during its read or claim, keeping a regain an outage owes for the next
+  tick; and its claim names the id the hold is under, so after a fork whose reclaim failed it
+  carries the role to the fork instead of dropping it on the listener's 409. A plugin's
+  role-bound subscription waits for the moves in flight before it checks its role. A move off any
+  other role still works, and its answer names the role it released (`details.released`).
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
