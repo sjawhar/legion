@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto"
 import { createConnection, type Socket } from "node:net"
+import type { DeliveryCapability } from "@legion/contracts"
 import type { ChannelNotification, ChannelNotifier } from "./envoy-channel-server"
 
 /**
@@ -9,6 +10,20 @@ import type { ChannelNotification, ChannelNotifier } from "./envoy-channel-serve
  * the bridge sends it to Claude Code as a user turn.
  */
 export const INBOX_VARIABLE = "LEGION_CLAUDE_INBOX"
+
+/**
+ * The delivery modes a session whose deliveries go to the bridge's inbox advertises. The bridge
+ * (`deliver` in `packages/daemon/internal/claudebridge/bridge.go`) starts a turn with a delivery
+ * when Claude Code is idle and otherwise sends it as the next user message of the turn running,
+ * once Claude Code ends its current reply: a Send. An Aside gets the same handling, which keeps
+ * its promise: the message joins the main conversation without interrupting the work in hand.
+ * The inbox line carries no mode, since the bridge treats both alike. `btw` stays off: the bridge
+ * runs no side turn.
+ */
+export const INBOX_CAPABILITIES = [
+  "aside",
+  "steer",
+] as const satisfies readonly DeliveryCapability[]
 
 /** `InboxAnswer`: the bridge's line back for one delivery, once it has queued it. */
 interface InboxAnswer {

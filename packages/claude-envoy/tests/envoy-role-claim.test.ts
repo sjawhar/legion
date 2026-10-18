@@ -8,12 +8,13 @@ import type {
   ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
-import type {
-  ChannelNotification,
-  ChannelNotifier,
-  ChannelSession,
+import {
+  CHANNEL_CAPABILITIES,
+  type ChannelNotification,
+  type ChannelNotifier,
+  type ChannelSession,
+  startChannelSession,
 } from "../src/envoy-channel-server"
-import { startChannelSession } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
 
 class IdleNats implements ChannelForwarderConnection {
@@ -85,6 +86,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       identity: new SessionIdentity("ses_current", "/tmp"),
       connection: new IdleNats(),
       notifier,
+      capabilities: CHANNEL_CAPABILITIES,
       client,
       heartbeatMs: 25,
       configFile: { path: join(stateDirectory, "envoy.json"), error: null },

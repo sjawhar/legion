@@ -43879,6 +43879,10 @@ function startLegionClaim(deps) {
 import { randomUUID } from "crypto";
 import { createConnection } from "net";
 var INBOX_VARIABLE = "LEGION_CLAUDE_INBOX";
+var INBOX_CAPABILITIES = [
+  "aside",
+  "steer"
+];
 function createInboxNotifier(socketPath) {
   let socket;
   let buffered = "";
@@ -44039,6 +44043,7 @@ function undefinedOnNotFound(error48) {
   throw error48;
 }
 var MCP_SERVER_INFO = { name: "envoy", version: version2 };
+var CHANNEL_CAPABILITIES = ["aside"];
 var argumentSchemas = new WeakMap;
 function argumentsSchema(spec) {
   let schema = argumentSchemas.get(spec);
@@ -44220,7 +44225,7 @@ async function startChannelSession(options) {
       topics: forwarder.topics(),
       port: 0,
       title: "",
-      capabilities: ["aside"],
+      capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true
     });
@@ -44599,6 +44604,7 @@ async function runEnvoyChannelServer() {
   });
   const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
   const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
+  const capabilities = inboxSocket === undefined ? CHANNEL_CAPABILITIES : INBOX_CAPABILITIES;
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
   let stopping = false;
@@ -44640,6 +44646,7 @@ async function runEnvoyChannelServer() {
         identity,
         connection,
         notifier,
+        capabilities,
         client,
         heartbeatMs: envoy.heartbeatMs,
         configFile,

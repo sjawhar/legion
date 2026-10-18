@@ -8,8 +8,12 @@ import type {
   ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
-import type { ChannelNotification, ChannelNotifier } from "../src/envoy-channel-server"
-import { startChannelSession } from "../src/envoy-channel-server"
+import {
+  CHANNEL_CAPABILITIES,
+  type ChannelNotification,
+  type ChannelNotifier,
+  startChannelSession,
+} from "../src/envoy-channel-server"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
 
 class IdleNats implements ChannelForwarderConnection {
@@ -80,6 +84,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
+    capabilities: CHANNEL_CAPABILITIES,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
@@ -126,6 +131,7 @@ test("runs the regain hook once a heartbeat's soft claim takes the held role bac
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
+    capabilities: CHANNEL_CAPABILITIES,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
