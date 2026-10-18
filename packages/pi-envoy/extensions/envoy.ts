@@ -1977,18 +1977,19 @@ export default function envoyExtension(pi: PiApi): void {
   let roleSettledFor = "";
   let lastHeard = "";
 
-  // Settles the holds session events gave up (`pendingHandBacks`). While this process holds no
-  // role, one of the role the host session wants (a resume Oh My Pi rolled back to the session
-  // that held it) is its hold again, which this pass and every later one keep, carry or hand back
-  // as any hold, so no hand-back opens the role to another claim on the way. Any other is handed
-  // back once: one the listener does not take back is left to its reaping, since nothing
-  // heartbeats the session it names any more, and a later try could take a hold another process
-  // made under that id. Answers whether a hold came back.
+  // Settles the holds session events gave up (`pendingHandBacks`), once the pass has handed back
+  // any other role it held. One of the role the host session wants (a resume Oh My Pi rolled back
+  // to the session that held it) is this process's hold again, which this pass and every later
+  // one keep, carry or hand back as any hold, so no hand-back opens the role to another claim on
+  // the way; a claim of a role drops every hand-back of it left pending, so there is at most one.
+  // Any other is handed back once: one the listener does not take back is left to its reaping,
+  // since nothing heartbeats the session it names any more, and a later try could take a hold
+  // another process made under that id. Answers whether a hold came back.
   const settleEndedHolds = async (wanted: string | undefined): Promise<boolean> => {
     let restored = false;
     for (const [key, hold] of pendingHandBacks) {
       pendingHandBacks.delete(key);
-      if (claimedRoleTopic === undefined && hold.topic === `${ROLE_TOPIC_PREFIX}${wanted}`) {
+      if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {
         claimedRoleTopic = hold.topic;
         claimedRoleSessionID = hold.id;
         restored = true;

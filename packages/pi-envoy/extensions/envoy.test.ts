@@ -6008,26 +6008,27 @@ describe("envoy OMP extension", () => {
     expect(holders.size).toBe(0);
   });
 
-  test("the pass after a role-ending event hands the hold back though its registration fails, so no later pass touches that id", async () => {
-    const role = "legion-controller";
-    const { fixture, live, context, holders, handedBack, refuseRegistrations, tick } =
-      await gatedRoleFixture("hand-back-in-outage", "ses_ho");
-    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
-    const refused = refuseRegistrations(2);
-    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
-    await fixture.handlers.get("session_switch")?.(
-      { reason: "resume" },
-      live("ses_ho_k", { fresh: true })
-    );
-    await refused;
-    expect(handedBack).toEqual([`notifications.role.${role}@ses_ho`]);
-    // Another process resumes the session this one left and claims the role under its id.
-    holders.set(role, "ses_ho");
-    tick();
-    for (let step = 0; step < 20; step += 1) await drain();
-    expect(holders.get(role)).toBe("ses_ho");
-    expect(handedBack).toEqual([`notifications.role.${role}@ses_ho`]);
-  });
+  for (const records of ["no role", "a role of its own"] as const) {
+    test(`the pass after a role-ending event hands the hold back though its registration fails, the resumed session recording ${records}, so no later pass touches that id`, async () => {
+      const role = "legion-controller";
+      const { fixture, live, context, holders, handedBack, refuseRegistrations, tick } =
+        await gatedRoleFixture(`hand-back-in-outage-${records.length}`, "ses_ho");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const refused = refuseRegistrations(2);
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      const resumed = live("ses_ho_k", { fresh: true });
+      if (records !== "no role") fixture.pi.appendEntry("envoy-role-claim", { role: "reviewer" });
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+      await refused;
+      expect(handedBack).toEqual([`notifications.role.${role}@ses_ho`]);
+      // Another process resumes the session this one left and claims the role under its id.
+      holders.set(role, "ses_ho");
+      tick();
+      for (let step = 0; step < 20; step += 1) await drain();
+      expect(holders.get(role)).toBe("ses_ho");
+      expect(handedBack).toEqual([`notifications.role.${role}@ses_ho`]);
+    });
+  }
 
   test("a hand-back the listener fails is not tried again, so a later pass leaves a hold another process makes under that id", async () => {
     const role = "legion-controller";
