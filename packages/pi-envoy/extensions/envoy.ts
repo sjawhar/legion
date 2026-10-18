@@ -392,6 +392,11 @@ interface Continuation {
   readonly role?: string;
 }
 
+// A claim refused, or handed back, because the session it was decided for was no longer open:
+// told apart from a claim that failed, since the session may be open again by the time its caller
+// reads (a resume Oh My Pi rolled back during the hand-back).
+class SessionLeftError extends Error {}
+
 /** Whether a topic served the session's role, and how many roles had ended, at one moment. */
 interface RoleSnapshot {
   readonly roleBound: boolean;
@@ -1703,7 +1708,7 @@ export default function envoyExtension(pi: PiApi): void {
     options: { soft?: boolean; previousSessionID?: string } = {}
   ): Promise<boolean> => {
     if (!sessionOpen(forSession)) {
-      throw new Error(
+      throw new SessionLeftError(
         `the session moved from ${forSession} to ${hostSessionID()} before its claim of role ${role} ran; nothing was claimed`
       );
     }
@@ -1731,7 +1736,7 @@ export default function envoyExtension(pi: PiApi): void {
         : handBack
           ? "the claim was handed back"
           : "the hold it already had stays";
-      throw new Error(
+      throw new SessionLeftError(
         `the session moved from ${id} to ${hostSessionID()} while its claim of role ${role} was in flight; ${outcome}`
       );
     }
@@ -1921,7 +1926,9 @@ export default function envoyExtension(pi: PiApi): void {
           : undefined;
       await setEnvoyRole(role, establishedFor, { soft: true, previousSessionID: continued }).catch(
         (error) => {
-          if (!sessionOpen(establishedFor)) {
+          // A refusal for a session left gives way even when the host has come back to it since
+          // (a rollback during the hand-back): the heartbeat settles it then.
+          if (error instanceof SessionLeftError || !sessionOpen(establishedFor)) {
             giveWay(establishedFor, continuation, carryPreviousSessionRole, role);
             return;
           }
@@ -2168,9 +2175,6 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<void> => {
     const previousID = sessionID;
     restoreLocalSessionState(context);
-    // The id this switch opened, as it stands now: by the time the establishment returns, a later
-    // switch may have moved `sessionID` on.
-    const openedID = sessionID;
     const carryPreviousSessionRole = carriesSession(reason);
     // Ended here, as the switch lands, rather than in its establishment: a `/new` never waits on
     // an earlier establishment or a slow listener call, and the heartbeat's role check, which names
@@ -2195,39 +2199,35 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (!inbound) return;
-    try {
-      await establishSession(context, { carryPreviousSessionRole }, previousID);
-    } finally {
-      // A branch or fork carries the transcript — and a handoff its
-      // agent-written summary — forward under a freshly minted session id. The
-      // extension tracks the change, but any identity already baked into that
-      // carried context — envoy_whoami output, ids the agent named in sent
-      // messages — silently rots, and peers who saved the old id can no longer
-      // reach this session. Tell the agent without starting a turn; the notice
-      // lands when it next runs. A "new" or "resume" switch replaces the
-      // transcript with one that matches its own id, so those stay silent. Told
-      // once: a switch run again for the same id finds it unchanged, and a tree
-      // navigation, which keeps the id, says nothing.
-      if (carryPreviousSessionRole && previousID !== "" && previousID !== openedID) {
-        pi.sendMessage(
-          {
-            customType: "envoy-message",
-            content: encode({
-              envoy: {
-                notice: "session id changed",
-                previous_session_id: previousID,
-                session_id: openedID,
-                detail:
-                  "This conversation now lives under a new session id. Any identity you shared earlier (envoy_whoami output, session ids named in messages) is stale, and peers using the old id cannot reach you. Re-run envoy_whoami before identifying yourself and re-announce the new id to peers you already introduced yourself to.",
-              },
-            }),
-            display: true,
-            details: LOCAL_ENVOY_NOTICE,
-          },
-          { deliverAs: "steer", triggerTurn: false }
-        );
-      }
+    // A branch or fork carries the transcript — and a handoff its agent-written summary — forward
+    // under a freshly minted session id. The extension tracks the change, but any identity already
+    // baked into that carried context — envoy_whoami output, ids the agent named in sent messages —
+    // silently rots, and peers who saved the old id can no longer reach this session. Tell the
+    // agent without starting a turn, as the switch lands, while the host is on the session it
+    // names: once the establishment returns, a later switch or a rollback may have moved the host
+    // on. A "new" or "resume" switch replaces the transcript with one that matches its own id, so
+    // those stay silent. Told once: a switch run again for the same id finds it unchanged, and a
+    // tree navigation, which keeps the id, says nothing.
+    if (carryPreviousSessionRole && previousID !== "" && previousID !== sessionID) {
+      pi.sendMessage(
+        {
+          customType: "envoy-message",
+          content: encode({
+            envoy: {
+              notice: "session id changed",
+              previous_session_id: previousID,
+              session_id: sessionID,
+              detail:
+                "This conversation now lives under a new session id. Any identity you shared earlier (envoy_whoami output, session ids named in messages) is stale, and peers using the old id cannot reach you. Re-run envoy_whoami before identifying yourself and re-announce the new id to peers you already introduced yourself to.",
+            },
+          }),
+          display: true,
+          details: LOCAL_ENVOY_NOTICE,
+        },
+        { deliverAs: "steer", triggerTurn: false }
+      );
     }
+    await establishSession(context, { carryPreviousSessionRole }, previousID);
   };
 
   const rebind = async (

@@ -4391,6 +4391,8 @@ describe("envoy OMP extension", () => {
       | undefined;
     // While positive, each claim fails with a 500 (the client retries a failure once).
     let failingClaims = 0;
+    // Runs as the listener takes a hand-back (an unsubscribe), before it answers.
+    let handBackHook: (() => void) | undefined;
     // The listener's holder per role, and its rule for a soft claim: it takes the role only when
     // the role is unheld, already held by the claimant, or held by the session it names as its
     // predecessor (every holder here is live).
@@ -4468,6 +4470,7 @@ describe("envoy OMP extension", () => {
             );
           }
         }
+        handBackHook?.();
         return response({});
       }
       const interestRead = /^\/v1\/interests\/([^/]+)$/.exec(url.pathname);
@@ -4514,6 +4517,13 @@ describe("envoy OMP extension", () => {
     const manager: { id: string; branch: () => readonly unknown[] } = {
       id: sessionID,
       branch: () => [...fixture.entries],
+    };
+    // Each message the extension sent, with the host's session it landed in.
+    const landed: { session: string; content: string }[] = [];
+    const send = fixture.pi.sendMessage;
+    fixture.pi.sendMessage = (message, options) => {
+      landed.push({ session: manager.id, content: String(message.content) });
+      return send(message, options);
     };
     let heartbeat: (() => void) | undefined;
     const notifications: string[] = [];
@@ -4610,6 +4620,7 @@ describe("envoy OMP extension", () => {
       holders,
       manager,
       notifications,
+      landed,
       refuseRegistrations,
       registrations,
       tick,
@@ -4618,6 +4629,9 @@ describe("envoy OMP extension", () => {
       gateRoleRead,
       holdRegistration,
       failClaims,
+      onHandBack: (hook: () => void) => {
+        handBackHook = hook;
+      },
       nextRegistration,
       rows,
       started,
@@ -5604,6 +5618,37 @@ describe("envoy OMP extension", () => {
     expect(claimSessions.length).toBe(claimed);
   });
 
+  test("a reclaim whose hand-back a rollback outlasts is settled by the next tick", async () => {
+    const role = "legion-controller";
+    const { fixture, live, context, holders, manager, tick, claimSessions, gate, onHandBack } =
+      await gatedRoleFixture("rollback-during-hand-back", "ses_hb", { claimAtStart: false });
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    // A resume to a session whose transcript records the role; its reclaim's claim is held.
+    const held = gate(role);
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const target = live("ses_hb_r", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    holders.set(role, "ses_hb_r");
+    const switched = fixture.handlers.get("session_switch")?.({ reason: "resume" }, target);
+    await held.reached;
+    // A second resume moves the host on, and rolls back while the claim is handed back.
+    const branch = manager.branch;
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    live("ses_hb_x", { fresh: true });
+    onHandBack(() => {
+      manager.id = "ses_hb_r";
+      manager.branch = branch;
+    });
+    held.release();
+    await switched;
+    for (let step = 0; step < 5; step += 1) await drain();
+    expect(claimSessions).toEqual([`${role}@ses_hb_r`]);
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(claimSessions).toEqual([`${role}@ses_hb_r`, `${role}@ses_hb_r`]);
+    expect(holders.get(role)).toBe("ses_hb_r");
+  });
+
   test("a reclaim left during its registration reads nothing of a resume target, and is settled after the rollback", async () => {
     const { fixture, live, context, holders, manager, tick, holdRegistration } =
       await gatedRoleFixture("reclaim-under-rolled-back-resume", "ses_q4");
@@ -5664,6 +5709,11 @@ describe("envoy OMP extension", () => {
         kind: "fork-then-fork",
         name: "a fork sends no event, then a fork lands",
         effective: ["fork", "fork"],
+      },
+      {
+        kind: "fork-then-new",
+        name: "a fork sends no event, then a /new lands",
+        effective: ["fork", "new"],
       },
       { kind: "cancelled", name: "a fork is announced and cancelled", effective: [] },
     ] as const satisfies readonly { kind: string; name: string; effective: readonly Step[] }[];
@@ -5777,9 +5827,17 @@ describe("envoy OMP extension", () => {
                 }
                 case "new-then-fork":
                 case "fork-then-fork":
-                  await switchTo(event.kind === "new-then-fork" ? "new" : "fork", "ses_c_b", false);
-                  await switchTo("fork", "ses_c_c");
+                case "fork-then-new": {
+                  const [missed, landing] =
+                    event.kind === "new-then-fork"
+                      ? (["new", "fork"] as const)
+                      : event.kind === "fork-then-fork"
+                        ? (["fork", "fork"] as const)
+                        : (["fork", "new"] as const);
+                  await switchTo(missed, "ses_c_b", false);
+                  await switchTo(landing, "ses_c_c");
                   break;
+                }
                 case "cancelled":
                   await h.fixture.handlers.get("session_before_switch")?.(
                     { reason: "fork" },
@@ -5831,11 +5889,21 @@ describe("envoy OMP extension", () => {
                 ).toEqual([]);
                 if (held) expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
               }
-              // Every carried switch changes the id the agent knows, and it is told once each.
-              const idNotices = h.fixture.deliveries.filter((delivery) =>
-                String(delivery.content).includes("session id changed")
+              // Every carried switch changes the id the agent knows: it is told once each, in the
+              // session the notice names, and the last session's agent knows its id exactly when a
+              // carried switch opened it.
+              const idNotices = h.landed.filter((message) =>
+                message.content.includes("session id changed")
               );
+              const named = (content: string) =>
+                /(?:^|[^_])session_id:\s*"?([A-Za-z0-9_]+)/.exec(content)?.[1];
+              for (const message of idNotices) {
+                expect(named(message.content)).toBe(message.session);
+              }
               expect(idNotices).toHaveLength(chain.filter((step) => step === "fork").length);
+              expect(idNotices.some((message) => named(message.content) === last)).toBe(
+                chain.at(-1) === "fork"
+              );
               // A role still held when a `/new` or resume that sent no event ran is warned of,
               // once, as the plugin's to claim again.
               if (held) {
