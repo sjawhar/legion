@@ -1739,8 +1739,9 @@ export default function envoyExtension(pi: PiApi): void {
       : [forSession, previousSessionID];
 
   // A reclaim that found its session already left carried nothing, so the session that overtook
-  // it continues the id it would have named: `from` is the overtaken session, `predecessor` that
-  // id. Every reclaim's turn sets it, so it only ever describes the reclaim just before.
+  // it continues what that session did: `from` is the overtaken session, `predecessor` the id it
+  // continues, or the overtaken session itself when it continues none. Every reclaim's turn sets
+  // it, so it only ever describes the reclaim just before.
   let overtaken: { from: string; predecessor: string } | undefined;
 
   const reclaimHeldRoles = async (
@@ -1776,15 +1777,17 @@ export default function envoyExtension(pi: PiApi): void {
     // session's, and its own establishment reclaims for it. One that finds it only once it has
     // read the listener claims nothing either (`setEnvoyRole` refuses for another session).
     await roleMoves.run(async () => {
-      // The id this session continues: the previous session's, or the one that session would
-      // have named when its own reclaim was overtaken before it carried the role.
+      // The id this session continues: the previous session's, or the one an overtaken reclaim
+      // of that session passed on.
       const continuing =
         overtaken?.from === previousSessionID ? overtaken.predecessor : previousSessionID;
-      // Only a carrying switch passes its id on: a `new` or `resume` session continues nothing.
+      // Only a carrying switch passes an id on: a `new` or `resume` session continues nothing.
+      // What it passes is the id the overtaken session continues, or that session itself when it
+      // continues none (a resumed start holds its role under its own id).
       const overtakenNow = !sessionOpen(establishedFor);
       overtaken =
         overtakenNow && carryPreviousSessionRole
-          ? { from: establishedFor, predecessor: continuing }
+          ? { from: establishedFor, predecessor: continuing || establishedFor }
           : undefined;
       if (overtakenNow) return;
       const remembered = transcriptClaimedRole(readBranch());
@@ -1828,6 +1831,10 @@ export default function envoyExtension(pi: PiApi): void {
       await setEnvoyRole(role, establishedFor, { soft: true, previousSessionID: continued }).catch(
         (error) => {
           logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
+          // The role still held is one this session's transcript no longer records (a branch to a
+          // point before the last move), so the heartbeat must not keep it: it ends here. A fork
+          // that opened meanwhile copies that transcript, so it records no other role either.
+          if (heldRole() !== undefined && heldRole() !== role) endRole();
         }
       );
     });

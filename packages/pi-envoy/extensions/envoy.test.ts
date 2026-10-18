@@ -4348,7 +4348,18 @@ describe("envoy OMP extension", () => {
   const gatedRoleFixture = async (
     label: string,
     sessionID: string,
-    { claimAtStart = true }: { claimAtStart?: boolean } = {}
+    {
+      claimAtStart = true,
+      transcriptRole,
+      holdStart = false,
+    }: {
+      claimAtStart?: boolean;
+      // A role an earlier process claimed under this session's id: the transcript records it and
+      // the listener still names this session, while this process holds nothing.
+      transcriptRole?: string;
+      // Hold the start's registration, so `started` resolves only once `releaseStart` is called.
+      holdStart?: boolean;
+    } = {}
   ) => {
     const claims: string[] = [];
     // Each claim as `<role>@<session it was sent for>`.
@@ -4505,10 +4516,13 @@ describe("envoy OMP extension", () => {
       };
     };
     // The context a session event for `id` carries: the host has moved its manager to `id`, and a
-    // `/new` (`fresh`) to an empty transcript.
+    // `/new` (`fresh`) to a transcript of its own, which holds what is appended from then on.
     const live = (id: string, { fresh = false }: { fresh?: boolean } = {}): SessionContext => {
       manager.id = id;
-      if (fresh) manager.branch = () => [];
+      if (fresh) {
+        const from = fixture.entries.length;
+        manager.branch = () => fixture.entries.slice(from);
+      }
       return host();
     };
     const context = host();
@@ -4516,7 +4530,21 @@ describe("envoy OMP extension", () => {
       if (heartbeat === undefined) throw new Error("no heartbeat was registered");
       heartbeat();
     };
-    await fixture.handlers.get("session_start")?.({}, context);
+    if (transcriptRole !== undefined) {
+      fixture.pi.appendEntry("envoy-role-claim", { role: transcriptRole });
+      holders.set(transcriptRole, sessionID);
+    }
+    const startReached = Promise.withResolvers<void>();
+    const startRelease = Promise.withResolvers<void>();
+    if (holdStart) {
+      registrationHold = {
+        session: sessionID,
+        reached: startReached.resolve,
+        release: startRelease.promise,
+      };
+    }
+    const started = fixture.handlers.get("session_start")?.({}, context);
+    if (!holdStart) await started;
     if (claimAtStart) await claimEnvoyRole(sessionID, "legion-controller", context);
     const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
     if (roleTool === undefined) throw new Error("role tool was not registered");
@@ -4574,6 +4602,9 @@ describe("envoy OMP extension", () => {
       failClaims,
       nextRegistration,
       rows,
+      started,
+      startReached: startReached.promise,
+      releaseStart: startRelease.resolve,
     };
   };
 
@@ -5001,6 +5032,52 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_switch")?.({ reason: "fork" }, live("ses_ft_fork2"));
     expect(holders.get("legion-controller")).toBe("ses_ft_fork2");
     expect(bound.active()).toBe(true);
+  });
+
+  test("a fork that overtakes a resumed start's reclaim carries the role the start would have reclaimed", async () => {
+    const { fixture, live, claimSessions, holders, started, startReached, releaseStart } =
+      await gatedRoleFixture("fork-over-resumed-start", "ses_rs", {
+        claimAtStart: false,
+        transcriptRole: "legion-controller",
+        holdStart: true,
+      });
+    // `omp --resume` starts on a transcript recording the role, which the listener still names
+    // this session for; a fork lands while the start is still registering.
+    await startReached;
+    const forked = fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      live("ses_rs_fork")
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseStart();
+    await started;
+    await forked;
+    // The start's reclaim was overtaken and continued no one, so the fork names the start itself.
+    expect(claimSessions).toEqual(["legion-controller@ses_rs_fork"]);
+    expect(holders.get("legion-controller")).toBe("ses_rs_fork");
+  });
+
+  test("a branch to before the last role move whose reclaim fails keeps no role its transcript does not record", async () => {
+    const { fixture, live, manager, roleTool, claimSessions, failClaims, tick, nextRegistration } =
+      await gatedRoleFixture("branch-before-move", "ses_bm");
+    // The transcript records legion-controller, then the model's move to release-captain.
+    const beforeMove = fixture.entries.length;
+    await roleTool.execute("", { role: "release-captain" });
+    // A branch to the point before the move: its transcript records legion-controller, and its
+    // reclaim of that role fails at the listener, retry included.
+    failClaims(2);
+    const branched = live("ses_bm_branch");
+    manager.branch = () => fixture.entries.slice(0, beforeMove);
+    await fixture.handlers.get("session_branch")?.(
+      { previousSessionFile: "/tmp/old.jsonl" },
+      branched
+    );
+    const tickRegistered = nextRegistration("ses_bm_branch");
+    tick();
+    await tickRegistered;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // Neither the reclaim nor the heartbeat's check took release-captain for the branch.
+    expect(claimSessions.filter((claim) => claim === "release-captain@ses_bm_branch")).toEqual([]);
   });
 
   test("a fork after a fork whose reclaim failed carries the role from the hold the parent still has", async () => {

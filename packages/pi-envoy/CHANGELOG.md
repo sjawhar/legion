@@ -5,37 +5,18 @@
 ### Changed
 
 - The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
-  plugin opened for the role the session holds (`whileHolding`). Before, a role move or an
-  unsubscribe closed it, and the session stopped receiving the role's notices without being
-  told. Now `envoy_role_set` refuses to move off such a role, naming the role and the
-  subscriptions, and `envoy_unsubscribe` leaves them open, named or not, listing them as kept
-  (`details.kept`); an explicit empty `topics` list closes nothing. Every role move (the tool's, a
-  plugin's claim, the heartbeat's role check, and the reclaim a session start, switch or drift
-  heal runs) runs one at a time and decides inside its turn, from the session and the role it
-  leaves when it runs, and every claim is for the session the move was decided for: one whose
-  session is no longer open when it runs is refused before anything is sent, and one still at the
-  listener when the session moves is handed back, except a re-claim of a role the old session
-  already held, whose hold stays for a `/fork` to carry. So a reclaim that waited reclaims the
-  role the transcript records by then rather than undo a move that landed first, and does nothing
-  once a later start or switch has opened another session, which reclaims for itself, naming as
-  its predecessor the id the hold is still under, or, when this process holds no role, the id the
-  overtaken reclaim would have named. A `/new` or resume ends the outgoing role as the switch
-  lands, not once earlier establishments finish. The heartbeat's check does nothing while a
-  session establishment has yet to finish, leaving the role to that establishment's reclaim; it
-  stops when a switch lands during its read or claim, keeping a regain an outage owes for the next
-  tick; and its claim names the id the hold is under, so after a fork whose reclaim failed it
-  carries the role to the fork instead of dropping it on the listener's 409. A plugin's
-  role-bound subscription waits for the moves in flight before it checks its role. A move off any
-  other role still works, and its answer names the role it released (`details.released`).
-- A heartbeat tick, a role claim or a message that lands while Oh My Pi switches sessions no
-  longer carries the role into a `/new` or resume, records a claim in the new session's
-  transcript, or reaches the new session. Oh My Pi moves its session manager before it fires the
-  switch event; pi-envoy now checks every role decision against the host's session id as well as
-  its own, leaves a drift a tick sees after `session_before_switch` or `session_before_branch` to
-  the switch's event (or, when a switch threw and sent none, heals it on the next tick by that
-  switch's rule), and leaves a frame addressed to the replaced session's agent subject
-  undelivered and unacknowledged, with a log line. Notices for the role that session holds still
-  arrive until the switch ends the role.
+  plugin opened for the role the session holds (`whileHolding`), which used to leave the session
+  deaf to that role's notices without saying so. `envoy_role_set` refuses to move off such a role,
+  naming the role and the subscriptions; a move off any other role names the role it released
+  (`details.released`). `envoy_unsubscribe` keeps them open, listing them as kept
+  (`details.kept`), and an empty `topics` list closes nothing.
+- A role is no longer lost, claimed twice or claimed for the wrong session when role moves race:
+  the model's moves, a plugin's claims, the heartbeat's role check and the reclaim a start, switch
+  or branch runs each act one at a time and only for the session they were decided for, and a
+  claim the session moved away from is handed back. A `/fork` keeps the role whatever overtakes it;
+  a `/new` or resume never carries it, ends it as the switch lands, and receives no message
+  addressed to the session it replaced. This holds through the gap where Oh My Pi has moved to
+  the new session but not yet sent its switch event, and through a switch that fails in that gap.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
