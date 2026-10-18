@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-798",
+  "completed": "2026-10-18T22:57:00Z",
+  "plan": "dispatch://LEGION-798/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the shared-workspace, PR-body, proof (references/pr-body.md) and handoff rules every phase follows; the implementer's proof is the real-time smoke of the probe code under the daemon's retry and budget, and the production check routes through the legion-deploy holder",
+      "dispatch: the holder's replies (the route's control, the stage 4a check, the deploy run) are recorded on the Dispatch issue, never the public pull request",
+      "ce-simplify-code: once, after the proof, in the first implementing round, scoped to the diff"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md says what the tester verifies (the implementer's proof re-run independently, its own proof, CI read for lint/types/suites) and the handoff's implementerProof, failures and proof fields",
+      "dispatch: any finding a human must know goes on the issue as the skill says"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review decision on the head and references/review-threads.md for threads; the reviewer carries Done-when bullets 3 and 4 and the kubelet's real wording under Not proven / risk until the production check",
+      "dispatch: the plan beside the spec is read from the issue's plan.md document"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Ambiguity: 'scheduled' could be pod.Spec.NodeName != \"\" or PodScheduled=True; the rig's waits() sets NodeName and no condition, so the condition reading would break the providers test the spec says stands unchanged.", "answer": "Decision 1: scheduled is pod.Spec.NodeName != \"\" (binding sets it; the kubelet mounts only a bound pod); stuck's doc comment says so; the capacity path (NodeName empty) costs no read."},
+      {"finding": "Hidden requirement: the kubelet skips a pod volume no container mounts (desired_state_of_world_populator.go:292-296 at v1.35.8), so the stage 4a check's volume alone would produce no FailedMount.", "answer": "Decision 7 and Task 3: the check adds both the volume and a volume_mounts entry at /etc/legion-operator-missing (CheckPod admits it), on slices.Clone'd slices; the route's control already mounts its ConfigMap."},
+      {"finding": "Hidden requirement: one mountRead timestamp and gate serve the providers rule today; nothing says one podEvents read feeds both matchers or where the new rule sits relative to the capacity stop.", "answer": "Decision 2 and Task 1: one read per 15 s (mountRecheck) feeds providers first, then the general matcher; mountRead stamped once; the capacity stop stays before the read; the !mountsProviders gate on reading goes away."},
+      {"finding": "Ambiguity: the refusal's exact format (imageRefusal prefix or bare fmt.Errorf), the order and selection of a projected volume's sources, and the attribution shape.", "answer": "Decision 4: bare fmt.Errorf refusals with the exact strings given; ConfigMap/Secret sources in pod-block order joined with ' and ', service_account_token sources not listed, a projected volume with no such source named as such; the unattributed form for a volume the pod block does not hold."},
+      {"finding": "Hidden requirement: probeWaiting returns the Reason alone and has two callers whose text existing tests assert; the rig cannot set a waiting Message.", "answer": "Decision 5: probeWaiting returns *corev1.ContainerStateWaiting; stuck and unfinished read .Reason (unfinished's text byte-identical, probe_test.go:429 its guard); the new test writes the waiting state through finishes; waits() unchanged."},
+      {"finding": "Unsupported claim: the spec's CreateContainerConfigError form list omits the plural configmaps/secrets forms the kubelet's env path can return verbatim from the manager.", "answer": "Decision 3: one form set for both rules, plural included, with the object's name a regexp wildcard and every other piece a literal substring."},
+      {"finding": "Uncheckable criterion: 'within one poll interval' cannot be timed on the rig's fake clock; determinism rests on mountRead being zero at the attempt's start and the event existing before ProbeImage runs.", "answer": "Task 2 names the three assertions (refusal text, creates == 1, no budget message) as the interval's stand-in and requires the event or waiting state planted before g.probe(p), as the providers test does."},
+      {"finding": "Unsupported claim: the fourth criterion's 'minutes into the boot' presumes the probe pod is placed; an unplaced pod waits outside the attempts and can pass 60 minutes without a refusal.", "answer": "Task 7 states the precondition and has the production check read whether 'boot probe is waiting on capacity' appeared in the daemon's log, so a slow-scheduling run is read against the pool, not the change; the acceptance table names the precondition on bullet 4."},
+      {"finding": "Uncheckable criterion: Done-when bullets 3 and 4 have no in-tree command; the stage 4a check runs only on a devbox by the legion-deploy holder, and a STAGE4A_FROM run is a development run.", "answer": "Tasks 5 and 7 and the acceptance table: the implementer's in-tree proof is the real-time smoke plus the tests; bullets 3-4 stand in the PR body's Not proven / risk until the production check, whose one Envoy message to legion-deploy asks for the route control's elapsed time, the startup-probe confirmation and the stage 4a check's line."},
+      {"finding": "Hidden requirement: scripts/e2e/README.md documents one row per stage 4a check and nothing machine-checks it; ProbeImage's and stuck's doc comments enumerate today's stops; providersMountRecheck's comment is providers-only; docs/kubernetes.md:2447-2450 says probe-boot 'fails here until it does'.", "answer": "Task 3 adds the README row; Task 1 rewrites the three comments; Task 4 changes the probe-boot sentence to 'fails here at once, naming the object'."},
+      {"finding": "Unsupported claim: 'the daemon then exits' and the restart/back-off/60-minute startup probe; only the exit is in-tree.", "answer": "The plan cites daemon.go:306-317 and cmd/legion/main.go:330-332 for the exit and marks the restart, back-off and startup probe as the deployment's, confirmed by the legion-deploy holder in Task 7."},
+      {"finding": "Checked: providersMountRecheck is read only in probe.go; no doc states the six-attempt budget as the bound on a missing-volume refusal; the providers-only sentences at docs/kubernetes.md:2753 and running-legion.md:191-194 stay accurate.", "answer": "Decision 2 confirms the rename is local; Task 4 adds the operator-volume case in the two sections the spec names plus one clause in the operator pod paragraph (docs/kubernetes.md:1198-1201), and leaves the providers-only sentences."},
+      {"finding": "Hidden requirement: legion probe-boot inherits the refusal through Prober.ProbeImage with no code of its own; --check-config runs CheckPod, which never looks for the objects.", "answer": "The plan states probe-boot inherits the change with no code (probe.go:208-212) and Task 4 names the refusal in probe-boot's paragraph and the troubleshooting bullet; --check-config is untouched."},
+      {"finding": "Hidden requirement: unfinished's detail must stay unchanged since only retried FailedMount forms reach it now.", "answer": "Decision 6: unfinished reports what it does today; probe_test.go:429 stays as the guard."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
