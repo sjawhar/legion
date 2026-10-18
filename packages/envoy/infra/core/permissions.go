@@ -85,6 +85,13 @@ func bucketPermissions(bucket string) []string {
 	}
 }
 
+// DispatchDurables are the fixed durable consumers of the stream that Dispatch's grant lets it
+// bind, beside the listener durable of its machine id. Two users holding DispatchPermissions would
+// bind the same ones.
+func DispatchDurables() []string {
+	return []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable}
+}
+
 // DispatchPermissions is the grant of Dispatch's one NATS user, which envoy-dispatch and the
 // envoy-listener beside it share: ListenerPermissions(machineID), the listener's machine id, then
 // what Dispatch itself needs. No session connects as this user, so it holds none of
@@ -100,7 +107,7 @@ func bucketPermissions(bucket string) []string {
 func DispatchPermissions(machineID string) Permissions {
 	listener := ListenerPermissions(machineID)
 	publish := listener.Publish.Allow
-	for _, durable := range []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable} {
+	for _, durable := range DispatchDurables() {
 		publish = append(publish,
 			jsAPI+"CONSUMER.INFO."+bus.Stream+"."+durable,
 			jsAPI+"CONSUMER.CREATE."+bus.Stream+"."+durable+".>",

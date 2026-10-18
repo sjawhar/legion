@@ -353,7 +353,7 @@ The listener refuses these before it registers anything, with an error naming wh
   nkey seed (not echoed)`, since each would reach a resource's inputs, an alias or another refusal.
   `seed` is the one input that is a seed;
 - an empty `machineId`, one with leading or trailing whitespace, or one holding `.`, `*`, `>`, `/`,
-  `\`, a control character, or whitespace other than an interior ordinary space, or one over 246 bytes: none can be carried by both
+  `\`, a control character, or whitespace other than an interior ordinary space, or one over 246 bytes: none can be used
   the durable consumer `listener-<machineId>` and queue group `envoy-listener-<machineId>` the
   listener uses;
 - a `hostBridge` holding a control character, such as a line break;
