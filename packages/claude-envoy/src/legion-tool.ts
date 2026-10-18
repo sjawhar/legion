@@ -5,6 +5,7 @@ import {
   type ClaimCapability,
   executePhaseOp,
   legionToolDescription,
+  PHASE_OP_SENTENCES,
   PHASE_OPS,
   phaseOpParameters,
 } from "@legion/pi-shared/legion-phase-ops"
@@ -18,7 +19,11 @@ export const LEGION_TOOL_NAME = "legion"
 export function legionToolDefinition() {
   return {
     name: LEGION_TOOL_NAME,
-    description: legionToolDescription({ envoyPublish: "mcp__legion__envoy_publish" }),
+    description: legionToolDescription({
+      envoyPublish: "mcp__legion__envoy_publish",
+      before: PHASE_OP_SENTENCES.readRecord,
+      after: PHASE_OP_SENTENCES.requestBackwardMove,
+    }),
     inputSchema: z.toJSONSchema(z.object({ op: z.enum(PHASE_OPS), ...phaseOpParameters(z) })),
   }
 }

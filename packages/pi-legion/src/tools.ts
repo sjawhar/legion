@@ -140,9 +140,12 @@ export function createLegionTool(deps: {
   return {
     name: "legion",
     label: "legion",
+    // No sentence on read_record or request_backward_move, and the controller's operations after
+    // handoff_complete: the exact text tools.test.ts pins, so a change to the shared template
+    // cannot reach an Oh My Pi agent unnoticed.
     description: legionToolDescription({
       envoyPublish: "envoy_publish",
-      otherOperations:
+      after:
         "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
     }),
     defaultInactive: true,

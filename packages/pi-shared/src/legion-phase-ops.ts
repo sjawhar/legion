@@ -105,18 +105,29 @@ export function phaseOpParameters(zod: unknown): Record<string, z.ZodType> {
   return fields;
 }
 
+/** The `legion` tool's sentences on `read_record` and `request_backward_move`, which a host whose
+ * tool states them passes as `before` and `after` (`legionToolDescription`). */
+export const PHASE_OP_SENTENCES = {
+  readRecord: "read_record returns the record of `issue` from the daemon's state. ",
+  requestBackwardMove:
+    "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. ",
+} as const;
+
 /**
- * The `legion` tool's description on every host: the phase ops, then `otherOperations`, the
- * sentences on the operations a host's tool serves beyond them, then where a question for another
- * role goes, `envoyPublish` being the host's name for Envoy's publish tool.
+ * The `legion` tool's description on every host, one template: what the tool is, then `before`,
+ * then `handoff_complete`'s contract, then `after`, then where a question for another role goes,
+ * `envoyPublish` being the host's name for Envoy's publish tool. `before` and `after` are whole
+ * sentences, each ending in a space: the host's sentences on its other operations, and on
+ * `read_record` and `request_backward_move` when it states them (`PHASE_OP_SENTENCES`).
  */
 export function legionToolDescription(host: {
   readonly envoyPublish: string;
-  readonly otherOperations?: string;
+  readonly before?: string;
+  readonly after?: string;
 }): string {
   return (
     "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
-    "read_record returns the record of `issue` from the daemon's state. " +
+    (host.before ?? "") +
     "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " +
     "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " +
     "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " +
@@ -125,8 +136,7 @@ export function legionToolDescription(host: {
     "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
     "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " +
     "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
-    "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. " +
-    (host.otherOperations ?? "") +
+    (host.after ?? "") +
     `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`
   );
 }

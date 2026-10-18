@@ -105,6 +105,44 @@ function recordingDaemon(options: {
   return { calls, daemon: () => daemon as never };
 }
 
+/** The `legion` tool description Oh My Pi agents read, written out whole: the shared template
+ * (`legionToolDescription` in `@legion/pi-shared/legion-phase-ops`) must reproduce it exactly. */
+const OMP_LEGION_TOOL_DESCRIPTION =
+  "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
+  "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " +
+  "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " +
+  "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " +
+  "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " +
+  "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " +
+  "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
+  "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " +
+  "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
+  "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
+  "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
+
+test("the legion tool's description is the exact text Oh My Pi agents read, for every session", () => {
+  const sessions: readonly LegionToolSession[] = [
+    claimSession("architect"),
+    claimSession("architect", "LEGION-209"),
+    ...(["planner", "implementer", "tester", "reviewer", "merger"] as const).map((role) =>
+      claimSession(role)
+    ),
+    { kind: "controller", sessionID: "ses_controller" },
+  ];
+  for (const active of sessions) {
+    const tool = createLegionTool({
+      pi,
+      daemon: recordingDaemon({}).daemon,
+      controllerGrant: noControllerGrant,
+      onPhaseCompleted: () => undefined,
+      handoffCommit: noHandoffCommit,
+      resolveDocument: noDocumentLookup,
+      session: () => active,
+    });
+    expect(tool.description).toBe(OMP_LEGION_TOOL_DESCRIPTION);
+  }
+});
+
 test("the legion tool exposes only the workflow operations each role owns", async () => {
   const state = {
     issues: { "LEGION-208": { key: "LEGION-208", phase: "held" } },

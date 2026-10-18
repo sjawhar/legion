@@ -8,6 +8,7 @@ import {
   type ClaimCapability,
   executePhaseOp,
   legionToolDescription,
+  PHASE_OP_SENTENCES,
   PHASE_OPS,
   PhaseOpArguments,
   type PhaseOpRuntime,
@@ -76,16 +77,23 @@ test("the phase ops' fields, as a host declares them, are every field of every o
   expect(Object.keys(phaseOpParameters(z)).sort()).toEqual([...fields].sort());
 });
 
-test("the description names each phase op, the host's other operations, and the host's Envoy publish tool", () => {
-  const description = legionToolDescription({
+test("the description sets the host's sentences before and after handoff_complete's contract, and ends on the host's Envoy publish tool", () => {
+  const bare = legionToolDescription({ envoyPublish: "envoy_publish" });
+  const placed = legionToolDescription({
     envoyPublish: "mcp__legion__envoy_publish",
-    otherOperations: "The controller's read_state returns the daemon's whole state. ",
+    before: PHASE_OP_SENTENCES.readRecord,
+    after: `${PHASE_OP_SENTENCES.requestBackwardMove}The controller's read_state returns the daemon's whole state. `,
   });
-  for (const op of PHASE_OPS) expect(description).toContain(op);
-  expect(description).toContain(
-    "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. The controller's read_state returns the daemon's whole state. What a later phase needs"
+  expect(bare).not.toContain("read_record");
+  expect(bare).not.toContain("request_backward_move");
+  expect(bare.endsWith("role topic with envoy_publish.")).toBe(true);
+  expect(placed).toContain(
+    "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete (phase workers"
   );
-  expect(description.endsWith("role topic with mcp__legion__envoy_publish.")).toBe(true);
+  expect(placed).toContain(
+    "arm nothing. request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. The controller's read_state returns the daemon's whole state. What a later phase needs"
+  );
+  expect(placed.endsWith("role topic with mcp__legion__envoy_publish.")).toBe(true);
 });
 
 test("each op refuses its arguments whole before any daemon request, naming every problem", async () => {

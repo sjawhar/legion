@@ -19,10 +19,11 @@
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
-  phase ops `@sjawhar/pi-legion`'s tool serves, on one shared schema, description and executor
-  (`@legion/pi-shared/legion-phase-ops`), the same daemon routes and session grants; a call is
-  refused whole before any request, each problem named. The claim boots through the claim boot
-  both share (`@legion/pi-shared/legion-claim-core`).
+  phase ops `@sjawhar/pi-legion`'s tool serves, on one shared schema, description template and
+  executor (`@legion/pi-shared/legion-phase-ops`), the same daemon routes and session grants; its
+  description also says what `read_record` and `request_backward_move` do, and a call is refused
+  whole before any request, each problem named. The claim boots through the claim boot both share
+  (`@legion/pi-shared/legion-claim-core`).
 - When `LEGION_CLAUDE_INBOX` is set, Envoy deliveries go to the bridge's inbox socket and arrive as
   user turns, since Claude Code's print mode delivers no channel notification, and the session
   advertises `["aside", "steer"]`: the bridge starts a turn with a delivery when Claude Code is

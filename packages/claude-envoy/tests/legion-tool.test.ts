@@ -75,6 +75,12 @@ test("declares the three phase-worker operations under one op, and names the Env
     },
     required: ["op"],
   })
+  expect(definition.description).toContain(
+    "this tool cannot spawn workers. read_record returns the record of `issue` from the daemon's state. handoff_complete",
+  )
+  expect(definition.description).toContain(
+    "arm nothing. request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. What a later phase needs",
+  )
   expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })
 

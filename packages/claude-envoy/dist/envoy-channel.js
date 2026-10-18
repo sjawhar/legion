@@ -44028,8 +44028,12 @@ function phaseOpParameters(zod) {
   }
   return fields;
 }
+var PHASE_OP_SENTENCES = {
+  readRecord: "read_record returns the record of `issue` from the daemon's state. ",
+  requestBackwardMove: "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. "
+};
 function legionToolDescription(host) {
-  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + "read_record returns the record of `issue` from the daemon's state. " + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " + "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " + "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " + "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " + "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " + "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " + "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " + "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + "request_backward_move asks the daemon to move this issue back to an earlier phase, `to`, for `reason`. " + (host.otherOperations ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
+  return "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " + (host.before ?? "") + "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " + "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " + "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " + "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " + "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " + "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " + "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " + "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " + (host.after ?? "") + `What a later phase needs goes in your handoff; a question for another live role goes to its role topic with ${host.envoyPublish}.`;
 }
 async function mintClaimGrant(daemon, claim) {
   const { grantId } = await daemon.grant({
@@ -44085,7 +44089,11 @@ var LEGION_TOOL_NAME = "legion";
 function legionToolDefinition() {
   return {
     name: LEGION_TOOL_NAME,
-    description: legionToolDescription({ envoyPublish: "mcp__legion__envoy_publish" }),
+    description: legionToolDescription({
+      envoyPublish: "mcp__legion__envoy_publish",
+      before: PHASE_OP_SENTENCES.readRecord,
+      after: PHASE_OP_SENTENCES.requestBackwardMove
+    }),
     inputSchema: exports_external.toJSONSchema(exports_external.object({ op: exports_external.enum(PHASE_OPS), ...phaseOpParameters(exports_external) }))
   };
 }
