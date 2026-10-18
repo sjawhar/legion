@@ -486,7 +486,12 @@ func (b *bridge) result(subtype string, isError bool, errs []string) {
 	}
 	b.stepping = false
 	if isError && !b.aborted {
-		b.emitRaw(map[string]any{"type": "error", "message": "Claude Code: " + subtype + " " + strings.Join(errs, "; ")})
+		// Oh My Pi reports a failed step as the assistant message that ends it, stopReason "error";
+		// the daemon reads neither, so the log line is what puts the failure on the pane.
+		failure := "Claude Code: " + subtype + " " + strings.Join(errs, "; ")
+		b.log.Printf("the step failed: %s", failure)
+		b.emitRaw(map[string]any{"type": "message_end", "message": map[string]any{
+			"role": "assistant", "stopReason": "error", "errorMessage": failure}})
 	}
 	if !b.aborted {
 		if len(b.queue) > 0 {

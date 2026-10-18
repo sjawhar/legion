@@ -37,6 +37,7 @@ func TestMain(m *testing.M) {
 //   - "handoff ok" / "handoff refused": a `legion` handoff_complete call and its result;
 //   - "say <text>": an assistant message of text;
 //   - "inbox <text>": writes one delivery to LEGION_CLAUDE_INBOX and reads its answer;
+//   - "fail <text>": an assistant message of text, then an error_during_execution result;
 //   - anything else: an assistant message "done".
 func fakeClaude() int {
 	record, err := os.OpenFile(os.Getenv("FAKE_CLAUDE_RECORD"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
@@ -102,6 +103,11 @@ func fakeClaude() int {
 			assistant(text("completed"))
 		case strings.HasPrefix(body, "say "):
 			assistant(text(strings.TrimPrefix(body, "say ")))
+		case strings.HasPrefix(body, "fail "):
+			assistant(text(strings.TrimPrefix(body, "fail ")))
+			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
+				"errors": []string{"API Error: 529 overloaded"}})
+			continue
 		case strings.HasPrefix(body, "inbox "):
 			conn, err := net.Dial("unix", os.Getenv(InboxVariable))
 			if err != nil {
@@ -382,6 +388,25 @@ func TestAnAbortInterruptsAndEndsTheTurn(t *testing.T) {
 	r.send(shimwire.Abort{ID: "a2"})
 	r.expect("response", map[string]any{"id": "a2", "command": "abort", "success": true})
 	r.quiet()
+}
+
+// A step Claude Code ends in error reaches the daemon as Oh My Pi reports a failed step: the
+// assistant message_end with stopReason "error" and the failure as its errorMessage. An interrupted
+// step is not a failure, and TestAnAbortInterruptsAndEndsTheTurn holds that it sends none.
+func TestAFailedStepIsOhMyPisFailedMessage(t *testing.T) {
+	r := newRig(t, "-p", "--resume", sessionID)
+	r.prompt("p1", "fail WAITING on the provider")
+	r.expect("agent_start", nil)
+	frame := r.expect("message_end", nil)
+	message, _ := frame["message"].(map[string]any)
+	if message["role"] != "assistant" || message["stopReason"] != "error" {
+		t.Fatalf("the failed step's message is %v, want an assistant message with stopReason error", frame)
+	}
+	if got, _ := message["errorMessage"].(string); !strings.Contains(got, "error_during_execution") ||
+		!strings.Contains(got, "API Error: 529 overloaded") {
+		t.Errorf("errorMessage %q names neither the result's subtype nor its error", got)
+	}
+	r.expect("agent_end", nil)
 }
 
 // An Envoy delivery during a turn is the turn's next user message; one between turns starts a turn.
