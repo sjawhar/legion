@@ -55,7 +55,14 @@ import {
 } from "./channel-forwarder"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
-import { type LegionClaim, legionPane, startLegionClaim, stopPane } from "./legion-claim"
+import {
+  endPane,
+  type LegionClaim,
+  legionPane,
+  logLegion,
+  startLegionClaim,
+  stopPane,
+} from "./legion-claim"
 import { createInboxNotifier, INBOX_CAPABILITIES, INBOX_VARIABLE } from "./legion-inbox"
 import {
   executeLegionTool,
@@ -1060,7 +1067,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
         client,
         session,
         signal: booting.signal,
-        stopPane,
+        log: logLegion,
+        stop: endPane,
       })
     }
     if (stopping) await session.shutdown()

@@ -1,28 +1,21 @@
 import { readdir, stat } from "node:fs/promises"
 import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
-import type { LegionRole } from "@legion/contracts"
-import type { LegionRegistration } from "@legion/contracts/legion-api"
 import { messageFor } from "@legion/envoy-client/errors"
 import { readSecretFile } from "@legion/envoy-client/secret-file"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
-import {
-  callReadyWithRetry,
-  LegionDaemonApiError,
-  type LegionDaemonClient,
-  type ReadyInput,
-} from "@legion/pi-shared/daemon-client"
+import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client"
+import { bootLegionClaim } from "@legion/pi-shared/legion-claim-core"
+import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import { legion } from "../package.json" with { type: "json" }
 import { configuredValue } from "./claude-session"
 import type { ChannelSession } from "./envoy-channel-server"
 
 /**
  * A Claude Code phase worker's claim on the Legion daemon, made by the MCP server Claude Code runs
- * for the pane (`dist/envoy-channel.js`, under the server name `legion`): what pi-legion's claim
- * session does in an Oh My Pi pane. The daemon launches the pane with its boot token
- * (`LEGION_BOOT_TOKEN_FILE`) and its address (`LEGION_DAEMON_URL`); the server registers the
- * session, claims the claim token's Envoy role, says it is ready, and says so again each time the
- * heartbeat takes the role back.
+ * for the pane (`dist/envoy-channel.js`, under the server name `legion`) through the claim boot
+ * every harness shares (`@legion/pi-shared/legion-claim-core`). The daemon launches the pane with
+ * its boot token (`LEGION_BOOT_TOKEN_FILE`) and its address (`LEGION_DAEMON_URL`).
  */
 
 /** What the daemon put on a Legion pane: its address, the boot token the registration spends, and
@@ -31,16 +24,6 @@ export interface LegionPane {
   readonly daemonUrl: string
   readonly bootToken: string
   readonly configDir: string
-}
-
-/** The claim a session registered: what the `legion` tool's operations need. */
-export interface LegionClaimCapability {
-  readonly sessionID: string
-  readonly claimToken: string
-  readonly tree: string
-  readonly issue: string
-  readonly role: LegionRole
-  readonly secret: string
 }
 
 /**
@@ -71,14 +54,24 @@ export function legionPane(env: NodeJS.ProcessEnv): LegionPane | undefined {
   }
 }
 
+/** Writes one line to the pane's log, the server's stderr. */
+export function logLegion(line: string): void {
+  process.stderr.write(`[legion] ${line}\n`)
+}
+
 /**
- * Stops the pane's Claude Code, this server's parent, so the daemon launches the claim again: what
+ * Ends the pane's Claude Code, this server's parent, so the daemon launches the claim again: what
  * an Oh My Pi pane's own exit does. `legion claude-bridge` exits with Claude Code's status, and the
  * shim reports the death.
  */
-export function stopPane(why: string): void {
-  process.stderr.write(`[legion] ${why}; stopping the pane so the daemon launches it again\n`)
+export function endPane(): void {
   process.kill(process.ppid, "SIGTERM")
+}
+
+/** Logs why the pane cannot run, then ends it (`endPane`). */
+export function stopPane(why: string): void {
+  logLegion(`${why}; stopping the pane so the daemon launches it again`)
+  endPane()
 }
 
 /**
@@ -113,22 +106,19 @@ export async function waitForTranscript(
 
 export interface LegionClaim {
   /** The registered claim, or undefined until `claims/register` has answered. */
-  readonly capability: () => LegionClaimCapability | undefined
+  readonly capability: () => ClaimCapability | undefined
   /** Settles once the boot has run: ready sent, or the failure reported. Never rejects. */
   readonly booted: Promise<void>
 }
 
 /**
- * Boots the pane's claim in the background of the server: waits for the transcript, registers
- * with it as the session file (`agentId` is the session id, `pluginContract` this package's
- * `legion.daemonApiVersion`), claims the claim token's Envoy role soft and records it with the
- * channel session, whose heartbeat re-asserts it, and sends `claims/ready` with no capability
- * report. Each time the heartbeat regains the role it sends ready again.
- *
- * A registration the daemon refuses (a 4xx: a spent boot token, another contract) and any failure
- * after a registration stop the pane through `stopPane`, so the daemon launches it again; a 5xx or
- * a request that never reached the daemon is reported and leaves the pane to the daemon's
- * registration deadline.
+ * Boots the pane's claim in the background of the server (`bootLegionClaim`): waits for the
+ * transcript, registers with it as the session file (`agentId` is the session id,
+ * `pluginContract` this package's `legion.daemonApiVersion`), claims the claim token's Envoy role
+ * soft and records it with the channel session, whose heartbeat re-asserts it, and sends
+ * `claims/ready` with no capability report, again each time the heartbeat regains the role. A
+ * failure the core stops on ends the pane through `stop`; a failure before a registration is
+ * logged and leaves the pane to the daemon's registration deadline.
  */
 export function startLegionClaim(deps: {
   readonly pane: LegionPane
@@ -137,11 +127,14 @@ export function startLegionClaim(deps: {
   readonly client: Pick<EnvoyClient, "setRole">
   readonly session: Pick<ChannelSession, "rememberRole" | "onRoleRegained">
   readonly signal: AbortSignal
-  readonly stopPane: (why: string) => void
+  /** Writes one line to the pane's log, the server's stderr. */
+  readonly log: (line: string) => void
+  /** Ends the pane's Claude Code, this server's parent, so the daemon launches the claim again. */
+  readonly stop: () => void
   readonly pollMs?: number
 }): LegionClaim {
-  let capability: LegionClaimCapability | undefined
-  const { daemon, sessionID } = deps
+  let capability: ClaimCapability | undefined
+  const { sessionID } = deps
 
   const boot = async (): Promise<void> => {
     const transcript = await waitForTranscript(
@@ -150,66 +143,36 @@ export function startLegionClaim(deps: {
       deps.signal,
       deps.pollMs,
     )
-    let claim: LegionRegistration
-    try {
-      claim = await daemon.register({
+    await bootLegionClaim({
+      daemon: deps.daemon,
+      registration: {
         bootToken: deps.pane.bootToken,
         sessionId: sessionID,
         ompSessionFile: transcript,
         agentId: sessionID,
         pluginContract: legion.daemonApiVersion,
-      })
-    } catch (error) {
-      if (!(error instanceof LegionDaemonApiError) || error.status >= 500) throw error
-      deps.stopPane(`claims/register registration failed (${error.status}): ${error.detail}`)
-      return
-    }
-    try {
-      capability = {
-        sessionID,
-        claimToken: claim.claimToken,
-        tree: claim.tree,
-        issue: claim.issue,
-        role: claim.role,
-        secret: claim.secret,
-      }
-      // The claim's role topic is where the daemon sends the worker's task and every notice.
-      const role = await deps.client.setRole({ sessionID, role: claim.claimToken, soft: true })
-      if (!role.claimed) {
-        throw new Error(`Envoy role ${claim.claimToken} is held by live session ${role.holder}`)
-      }
-      await deps.session.rememberRole(claim.claimToken)
-      const ready: ReadyInput = {
-        claimToken: claim.claimToken,
-        sessionId: sessionID,
-        secret: claim.secret,
-        generation: claim.generation,
-      }
-      await callReadyWithRetry("claims/ready", () => daemon.ready(ready))
-      deps.session.onRoleRegained(async (regained, reason) => {
-        if (regained !== claim.claimToken) return
-        try {
-          await callReadyWithRetry("claims/ready after role regain", () => daemon.ready(ready))
-          process.stderr.write(
-            `[legion] re-ran claims/ready after role ${regained} was ${reason}\n`,
-          )
-        } catch (error) {
-          process.stderr.write(
-            `[legion] claims/ready after role ${regained} was ${reason} failed; the daemon's queued task stays undelivered until the next regain or boot: ${messageFor(error)}\n`,
-          )
+      },
+      setCapability: (registered) => {
+        capability = registered
+      },
+      claimRole: async (role) => {
+        const claimed = await deps.client.setRole({ sessionID, role, soft: true })
+        if (!claimed.claimed) {
+          throw new Error(`Envoy role ${role} is held by live session ${claimed.holder}`)
         }
-      })
-    } catch (error) {
-      deps.stopPane(
-        `claim boot failed after claims/register registered ${claim.claimToken}: ${messageFor(error)}`,
-      )
-    }
+        await deps.session.rememberRole(role)
+      },
+      onRoleRegained: (listener) => deps.session.onRoleRegained(listener),
+      log: deps.log,
+      stopping: "stopping the pane so the daemon launches it again",
+      stop: deps.stop,
+    })
   }
 
   const booted = boot().catch((error: unknown) => {
     if (deps.signal.aborted) return
-    process.stderr.write(
-      `[legion] claim boot failed before a registration; the daemon's registration deadline relaunches the pane: ${messageFor(error)}\n`,
+    deps.log(
+      `claim boot failed before a registration; the daemon's registration deadline relaunches the pane: ${messageFor(error)}`,
     )
   })
   return { capability: () => capability, booted }

@@ -106,7 +106,8 @@ test("registers once the transcript exists, claims the claim token's role soft, 
   const setRoles: SetRoleInput[] = []
   const remembered: string[] = []
   let regain: RoleRegainHook | undefined
-  const stops: string[] = []
+  const lines: string[] = []
+  let stops = 0
   const claim = startLegionClaim({
     pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir },
     sessionID: SESSION,
@@ -129,7 +130,10 @@ test("registers once the transcript exists, claims the claim token's role soft, 
       },
     },
     signal: new AbortController().signal,
-    stopPane: (why) => stops.push(why),
+    log: (line) => lines.push(line),
+    stop: () => {
+      stops += 1
+    },
     pollMs: 5,
   })
 
@@ -165,27 +169,31 @@ test("registers once the transcript exists, claims the claim token's role soft, 
   expect(remembered).toEqual([String(registered["claimToken"])])
   expect(claim.capability()).toEqual({
     sessionID: SESSION,
-    claimToken: String(registered["claimToken"]),
     tree: String(registered["tree"]),
     issue: String(registered["issue"]),
     role: registered["role"] as never,
     secret: String(registered["secret"]),
   })
-  expect(stops).toEqual([])
+  expect(stops).toBe(0)
+  expect(lines).toEqual([])
 
   await regain?.("some-other-role", "reclaimed")
   expect(posted).toHaveLength(2)
   await regain?.(String(registered["claimToken"]), "reregistered")
   expect(posted.at(-1)).toEqual({ path: "/legion/v1/claims/ready", body: ready })
+  expect(lines).toEqual([
+    `re-ran claims/ready after role ${registered["claimToken"]} was reregistered`,
+  ])
 })
 
-test("a registration the daemon refuses stops the pane, and claims no role", async () => {
+test("a registration the daemon refuses logs the refusal, stops the pane, and claims no role", async () => {
   const configDir = await tempDir()
   await mkdir(join(configDir, "projects", "p"), { recursive: true })
   await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
   const refusal = await daemonFixture("error.json")
   const { fetch } = daemonAnswering(() => Response.json(refusal, { status: 409 }))
-  const stops: string[] = []
+  const lines: string[] = []
+  let stops = 0
   const setRoles: SetRoleInput[] = []
   const claim = startLegionClaim({
     pane: { daemonUrl: "http://daemon.test", bootToken: "spent", configDir },
@@ -199,21 +207,26 @@ test("a registration the daemon refuses stops the pane, and claims no role", asy
     },
     session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
     signal: new AbortController().signal,
-    stopPane: (why) => stops.push(why),
+    log: (line) => lines.push(line),
+    stop: () => {
+      stops += 1
+    },
   })
   await claim.booted
-  expect(stops).toEqual([`claims/register registration failed (409): ${refusal["error"]}`])
+  expect(lines).toEqual([`claims/register registration failed (409): ${refusal["error"]}`])
+  expect(stops).toBe(1)
   expect(setRoles).toEqual([])
   expect(claim.capability()).toBeUndefined()
 })
 
-test("a role another live session holds stops the pane after the registration", async () => {
+test("a role another live session holds stops the pane after the registration, logging why", async () => {
   const configDir = await tempDir()
   await mkdir(join(configDir, "projects", "p"), { recursive: true })
   await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
   const registered = await daemonFixture("register.json")
   const { posted, fetch } = daemonAnswering(() => Response.json(registered))
-  const stops: string[] = []
+  const lines: string[] = []
+  let stops = 0
   const claim = startLegionClaim({
     pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir },
     sessionID: SESSION,
@@ -221,11 +234,44 @@ test("a role another live session holds stops the pane after the registration", 
     client: { setRole: async () => ({ claimed: false, holder: "ses_other" }) },
     session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
     signal: new AbortController().signal,
-    stopPane: (why) => stops.push(why),
+    log: (line) => lines.push(line),
+    stop: () => {
+      stops += 1
+    },
   })
   await claim.booted
   expect(posted.map(({ path }) => path)).toEqual(["/legion/v1/claims/register"])
-  expect(stops).toEqual([
-    `claim boot failed after claims/register registered ${registered["claimToken"]}: Envoy role ${registered["claimToken"]} is held by live session ses_other`,
+  expect(lines).toEqual([
+    `claim boot failed after claims/register registered ${registered["claimToken"]}; stopping the pane so the daemon launches it again: Envoy role ${registered["claimToken"]} is held by live session ses_other`,
   ])
+  expect(stops).toBe(1)
+})
+
+test("a registration the daemon failed (5xx) is logged and leaves the pane to the registration deadline", async () => {
+  const configDir = await tempDir()
+  await mkdir(join(configDir, "projects", "p"), { recursive: true })
+  await writeFile(join(configDir, "projects", "p", `${SESSION}.jsonl`), "{}\n")
+  const { fetch } = daemonAnswering(() =>
+    Response.json({ error: "register failed" }, { status: 503 }),
+  )
+  const lines: string[] = []
+  let stops = 0
+  const claim = startLegionClaim({
+    pane: { daemonUrl: "http://daemon.test", bootToken: "boot-1", configDir },
+    sessionID: SESSION,
+    daemon: createLegionDaemonClient("http://daemon.test", fetch),
+    client: { setRole: async () => ({ claimed: false, holder: "x" }) },
+    session: { rememberRole: async () => undefined, onRoleRegained: () => undefined },
+    signal: new AbortController().signal,
+    log: (line) => lines.push(line),
+    stop: () => {
+      stops += 1
+    },
+  })
+  await claim.booted
+  expect(lines).toEqual([
+    "claims/register registration failed (503): register failed",
+    "claim boot failed before a registration; the daemon's registration deadline relaunches the pane: POST /legion/v1/claims/register failed with 503: register failed",
+  ])
+  expect(stops).toBe(0)
 })

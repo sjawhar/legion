@@ -154,8 +154,9 @@ Claude Code when `legion.yaml` sets `worker_backends: {<role>: claude}` (tmux ru
 `legion/`, and a per-claim `CLAUDE_CONFIG_DIR`. In that pane the MCP server:
 
 - registers the session with the daemon once its transcript exists, claims the issue's Envoy role
-  and reports ready (`src/legion-claim.ts`);
-- serves the `legion` tool: `read_record`, `handoff_complete` and `request_backward_move`
+  and reports ready (`src/legion-claim.ts`, over the claim boot `@sjawhar/pi-legion` shares);
+- serves the `legion` tool: `read_record`, `handoff_complete` and `request_backward_move`, the
+  phase ops `@sjawhar/pi-legion`'s tool serves, on the same schema and executor
   (`src/legion-tool.ts`);
 - hands each Envoy delivery to the bridge's socket (`LEGION_CLAUDE_INBOX`), which sends it as a
   user turn, since print mode delivers no channel notification (`src/legion-inbox.ts`): the bridge

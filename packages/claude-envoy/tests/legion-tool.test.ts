@@ -4,7 +4,7 @@ import { resolve } from "node:path"
 import type { LegionRole } from "@legion/contracts"
 import type { LegionPhase } from "@legion/contracts/legion-api"
 import { createLegionDaemonClient, type LegionDaemonClient } from "@legion/pi-shared/daemon-client"
-import type { LegionClaimCapability } from "../src/legion-claim"
+import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops"
 import { executeLegionTool, legionToolDefinition } from "../src/legion-tool"
 
 /** A response the daemon's own golden test wrote (`packages/daemon/internal/api`). */
@@ -42,9 +42,8 @@ async function daemon(): Promise<{
   return { client: createLegionDaemonClient("http://daemon.test", stub), requests }
 }
 
-const implementer: LegionClaimCapability = {
+const implementer: ClaimCapability = {
   sessionID: "ses_implementer",
-  claimToken: "legion-legion-legion-208-implementer",
   tree: "LEGION-208",
   issue: "LEGION-208",
   role: "implementer",
@@ -62,12 +61,21 @@ const grantRequest = {
   },
 }
 
-test("declares the three phase-worker operations under one op", () => {
+test("declares the three phase-worker operations under one op, and names the Envoy publish tool as Claude Code shows it", () => {
   const definition = legionToolDefinition()
   expect(definition.name).toBe("legion")
   expect(definition.inputSchema).toMatchObject({
-    properties: { op: { enum: ["read_record", "handoff_complete", "request_backward_move"] } },
+    properties: {
+      op: { enum: ["read_record", "handoff_complete", "request_backward_move"] },
+      issue: { type: "string" },
+      summary: { type: "string" },
+      verdict: { enum: ["pass", "fail"] },
+      ready: { type: "boolean" },
+      reason: { type: "string" },
+    },
+    required: ["op"],
   })
+  expect(definition.description).toContain("with mcp__legion__envoy_publish.")
 })
 
 test("handoff_complete finds the commit for the issue's phase and the claim's role, then mints its grant and posts", async () => {
@@ -167,10 +175,12 @@ test("refuses before the claim registered, an operation a phase worker has not, 
   const runtime = { daemon: client, claim: () => implementer, handoffCommit }
   await expect(
     executeLegionTool(runtime, { op: "set_status", issue: "LEGION-208" }),
-  ).rejects.toThrow()
+  ).rejects.toThrow("op is one of read_record, handoff_complete, request_backward_move")
   await expect(
     executeLegionTool(runtime, { op: "read_record", issue: "LEGION-208", summary: "x" }),
-  ).rejects.toThrow()
-  await expect(executeLegionTool(runtime, { op: "handoff_complete" })).rejects.toThrow()
+  ).rejects.toThrow('read_record does not accept field "summary"')
+  await expect(executeLegionTool(runtime, { op: "handoff_complete" })).rejects.toThrow(
+    "handoff_complete requires summary",
+  )
   expect(requests).toEqual([])
 })
