@@ -14519,6 +14519,17 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+
+// ../contracts/src/legion-roles.ts
+var LEGION_ROLES = [
+  "architect",
+  "planner",
+  "implementer",
+  "tester",
+  "reviewer",
+  "merger"
+];
+var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
