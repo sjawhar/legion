@@ -18,9 +18,11 @@
   listener. A `/fork` keeps the role whatever overtakes it; a `/new` or resume never carries it,
   ends it as the switch lands, and receives no message addressed to the session it replaced; a
   resumed session whose records name the role takes it back; a switch Oh My Pi rolls back, or one
-  that fails before its event, settles on the session the host stays on. A role ended by a move
-  no session event announced is warned of, naming who claims it again. The agent is told of each
-  id change a fork or branch makes once, in the session it names.
+  that fails before its event, settles on the session the host stays on. A role the session moves
+  off is handed back under the session the listener names for it (a fork's parent, until the fork
+  carried it). A role ended by a move no session event announced is warned of, naming who claims
+  it again. The agent is told of each id change a fork or branch makes once, in the session it
+  names.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
