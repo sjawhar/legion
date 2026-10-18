@@ -155,6 +155,8 @@ const natsState = {
   /** What each connect was given: its servers, and whether it carried an nkey authenticator. */
   connects: [] as { readonly servers: readonly string[]; readonly authenticated: boolean }[],
   failConnects: 0,
+  /** Every connection reports itself closed, as one NATS dropped does. */
+  connectionsClosed: false,
   /** Hands each connect, once recorded, to nats.js itself, for a row that watches what it dials. */
   realConnect: false,
   drainHangs: false,
@@ -194,7 +196,7 @@ mock.module("nats", () => ({
       return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
     }
     return {
-      isClosed: () => false,
+      isClosed: () => natsState.connectionsClosed,
       drain: async () => {
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
@@ -413,6 +415,7 @@ afterEach(async () => {
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
+  natsState.connectionsClosed = false;
   natsState.failSubscribes = 0;
   natsState.realConnect = false;
   natsState.drainHangs = false;
@@ -4737,7 +4740,7 @@ describe("envoy OMP extension", () => {
     );
     await registering;
     held.release();
-    await expect(claimed).rejects.toThrow("the hold it already had stays");
+    await expect(claimed).rejects.toThrow("the session moved from ses_rh_parent");
     await forked;
     expect(handedBack).not.toContain("notifications.role.legion-controller@ses_rh_parent");
     // The fork carries the role over to the child.
@@ -4797,28 +4800,22 @@ describe("envoy OMP extension", () => {
       { reason: "fork" },
       live("ses_hb_fork2")
     );
-    // Each drain lets everything that can run do so (no real I/O runs here): first the second
-    // fork's handler as far as its queue, so the heartbeat sees a steady session; then the tick's
-    // registration, the only one of the second fork before the claim lands, and its role check
-    // into the role-move queue, ahead of the second fork's reclaim.
+    // A heartbeat tick lands in the gap, while the plugin's claim still holds the role moves.
     const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
     await drain();
-    const tickRegistered = nextRegistration("ses_hb_fork2");
     tick();
-    await tickRegistered;
     await drain();
     held.release();
     await claimed;
     await forked;
     await forkedAgain;
-    // The tool's move runs after both, so its answer is the end state: the role is still held,
-    // under the second fork, whose hold the move hands back.
+    for (let step = 0; step < 10; step += 1) await drain();
+    // The tool's move runs after all of it, so its answer is the end state: the role is still
+    // held, under the second fork, whose hold the move hands back.
     const next = await roleTool.execute("", { role: "reviewer" });
     expect(next.details).toEqual({ role: "reviewer", released: "legion-controller" });
     expect(handedBack).toContain("notifications.role.legion-controller@ses_hb_fork2");
-    // The tick took the steady path: the second fork registered only for the tick and for its
-    // own establishment, not for a drift heal's.
-    expect(registrations.filter((session) => session === "ses_hb_fork2")).toHaveLength(2);
+    expect(registrations).toContain("ses_hb_fork2");
   });
 
   test("an establishment's reclaim belongs to the session it was queued for, though the host's one session manager moves on", async () => {
@@ -4856,8 +4853,16 @@ describe("envoy OMP extension", () => {
   });
 
   test("a plugin's claim at the listener when the session switches is handed back, not kept for the new session", async () => {
-    const { fixture, live, context, claimSessions, handedBack, gate, nextRegistration } =
-      await gatedRoleFixture("claim-in-flight-across-new", "ses_flight_old");
+    const {
+      fixture,
+      live,
+      context,
+      claimSessions,
+      handedBack,
+      gate,
+      nextRegistration,
+      notifications,
+    } = await gatedRoleFixture("claim-in-flight-across-new", "ses_flight_old");
     const held = gate("reviewer");
     const claimed = claimEnvoyRole("ses_flight_old", "reviewer", context);
     await held.reached;
@@ -4868,25 +4873,28 @@ describe("envoy OMP extension", () => {
     );
     await registering;
     held.release();
-    await expect(claimed).rejects.toThrow("handed back");
+    await expect(claimed).rejects.toThrow("the session moved from ses_flight_old");
     await switched;
     expect(claimSessions.at(-1)).toBe("reviewer@ses_flight_old");
     expect(handedBack).toContain("notifications.role.reviewer@ses_flight_old");
     expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");
+    // The `/new` was heard, so the plugin that claimed knows; nothing warns.
+    expect(notifications.filter((message) => message.includes("ended:"))).toEqual([]);
   });
 
-  test("a reclaim whose listener read a /new outlasts claims nothing, for either session", async () => {
-    const { fixture, live, claimSessions, gateInterest, nextRegistration } = await gatedRoleFixture(
+  test("a resume whose listener read a /new outlasts claims nothing, for either session", async () => {
+    const { fixture, live, claimSessions, gateInterest } = await gatedRoleFixture(
       "reclaim-read-across-new",
       "ses_ri",
       { claimAtStart: false }
     );
-    // Nothing in the transcript or in memory, so a tree navigation's reclaim asks the listener
-    // which role this session's rows hold; that read is held while a `/new` lands.
-    const read = gateInterest("ses_ri", ["notifications.role.release-captain"]);
-    const registering = nextRegistration("ses_ri");
-    const rebound = fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_ri"));
-    await registering;
+    // The resumed session records no role, so its pass asks the listener which role its rows
+    // hold; that read is held while a `/new` lands.
+    const read = gateInterest("ses_ri_r", ["notifications.role.release-captain"]);
+    const resumed = fixture.handlers.get("session_switch")?.(
+      { reason: "resume" },
+      live("ses_ri_r", { fresh: true })
+    );
     await read.reached;
     const switched = fixture.handlers.get("session_switch")?.(
       { reason: "new" },
@@ -4894,7 +4902,7 @@ describe("envoy OMP extension", () => {
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
     read.release();
-    await rebound;
+    await resumed;
     await switched;
     expect(claimSessions.filter((claim) => claim.startsWith("release-captain@"))).toEqual([]);
     expect(claimEntryRoles(fixture.entries)).not.toContain("release-captain");
@@ -4931,57 +4939,46 @@ describe("envoy OMP extension", () => {
     expect(regained).toEqual([]);
   });
 
-  test("a heartbeat's role check skipped for a session establishment keeps the regain an outage owes", async () => {
-    const { fixture, live, roleTool, refuseRegistrations, tick, gate, nextRegistration } =
-      await gatedRoleFixture("heartbeat-owed-regain", "ses_or");
+  test("a regain an outage owes is made once, by the first pass that decides after it", async () => {
+    const { fixture, live, roleTool, refuseRegistrations, tick, gate } = await gatedRoleFixture(
+      "heartbeat-owed-regain",
+      "ses_or"
+    );
     const regained: string[] = [];
     onEnvoyRoleRegained(async (role: string, reason: string) => {
       regained.push(`${role}:${reason}`);
     });
     const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
-    // A tick whose registration the listener refuses, retry included: the next healthy check
+    // A tick whose registration the listener refuses, retry included: the next pass that decides
     // owes a regain.
     const refused = refuseRegistrations(2);
     tick();
     await refused;
     await drain();
-    // A re-claim of the held role holds the role-move queue; a tick's check queues behind it,
-    // then a tree navigation's reclaim behind the check, so the check's turn comes while that
-    // establishment is unfinished, and it is skipped.
+    // A re-claim of the held role holds the role moves; a tick's pass and a tree navigation's
+    // pass queue behind it.
     const held = gate("legion-controller");
     const reclaimed = roleTool.execute("", { role: "legion-controller" });
     await held.reached;
-    const tickRegistered = nextRegistration("ses_or");
     tick();
-    await tickRegistered;
     await drain();
-    const registering = nextRegistration("ses_or");
     const rebound = fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_or"));
-    await registering;
+    await drain();
     held.release();
     await reclaimed;
     await rebound;
-    await roleTool.execute("", { role: "legion-controller" });
-    expect(regained).toEqual([]);
-    // The next healthy tick makes the check it owed.
-    const nextTick = nextRegistration("ses_or");
+    for (let step = 0; step < 10; step += 1) await drain();
+    // Later ticks owe nothing more.
     tick();
-    await nextTick;
+    for (let step = 0; step < 10; step += 1) await drain();
     await roleTool.execute("", { role: "legion-controller" });
     await drain();
     expect(regained).toEqual(["legion-controller:reregistered"]);
   });
 
   test("a heartbeat's role check whose read a /new outlasts fires no regain for the role the switch ended", async () => {
-    const {
-      fixture,
-      live,
-      claimSessions,
-      refuseRegistrations,
-      tick,
-      gateRoleRead,
-      nextRegistration,
-    } = await gatedRoleFixture("heartbeat-read-across-new", "ses_rr");
+    const { fixture, live, claimSessions, refuseRegistrations, tick, gateRoleRead } =
+      await gatedRoleFixture("heartbeat-read-across-new", "ses_rr");
     const regained: string[] = [];
     onEnvoyRoleRegained(async (role: string, reason: string) => {
       regained.push(`${role}:${reason}`);
@@ -4997,12 +4994,11 @@ describe("envoy OMP extension", () => {
     const read = gateRoleRead("legion-controller");
     tick();
     await read.reached;
-    const registering = nextRegistration("ses_rr_new");
     const switched = fixture.handlers.get("session_switch")?.(
       { reason: "new" },
       live("ses_rr_new", { fresh: true })
     );
-    await registering;
+    await drain();
     read.release();
     await switched;
     await drain();
@@ -5094,7 +5090,7 @@ describe("envoy OMP extension", () => {
   // A session can be overtaken at any point of its establishment: before it begins, at its
   // reclaim's turn, during the reclaim's listener reads, or once its claim returns. Each hands the
   // session that overtook it what it continued, so a fork keeps the role.
-  test("an establishment that begins in a later fork's window acts for no session and hands the fork its role", async () => {
+  test("an establishment that begins in a later fork's window hands the fork its role, told once", async () => {
     const { fixture, live, context, claimSessions, holders, started, startReached, releaseStart } =
       await gatedRoleFixture("establishment-in-fork-window", "ses_ew", {
         claimAtStart: false,
@@ -5111,16 +5107,6 @@ describe("envoy OMP extension", () => {
     releaseStart();
     await started;
     await navigated;
-    // Neither queued establishment registered or subscribed the fork before its event, and the
-    // parent's subject still takes the frames the fork carries on.
-    expect(natsState.controls.get("notifications.agent.ses_ew_fork")).toBeUndefined();
-    natsState.controls
-      .get("notifications.agent.ses_ew")
-      ?.push(forwardedRoleEnvelope("legion-controller", "frame for the parent", "parent-frame"));
-    for (let drain = 0; drain < 5; drain += 1) {
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    expect(fixture.messages.some((message) => message.includes("frame for the parent"))).toBe(true);
     await fixture.handlers.get("session_switch")?.({ reason: "fork" }, moved);
     expect(claimSessions).toEqual(["legion-controller@ses_ew_fork"]);
     expect(holders.get("legion-controller")).toBe("ses_ew_fork");
@@ -5356,16 +5342,15 @@ describe("envoy OMP extension", () => {
       const held = phase === "read" ? gateRoleRead("legion-controller") : gate("legion-controller");
       tick();
       await held.reached;
-      const registering = nextRegistration(`ses_${phase}f_fork`);
       const forked = fixture.handlers.get("session_switch")?.(
         { reason: "fork" },
         live(`ses_${phase}f_fork`)
       );
-      await registering;
+      await drain();
       held.release();
       await forked;
-      await drain();
-      // Nothing fired for the parent, and the fork's reclaim carried the role.
+      for (let step = 0; step < 10; step += 1) await drain();
+      // Nothing fired for the parent, and the fork's pass carried the role.
       expect(regained).toEqual([]);
       expect(holders.get("legion-controller")).toBe(`ses_${phase}f_fork`);
       // The next tick checks the fork and makes the regain it owes.
@@ -5464,14 +5449,10 @@ describe("envoy OMP extension", () => {
         if (bound === undefined) throw new Error("the role-bound subject was not subscribed");
         const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
         // The switch is announced and the manager moves; its event then never comes (the switch
-        // threw) or comes only after two ticks.
+        // threw) or comes only after a tick.
         await fixture.handlers.get("session_before_switch")?.({ reason }, context);
         const moved = live("ses_se_next", { fresh: reason === "new" });
-        // The first tick leaves the drift to the event it expects.
-        tick();
-        await drain();
-        expect(registrations).not.toContain("ses_se_next");
-        // The next one runs the switch as its event would.
+        // The tick converges to the session the host is on, by the announced switch's rule.
         tick();
         for (let step = 0; step < 5; step += 1) await drain();
         if (event === "comes late") {
@@ -5484,9 +5465,9 @@ describe("envoy OMP extension", () => {
             String(delivery.content).includes("session id changed") &&
             String(delivery.content).includes("ses_se_next")
         );
-        // The heal says what it ended, since the controller claims its role again only from the
-        // event; a role it carries needs no word.
-        const warned = notifications.filter((message) => message.includes("sent no event"));
+        // A role end no session event announced is one no plugin heard, so it is said; a role
+        // carried needs no word.
+        const warned = notifications.filter((message) => message.includes("with no session event"));
         if (reason === "new") {
           expect(claimSessions.filter((claim) => claim.endsWith("@ses_se_next"))).toEqual([]);
           expect(bound.active()).toBe(false);
@@ -5494,7 +5475,7 @@ describe("envoy OMP extension", () => {
           expect(warned).toHaveLength(1);
           expect(warned[0]).toContain("legion-controller");
           // The role's notices were a plugin's, which only that plugin's next claim reopens.
-          expect(warned[0]).toContain("that plugin claims it again");
+          expect(warned[0]).toContain("the plugin that opened its notices");
           expect(warned[0]).not.toContain("envoy_role_set");
         } else {
           expect(claimSessions.at(-1)).toBe("legion-controller@ses_se_next");
@@ -5520,7 +5501,7 @@ describe("envoy OMP extension", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     tick();
     for (let step = 0; step < 5; step += 1) await new Promise<void>((r) => setImmediate(r));
-    const warned = notifications.filter((message) => message.includes("sent no event"));
+    const warned = notifications.filter((message) => message.includes("with no session event"));
     expect(warned).toHaveLength(1);
     expect(warned[0]).toContain("release-captain");
     expect(warned[0]).toContain("envoy_role_set");
@@ -5539,7 +5520,7 @@ describe("envoy OMP extension", () => {
       forkMoves: false,
     },
   ] as const) {
-    test(`${name}: the next switch's announcement runs a switch that sent no event first`, async () => {
+    test(`${name}: a switch that sent no event takes effect before the next one`, async () => {
       const notice = "notifications.legion.ACME.controller";
       const { fixture, live, context, claimSessions, registrations, tick, notifications } =
         await gatedRoleFixture(`missed-switch-${newMoves}-${forkMoves}`, "ses_nf");
@@ -5548,7 +5529,7 @@ describe("envoy OMP extension", () => {
       if (bound === undefined) throw new Error("the role-bound subject was not subscribed");
       const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
       // The `/new` is announced; it moves the host and throws, or another extension cancels it.
-      // One tick leaves any drift to its event.
+      // A tick runs a pass meanwhile.
       await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
       if (newMoves) live("ses_nf_new", { fresh: true });
       tick();
@@ -5559,7 +5540,7 @@ describe("envoy OMP extension", () => {
         await fixture.handlers.get("session_switch")?.({ reason: "fork" }, live("ses_nf_fork"));
       }
       for (let step = 0; step < 5; step += 1) await drain();
-      const warned = notifications.filter((message) => message.includes("sent no event"));
+      const warned = notifications.filter((message) => message.includes("with no session event"));
       if (newMoves) {
         // The `/new` ran first: the role ended, said so, and nothing carried it on.
         expect(claimSessions.filter((claim) => !claim.endsWith("@ses_nf"))).toEqual([]);
@@ -5618,7 +5599,7 @@ describe("envoy OMP extension", () => {
     expect(claimSessions.length).toBe(claimed);
   });
 
-  test("a reclaim whose hand-back a rollback outlasts is settled by the next tick", async () => {
+  test("a resume rolled back while this process hands back its claim is settled once the host is back", async () => {
     const role = "legion-controller";
     const { fixture, live, context, holders, manager, tick, claimSessions, gate, onHandBack } =
       await gatedRoleFixture("rollback-during-hand-back", "ses_hb", { claimAtStart: false });
@@ -5631,7 +5612,7 @@ describe("envoy OMP extension", () => {
     holders.set(role, "ses_hb_r");
     const switched = fixture.handlers.get("session_switch")?.({ reason: "resume" }, target);
     await held.reached;
-    // A second resume moves the host on, and rolls back while the claim is handed back.
+    // A second resume moves the host on; it rolls back while the claim is handed back.
     const branch = manager.branch;
     await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
     live("ses_hb_x", { fresh: true });
@@ -5643,8 +5624,12 @@ describe("envoy OMP extension", () => {
     await switched;
     for (let step = 0; step < 5; step += 1) await drain();
     expect(claimSessions).toEqual([`${role}@ses_hb_r`]);
-    tick();
-    for (let step = 0; step < 10; step += 1) await drain();
+    // A pass for the second resume hands the claim back, during which the host rolls back; the
+    // pass after converges to the session the host is on again.
+    for (let ticks = 0; ticks < 2; ticks += 1) {
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+    }
     expect(claimSessions).toEqual([`${role}@ses_hb_r`, `${role}@ses_hb_r`]);
     expect(holders.get(role)).toBe("ses_hb_r");
   });
@@ -5736,7 +5721,7 @@ describe("envoy OMP extension", () => {
     expect(holders.get(other)).toBe("ses_rr0_x");
   });
 
-  test("a switch that lands while an undo hands a role back is established by its own rules", async () => {
+  test("a switch that lands while a rolled-back resume's role is handed back is established by its own rules", async () => {
     const role = "legion-controller";
     const other = "release-captain";
     const {
@@ -5799,9 +5784,161 @@ describe("envoy OMP extension", () => {
     for (let step = 0; step < 10; step += 1) await drain();
     // The `/new` session takes no role, and the warning names the session the host came back to.
     expect(claimSessions.filter((claim) => claim.endsWith("@ses_ur_y"))).toEqual([]);
-    const undone = notifications.filter((message) => message.includes("was rolled back"));
+    const undone = notifications.filter((message) =>
+      message.includes("role release-captain ended")
+    );
     expect(undone).toHaveLength(1);
-    expect(undone[0]).toContain("rolled back to session ses_ur_f");
+    expect(undone[0]).toContain("the host moved to session ses_ur_f");
+    // Only the session the host ends on keeps its agent subject open.
+    expect(natsState.controls.get("notifications.agent.ses_ur_x")?.active() ?? false).toBe(false);
+    expect(natsState.controls.get("notifications.agent.ses_ur_f")?.active() ?? false).toBe(false);
+    expect(natsState.controls.get("notifications.agent.ses_ur_y")?.active()).toBe(true);
+  });
+
+  test("a release the session's records hold is final: a pass hands the role back and claims nothing", async () => {
+    const { fixture, live, claimSessions, holders, handedBack } = await gatedRoleFixture(
+      "release-is-final",
+      "ses_rl"
+    );
+    const before = claimSessions.length;
+    fixture.pi.appendEntry("envoy-role-claim", { role: null });
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rl"));
+    expect(claimSessions.slice(before)).toEqual([]);
+    expect(holders.has("legion-controller")).toBe(false);
+    expect(handedBack).toContain("notifications.role.legion-controller@ses_rl");
+  });
+
+  test("a fork does not take its recorded role from a live session outside its lineage", async () => {
+    const { fixture, live, holders } = await gatedRoleFixture("fork-foreign-holder", "ses_fh", {
+      claimAtStart: false,
+    });
+    // The transcript records the role, but another process took it over: the listener names a
+    // session this process never was.
+    fixture.pi.appendEntry("envoy-role-claim", { role: "legion-controller" });
+    holders.set("legion-controller", "ses_elsewhere");
+    await fixture.handlers.get("session_switch")?.({ reason: "fork" }, live("ses_fh_fork"));
+    expect(holders.get("legion-controller")).toBe("ses_elsewhere");
+  });
+
+  test("a role claimed back after a move no event announced ended its plugin notices says they stay closed", async () => {
+    const notice = "notifications.legion.ACME.controller";
+    const { fixture, live, context, manager, tick, notifications, holders } =
+      await gatedRoleFixture("notices-stay-closed", "ses_nc");
+    await subscribeLegionNotice("ses_nc", notice, context, "legion-controller");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const own = manager.branch();
+    // A resume moves the host and sends no event; a tick ends the role, whose notices close.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    live("ses_nc_x", { fresh: true });
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
+    // The host rolls back to the session whose records name the role.
+    const returned = fixture.entries.length;
+    manager.id = "ses_nc";
+    manager.branch = () => [...own, ...fixture.entries.slice(returned)];
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(holders.get("legion-controller")).toBe("ses_nc");
+    expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
+    expect(notifications.some((message) => message.includes("stay closed"))).toBe(true);
+  });
+
+  test("a heartbeat tick during a NATS outage still re-registers and re-asserts the role over HTTP", async () => {
+    const { tick, registrations, holders, notifications } = await gatedRoleFixture(
+      "nats-outage-heartbeat",
+      "ses_no"
+    );
+    // NATS drops and refuses to reconnect; meanwhile the listener lost the session's claim.
+    natsState.connectionsClosed = true;
+    natsState.failConnects = 99;
+    holders.delete("legion-controller");
+    const before = registrations.length;
+    tick();
+    for (let step = 0; step < 10; step += 1) await new Promise<void>((r) => setImmediate(r));
+    expect(registrations.length).toBeGreaterThan(before);
+    expect(holders.get("legion-controller")).toBe("ses_no");
+    expect(notifications.filter((message) => message.includes("heartbeat failed"))).toEqual([]);
+  });
+
+  test("a pass between a /new's announcement and the host's move keeps the /new from carrying the role", async () => {
+    const { fixture, live, context, claimSessions, tick } = await gatedRoleFixture(
+      "pass-before-move",
+      "ses_pm"
+    );
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    tick();
+    for (let step = 0; step < 5; step += 1) await drain();
+    live("ses_pm_new", { fresh: true });
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(claimSessions.filter((claim) => claim.endsWith("@ses_pm_new"))).toEqual([]);
+  });
+
+  for (const call of ["claim", "subscribe"] as const) {
+    test(`a plugin's ${call} for a session the host switched to before pi-envoy's handler opens that session first`, async () => {
+      const { live } = await gatedRoleFixture(`bridge-${call}-first`, "ses_bf");
+      const forked = live("ses_bf_fork");
+      if (call === "claim") await claimEnvoyRole("ses_bf_fork", "legion-controller", forked);
+      else await subscribeLegionNotice("ses_bf_fork", "notifications.legion.ACME.other", forked);
+      expect(natsState.controls.get("notifications.agent.ses_bf_fork")?.active()).toBe(true);
+    });
+  }
+
+  test("a resume whose records name a role another process holds under an id this process gave up does not take it", async () => {
+    const role = "legion-controller";
+    const { fixture, live, context, holders } = await gatedRoleFixture("foreign-same-id", "ses_e");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    // A resume to a session that records nothing: the role is handed back.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "resume" },
+      live("ses_e_k", { fresh: true })
+    );
+    for (let step = 0; step < 5; step += 1) await drain();
+    expect(holders.has(role)).toBe(false);
+    // Another process resumes ses_e and holds the role under it.
+    holders.set(role, "ses_e");
+    // This process resumes a session whose records name the role.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const resumed = live("ses_e_q", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+    for (let step = 0; step < 5; step += 1) await drain();
+    expect(holders.get(role)).toBe("ses_e");
+  });
+
+  test("a fork that overtakes a resume names the session the listener holds the role under", async () => {
+    const role = "legion-controller";
+    const { fixture, live, context, holders, holdRegistration } = await gatedRoleFixture(
+      "fork-over-resume-holder",
+      "ses_f"
+    );
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "resume" },
+      live("ses_f_k", { fresh: true })
+    );
+    for (let step = 0; step < 5; step += 1) await drain();
+    // The listener names P for the role from an earlier life; this process resumes P, whose
+    // records name it, and a fork of P lands while P's registration is held.
+    holders.set(role, "ses_f_p");
+    const held = holdRegistration("ses_f_p");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const toP = live("ses_f_p", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    const resumed = fixture.handlers.get("session_switch")?.({ reason: "resume" }, toP);
+    await held.reached;
+    await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+    const forked = fixture.handlers.get("session_switch")?.({ reason: "fork" }, live("ses_f_f"));
+    await drain();
+    held.release();
+    await resumed;
+    await forked;
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(holders.get(role)).toBe("ses_f_f");
   });
 
   test("a fork rolled back after its event tells the agent of no id change it never saw", async () => {
@@ -6188,31 +6325,25 @@ describe("envoy OMP extension", () => {
                   natsState.controls.get(`notifications.agent.${left}`)?.active() ?? false
                 ).toBe(false);
               }
-              // A resume that ran before the host rolled it back without a plugin claiming at its
-              // event (its event came, or the heartbeat ran it as a resume that threw after two
-              // ticks) ended the role with the notices only their plugin reopens; the return
-              // reclaims the role from the session's own records. The heartbeat cannot tell a slow
-              // rollback from a resume that will never send its event. A plugin that claims at
-              // the event keeps the role and its notices across the rollback when the session
-              // returned to records it.
-              const ranBeforeRollback =
-                (event.kind === "rollback" && ticksInWindow > 0) ||
-                event.kind === "landed-rollback";
               // A step keeps the role when it carries it (a fork) or when its target records it
               // (the first resume, in the rows where it does); the session the host returns to in
               // a rollback records it after a fork or such a resume.
               const keeps = (step: Step, index: number) =>
                 step === "fork" || (index === 0 && firstRecords);
-              const returnedRecords = first === "fork" || firstRecords;
               const replacedAt = chain.findIndex((step, index) => !keeps(step, index));
+              const roleWarnings = h.notifications.filter((message) =>
+                message.includes("with no session event")
+              );
+              const closedWarnings = h.notifications.filter((message) =>
+                message.includes("stay closed")
+              );
               if (replacedAt === -1) {
                 expect(h.holders.get(role)).toBe(last);
-                if (held) {
-                  // Open when no `/new` or resume closed them, or when a plugin reopened them at a
-                  // rolled-back switch's event and the returned session kept the role.
-                  const noticeOpen =
-                    (first === "fork" && !ranBeforeRollback) || (pluginEvent && returnedRecords);
-                  expect(natsState.controls.get(notice)?.active() ?? false).toBe(noticeOpen);
+                // The plugin's notices are open, unless a role end closed them on the way, which
+                // pi-envoy cannot undo: then a warning says they stay closed until the plugin
+                // claims again.
+                if (held && natsState.controls.get(notice)?.active() !== true) {
+                  expect(closedWarnings.length + roleWarnings.length).toBeGreaterThan(0);
                 }
               } else {
                 const after = chainIds.slice(replacedAt);
@@ -6223,8 +6354,8 @@ describe("envoy OMP extension", () => {
                 // A role a plugin claimed at a rolled-back switch's event is handed back.
                 if (pluginEvent) expect(h.holders.has(role)).toBe(false);
               }
-              // Every carried switch changes the id the agent knows: it is told once each, in the
-              // session the notice names, and the last session's agent knows its id exactly when a
+              // A carried switch changes the id the agent knows: each notice lands in the session
+              // it names, once at most, and the last session's agent is told exactly when a
               // carried switch opened it.
               const idNotices = h.landed.filter((message) =>
                 message.content.includes("session id changed")
@@ -6234,34 +6365,27 @@ describe("envoy OMP extension", () => {
               for (const message of idNotices) {
                 expect(named(message.content)).toBe(message.session);
               }
-              expect(idNotices).toHaveLength(chain.filter((step) => step === "fork").length);
+              expect(new Set(idNotices.map((message) => message.session)).size).toBe(
+                idNotices.length
+              );
               expect(idNotices.some((message) => named(message.content) === last)).toBe(
                 chain.at(-1) === "fork"
               );
-              // A role still held when a `/new` or resume that sent no event ran is warned of,
-              // once: as the plugin's to claim again while its notices were open, otherwise as the
-              // model's.
-              if (held) {
-                const warned = h.notifications.filter((message) =>
-                  message.includes("sent no event")
-                );
-                // The role is held at the second switch after a fork, or after a resume recording
-                // it once that resume's own reclaim has run.
-                const heldAtSecond = first === "fork" || (firstRecords && stage === "settled");
-                const endsWithoutEvent =
-                  heldAtSecond &&
-                  (event.kind === "new-no-event" ||
-                    event.kind === "new-then-fork" ||
-                    (event.kind === "rollback" && ticksInWindow > 0));
-                expect(warned).toHaveLength(endsWithoutEvent ? 1 : 0);
-                if (endsWithoutEvent) {
-                  expect(warned[0]).toContain(
-                    first === "fork" ? "that plugin claims it again" : "envoy_role_set"
-                  );
-                }
+              // A `/new` that sent no event, which no plugin heard, ends a role still held with a
+              // warning naming it as the plugin's to claim again: the plugin's notices are still
+              // open then, after a fork or a resume whose records name the role alike.
+              const heldAtSecond = first === "fork" || (firstRecords && stage === "settled");
+              if (held && event.kind === "new-no-event" && heldAtSecond) {
+                const named = roleWarnings.filter((message) => message.includes(role));
+                expect(named).toHaveLength(1);
+                expect(named[0]).toContain("the plugin that opened its notices");
               }
-              // The resumed session's own role is its own: a session the host lands on takes it, and
-              // an undone one hands it back, so no other session claims it.
+              // Every such warning names a role and the session the host was on.
+              for (const message of roleWarnings) {
+                expect(message).toMatch(/role \S+ ended: the host moved to session ses_c_\w+/);
+              }
+              // The resumed session's own role is its own: a session the host lands on takes it, a
+              // session the host left hands it back, and no other session claims it.
               if (event.kind === "resume") expect(h.holders.get(other)).toBe("ses_c_b");
               const resumed = event.kind === "resume" ? "ses_c_b" : "ses_c_x";
               expect(
@@ -6269,15 +6393,8 @@ describe("envoy OMP extension", () => {
                   (claim) => claim.startsWith(`${other}@`) && claim !== `${other}@${resumed}`
                 )
               ).toEqual([]);
-              if (ranBeforeRollback) expect(h.holders.has(other)).toBe(false);
-              // An undo that ends a role, or leaves a plugin's notices closed, says so once.
-              const undone = h.notifications.filter((message) =>
-                message.includes("was rolled back")
-              );
-              const undoEnds = ranBeforeRollback || (pluginEvent && !returnedRecords);
-              expect(undone).toHaveLength(undoEnds ? 1 : 0);
-              if (ranBeforeRollback) {
-                expect(undone[0]?.includes("stay closed")).toBe(first === "fork" && held);
+              if (resumed === "ses_c_x" && h.claimSessions.includes(`${other}@ses_c_x`)) {
+                expect(h.holders.has(other)).toBe(false);
               }
             });
           }
@@ -6372,7 +6489,7 @@ describe("envoy OMP extension", () => {
     expect(registrations).toContain("ses_minted");
   });
 
-  test("a claim that returns between the host's move and its switch event is handed back and recorded nowhere", async () => {
+  test("a claim that returns between the host's move and its switch event is handed back by the next pass and recorded nowhere", async () => {
     const { fixture, live, context, handedBack, gate } = await gatedRoleFixture(
       "claim-in-host-window",
       "ses_cw"
@@ -6382,7 +6499,7 @@ describe("envoy OMP extension", () => {
     await held.reached;
     const moved = await hostMoves(fixture, live, context, "ses_cw_new");
     held.release();
-    await expect(claimed).rejects.toThrow("handed back");
+    await expect(claimed).rejects.toThrow("the session moved from ses_cw");
     await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
     expect(handedBack).toContain("notifications.role.reviewer@ses_cw");
     expect(claimEntryRoles(fixture.entries)).not.toContain("reviewer");

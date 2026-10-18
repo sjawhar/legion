@@ -10,18 +10,17 @@
   naming the role and the subscriptions; a move off any other role names the role it released
   (`details.released`). `envoy_unsubscribe` keeps them open, listing them as kept
   (`details.kept`), and an empty `topics` list closes nothing.
-- A role is no longer lost, claimed twice or claimed for the wrong session when role moves race:
-  the model's moves, a plugin's claims, the heartbeat's role check and the reclaim a start, switch
-  or branch runs each act one at a time and only for the session they were decided for, and a
-  claim the session moved away from is handed back. A `/fork` keeps the role whatever overtakes it;
-  a `/new` or resume never carries it, ends it as the switch lands, and receives no message
-  addressed to the session it replaced. This holds through the gap where Oh My Pi has moved to
-  the new session but not yet sent its switch event, through a switch that fails in that gap, and
-  through a switch Oh My Pi rolls back, before or after its event; a `/new` or resume that fails
-  in that gap ends the role with a warning that says who claims it again. The agent is told of
-  each id change a fork or branch makes once, in the session it names, never in a later `/new`
-  session. A resumed session whose records name the role the session it replaced held takes the
-  role back rather than be refused by that session's hold.
+- A role is no longer lost, claimed twice or claimed for the wrong session when role moves and
+  session switches race. Every session event and heartbeat tick now converges pi-envoy to the
+  session Oh My Pi is on, whatever order the events came in: that session's agent subject is the
+  one open and registered, and it holds the role its own records name (a fork's copy of its
+  parent's, none after a `/new`, its own after a resume), every other role handed back at the
+  listener. A `/fork` keeps the role whatever overtakes it; a `/new` or resume never carries it,
+  ends it as the switch lands, and receives no message addressed to the session it replaced; a
+  resumed session whose records name the role takes it back; a switch Oh My Pi rolls back, or one
+  that fails before its event, settles on the session the host stays on. A role ended by a move
+  no session event announced is warned of, naming who claims it again. The agent is told of each
+  id change a fork or branch makes once, in the session it names.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
