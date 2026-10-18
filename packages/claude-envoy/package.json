@@ -11,6 +11,7 @@
     "bin/**",
     "dist/**",
     "hooks/**",
+    "legion/**",
     "scripts/**",
     "src/**",
     "README.md",
