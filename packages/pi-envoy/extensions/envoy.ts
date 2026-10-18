@@ -1599,22 +1599,22 @@ export default function envoyExtension(pi: PiApi): void {
         }
         switchWithoutEvent = { reason: leavingSession.reason };
       }
-      // A session whose establishment gave way to a host move the host then undid with no event
-      // (a resume that failed after its move): the host is on it again, whatever pi-envoy did
-      // meanwhile, so it is settled here by the rule of the switch that opened it and from what it
-      // continued, closing the subject of the session pi-envoy had moved to.
-      const resettle =
-        switchWithoutEvent === undefined && unsettled?.id === liveSessionID ? unsettled : undefined;
-      // The host came back to the session the last switch left, after pi-envoy had moved on (a
-      // switch Oh My Pi rolled back after its event ran): that switch is undone by its own rule,
-      // from the session pi-envoy had moved to — a `/new` or resume ends the role that session took
-      // and the session returned to reclaims its own; a fork carries the role back.
+      // The host came back to the session the last switch left, after that switch moved pi-envoy
+      // on (Oh My Pi rolls a resume back after its event ran, or the heartbeat had run it as one
+      // that threw): the switch is undone (`undoSwitch`).
       const rolledBack =
-        drifted &&
-        switchWithoutEvent === undefined &&
-        resettle === undefined &&
-        leavingSession?.id === liveSessionID
+        drifted && switchWithoutEvent === undefined && leavingSession?.id === liveSessionID
           ? leavingSession
+          : undefined;
+      // A session whose establishment gave way to a host move the host then undid with no event
+      // (a resume that failed after its move): the host is on it again, so it is settled here by
+      // the rule of the switch that opened it and from what it continued, closing the subject of
+      // the session pi-envoy had moved to.
+      const resettle =
+        switchWithoutEvent === undefined &&
+        rolledBack === undefined &&
+        unsettled?.id === liveSessionID
+          ? unsettled
           : undefined;
       if (healing) return;
       healing = true;
@@ -1628,7 +1628,7 @@ export default function envoyExtension(pi: PiApi): void {
         if (switchWithoutEvent !== undefined) {
           return switchSession(switchWithoutEvent.reason, context, true);
         }
-        if (rolledBack !== undefined) return switchSession(rolledBack.reason, context, true);
+        if (rolledBack !== undefined) return undoSwitch(rolledBack, context);
         if (resettle !== undefined) {
           return establishSession(context, {
             carryPreviousSessionRole: resettle.carryPreviousSessionRole,
@@ -2191,6 +2191,9 @@ export default function envoyExtension(pi: PiApi): void {
     // what it claimed (`setEnvoyRole`, `reassertRoleNow`).
     const pluginHeld = roleNoticeSubjects.size > 0;
     const ended = carryPreviousSessionRole ? undefined : endOutgoingRole(sessionID);
+    // Kept so an undo of this switch can say the notices stay closed (`undoSwitch`).
+    noticesClosedBy =
+      ended !== undefined && pluginHeld ? { role: ended, by: sessionID } : undefined;
     // A role a switch with no event ended stays unheld until someone claims it again: say so, and
     // who does. A plugin that opened the role's notices (pi-legion's controller) claims it again
     // on its next session event, which `envoy_role_set` is not: it reopens none of them.
@@ -2236,6 +2239,95 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     await establishSession(context, { carryPreviousSessionRole }, previousID);
+  };
+
+  // The role a `/new` or resume ended along with the notices a plugin opened for it, and the
+  // session that switch opened: an undo of that switch says the notices stay closed.
+  let noticesClosedBy: { readonly role: string; readonly by: string } | undefined;
+
+  // What the heartbeat does when the host comes back to the session `left.id`, which the last
+  // switch left, after that switch moved pi-envoy on (Oh My Pi rolls a resume back after its event
+  // ran, or the heartbeat had run it as a resume that threw): it undoes the switch. A role held
+  // under the session undone stays when the records of the session returned to name it (a plugin
+  // that claims at every session event claimed it there too), and the claim that follows names
+  // the undone session as its predecessor; any other role it holds is that session's alone, so it
+  // ends here and at the listener. The session returned to is then established again, from the
+  // session pi-envoy had moved to, by the rule of the switch that opened it when it never settled.
+  // One warning says what the undo ended, and that notices a plugin opened before the switch stay
+  // closed: only that plugin reopens them. No id-change notice: the agent's transcript is the one
+  // it had before.
+  const undoSwitch = async (
+    left: { readonly id: string; readonly reason: SessionSwitchReason | undefined },
+    context: SessionContext
+  ): Promise<void> => {
+    const undoneID = sessionID;
+    restoreLocalSessionState(context);
+    const closedBySwitch = noticesClosedBy?.by === undoneID ? noticesClosedBy : undefined;
+    noticesClosedBy = undefined;
+    const held = heldRole();
+    let ended: { role: string; pluginHeld: boolean } | undefined;
+    if (held !== undefined && claimedRoleSessionID === undoneID) {
+      const recorded = transcriptClaimedRole(context.sessionManager.getBranch?.() ?? []);
+      if (recorded !== held) {
+        ended = { role: held, pluginHeld: roleNoticeSubjects.size > 0 };
+        endRole();
+        // The session undone is this process's, and abandoned: hand its hold back, so the
+        // listener does not keep naming it, before the session returned to reads the listener.
+        await requireEnvoy()
+          .client.unsubscribe({ sessionID: undoneID, topics: [ROLE_TOPIC_PREFIX + held] })
+          .catch((error: unknown) =>
+            logger.warn("envoy: a rolled-back session's role was not handed back", {
+              role: held,
+              undone: undoneID,
+              error: messageFor(error),
+            })
+          );
+      }
+    }
+    // The switch's closing of a plugin's notices still matters only while none are open again (a
+    // plugin that claimed at its event reopened them) and the role ended here is another.
+    const closed =
+      closedBySwitch !== undefined &&
+      roleNoticeSubjects.size === 0 &&
+      closedBySwitch.role !== ended?.role
+        ? closedBySwitch
+        : undefined;
+    if (ended !== undefined || closed !== undefined) {
+      const parts = [
+        `envoy: the switch to session ${undoneID} was rolled back to session ${sessionID}`,
+      ];
+      if (ended !== undefined) {
+        parts.push(
+          ended.pluginHeld
+            ? `role ${ended.role}, which it took, ended with the notices a plugin opened for it, which that plugin reopens on its next session switch or restart`
+            : `role ${ended.role}, which it took, ended; if this session should hold it, run envoy_role_set`
+        );
+      }
+      if (closed !== undefined) {
+        parts.push(
+          `the notices a plugin opened for role ${closed.role} before the switch stay closed until that plugin claims it again on its next session switch or restart`
+        );
+      }
+      logger.warn("envoy: a session switch was rolled back", {
+        undone: undoneID,
+        sessionID,
+        ended: ended?.role,
+        noticesClosed: closed?.role,
+      });
+      context.ui.notify(parts.join("; "), "warning");
+    }
+    if (!inbound) return;
+    const settle = unsettled?.id === left.id ? unsettled : undefined;
+    await establishSession(
+      context,
+      settle === undefined
+        ? { carryPreviousSessionRole: true }
+        : {
+            carryPreviousSessionRole: settle.carryPreviousSessionRole,
+            continues: settle.continues,
+          },
+      undoneID
+    );
   };
 
   const rebind = async (
