@@ -4352,28 +4352,49 @@ describe("envoy OMP extension", () => {
     const handedBack: string[] = [];
     let gated: { role: string; reached: () => void; release: Promise<void> } | undefined;
     let registered: { session: string; seen: () => void } | undefined;
+    // The listener's holder per role, and its rule for a soft claim: it takes the role only when
+    // the role is unheld, already held by the claimant, or held by the session it names as its
+    // predecessor (every holder here is live).
+    const holders = new Map<string, string>();
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
       if (url.pathname === "/v1/roles/set") {
         const claimed = typeof body?.role === "string" ? body.role : "";
+        const claimant = body?.session_id;
         claims.push(claimed);
-        claimSessions.push(`${claimed}@${body?.session_id}`);
+        claimSessions.push(`${claimed}@${claimant}`);
         if (gated?.role === claimed) {
           const { reached, release } = gated;
           gated = undefined;
           reached();
           await release;
         }
+        const holder = holders.get(claimed);
+        if (
+          body?.soft === true &&
+          holder !== undefined &&
+          holder !== claimant &&
+          holder !== body?.previous_session_id
+        ) {
+          return new Response(JSON.stringify({ error: "role held", role: claimed, holder }), {
+            status: 409,
+          });
+        }
+        holders.set(claimed, claimant);
         return response({
-          session_id: body?.session_id,
+          session_id: claimant,
           machine_id: "test",
           dir: "/tmp/envoy-omp-test",
           topics: [`notifications.role.${claimed}`],
         });
       }
       if (url.pathname === "/v1/interests/unsubscribe") {
-        for (const topic of body?.topics ?? []) handedBack.push(`${topic}@${body?.session_id}`);
+        for (const topic of body?.topics ?? []) {
+          handedBack.push(`${topic}@${body?.session_id}`);
+          const role = String(topic).replace("notifications.role.", "");
+          if (holders.get(role) === body?.session_id) holders.delete(role);
+        }
         return response({});
       }
       if (url.pathname === "/v1/interests/subscribe" && registered?.session === body?.session_id) {
@@ -4528,6 +4549,78 @@ describe("envoy OMP extension", () => {
     expect(handedBack).not.toContain("notifications.role.legion-controller@ses_rh_parent");
     // The fork carries the role over to the child.
     expect(claimSessions.at(-1)).toBe("legion-controller@ses_rh_child");
+  });
+
+  test("a fork that overtakes another fork's waiting reclaim still carries the role", async () => {
+    const { fixture, live, context, roleTool, claimSessions, gate, nextRegistration } =
+      await gatedRoleFixture("fork-over-fork", "ses_ff");
+    // A re-claim of the held role holds the role-move queue, so the first fork's reclaim waits.
+    const held = gate("legion-controller");
+    const claimed = claimEnvoyRole("ses_ff", "legion-controller", context).catch(() => undefined);
+    await held.reached;
+    const registering = nextRegistration("ses_ff_fork");
+    const forked = fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      live("ses_ff_fork")
+    );
+    await registering;
+    // A second fork sets its id while the first fork's reclaim still waits.
+    const forkedAgain = fixture.handlers.get("session_switch")?.(
+      { reason: "fork" },
+      live("ses_ff_fork2")
+    );
+    held.release();
+    await claimed;
+    await forked;
+    await forkedAgain;
+    // The hold is still under the parent's id, so the second fork names it as its predecessor.
+    expect(claimSessions.at(-1)).toBe("legion-controller@ses_ff_fork2");
+    const next = await roleTool.execute("", { role: "reviewer" });
+    expect(next.details).toEqual({ role: "reviewer", released: "legion-controller" });
+  });
+
+  test("an establishment's reclaim belongs to the session it was queued for, though the host's one session manager moves on", async () => {
+    const { fixture, context, claimSessions, gate } = await gatedRoleFixture(
+      "reclaim-queued-id",
+      "ses_q"
+    );
+    // Oh My Pi hands every context one session manager and moves its id and transcript in place.
+    const manager = { id: "ses_q", branch: (): readonly unknown[] => [...fixture.entries] };
+    const hostContext = (): SessionContext => {
+      const base = sessionContext("ses_q");
+      return {
+        ...base,
+        sessionManager: {
+          ...base.sessionManager,
+          getSessionId: () => manager.id,
+          getBranch: () => manager.branch(),
+        },
+      };
+    };
+    // The host moves its manager only once a handler has run as far as it can: it awaits each
+    // handler (up to its 30 s budget). No real I/O runs on these paths, so draining the pending
+    // callbacks is that point.
+    const settled = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const held = gate("legion-controller");
+    const claimed = claimEnvoyRole("ses_q", "legion-controller", context).catch(() => undefined);
+    await held.reached;
+    // A tree navigation's reclaim waits behind the held claim; a fork queues behind that
+    // establishment; then a `/new` moves the manager to a fresh, empty transcript.
+    const rebound = fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, hostContext());
+    await settled();
+    manager.id = "ses_q_fork";
+    const forked = fixture.handlers.get("session_switch")?.({ reason: "fork" }, hostContext());
+    await settled();
+    manager.id = "ses_q_new";
+    manager.branch = () => [];
+    const switched = fixture.handlers.get("session_switch")?.({ reason: "new" }, hostContext());
+    await settled();
+    held.release();
+    await claimed;
+    await rebound;
+    await forked;
+    await switched;
+    expect(claimSessions.filter((claim) => claim.endsWith("@ses_q_new"))).toEqual([]);
   });
 
   test("a plugin's claim at the listener when the session switches is handed back, not kept for the new session", async () => {

@@ -1699,9 +1699,16 @@ export default function envoyExtension(pi: PiApi): void {
       // the same transcript), and it must not take a role a different live
       // session holds. The listener decides that atomically for a soft claim;
       // the id this session continues is the one live holder it may supersede.
+      // The id this process's hold is under. Usually the previous session's; but when an earlier
+      // establishment gave way to this one before it carried the role, the hold is still under the
+      // id that establishment came from.
+      const holdingID =
+        claimedRoleSessionID !== undefined && claimedRoleSessionID !== sessionID
+          ? claimedRoleSessionID
+          : previousSessionID;
       const continued =
-        carryPreviousSessionRole && previousSessionID !== "" && previousSessionID !== sessionID
-          ? previousSessionID
+        carryPreviousSessionRole && holdingID !== "" && holdingID !== sessionID
+          ? holdingID
           : undefined;
       await setEnvoyRole(role, { soft: true, previousSessionID: continued }).catch((error) => {
         logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });

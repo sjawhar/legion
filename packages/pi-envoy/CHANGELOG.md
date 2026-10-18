@@ -11,12 +11,15 @@
   subscriptions, and `envoy_unsubscribe` leaves them open, named or not, listing them as kept
   (`details.kept`); an explicit empty `topics` list closes nothing. Every role move (the tool's, a
   plugin's claim, and the reclaim a session start, switch or drift heal runs) runs one at a time
-  and decides inside its turn, from the session and the role it leaves when it runs: so a reclaim
+  and decides inside its turn, from the session and the role it leaves when it runs: a reclaim
   that waited reclaims the role the transcript records by then rather than undo a move that landed
-  first, and a claim whose session changed while it waited is refused, or handed back if it was
-  already at the listener. A plugin's role-bound subscription waits for the moves in flight before
-  it checks its role. A move off any other role still works, and its answer names the role it
-  released (`details.released`).
+  first, and does nothing when a later start or switch has opened another session, which reclaims
+  for itself, naming as its predecessor the id the hold is still under. A claim whose session
+  changed while it waited is refused, or handed back if it was already at the listener, except a
+  re-claim of a role the old session already held, whose hold stays for a `/fork` to carry. A
+  plugin's role-bound subscription waits for the moves in flight before it checks its role. A
+  move off any other role still works, and its answer names the role it released
+  (`details.released`).
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.
