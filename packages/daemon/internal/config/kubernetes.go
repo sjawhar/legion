@@ -102,7 +102,8 @@ type Toleration struct{ Key, Operator, Value, Effect string }
 // ephemeral storage it carries as a limit (EphemeralStorage) and as a request
 // (EphemeralStorageRequest, at most the limit). "" is unset only while the file is read; the
 // settled block holds every field (DefaultResources fills what the file leaves out, and a request
-// the file leaves out takes its settled limit).
+// the file leaves out takes the file's limit where it set one, else the default's request:
+// settledRequest).
 type RoleResources struct {
 	CPU, CPURequest, Memory, MemoryRequest, EphemeralStorage, EphemeralStorageRequest string
 }

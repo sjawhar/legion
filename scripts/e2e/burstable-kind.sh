@@ -80,7 +80,7 @@ begin prerequisites
 for tool in docker go kubectl curl zstd tar sha256sum sha512sum "$kind_bin"; do
   command -v "$tool" >/dev/null || fail "$tool is not on PATH"
 done
-tar --help 2>/dev/null | grep -q -- '--zstd' || fail "this tar has no --zstd; install GNU tar 1.31 or later"
+[[ $(tar --help 2>/dev/null) == *--zstd* ]] || fail "this tar has no --zstd; install GNU tar 1.31 or later"
 image=${LEGION_E2E_IMAGE:-}
 [[ $image == *@sha256:* ]] || fail "LEGION_E2E_IMAGE must name the worker image by digest (<image>@sha256:<64 hex>)"
 note "kind $("$kind_bin" version), worker image $image"

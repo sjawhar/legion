@@ -1124,8 +1124,9 @@ request. `runtime.kubernetes.resources.<role>` sets a role's reservation: `cpu` 
 limits), `cpu_request` and `memory_request`, `ephemeral_storage` (the limit) and
 `ephemeral_storage_request`, any of them. A limit the file leaves out takes the daemon's default
 (`config.DefaultResources()`, `packages/daemon/internal/config/kubernetes.go`); a `cpu_request` or
-`memory_request` it leaves out takes the role's settled limit, so a file that raises `memory` alone
-keeps the role's request equal to it. With no request set below a limit, as at the defaults, every
+`memory_request` it leaves out takes the file's limit where it set one, else the default's request
+(`settledRequest`), so a file that raises `memory` alone keeps the role's request equal to it.
+With no request set below a limit, as at the defaults, every
 Legion pod is `Guaranteed`; a role with a lower request makes every pod holding its container
 `Burstable` ([Issue sizing](#issue-sizing-one-reservation-per-pod), "Guaranteed or Burstable").
 
@@ -1989,18 +1990,22 @@ capacity — the sum of the requests of the pods on that node, plus a small buff
 its system pods — and GKE terminates containers in lower-QoS pods first when memory use passes it;
 a `Performance`-class or accelerator pod bursts into the node's allocatable instead
 ([Configure Pod bursting in GKE](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/pod-bursting-gke#burstable-capacity),
-"Bursting availability in GKE" and "Burstable capacity in GKE"; both pages read 2026-10-18).
-Legion's issue and controller pods carry `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`,
-which on Autopilot gives each a node of its own whenever possible
-([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so on the general-purpose platform an
-issue pod's ceiling is about its own summed requests, whatever its limits say: with the implementer
-at `memory_request: 8Gi` and every other role at its default, the pod requests 1 + 1 + 8 + 6 + 4 +
-1 = 21Gi, so the implementer peaks near 21Gi even while every sibling idles, and never reaches its
-32Gi limit. General-purpose saves money but caps the burst at the pod's summed requests;
-`Performance` allows the burst to the limit but saves nothing, since Autopilot bills the whole node
-there. To burst toward the limit, place the pods on a `Performance`-class node
-(`runtime.kubernetes.scheduling.node_selector`, for example `cloud.google.com/compute-class:
-Performance` with `cloud.google.com/machine-family`).
+"Bursting availability in GKE" and "Burstable capacity in GKE"). That node is itself sized from the
+requests: GKE adds up the cpu, memory and ephemeral-storage requests of the pods and DaemonSets that
+will run on the new node and rounds them up to the nearest machine type in the series that holds
+them, and Autopilot bills that VM
+([Optimize Autopilot Pod performance by choosing a machine series](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/performance-pods#how-gke-selects-machine-type),
+"How GKE selects a machine type" and "Pricing"; all three pages read 2026-10-18). So on Autopilot
+every class sets the burst ceiling from the requests. Legion's issue and controller pods carry
+`cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, which on Autopilot gives each a node of
+its own whenever possible ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so on the
+general-purpose platform an issue pod's ceiling is about its own summed requests, whatever its
+limits say: with the implementer at `memory_request: 8Gi` and every other role at its default, the
+pod requests 1 + 1 + 8 + 6 + 4 + 1 = 21Gi, so the implementer peaks near 21Gi even while every
+sibling idles, and never reaches its 32Gi limit. On a `Performance` node the ceiling is those
+requests rounded up to a machine type, and a lower request still picks a smaller, cheaper VM. To
+give a role real headroom on Autopilot, raise the pod's summed requests — the role's own request,
+or that of a sibling that sits idle while it works — rather than its limit alone.
 
 The defaults were sized from an issue pod on the production cluster (measured 2026-10-09, under
 `GOMAXPROCS=3`): `go test ./...` of `packages/daemon` peaks at about 1.45 GiB of summed RSS, a cold

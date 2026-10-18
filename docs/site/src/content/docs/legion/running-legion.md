@@ -102,8 +102,11 @@ on the same repositories.
   (1.30.2-gke.1394000 or later on cgroup v2, with the `efficiency-daemon` DaemonSet running), and
   otherwise each limit is set to the request; even then such a pod, alone on its node, bursts only
   to about its own summed requests (21Gi for the implementer example above, never its 32Gi limit).
-  General-purpose saves money but caps the burst at the pod's summed requests; `Performance` allows
-  the burst to the limit but saves nothing, since Autopilot bills the whole node there. See
+  A `Performance`-class pod bursts into its node's allocatable, but GKE sizes that node from the
+  summed requests of its pods and DaemonSets, rounded up to a machine type, and bills that VM, so
+  every Autopilot class sets the burst ceiling from the requests. To give a role real headroom on
+  Autopilot, raise the pod's summed requests (the role's own request, or an idle sibling's) rather
+  than its limit alone. See
   [Issue sizing](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
   for the sources. The image probe pod, which every
   boot runs before anything is served, carries a fixed reservation of its own and no role's share:
