@@ -18,9 +18,9 @@ follows is a document on the same issue. This skill replaces superpowers' `brain
 - There is no approval after each section, only the one at the end.
 - A small change gets a short spec, never a design in chat: its size shortens the spec and changes
   nothing about where the conversation happens.
-- No spec or plan file goes in the repository (`docs/superpowers/specs/`,
-  `docs/superpowers/plans/`, `docs/plans/`): the spec is the issue's primary document and the plan
-  is its `plan.md` document.
+- The spec is the issue's primary document and the plan is its `plan.md` document, in place of
+  superpowers' spec and plan files (`docs/superpowers/specs/`, `docs/superpowers/plans/`). A copy
+  also goes in the repository only when the issue or the repository asks for one.
 
 The brainstorming stages still shape what you ask: clarifying questions, then two or three
 approaches with a recommendation, then the design section by section. A question that depends on
