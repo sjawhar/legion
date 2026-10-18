@@ -494,9 +494,12 @@ export default function envoyExtension(pi: PiApi): void {
   let recordedSessionKey: string | undefined;
   let heartbeatRegistered = false;
   // The session the last switch or branch the host began was leaving (`session_before_switch`,
-  // `session_before_branch`), and whether that switch carries it on (a fork, a handoff, a branch)
-  // rather than replace it (`/new`, a resume): the host moves its manager before the switch's event.
-  let leavingSession: { readonly id: string; readonly carries: boolean } | undefined;
+  // `session_before_branch`), whether that switch carries it on (a fork, a branch) rather than
+  // replace it (`/new`, a resume), and whether a heartbeat tick has already left a drift to it:
+  // the host moves its manager before the switch's event.
+  let leavingSession:
+    | { readonly id: string; readonly carries: boolean; waited: boolean }
+    | undefined;
   let claimedRoleTopic: string | undefined;
   // The session id `claimedRoleTopic` was claimed under (endOutgoingRole).
   let claimedRoleSessionID: string | undefined;
@@ -900,19 +903,6 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
-    // A frame for the session a `/new` or resume replaces can still arrive once the host has moved
-    // on: its manager moves before the switch's event, and the event's establishment closes that
-    // subject. Injected now, it would land in the new session's transcript; it stays undelivered,
-    // unacknowledged, as it would on the closed subject. A fork or branch carries the session on,
-    // so its frames still arrive.
-    if (
-      leavingSession !== undefined &&
-      !leavingSession.carries &&
-      subject === agentSubject(leavingSession.id) &&
-      hostSessionID() !== leavingSession.id
-    ) {
-      return;
-    }
     const rendered = renderInbound(raw, sessionID, subject);
     // Acknowledge first. The listener's role lane waits two seconds for this
     // receipt and reports a miss as a failed delivery, which the daemon answers
@@ -1110,9 +1100,31 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
+  // Whether a frame on the subscription `topic` is addressed to the session a `/new` or resume
+  // replaces, arriving once the host has moved on: its manager moves before the switch's event,
+  // which closes that session's agent subject. Injected now, the frame would land in the new
+  // session's transcript; it stays undelivered and unacknowledged, as on the closed subject (a
+  // role lane counts a failed delivery and the daemon re-sends to the role's holder, a BTW's sender
+  // sees its wait time out). A switch Oh My Pi rolls back after its move loses what arrived in
+  // between. A fork or branch carries the session on, so its frames arrive. A subject the role
+  // holds is addressed to the role, not the session: its notices still arrive until the switch
+  // ends the role, since the controller, the one plugin that opens such subjects, claims its role
+  // again for whatever session the pane is left on, and a wake dropped here would be lost.
+  const replacedSessionTopic = (topic: string): boolean =>
+    leavingSession !== undefined &&
+    !leavingSession.carries &&
+    hostSessionID() !== leavingSession.id &&
+    topic === agentSubject(leavingSession.id);
+
   const pump = async (topic: string, subscription: Subscription): Promise<void> => {
     try {
       for await (const message of subscription) {
+        if (replacedSessionTopic(topic)) {
+          logger.warn("envoy: frame for a session a switch replaced left undelivered", {
+            subject: message.subject,
+          });
+          continue;
+        }
         try {
           await deliver(message.subject, codec.decode(message.data), message.reply ?? "");
         } catch {
@@ -1350,11 +1362,12 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // A `new` or `resume` switch installs an unrelated transcript, so the outgoing session's role is
-  // not carried into it (`rebind`). A role claimed under the current session id is not the
-  // outgoing one's: legion.ts's handler for the same switch can claim for the new session first,
-  // and that claim, with the notice subjects it opened, stays.
-  const endOutgoingRole = (): void => {
-    if (claimedRoleSessionID !== sessionID) endRole();
+  // not carried into `openedID`, the session it opened (`rebind`, or the heartbeat's heal of a
+  // switch that sent no event). A role claimed under that id is not the outgoing one's:
+  // legion.ts's handler for the same switch can claim for the new session first, and that claim,
+  // with the notice subjects it opened, stays.
+  const endOutgoingRole = (openedID = sessionID): void => {
+    if (claimedRoleSessionID !== openedID) endRole();
   };
 
   // The host's own session id. Oh My Pi moves its one session manager before it dispatches the
@@ -1542,9 +1555,18 @@ export default function envoyExtension(pi: PiApi): void {
       if (liveSessionID === "") return;
       const drifted = liveSessionID !== sessionID;
       // A switch the host has begun moves its manager before its event, which establishes the
-      // session it opens: a drift seen meanwhile is that switch, not an id the host minted on its
-      // own, and healing it would carry this session's role into a `/new` or a resume.
-      if (drifted && leavingSession?.id === sessionID) return;
+      // session it opens: a drift seen meanwhile is most likely that switch, not an id the host
+      // minted on its own, so the first such tick leaves it to the event. A switch that throws
+      // after the move sends none, so a later tick heals by that switch's own rule: a `/new` or
+      // resume ends the role here and carries nothing into the session it opened.
+      let carryPreviousSessionRole = true;
+      if (drifted && leavingSession?.id === sessionID) {
+        if (!leavingSession.waited) {
+          leavingSession.waited = true;
+          return;
+        }
+        carryPreviousSessionRole = leavingSession.carries;
+      }
       if (healing) return;
       healing = true;
       if (drifted) {
@@ -1553,11 +1575,12 @@ export default function envoyExtension(pi: PiApi): void {
         // the snapshot the shell takes, as the host does after a session event.
         bindDispatchSession(liveSessionID);
         procmgr.refreshShellConfigCache();
+        if (!carryPreviousSessionRole) endOutgoingRole(liveSessionID);
       }
       // A drifted id re-establishes the whole session (reclaimHeldRoles included); a steady one
       // re-registers, then checks the listener still resolves this session's role.
       const afterOutage = registrationFailed;
-      void (drifted ? establishSession(context) : registerSession())
+      void (drifted ? establishSession(context, { carryPreviousSessionRole }) : registerSession())
         .then(
           () => (drifted ? undefined : reassertRole(afterOutage, context)),
           (error: unknown) => {
@@ -2080,7 +2103,7 @@ export default function envoyExtension(pi: PiApi): void {
   // changes nothing: only a switch or a branch moves the host's id once it has one, so no drift
   // follows it, and the session it would have left stays the host's.
   const leaveSession = (carries: boolean): void => {
-    if (sessionID !== "") leavingSession = { id: sessionID, carries };
+    if (sessionID !== "") leavingSession = { id: sessionID, carries, waited: false };
   };
   pi.on("session_before_switch", async (event) =>
     leaveSession(event.reason !== "new" && event.reason !== "resume")

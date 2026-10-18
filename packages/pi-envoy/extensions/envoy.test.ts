@@ -5184,6 +5184,70 @@ describe("envoy OMP extension", () => {
     expect(bound.active()).toBe(false);
   });
 
+  for (const reason of ["new", "fork"] as const) {
+    test(`a ${reason === "new" ? "/new" : "fork"} that throws after the host's move, sending no event, is healed by the next tick by its own rule`, async () => {
+      const notice = "notifications.legion.ACME.controller";
+      const { fixture, live, context, claimSessions, registrations, tick } = await gatedRoleFixture(
+        `switch-without-event-${reason}`,
+        "ses_se"
+      );
+      await subscribeLegionNotice("ses_se", notice, context, "legion-controller");
+      const bound = natsState.controls.get(notice);
+      if (bound === undefined) throw new Error("the role-bound subject was not subscribed");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      // The switch is announced and the manager moves; then the switch throws, and no event comes.
+      await fixture.handlers.get("session_before_switch")?.({ reason }, context);
+      live("ses_se_next", { fresh: reason === "new" });
+      // The first tick leaves the drift to the event it expects.
+      tick();
+      await drain();
+      expect(registrations).not.toContain("ses_se_next");
+      // The next one heals it as the switch would have.
+      tick();
+      for (let step = 0; step < 5; step += 1) await drain();
+      expect(registrations).toContain("ses_se_next");
+      expect(process.env.DISPATCH_SESSION_ID).toBe("ses_se_next");
+      if (reason === "new") {
+        expect(claimSessions.filter((claim) => claim.endsWith("@ses_se_next"))).toEqual([]);
+        expect(bound.active()).toBe(false);
+      } else {
+        expect(claimSessions.at(-1)).toBe("legion-controller@ses_se_next");
+        expect(bound.active()).toBe(true);
+      }
+    });
+  }
+
+  for (const kind of ["fork", "branch"] as const) {
+    test(`a heartbeat tick inside a ${kind}'s window leaves the ${kind}'s event to tell the agent its id changed`, async () => {
+      const { fixture, live, context, tick } = await gatedRoleFixture(
+        `tick-in-${kind}-window`,
+        "ses_tw"
+      );
+      if (kind === "fork") {
+        await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+      } else {
+        await fixture.handlers.get("session_before_branch")?.({ entryId: "entry" }, context);
+      }
+      const moved = live("ses_tw_next");
+      tick();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (kind === "fork") {
+        await fixture.handlers.get("session_switch")?.({ reason: "fork" }, moved);
+      } else {
+        await fixture.handlers.get("session_branch")?.(
+          { previousSessionFile: "/tmp/old.jsonl" },
+          moved
+        );
+      }
+      const notices = fixture.deliveries.filter(
+        (delivery) =>
+          String(delivery.content).includes("session id changed") &&
+          String(delivery.content).includes("ses_tw_next")
+      );
+      expect(notices).toHaveLength(1);
+    });
+  }
+
   test("a heartbeat tick after a switch another extension cancelled still checks the role", async () => {
     const { fixture, context, roleTool, claims, holders, tick, nextRegistration } =
       await gatedRoleFixture("cancelled-switch", "ses_cs");
@@ -5277,10 +5341,8 @@ describe("envoy OMP extension", () => {
   }
 
   test("a reclaim whose turn comes between the host's move and its switch event does nothing", async () => {
-    const { fixture, live, context, roleTool, gate, nextRegistration } = await gatedRoleFixture(
-      "reclaim-in-host-window",
-      "ses_rw"
-    );
+    const { fixture, live, context, roleTool, claimSessions, gate, nextRegistration } =
+      await gatedRoleFixture("reclaim-in-host-window", "ses_rw");
     const warnings: string[] = [];
     const stopSink = logger.registerLogSink((entry) => {
       if (entry.level === "warn") warnings.push(entry.message);
@@ -5294,9 +5356,14 @@ describe("envoy OMP extension", () => {
       const rebound = fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rw"));
       await registering;
       const moved = await hostMoves(fixture, live, context, "ses_rw_new");
+      const claimsBefore = claimSessions.length;
+      const entriesBefore = claimEntryRoles(fixture.entries);
       held.release();
       await moving.catch(() => undefined);
       await rebound;
+      // Neither the reclaim nor anything else sent a claim or recorded one in the window.
+      expect(claimSessions.slice(claimsBefore)).toEqual([]);
+      expect(claimEntryRoles(fixture.entries)).toEqual(entriesBefore);
       await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
       expect(warnings).not.toContain("envoy: role reclaim failed");
     } finally {
@@ -5304,27 +5371,82 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  for (const { name, reason, moves, arrives } of [
-    { name: "a /new replaces", reason: "new", moves: true, arrives: false },
-    { name: "a fork carries on", reason: "fork", moves: true, arrives: true },
-    { name: "a cancelled /new keeps", reason: "new", moves: false, arrives: true },
+  // A frame on the replaced session's agent subject is addressed to that session; one on a subject
+  // its role holds is addressed to the role, and arrives until the switch ends the role.
+  for (const { name, reason, moves, replaced } of [
+    { name: "a /new replaces", reason: "new", moves: true, replaced: true },
+    { name: "a resume replaces", reason: "resume", moves: true, replaced: true },
+    { name: "a fork carries on", reason: "fork", moves: true, replaced: false },
+    { name: "a cancelled /new keeps", reason: "new", moves: false, replaced: false },
   ] as const) {
-    test(`a frame for the session ${name}, arriving before the switch's event, ${arrives ? "arrives" : "is left undelivered"}`, async () => {
-      const slug = name.replaceAll(/[^a-z]+/g, "-");
-      const { fixture, live, context } = await gatedRoleFixture(`inbound-${slug}`, "ses_in");
-      const subject = natsState.controls.get("notifications.agent.ses_in");
-      if (subject === undefined) throw new Error("the agent subject was not subscribed");
-      await fixture.handlers.get("session_before_switch")?.({ reason }, context);
-      if (moves) live("ses_in_next", { fresh: reason === "new" });
-      const inbox = `_INBOX.${slug}`;
-      subject.push(forwardedRoleEnvelope("legion-controller", `frame ${slug}`, slug), inbox);
-      for (let drain = 0; drain < 5; drain += 1) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-      expect(fixture.messages.some((message) => message.includes(`frame ${slug}`))).toBe(arrives);
-      expect(natsState.published.some((each) => each.subject === inbox)).toBe(arrives);
-    });
+    for (const channel of ["agent subject", "role-bound subject"] as const) {
+      const arrives = !replaced || channel === "role-bound subject";
+      test(`a frame on the ${channel} of the session ${name}, arriving before the switch's event, ${arrives ? "arrives" : "is left undelivered"}`, async () => {
+        const slug = `${name}-${channel}`.replaceAll(/[^a-z]+/g, "-");
+        const notice = "notifications.legion.ACME.controller";
+        const { fixture, live, context } = await gatedRoleFixture(`inbound-${slug}`, "ses_in");
+        await subscribeLegionNotice("ses_in", notice, context, "legion-controller");
+        const subject = natsState.controls.get(
+          channel === "agent subject" ? "notifications.agent.ses_in" : notice
+        );
+        if (subject === undefined) throw new Error(`the ${channel} was not subscribed`);
+        await fixture.handlers.get("session_before_switch")?.({ reason }, context);
+        if (moves) live("ses_in_next", { fresh: reason === "new" });
+        const inbox = `_INBOX.${slug}`;
+        subject.push(
+          channel === "agent subject"
+            ? forwardedRoleEnvelope("legion-controller", `frame ${slug}`, slug)
+            : JSON.stringify({
+                event_id: `evt-${slug}`,
+                source: "legion",
+                source_event_id: `source-${slug}`,
+                topic: notice,
+                dedupe_key: `legion.notice.${slug}`,
+                issued_at: 1,
+                payload_summary: `frame ${slug}`,
+                trace_id: `trace-${slug}`,
+              }),
+          inbox
+        );
+        for (let drain = 0; drain < 5; drain += 1) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        expect(fixture.messages.some((message) => message.includes(`frame ${slug}`))).toBe(arrives);
+        if (channel === "agent subject") {
+          expect(natsState.published.some((each) => each.subject === inbox)).toBe(arrives);
+        }
+      });
+    }
   }
+
+  test("after a /new, a role the new session claims takes its role-bound frames", async () => {
+    const notice = "notifications.legion.ACME.reviewer";
+    const { fixture, live, context } = await gatedRoleFixture("inbound-after-new", "ses_an");
+    const moved = await hostMoves(fixture, live, context, "ses_an_new");
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+    await claimEnvoyRole("ses_an_new", "legion-reviewer", moved);
+    await subscribeLegionNotice("ses_an_new", notice, moved, "legion-reviewer");
+    const subject = natsState.controls.get(notice);
+    if (subject === undefined) throw new Error("the role-bound subject was not subscribed");
+    subject.push(
+      JSON.stringify({
+        event_id: "evt-after-new",
+        source: "legion",
+        source_event_id: "source-after-new",
+        topic: notice,
+        dedupe_key: "legion.notice.after-new",
+        issued_at: 1,
+        payload_summary: "frame for the new session's role",
+        trace_id: "trace-after-new",
+      })
+    );
+    for (let drain = 0; drain < 5; drain += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(
+      fixture.messages.some((message) => message.includes("frame for the new session's role"))
+    ).toBe(true);
+  });
 
   test("role moves run one at a time, so a move back and a plugin's subscription after it both stand", async () => {
     const notice = "notifications.legion.ACME.controller";
