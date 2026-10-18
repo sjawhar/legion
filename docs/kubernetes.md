@@ -1222,8 +1222,8 @@ proofs run on the example, each with its own copy of its ConfigMap.
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
 `omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. It refuses a
-`worker_backends` entry that puts a role on `claude` too (`worker_backends.<role> is claude, which
-runs only under runtime: tmux: the worker image carries no Claude Code`). Every
+`worker_backends` entry that puts a role on `claude` too, since the worker image carries no Claude
+Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). Every
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
 worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
