@@ -5629,6 +5629,234 @@ describe("envoy OMP extension", () => {
     expect(holders.get("legion-controller")).toBe("ses_q4_f");
   });
 
+  // The class every switch race above belongs to: pi-envoy's idea of the current session against
+  // the host's. Each row holds a first switch's establishment at one stage while the host does
+  // something else, with or without heartbeat ticks in that window, then lets everything run.
+  // Whatever the interleaving, the end is the one the host's switches decide: the last session
+  // holds the role only when every switch that took effect carried it, no session after a `/new`
+  // or resume claims it, only the last session's agent subject is open, registered and bound for
+  // Dispatch, the agent is told of each carried id change once, and a role a switch with no event
+  // ended is warned of once.
+  describe("every host switch against every establishment stage", () => {
+    type Step = "fork" | "new" | "resume";
+    const stages = ["starting", "queued", "registering", "reading", "claiming", "settled"] as const;
+    const events = [
+      { kind: "none", name: "nothing else happens", effective: [] },
+      { kind: "fork", name: "a fork lands", effective: ["fork"] },
+      { kind: "new", name: "a /new lands", effective: ["new"] },
+      {
+        kind: "fork-no-event",
+        name: "a fork moves the host and sends no event",
+        effective: ["fork"],
+      },
+      {
+        kind: "new-no-event",
+        name: "a /new moves the host and sends no event",
+        effective: ["new"],
+      },
+      { kind: "rollback", name: "a resume moves the host and rolls back", effective: [] },
+      {
+        kind: "new-then-fork",
+        name: "a /new sends no event, then a fork lands",
+        effective: ["new", "fork"],
+      },
+      {
+        kind: "fork-then-fork",
+        name: "a fork sends no event, then a fork lands",
+        effective: ["fork", "fork"],
+      },
+      { kind: "cancelled", name: "a fork is announced and cancelled", effective: [] },
+    ] as const satisfies readonly { kind: string; name: string; effective: readonly Step[] }[];
+    const role = "legion-controller";
+    const roleTopic = `notifications.role.${role}`;
+    const notice = "notifications.legion.ACME.controller";
+    const ids = ["ses_c", "ses_c_a", "ses_c_b", "ses_c_c", "ses_c_x"] as const;
+    for (const first of ["fork", "new", "resume"] as const) {
+      for (const stage of stages) {
+        // Only a carried role is claimed, so only a fork's establishment reaches a claim.
+        if (stage === "claiming" && first !== "fork") continue;
+        for (const event of events) {
+          for (const ticksInWindow of [0, 2] as const) {
+            // A start held at its registration has no heartbeat yet to tick.
+            if (stage === "starting" && ticksInWindow > 0) continue;
+            const ticking = ticksInWindow === 0 ? "" : ", the heartbeat ticking meanwhile";
+            test(`a ${first} held ${stage} when ${event.name}${ticking}`, async () => {
+              // Where the role is before the first switch: held by the session with a plugin's
+              // role-bound notice; only in the listener's rows (the one source a reclaim reads over
+              // the network); or, for a resumed start, in the transcript with nothing held yet.
+              const rowsOnly = stage === "reading";
+              const resumedStart = stage === "starting";
+              const held = !rowsOnly && !resumedStart;
+              const h = await gatedRoleFixture(
+                `class-${first}-${stage}-${event.kind}-${ticksInWindow}`,
+                "ses_c",
+                resumedStart
+                  ? { claimAtStart: false, transcriptRole: role, holdStart: true }
+                  : { claimAtStart: held }
+              );
+              if (rowsOnly) {
+                h.rows.set("ses_c", [roleTopic]);
+                h.holders.set(role, "ses_c");
+              }
+              if (held) await subscribeLegionNotice("ses_c", notice, h.context, role);
+              const drain = async (times = 5) => {
+                for (let step = 0; step < times; step += 1) {
+                  await new Promise<void>((resolve) => setImmediate(resolve));
+                }
+              };
+              const pending: Promise<unknown>[] = [];
+              // Oh My Pi announces a switch, moves its manager, then sends the switch's event (left
+              // running here, since it can queue behind a held establishment).
+              const switchTo = async (reason: Step, id: string, withEvent = true) => {
+                await h.fixture.handlers.get("session_before_switch")?.({ reason }, h.context);
+                const moved = h.live(id, { fresh: reason !== "fork" });
+                if (withEvent) {
+                  pending.push(
+                    Promise.resolve(h.fixture.handlers.get("session_switch")?.({ reason }, moved))
+                  );
+                }
+              };
+              let release = () => {};
+              if (stage === "starting") {
+                await h.startReached;
+                pending.push(Promise.resolve(h.started));
+                release = h.releaseStart;
+                await switchTo(first, "ses_c_a");
+                await drain();
+              } else if (stage === "queued") {
+                // A tree navigation's establishment holds the queue at its registration.
+                const gate = h.holdRegistration("ses_c");
+                pending.push(
+                  Promise.resolve(
+                    h.fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, h.context)
+                  )
+                );
+                await gate.reached;
+                release = gate.release;
+                await switchTo(first, "ses_c_a");
+                await drain();
+              } else if (stage === "settled") {
+                await switchTo(first, "ses_c_a");
+                await Promise.all(pending);
+                await drain();
+              } else {
+                const gate =
+                  stage === "registering"
+                    ? h.holdRegistration("ses_c_a")
+                    : stage === "claiming"
+                      ? h.gate(role)
+                      : first === "fork"
+                        ? h.gateInterest("ses_c", [roleTopic])
+                        : h.gateInterest("ses_c_a", []);
+                await switchTo(first, "ses_c_a");
+                await gate.reached;
+                release = gate.release;
+              }
+              let afterRelease = () => {};
+              switch (event.kind) {
+                case "none":
+                  break;
+                case "fork":
+                case "new":
+                  await switchTo(event.kind, "ses_c_b");
+                  break;
+                case "fork-no-event":
+                  await switchTo("fork", "ses_c_b", false);
+                  break;
+                case "new-no-event":
+                  await switchTo("new", "ses_c_b", false);
+                  break;
+                case "rollback": {
+                  const branch = h.manager.branch;
+                  await switchTo("resume", "ses_c_x", false);
+                  afterRelease = () => {
+                    h.manager.id = "ses_c_a";
+                    h.manager.branch = branch;
+                  };
+                  break;
+                }
+                case "new-then-fork":
+                case "fork-then-fork":
+                  await switchTo(event.kind === "new-then-fork" ? "new" : "fork", "ses_c_b", false);
+                  await switchTo("fork", "ses_c_c");
+                  break;
+                case "cancelled":
+                  await h.fixture.handlers.get("session_before_switch")?.(
+                    { reason: "fork" },
+                    h.context
+                  );
+                  break;
+              }
+              await drain();
+              for (let tick = 0; tick < ticksInWindow; tick += 1) {
+                h.tick();
+                await drain();
+              }
+              release();
+              await Promise.all(pending);
+              await drain(10);
+              afterRelease();
+              for (let tick = 0; tick < 3; tick += 1) {
+                h.tick();
+                await drain(10);
+              }
+
+              const chain: readonly Step[] = [first, ...event.effective];
+              const chainIds = ["ses_c_a", "ses_c_b", "ses_c_c"].slice(0, chain.length);
+              const last = chainIds.at(-1) ?? "ses_c_a";
+              expect(h.registrations).toContain(last);
+              expect(process.env.DISPATCH_SESSION_ID).toBe(last);
+              expect(natsState.controls.get(`notifications.agent.${last}`)?.active()).toBe(true);
+              for (const left of ids.filter((id) => id !== last)) {
+                expect(
+                  natsState.controls.get(`notifications.agent.${left}`)?.active() ?? false
+                ).toBe(false);
+              }
+              // A resume that rolls back only after two ticks has already been run by the
+              // heartbeat as a resume that threw: the role ended, warned of, and the host's return
+              // re-established the session from its transcript, which pi-envoy can do for the role
+              // but not for the notices only their plugin reopens. The heartbeat cannot tell a slow
+              // rollback from a resume that will never send its event.
+              const ranBeforeRollback = event.kind === "rollback" && ticksInWindow > 0;
+              const replacedAt = chain.findIndex((step) => step !== "fork");
+              if (replacedAt === -1) {
+                expect(h.holders.get(role)).toBe(last);
+                if (held) {
+                  expect(natsState.controls.get(notice)?.active()).toBe(!ranBeforeRollback);
+                }
+              } else {
+                const after = chainIds.slice(replacedAt);
+                expect(
+                  h.claimSessions.filter((claim) => after.some((id) => claim === `${role}@${id}`))
+                ).toEqual([]);
+                if (held) expect(natsState.controls.get(notice)?.active() ?? false).toBe(false);
+              }
+              // Every carried switch changes the id the agent knows, and it is told once each.
+              const idNotices = h.fixture.deliveries.filter((delivery) =>
+                String(delivery.content).includes("session id changed")
+              );
+              expect(idNotices).toHaveLength(chain.filter((step) => step === "fork").length);
+              // A role still held when a `/new` or resume that sent no event ran is warned of,
+              // once, as the plugin's to claim again.
+              if (held) {
+                const warned = h.notifications.filter((message) =>
+                  message.includes("sent no event")
+                );
+                const endsWithoutEvent =
+                  first === "fork" &&
+                  (event.kind === "new-no-event" ||
+                    event.kind === "new-then-fork" ||
+                    ranBeforeRollback);
+                expect(warned).toHaveLength(endsWithoutEvent ? 1 : 0);
+                if (endsWithoutEvent) expect(warned[0]).toContain("that plugin claims it again");
+              }
+            });
+          }
+        }
+      }
+    }
+  });
+
   for (const reason of ["new", "resume"] as const) {
     test(`after a ${reason === "new" ? "/new" : "resume"} completes, a frame on the new session's agent subject arrives and is acknowledged`, async () => {
       const { fixture, live, context } = await gatedRoleFixture(`frame-after-${reason}`, "ses_ac");

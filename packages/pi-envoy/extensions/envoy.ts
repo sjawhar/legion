@@ -378,6 +378,9 @@ interface RoleClaimEntry {
 
 interface EstablishSessionOptions {
   readonly carryPreviousSessionRole?: boolean;
+  // What the session continues, when that is not what its previous session leaves: the
+  // heartbeat's settling of a session the host came back to.
+  readonly continues?: Continuation;
 }
 
 // What a session continues from the sessions before it: the id it supersedes (`predecessor`), a
@@ -1592,9 +1595,11 @@ export default function envoyExtension(pi: PiApi): void {
         switchWithoutEvent = { reason: leavingSession.reason };
       }
       // A session whose establishment gave way to a host move the host then undid with no event
-      // (a resume that failed after its move): the host is on it again, so it is settled here, by
-      // the rule of the switch that opened it.
-      const resettle = !drifted && unsettled?.id === liveSessionID ? unsettled : undefined;
+      // (a resume that failed after its move): the host is on it again, whatever pi-envoy did
+      // meanwhile, so it is settled here by the rule of the switch that opened it and from what it
+      // continued, closing the subject of the session pi-envoy had moved to.
+      const resettle =
+        switchWithoutEvent === undefined && unsettled?.id === liveSessionID ? unsettled : undefined;
       if (healing) return;
       healing = true;
       // The host minted an id with no session event (a fresh TUI's first, or a session file it
@@ -1610,6 +1615,7 @@ export default function envoyExtension(pi: PiApi): void {
         if (resettle !== undefined) {
           return establishSession(context, {
             carryPreviousSessionRole: resettle.carryPreviousSessionRole,
+            continues: resettle.continues,
           });
         }
         return drifted ? establishSession(context) : registerSession();
@@ -1790,16 +1796,22 @@ export default function envoyExtension(pi: PiApi): void {
       ? overtaken
       : { from: new Set(), predecessor: previousSessionID };
 
-  // A session of this instance's whose establishment gave way to a later host move before its
-  // role was decided, and the rule of the switch that opened it. The host can come back to it with
-  // no event (Oh My Pi rolls back a resume that fails after its move), so the heartbeat settles it
-  // then (`ensureHeartbeat`). An establishment of it that goes ahead clears it.
-  let unsettled: { readonly id: string; readonly carryPreviousSessionRole: boolean } | undefined;
+  // The last session whose establishment gave way to a later host move before its role was
+  // decided: the rule of the switch that opened it, and what it continued. The host can come back
+  // to it with no event (Oh My Pi rolls back a resume that fails after its move), so the heartbeat
+  // settles it then, by that rule and from that continuation (`ensureHeartbeat`), whatever
+  // pi-envoy did meanwhile. An establishment of it that goes ahead clears it.
+  let unsettled:
+    | {
+        readonly id: string;
+        readonly carryPreviousSessionRole: boolean;
+        readonly continues: Continuation;
+      }
+    | undefined;
 
   // What a session the host left before its role was decided does: it hands its continuation,
   // with the role it found when it found one, to the session that overtook it — only for a
-  // carrying switch, since a `new` or `resume` session continues nothing — and, while it is still
-  // this instance's session (no later event has moved it on), it is left unsettled.
+  // carrying switch, since a `new` or `resume` session continues nothing — and is left unsettled.
   const giveWay = (
     establishedFor: string,
     continuation: Continuation,
@@ -1813,14 +1825,19 @@ export default function envoyExtension(pi: PiApi): void {
           role,
         }
       : undefined;
-    if (sessionID === establishedFor) unsettled = { id: establishedFor, carryPreviousSessionRole };
+    unsettled = {
+      id: establishedFor,
+      carryPreviousSessionRole,
+      continues: { ...continuation, role },
+    };
   };
 
   const reclaimHeldRoles = async (
     previousSessionID: string,
     readBranch: () => readonly unknown[],
     carryPreviousSessionRole: boolean,
-    establishedFor: string
+    establishedFor: string,
+    continues: Continuation | undefined
   ): Promise<void> => {
     // A role claim outlives the process it was made in, and the process that
     // resumes or rebinds the session must hold it again under its current
@@ -1850,7 +1867,7 @@ export default function envoyExtension(pi: PiApi): void {
     // session's, and its own establishment reclaims for it (`setEnvoyRole` refuses, or hands back,
     // a claim for a session left).
     await roleMoves.run(async () => {
-      const continuation = continuationOf(previousSessionID);
+      const continuation = continues ?? continuationOf(previousSessionID);
       const continuing = continuation.predecessor;
       if (!sessionOpen(establishedFor)) {
         giveWay(establishedFor, continuation, carryPreviousSessionRole);
@@ -1939,7 +1956,7 @@ export default function envoyExtension(pi: PiApi): void {
       }
       giveWay(
         establishedFor,
-        continuationOf(previousSessionID),
+        options.continues ?? continuationOf(previousSessionID),
         options.carryPreviousSessionRole ?? true
       );
       return;
@@ -1973,7 +1990,8 @@ export default function envoyExtension(pi: PiApi): void {
         previousSessionID,
         () => context.sessionManager.getBranch?.() ?? [],
         options.carryPreviousSessionRole ?? true,
-        establishedFor
+        establishedFor,
+        options.continues
       );
     }
     ensureHeartbeat(context);
@@ -2150,6 +2168,9 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<void> => {
     const previousID = sessionID;
     restoreLocalSessionState(context);
+    // The id this switch opened, as it stands now: by the time the establishment returns, a later
+    // switch may have moved `sessionID` on.
+    const openedID = sessionID;
     const carryPreviousSessionRole = carriesSession(reason);
     // Ended here, as the switch lands, rather than in its establishment: a `/new` never waits on
     // an earlier establishment or a slow listener call, and the heartbeat's role check, which names
@@ -2185,8 +2206,9 @@ export default function envoyExtension(pi: PiApi): void {
       // reach this session. Tell the agent without starting a turn; the notice
       // lands when it next runs. A "new" or "resume" switch replaces the
       // transcript with one that matches its own id, so those stay silent. Told
-      // once: a switch run again for the same id finds it unchanged.
-      if (carryPreviousSessionRole && previousID !== "" && previousID !== sessionID) {
+      // once: a switch run again for the same id finds it unchanged, and a tree
+      // navigation, which keeps the id, says nothing.
+      if (carryPreviousSessionRole && previousID !== "" && previousID !== openedID) {
         pi.sendMessage(
           {
             customType: "envoy-message",
@@ -2194,7 +2216,7 @@ export default function envoyExtension(pi: PiApi): void {
               envoy: {
                 notice: "session id changed",
                 previous_session_id: previousID,
-                session_id: sessionID,
+                session_id: openedID,
                 detail:
                   "This conversation now lives under a new session id. Any identity you shared earlier (envoy_whoami output, session ids named in messages) is stale, and peers using the old id cannot reach you. Re-run envoy_whoami before identifying yourself and re-announce the new id to peers you already introduced yourself to.",
               },
