@@ -17,7 +17,7 @@ import (
 
 // RoleFor is the role that works a phase: the one a transition starts, and the one whose handoff
 // the `legion` tool's `handoff_complete` resolves the carrying commit of for a file-backed phase
-// (packages/pi-legion/src/handoff-commit.ts). A phase no role works — awaiting_merge, done, held —
+// (packages/pi-shared/src/handoff-commit.ts). A phase no role works — awaiting_merge, done, held —
 // has none.
 //
 // It is exported for admission too, which starts the mid-phase children of a tree it re-admits

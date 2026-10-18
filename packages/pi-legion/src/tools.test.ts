@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import type { LegionRole } from "@legion/contracts";
 import type { LegionPhase } from "@legion/contracts/legion-api";
+import { findHandoffCommit, type JjRunner } from "@legion/pi-shared/handoff-commit";
 import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
-import { findHandoffCommit, type JjRunner } from "./handoff-commit";
 import { createLegionTool, type LegionToolSession } from "./tools";
 
 function context(sessionId = "ses_208"): SessionContext {

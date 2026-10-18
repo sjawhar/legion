@@ -7,9 +7,9 @@ import {
   type LegionPhase,
   type LegionState,
 } from "@legion/contracts/legion-api";
+import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "@legion/pi-shared/pi-types";
 import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
-import type { LegionDaemonClient } from "./daemon-client";
 
 export type LegionToolRole = "architect" | "phase-worker" | "controller";
 
