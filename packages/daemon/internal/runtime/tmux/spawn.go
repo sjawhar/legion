@@ -378,9 +378,6 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 			}
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 		}
-		if err := refuseAnotherBackendsSession(r.stateDir, backend, spec.ResumeSessionFile); err != nil {
-			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
-		}
 		r.log.Info("tmux runtime: resuming a recorded "+runtime.Backends[backend].Name+" session", "claim", spec.Claim, "backend", backend, "session", spec.ResumeSessionFile)
 	}
 	if err := makePaneHome(r.stateDir); err != nil {

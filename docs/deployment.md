@@ -147,9 +147,10 @@ The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is th
 `legion`, running claude-envoy's `dist/envoy-channel.js` on bun) and the bridge's phase-stall state,
 and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
 relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
-comes back as the same Claude Code session. A role whose harness changed since its session was
-recorded is refused rather than resumed: Claude Code refuses an Oh My Pi session, and Oh My Pi a
-transcript under `<state_dir>/claude/`, each naming the file.
+comes back as the same Claude Code session. A role moved to Claude Code since its session was
+recorded is refused rather than resumed, naming the Oh My Pi session file; a role moved back to Oh
+My Pi resumes under `omp --resume`, which refuses a Claude Code transcript itself and leaves it
+untouched.
 
 Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
 the same refusals:
@@ -176,7 +177,7 @@ not know which harness a pane runs. A harness is three pieces in the daemon:
 
 - its row in `runtime.Backends`: the roles it runs, the runtimes that launch it, the daemon prompt
   part its launches are told after their role's parts (Claude Code's is
-  `internal/prompts/go/claude-mechanics.md`), and the state directory its sessions live in;
+  `internal/prompts/go/claude-mechanics.md`);
 - a `Launcher` in `internal/runtime/tmux`: the command the shim runs, the extra `-e` pairs of its
   pane, and the marker its pane's command line holds;
 - a boot resolver in `internal/daemon/launchers.go`, which finds what its launch needs on the host.

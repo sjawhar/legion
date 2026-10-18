@@ -1,8 +1,6 @@
 package tmux
 
 import (
-	"fmt"
-	"path/filepath"
 	"slices"
 	"strings"
 
@@ -57,21 +55,4 @@ func agentMarkers(launchers map[runtime.Backend]Launcher) (markers []string, age
 	slices.Sort(markers)
 	slices.Sort(names)
 	return slices.Compact(markers), strings.Join(names, " or ")
-}
-
-// refuseAnotherBackendsSession refuses to resume a launch on backend from a recorded session kept
-// in another backend's session directory (runtime.BackendInfo.SessionDir): one recorded before the
-// role's backend changed, which this backend cannot continue.
-func refuseAnotherBackendsSession(stateDir string, backend runtime.Backend, file string) error {
-	for other, info := range runtime.Backends {
-		if other == backend || info.SessionDir == "" {
-			continue
-		}
-		dir := filepath.Join(stateDir, info.SessionDir)
-		if strings.HasPrefix(filepath.Clean(file), dir+string(filepath.Separator)) {
-			return fmt.Errorf("the recorded session %s is a %s session under %s: the role's backend changed since it was recorded, and %s cannot continue it",
-				file, info.Name, dir, runtime.Backends[backend].Name)
-		}
-	}
-	return nil
 }

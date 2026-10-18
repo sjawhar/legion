@@ -36,17 +36,13 @@ type BackendInfo struct {
 	// PromptPart names a daemon prompt part (prompts.Composer.Part) a launch on it is told after its
 	// role's parts; "" is none.
 	PromptPart string
-	// SessionDir is the directory under the state directory that holds every session it records,
-	// one subdirectory per claim; "" when its sessions live elsewhere. A launch on another backend
-	// refuses to resume a session under it.
-	SessionDir string
 }
 
 // Backends is every harness a launch can run on. Oh My Pi runs every role under either runtime.
 // Claude Code runs the phase workers under tmux alone, since the worker image carries no Claude
 // Code; it is told claude-mechanics.md, the role prompts' Oh My Pi tool names as Claude Code names
-// them, and keeps each claim's transcripts in `<state_dir>/claude/<claim token>`. A harness is
-// added here, as a tmux Launcher (runtime/tmux), and as a boot resolver (daemon's launchers.go).
+// them. A harness is added here, as a tmux Launcher (runtime/tmux), and as a boot resolver
+// (daemon's launchers.go).
 var Backends = map[Backend]BackendInfo{
 	BackendOmp: {Name: "OMP", Runtimes: []string{"tmux", "kubernetes"}},
 	BackendClaude: {
@@ -56,7 +52,6 @@ var Backends = map[Backend]BackendInfo{
 			"and Claude Code's print mode delivers no channel notification",
 		Runtimes:   []string{"tmux"},
 		PromptPart: "claude-mechanics.md",
-		SessionDir: "claude",
 	},
 }
 

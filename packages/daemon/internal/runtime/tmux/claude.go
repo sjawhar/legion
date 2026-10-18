@@ -41,11 +41,10 @@ const ClaudeMCPServer = "legion"
 
 // ClaudeConfigDir is a claim's own Claude Code directory, its CLAUDE_CONFIG_DIR: the session
 // transcripts `--resume` reads, the MCP configuration, the bridge's phase-stall state. It is named
-// for the claim token, under Claude Code's session directory in the state directory
-// (runtime.BackendInfo.SessionDir) but outside its secrets, so it outlives every launch of the
-// claim and no secret pruning removes it.
+// for the claim token, under the state directory but outside its secrets, so it outlives every
+// launch of the claim and no secret pruning removes it.
 func ClaudeConfigDir(stateDir string, token claim.Token) string {
-	return filepath.Join(stateDir, runtime.Backends[runtime.BackendClaude].SessionDir, string(token))
+	return filepath.Join(stateDir, "claude", string(token))
 }
 
 // claudeTranscript is a transcript Claude Code writes: `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session>.jsonl`.
