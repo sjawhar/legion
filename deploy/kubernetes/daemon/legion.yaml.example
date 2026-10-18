@@ -60,17 +60,20 @@ runtime:
     image: ghcr.io/sjawhar/legion-worker@sha256:0000000000000000000000000000000000000000000000000000000000000000
     storage_class: standard            # the issue volumes' class; required, the cluster has no default
     issue_volume: 20Gi                 # each issue pod's own volume (and the daemon-launched controller's); 20Gi is the default
-    # resources:                       # each role's reservation: cpu and memory, each both the container's request and
-    #   tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # its limit, so every Legion pod is Guaranteed,
-    #   reviewer: { memory: 6Gi }      # and ephemeral_storage, the container's limit on the node's disk (its root
-    #   implementer: { ephemeral_storage_request: 8Gi }   # filesystem: $HOME, the state home, build caches) over
-    #   controller: { cpu: 2, memory: 8Gi }  # ephemeral_storage_request, what the scheduler reserves of it (at most
-    #                                  # the limit). A field or role left out takes the daemon's default: implementer,
-    #                                  # tester 750m and 6Gi; reviewer 750m and 4Gi; architect, planner, merger 250m and
-    #                                  # 1Gi; controller 1 and 4Gi (controller: daemon only, else refused);
-    #                                  # ephemeral_storage 20Gi for implementer and tester, 10Gi for the rest, over a 1Gi
-    #                                  # ephemeral_storage_request for every role. A six-role issue pod sums to 3 CPU
-    #                                  # and 19Gi at the defaults, its disk limits to 80Gi over 6Gi of requests
+    # resources:                       # each role's reservation: cpu and memory, the container's limits, each
+    #   tester: { cpu: 1, memory: 6Gi, ephemeral_storage: 40Gi }   # requested in full unless cpu_request or
+    #   reviewer: { memory: 6Gi }      # memory_request sets less (at most the limit): with none set every Legion
+    #   implementer: { memory: 32Gi, memory_request: 8Gi }   # pod is Guaranteed, and a lower request makes every
+    #   controller: { cpu: 2, memory: 8Gi }  # pod holding that role Burstable (docs/kubernetes.md, Issue sizing);
+    #                                  # and ephemeral_storage, the container's limit on the node's disk (its root
+    #                                  # filesystem: $HOME, the state home, build caches) over ephemeral_storage_request,
+    #                                  # what the scheduler reserves of it (at most the limit). A field or role left
+    #                                  # out takes the daemon's default: implementer, tester 750m and 6Gi; reviewer
+    #                                  # 750m and 4Gi; architect, planner, merger 250m and 1Gi; controller 1 and 4Gi
+    #                                  # (controller: daemon only, else refused); ephemeral_storage 20Gi for
+    #                                  # implementer and tester, 10Gi for the rest, over a 1Gi ephemeral_storage_request
+    #                                  # for every role. A six-role issue pod sums to 3 CPU and 19Gi at the defaults,
+    #                                  # its disk limits to 80Gi over 6Gi of requests
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
     # plugins:                         # the exact pi-legion/pi-envoy pair a stale-plugin relaunch installs
