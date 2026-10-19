@@ -570,6 +570,60 @@ func TestHandoffCompleteAnswersTheEnginesRefusalOfACheckReport(t *testing.T) {
 	}
 }
 
+// A second production check of the same issue — a rerun's, after the first closed (a child set
+// back to todo, a root reopened inside its linger) and its merge opened another — counts its looks
+// from one again, so its implementer's report on look 1 is a new fact, not the first check's
+// report of the same look and verdict: the event a report is recorded under must tell the two
+// checks apart (workflow.openCheck replaces the record; nothing clears processed_events). The
+// first check's first look was reported pending, as a first look is; the rerun's must be too.
+func TestHandoffCompleteTakesAReportOnALaterChecksLookAsANewFact(t *testing.T) {
+	github := newHandoffGitHub(t)
+	h, facts := newHandoffHarness(t, github, nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	put := func(check record.ProductionCheck) {
+		t.Helper()
+		if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+			return record.NewStore().PutProductionCheck(context.Background(), tx, check)
+		}); err != nil {
+			t.Fatalf("put the production check: %v", err)
+		}
+	}
+	opened := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+	first := record.ProductionCheck{
+		Issue: "LEGION-208", Project: testProject, Tree: "LEGION-208", Repo: "acme/widgets", Number: 42, MergeSHA: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0",
+		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 1, LookOpen: true, LookWakeAt: &opened,
+		LastWakeKind: "merge", LastWakeDetail: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", LastWakeAt: &opened,
+	}
+	put(first)
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no production carries the merge yet", Verdict: "pending"}))
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("facts after the first check's report = %#v, want one", got)
+	}
+
+	// The first check closed as not run when the child was set back to todo; the rerun merged a
+	// day later, and the merge opened the issue's second check at its first look.
+	closed := opened.Add(2 * time.Hour)
+	first.LookOpen, first.ClosedAt, first.Outcome = false, &closed, record.CheckNotRun
+	put(first)
+	reopened := opened.Add(24 * time.Hour)
+	second := first
+	second.MergeSHA, second.OpenedAt, second.BoundAt = "f00dfeedf00dfeedf00dfeedf00dfeedf00dfeed", reopened, reopened.Add(336*time.Hour)
+	second.Looks, second.LookOpen, second.LookWakeAt = 1, true, &reopened
+	second.LastWakeDetail, second.LastWakeAt = second.MergeSHA, &reopened
+	second.ClosedAt, second.Outcome = nil, ""
+	put(second)
+
+	answer := h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "no production carries the rerun's merge yet", Verdict: "pending"})
+	if answer.Code != http.StatusOK {
+		t.Fatalf("the rerun's first look reported pending = %d: %s; want it taken as the second check's own report, not the first check's", answer.Code, answer.Body)
+	}
+	want := intake.CheckReport{Issue: "LEGION-208", Claim: implementer.token, Look: 1, Verdict: "pending", Summary: "no production carries the rerun's merge yet"}
+	if got := facts.recorded(); len(got) != 2 || got[1] != want {
+		t.Fatalf("facts after the second check's report = %#v, want the first check's report and then %+v", got, want)
+	}
+}
+
 // The commit is a phase completion's field, read once the grant is redeemed and the record says
 // the call is one: an expired grant is refused before the missing commit is, a phase completion
 // without a commit is still refused for it, and an implementer's verdict on a phase completion is
