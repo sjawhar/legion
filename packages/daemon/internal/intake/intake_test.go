@@ -511,8 +511,7 @@ func TestAFailedSetRepositoriesChangesNothing(t *testing.T) {
 // applied (ConsumerSpec.PrepareRepository): the workflow performs no I/O, so what it reads of the
 // repository is read here, and a failed read is retried rather than applied without it. The fact
 // the preparation returns is the one applied: a retained event's missing repository is filled
-// there. The preparation is told whether the event was delivered before: not at first, and so
-// after the failed read's nak.
+// there.
 func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
@@ -521,10 +520,10 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	var mu sync.Mutex
 	var prepared []string
 	var applied []DispatchIssue
-	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue, redelivered bool) (DispatchIssue, error) {
+	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue) (DispatchIssue, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		prepared = append(prepared, fmt.Sprintf("%s %s redelivered=%t", issue.Key, issue.ResolvedRepo, redelivered))
+		prepared = append(prepared, issue.Key+" "+issue.ResolvedRepo)
 		if len(prepared) == 1 {
 			return issue, errors.New("GitHub is slow")
 		}
@@ -547,7 +546,7 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 	mu.Lock()
 	defer mu.Unlock()
-	if want := []string{"CAPTURE-3 sjawhar/legion redelivered=false", "CAPTURE-3 sjawhar/legion redelivered=true"}; !reflect.DeepEqual(prepared, want) {
+	if want := []string{"CAPTURE-3 sjawhar/legion", "CAPTURE-3 sjawhar/legion"}; !reflect.DeepEqual(prepared, want) {
 		t.Fatalf("prepared %v, want %v (a failed preparation, then the retry)", prepared, want)
 	}
 	if len(applied) != 1 || applied[0].ResolvedRepo != "acme/widgets" {

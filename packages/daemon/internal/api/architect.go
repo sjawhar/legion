@@ -308,7 +308,9 @@ const (
 // (workflow's recordChildUnderLiveTree), and a child set todo before its tree was live, by a person
 // or another session, has none: the release writes it nothing, and Dispatch would make no event for
 // a status the issue already has. So the release applies Dispatch's view of the child, as just read,
-// as that observation, at the child's own Dispatch sequence.
+// as that observation, at the child's own Dispatch sequence, and only while the child stays
+// unrecorded (intake.DispatchIssue.Observed): an event that recorded it meanwhile has the record
+// carried on by the child's own events, each with its actor.
 //
 // A child whose parent this wave released may reach here before that parent's todo event reaches
 // intake. Its durable retry record bounds attempts with exponential backoff; after the limit, it

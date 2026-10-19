@@ -978,6 +978,16 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 		if servedMapping(t, w, r, cfg.Project) {
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues/"+key {
+			// The admission event of an issue not yet recorded is prepared as Dispatch's detail
+			// shows the issue now: as the move left it.
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"key": key, "project": cfg.Project, "title": "Captured workflow issue",
+				"status": "todo", "rank": "UUU", "labels": []string{"legion"}, "last_seq": 2, "resolved_repo": "acme/widgets"}); err != nil {
+				t.Errorf("write Dispatch issue: %v", err)
+			}
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
 			// Once the move is admitted, the outbox reads and writes this project's issue; those
 			// calls are not what this test is about. Another project's issue is never this daemon's.
