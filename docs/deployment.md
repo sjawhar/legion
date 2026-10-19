@@ -191,9 +191,12 @@ The claim's own Claude Code directory, `<state_dir>/claude/<claim token>`, is th
 and it outlives every launch of the claim. A fresh launch passes `--session-id <new id>`; a
 relaunch passes `--resume <id>`, read from the transcript the claim registered, so a killed pane
 comes back as the same Claude Code session. A role moved to Claude Code since its session was
-recorded is refused rather than resumed, naming the Oh My Pi session file; a role moved back to Oh
-My Pi resumes under `omp --resume`, which refuses a Claude Code transcript itself and leaves it
-untouched.
+recorded is refused rather than resumed, naming the Oh My Pi session file. A role moved back to Oh
+My Pi gets its recorded Claude Code transcript passed to `omp --resume`, as every recorded session
+file is; the pinned Oh My Pi refuses it, exiting 1 with `Cannot resume session "<file>": the
+session header is missing or malformed. The file was not modified.`, and leaves its bytes as they
+were, so the launch fails loudly rather than starting a fresh agent
+(`packages/daemon/internal/runtime/tmux/resume_omp_test.go` holds the real binary to this).
 
 Boot resolves three things from the daemon's environment, and `legion start --check-config` makes
 the same refusals:
