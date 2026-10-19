@@ -182,7 +182,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, projectOwners(cfg))
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -243,14 +243,14 @@ func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
 // until LEGION-632 — could leave the daemon unable to boot on a pool full enough to place nothing
 // that large, while a 250m / 1Gi pod still fits (stage 4b's daemon-controller-liveness restart,
 // whose controller reservation no node can hold, met exactly that).
-var probeReservation = config.RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
+var probeReservation = config.RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"}
 
 // imageProbe is the probe of the daemon's worker image: this daemon's contract, the role prompts
 // every pod is handed — this daemon's, inlined at each launch, so the probe resolves what they name
 // rather than the image's copy — and the probe's own reservation (probeReservation), translated as
-// every role's is (requirements), so the probe pod is Guaranteed as every Legion pod is. The
-// error is the translation's, which only an edit to probeReservation can cause. Budget is
-// ProbeBudget's.
+// every role's is (requirements), its requests equal to its limits so the probe pod is Guaranteed
+// whatever the roles request: a deployment's Burstable roles never reach the probe. The error is
+// the translation's, which only an edit to probeReservation can cause. Budget is ProbeBudget's.
 func imageProbe(cfg config.Config, references promptrefs.Names) (sandbox.ImageProbe, error) {
 	resources, err := requirements("the image probe's reservation", probeReservation)
 	if err != nil {
@@ -412,49 +412,51 @@ func roleRequirements(role claim.Role, reservation config.RoleResources) (corev1
 	return requirements("runtime.kubernetes.resources."+string(role), reservation)
 }
 
-// requirements is a reservation as a container's requirements: its cpu and memory, each the
-// request and the limit alike, so the pod the containers make is Guaranteed and bursts past
-// nothing (the kubelet's QoS reads cpu and memory alone); and its ephemeral storage, the limit on
-// what the container writes to the node's disk and the smaller request the scheduler fits to the
-// node's allocatable disk (the loader holds the request to the limit). The two lists are built
-// apart so neither edit reaches the other. key names the reservation in an error: a role's
-// configuration key, or the probe's.
+// requirements is a reservation as a container's requirements: its cpu and memory limits, and its
+// cpu and memory requests, each at most its limit (the loader holds them there) — equal to it at
+// the defaults, so the pod the containers make is Guaranteed and bursts past nothing, and below it
+// where the file set a lower request, which makes the pod Burstable (the kubelet's QoS reads cpu
+// and memory alone); and its ephemeral storage, the limit on what the container writes to the
+// node's disk and the smaller request the scheduler fits to the node's allocatable disk. The two
+// lists are built apart so neither edit reaches the other. key names the reservation in an error:
+// a role's configuration key, or the probe's.
 func requirements(key string, reservation config.RoleResources) (corev1.ResourceRequirements, error) {
-	cpu, err := resource.ParseQuantity(reservation.CPU)
-	if err != nil {
-		return corev1.ResourceRequirements{}, fmt.Errorf("%s.cpu: %w", key, err)
+	requests, limits := corev1.ResourceList{}, corev1.ResourceList{}
+	for _, field := range []struct {
+		name          corev1.ResourceName
+		list          corev1.ResourceList
+		key, quantity string
+	}{
+		{corev1.ResourceCPU, limits, "cpu", reservation.CPU},
+		{corev1.ResourceCPU, requests, "cpu_request", reservation.CPURequest},
+		{corev1.ResourceMemory, limits, "memory", reservation.Memory},
+		{corev1.ResourceMemory, requests, "memory_request", reservation.MemoryRequest},
+		{corev1.ResourceEphemeralStorage, limits, "ephemeral_storage", reservation.EphemeralStorage},
+		{corev1.ResourceEphemeralStorage, requests, "ephemeral_storage_request", reservation.EphemeralStorageRequest},
+	} {
+		quantity, err := resource.ParseQuantity(field.quantity)
+		if err != nil {
+			return corev1.ResourceRequirements{}, fmt.Errorf("%s.%s: %w", key, field.key, err)
+		}
+		field.list[field.name] = quantity
 	}
-	memory, err := resource.ParseQuantity(reservation.Memory)
-	if err != nil {
-		return corev1.ResourceRequirements{}, fmt.Errorf("%s.memory: %w", key, err)
-	}
-	storage, err := resource.ParseQuantity(reservation.EphemeralStorage)
-	if err != nil {
-		return corev1.ResourceRequirements{}, fmt.Errorf("%s.ephemeral_storage: %w", key, err)
-	}
-	storageRequest, err := resource.ParseQuantity(reservation.EphemeralStorageRequest)
-	if err != nil {
-		return corev1.ResourceRequirements{}, fmt.Errorf("%s.ephemeral_storage_request: %w", key, err)
-	}
-	return corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: storageRequest},
-		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu.DeepCopy(), corev1.ResourceMemory: memory.DeepCopy(), corev1.ResourceEphemeralStorage: storage},
-	}, nil
+	return corev1.ResourceRequirements{Requests: requests, Limits: limits}, nil
 }
 
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
-// token source (the implement App's) and every tree role's gh files (gitHubCredential, minted for
-// owner, the repository's), and registers its launcher acceptor on the stream listener. A daemon
-// with no GitHub Apps hands it neither, and sandbox.New's own refusal names what is missing. Boot
-// has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox
-// of a layout before this one — per-claim pods, or issue pods on one tree volume — remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owner string) runtimeFactory {
+// token source (the implement App's, minted for the repository's owner) and every tree role's gh
+// bundle (gitHubCredential, a directory for each of owners), and registers its launcher acceptor on
+// the stream listener. A daemon with no GitHub Apps hands it neither, and sandbox.New's own refusal
+// names what is missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox
+// is installed and no Sandbox of a layout before this one — per-claim pods, or issue pods on one
+// tree volume — remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
-			opts.GitHubCredential = gitHubCredential(apps, owner)
+			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {

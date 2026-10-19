@@ -209,7 +209,21 @@ package api
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
 //
-// 30: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
+// 30: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
+// directory per GitHub owner of the project under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's
+// owner's (write) and every other owner's read-only, with LEGION_GH_PATH the real gh the `gh`
+// wrapper first on PATH (`legion gh`; `/opt/legion/bin/gh` in the image) runs; every shared
+// clone's credential helper is `legion git-credential` with `credential.useHttpPath` on. A role
+// Secret's gh keys are per owner (`github-hosts-<owner>`, `github-config-<owner>`,
+// `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
+// `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
+// `expiresAt` in place of one `hosts` and `config`. An image built before 30 has neither the
+// wrapper nor the two commands, so the image probe refuses it. (This branch took 28, then 29 when
+// sjawhar/legion#1999 landed at 28; main then landed sjawhar/legion#2003 at 29 and released
+// pi-legion v10.5.0 declaring it without these shapes, so this branch takes the number above it,
+// as the collision note says.)
+//
+// 31: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
 // production check is work after the close. The phase enum gains `accepting` (between `reviewing`
 // and `retro`, the architect's `sign_off` phase, a backward target too) and loses
 // `production_check`; the issue record on GET /legion/v1/state gains `check` (api.CheckView), the
@@ -218,7 +232,10 @@ package api
 // implementer's report on a look of that check (`handoff_complete` on a done issue whose check is
 // open) pushes nothing, and its `verdict` gains `pending` beside `pass` and `fail`;
 // `PhaseBackwardRequest` gains an optional `issue`, which the architect's grant, serving its whole
-// tree, names the issue it returns from `accepting` with. A 29 plugin's strict reader refuses a
+// tree, names the issue it returns from `accepting` with. A 30 plugin's strict reader refuses a
 // state carrying `check` or the phase `accepting`, and its `handoff_complete` requires a commit the
-// check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 30
+// check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch took 30; main then landed sjawhar/legion#1986 at 30 and released pi-legion v10.8.3
+// declaring it without these shapes, so this branch takes the number above it, as the collision
+// note says.)
+const DaemonAPIVersion = 31

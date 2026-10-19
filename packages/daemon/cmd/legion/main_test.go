@@ -302,8 +302,11 @@ func TestHelpListsEveryCommand(t *testing.T) {
 }
 
 // Every command answers -h, -help and --help with its usage, `usage: legion <command>…`, and exit
-// 0: the docs site's CLI generator fails the build on any other answer.
+// 0: the docs site's CLI generator fails the build on any other answer. It runs each help with no
+// LEGION_* variable, and so does this test: in a Legion pane, LEGION_GH_PATH would have `legion gh
+// --help` exec the real gh in place of the test binary.
 func TestEveryCommandAnswersHelp(t *testing.T) {
+	unsetenv(t, "LEGION_GH_PATH")
 	for name := range commands {
 		for _, help := range []string{"-h", "-help", "--help"} {
 			var out, errb bytes.Buffer
@@ -489,7 +492,8 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 // workflowConfig writes a Stage 3 configuration whose two GitHub Apps read their keys through a
 // private_key_command that leaves marker behind and fails: a command that ran it is seen twice
 // over, in the marker and in the refusal. The operator and Dispatch bearer files it names exist, and
-// LEGION_OMP_PATH names an executable, so the OMP invocation resolves without mise.
+// LEGION_OMP_PATH and LEGION_GH_PATH name an executable, so the OMP invocation resolves without
+// mise and the real gh whatever heads the machine's PATH.
 func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
 	t.Helper()
 	omp, err := os.Executable()
@@ -497,6 +501,7 @@ func workflowConfig(t *testing.T, port int, extra string) (path, marker string) 
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_OMP_PATH", omp)
+	t.Setenv("LEGION_GH_PATH", omp)
 	dir := t.TempDir()
 	marker = filepath.Join(dir, "private-key-command-ran")
 	command := "touch " + marker + "; exit 1"
@@ -651,7 +656,8 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 
 // --check-config makes every refusal boot makes from the configuration, the environment and the
 // files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
-// operator bearer's file, the Dispatch bearer's file, the instructions file and the OMP invocation.
+// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation and
+// the real gh every pane's `legion gh` runs, which a script heading PATH (a gh wrapper) is not.
 // Each is refused in boot's words, no App key command runs, and no state directory is made.
 func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
@@ -682,6 +688,20 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
 			func(string) string {
 				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
+			}},
+		{"a script as the first gh on PATH", "", func(t *testing.T, dir string) {
+			shims := filepath.Join(dir, "shims")
+			if err := os.MkdirAll(shims, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unsetenv(t, "LEGION_GH_PATH")
+			t.Setenv("PATH", shims+string(os.PathListSeparator)+os.Getenv("PATH"))
+		},
+			func(dir string) string {
+				return "legion start: the first gh on PATH, " + filepath.Join(dir, "shims", "gh") + ", is a script, not the real gh"
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1000,6 +1020,10 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
 		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, token_file: /var/run/legion/agent-secrets-token/token}\n", ""},
 		{"secrets decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n", ""},
+		{"a role requesting less memory than its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 8Gi}}\n",
+			secretsGap + "resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed\n"},
+		{"the controller requesting less cpu than its limit", "    resources: {controller: {cpu: 2, cpu_request: 500m}}\ncontroller: daemon\n",
+			secretsGap + "resources: Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -1009,6 +1033,29 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 
 			if want := "Config OK: project=DEMO\n" + tc.want + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+			}
+		})
+	}
+}
+
+// --check-config refuses a cpu or memory request above its limit and a request that is no
+// quantity, naming the key, with exit 1 and no Config OK.
+func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
+	legionState(t)
+	for _, tc := range []struct{ name, extra, want string }{
+		{"a memory request past its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 40Gi}}\n",
+			"legion start: runtime.kubernetes.resources.implementer.memory_request 40Gi exceeds memory 32Gi\n"},
+		{"a cpu request past the default limit", "    resources: {tester: {cpu_request: 2}}\n",
+			"legion start: runtime.kubernetes.resources.tester.cpu_request 2 exceeds cpu 750m\n"},
+		{"a request that is no quantity", "    resources: {implementer: {memory_request: lots}}\n",
+			"legion start: runtime.kubernetes.resources.implementer.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := kubernetesCheckConfig(t, tc.extra)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+			if code != 1 || out.Len() != 0 || errb.String() != tc.want {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1, nothing, and %q", code, out.String(), errb.String(), tc.want)
 			}
 		})
 	}

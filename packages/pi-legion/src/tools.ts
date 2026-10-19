@@ -185,8 +185,9 @@ export function createLegionTool(deps: {
       "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
       "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
       "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
-      "architect, or the merger's READY packet), `verdict` pass|pending|fail when your role's instructions require one (pass|fail for the tester; " +
-      "pending is a production check's, when production does not carry the merge yet), `ready: true` for the merger's READY. A handoff is a committed " +
+      "architect, or the merger's READY packet), `verdict` pass|fail from the tester alone on a phase completion (the daemon refuses a verdict from " +
+      "any other role there) and pass|pending|fail from the implementer on a production check report (pending: production does not carry the merge " +
+      "yet), `ready: true` for the merger's READY. A handoff is a committed " +
       "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " +
       "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " +
       "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +

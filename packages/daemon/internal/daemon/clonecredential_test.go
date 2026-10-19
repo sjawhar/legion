@@ -32,12 +32,14 @@ func git(t *testing.T, clone string, args ...string) string {
 }
 
 // A tmux daemon's boot rewrites the shared clone an older daemon provisioned, whose helper names
-// that daemon's `legion credential` by the pane launcher's path, to `gh auth git-credential`, the
-// helper every pane's git answers from its own gh files through: the clone's credential.helper and
-// its github.com one each read as the empty reset and then the new helper, as a clone provisioned
-// now does, and the boot log names the clone. The next boot finds the helper current and writes
-// and logs nothing. A state directory with no clone is nothing to do, and so is a configuration
-// with no repository.
+// that daemon's own (`legion credential` by the pane launcher's path, or `gh auth git-credential`,
+// which answers from one owner's gh files alone), to `legion git-credential`, the helper that
+// answers each pane's git from the gh files of the owner the repository's path names: the clone's
+// credential.helper and its github.com one each read as the empty reset and then the new helper,
+// with credential.useHttpPath true so git passes that path, as a clone provisioned now does, and
+// the boot log names the clone. The next boot finds the helper current and writes and logs
+// nothing; a clone with the current helper and no useHttpPath is rewritten. A state directory with
+// no clone is nothing to do, and so is a configuration with no repository.
 func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	if _, err := os.Stat(realGit); err != nil {
 		t.Skipf("no git at %s: %v", realGit, err)
@@ -72,7 +74,7 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	if out, err := exec.Command(realGit, "init", "-q", located.Clone).CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, out)
 	}
-	old := "!/old/legion credential"
+	old := "!gh auth git-credential"
 	git(t, located.Clone, "config", "--add", "credential.helper", old)
 	git(t, located.Clone, "config", "--add", "credential.https://github.com.helper", old)
 
@@ -88,6 +90,9 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.interactive")); got != "false" {
 		t.Errorf("credential.interactive = %q, want false", got)
 	}
+	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.useHttpPath")); got != "true" {
+		t.Errorf("credential.useHttpPath = %q, want true", got)
+	}
 	if lines := strings.Count(logs.String(), "set the shared clone's git credential helper"); lines != 1 || !strings.Contains(logs.String(), located.Clone) {
 		t.Errorf("the fix-up logged %q, want one line naming %s", logs.String(), located.Clone)
 	}
@@ -100,6 +105,17 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	}
 	if after := git(t, located.Clone, "config", "--list", "--local"); after != before || logs.Len() != 0 {
 		t.Errorf("a current clone was rewritten or logged: config before %q, after %q, log %q", before, after, logs.String())
+	}
+
+	// A clone with the current helper and no useHttpPath answers every repository with one
+	// owner's token, so it is rewritten too.
+	git(t, located.Clone, "config", "--unset", "credential.useHttpPath")
+	logs.Reset()
+	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil {
+		t.Fatalf("reconfigureCloneCredential on a clone without useHttpPath: %v", err)
+	}
+	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.useHttpPath")); got != "true" || !strings.Contains(logs.String(), located.Clone) {
+		t.Errorf("credential.useHttpPath = %q after the fix-up, log %q; want true and a line naming %s", got, logs.String(), located.Clone)
 	}
 
 	// A configuration with no repository has no clone to look for, whatever the state directory

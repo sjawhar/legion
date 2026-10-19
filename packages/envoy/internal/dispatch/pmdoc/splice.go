@@ -763,7 +763,11 @@ func inlineRange(block *Node, blockStart, from, to int) ([]*Node, error) {
 		if child.Type == "text" {
 			start := max(from, position) - position
 			stop := min(to, end) - position
-			appendText(&children, slice16(child.Text, start, stop), child.Marks)
+			text, err := slice16(child.Text, start, stop)
+			if err != nil {
+				return nil, err
+			}
+			appendText(&children, text, child.Marks)
 		} else {
 			if from > position || to < end {
 				return nil, fmt.Errorf("%w: splice partially selects inline leaf", ErrSchema)
@@ -807,7 +811,11 @@ func spliceInline(block *Node, r Range, blockStart int, replacement []*Node) err
 		}
 		if child.Type == "text" {
 			if r.From > position {
-				appendText(&children, slice16(child.Text, 0, r.From-position), child.Marks)
+				text, err := slice16(child.Text, 0, r.From-position)
+				if err != nil {
+					return err
+				}
+				appendText(&children, text, child.Marks)
 			}
 			if !inserted {
 				for _, node := range replacement {
@@ -816,7 +824,11 @@ func spliceInline(block *Node, r Range, blockStart int, replacement []*Node) err
 				inserted = true
 			}
 			if r.To < end {
-				appendText(&children, slice16(child.Text, r.To-position, size), child.Marks)
+				text, err := slice16(child.Text, r.To-position, size)
+				if err != nil {
+					return err
+				}
+				appendText(&children, text, child.Marks)
 			}
 		} else {
 			if r.From > position || r.To < end {

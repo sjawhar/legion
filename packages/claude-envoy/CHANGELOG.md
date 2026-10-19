@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
+  exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
+  end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
+
 ### Added
 
 - The MCP server lists `slack_post` beside the ten `envoy_*` tools (sjawhar/legion#1998), a reply
@@ -9,6 +15,8 @@
 
 ### Changed
 
+- The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
+  an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.

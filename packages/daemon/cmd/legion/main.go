@@ -91,6 +91,8 @@ var commands = map[string]commandEntry{
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
 	"workspace-init": {runWorkspaceInit, "a Sandbox pod's init containers: fetch the repository, provision the issue's workspace, prepare the controller's volume"},
 	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
+	"git-credential": {runGitCredential, "git's credential helper in every shared clone: answers git with the token of the owner the repository's path names (git runs it, never a person)"},
+	"gh":             {runGh, "the gh first on a pane's or pod's PATH: runs the real gh with the gh directory of the owner the command names (a pane runs it, never a person)"},
 }
 
 // helpRequested says whether a command's first argument asks for its usage.
@@ -232,9 +234,12 @@ func pluginsSourceWords(source string) string {
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
-// Under kubernetes, when the image probe's attempt budget is derived above
-// slow_command_timeout_seconds (daemon.ProbeBudget), one plain line names the derived bound and
-// why, before the plugin line: both run only under kubernetes, since the probe runs only there.
+// Under kubernetes, when a role requests less cpu or memory than its limit, one plain `resources:`
+// line names those roles and the pods they make Burstable (capabilities.Deployment.BurstableLine);
+// a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
+// probe's attempt budget is derived above slow_command_timeout_seconds (daemon.ProbeBudget), one
+// plain line names the derived bound and why, before the plugin line: these run only under
+// kubernetes, since only its pods carry requests and only it runs the probe.
 // Then a last plain line names the plugin pair this daemon would install for a stale-plugin
 // relaunch — the file's or the binary's — or, with neither, the gap; it is its own line rather
 // than a capability row, since it would otherwise be open on every unreleased build.
@@ -259,10 +264,14 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
-	for _, gap := range daemon.Deployment(cfg).OpenFromConfiguration() {
+	deployment := daemon.Deployment(cfg)
+	for _, gap := range deployment.OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
 	}
 	if cfg.Runtime.Name == "kubernetes" {
+		if line := deployment.BurstableLine(); line != "" {
+			fmt.Fprintln(stdout, "resources: "+line)
+		}
 		if line, derived := daemon.ProbeBudgetLine(cfg); derived {
 			fmt.Fprintln(stdout, line)
 		}

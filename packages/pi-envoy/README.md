@@ -12,7 +12,8 @@ described in `packages/pi-shared/AGENTS.md`.
 Normal topic subscriptions are direct NATS subscriptions owned by this extension. A role claim is
 different: the listener arbitrates the core-NATS role lane for the current live holder, then sends
 a receipt-backed request with the original role topic to the holder's direct agent subject.
-`envoy_unsubscribe` manages only normal topic subscriptions; it does not relinquish a held role.
+`envoy_unsubscribe` manages only normal topic subscriptions; it does not relinquish a held role,
+and it keeps open, listing them as kept, the subscriptions another plugin holds for that role.
 The agent pump replies after accepting the envelope; without a receipt within two seconds the
 listener emits a `delivery_failed` exception. Role messages are live only; they are not retained
 for a later claimant.

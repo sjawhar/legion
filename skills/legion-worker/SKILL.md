@@ -198,21 +198,21 @@ Your pane's `gh` and `git` already carry your role's GitHub identity; invoke Git
 gh <gh args…>
 ```
 
-How `gh` works in a worker pane. `GH_CONFIG_DIR` names a read-only directory holding gh's own
-`hosts.yml` (your role's GitHub App installation token, user `x-access-token`) and `config.yml`,
-which the daemon rewrites in place from its cached lease so it never expires under you; the `gh`
-on your `PATH` is the ordinary binary and reads it on every call, `git` reads the same file
-through the clone's `credential.helper` (`!gh auth git-credential`), and `GH_TOKEN`,
-`GITHUB_TOKEN` and `GH_HOST` are set empty so nothing outranks it. Never run `gh auth login`,
-`gh auth setup-git`, `gh config set` or `gh alias set`: there is no login state to create, and the
-directory is read-only. One rule nothing enforces: **Legion's issues live on Dispatch, never on
+How `gh` works in a worker pane. `LEGION_GH_OWNERS_DIR` holds one read-only gh directory per
+GitHub owner of the project (`hosts.yml`, an App installation token, and `config.yml`), which the
+daemon rewrites in place so no token expires under you: your issue's owner's, which `GH_CONFIG_DIR`
+names, holds your role's App token; every other owner's the same App's, read-only. Your `gh` picks
+the directory of the owner a command names (`-R owner/repo`, `repos/owner/repo` in `gh api`, a
+GitHub URL), your issue's owner's otherwise, so name the repository whenever it is not your
+issue's; `git` picks by the remote URL's owner (`!legion git-credential`). `GH_TOKEN`,
+`GITHUB_TOKEN` and `GH_HOST` are empty so nothing outranks the files. Never run `gh auth login`,
+`gh auth switch`, `gh auth setup-git`, `gh config set` or `gh alias set`: there is no login state
+to create. One rule nothing enforces: **Legion's issues live on Dispatch, never on
 GitHub issues** — no `gh issue` write and no non-GET `gh api` call to an `/issues` path
 (pull-request conversation comments live on that path too; edit them with `gh pr comment`); use
 `dispatch message` or `dispatch comment` on your `LEGION_ISSUE`. The `legion` tool's own daemon
 calls carry a credential of their own, minted in-process; `gh` and `git` never see it, and you
-never `cat`, `echo`, copy, or `export` a token. A `task` subagent, an `eval` subprocess, or a
-background job in your pane inherits the same `GH_CONFIG_DIR` and so the same credential, for as
-long as it runs.
+never `cat`, `echo`, copy, or `export` a token; a `task` subagent or background job inherits them.
 
 **Other credentials your pod may already carry.** Before reporting that a read is unreachable,
 check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
@@ -248,17 +248,15 @@ gh pr comment <pr-number> \
 ## Planner artifact
 
 The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document, never in the issue's
-primary document, which is its spec; never commit a plan or spec file to the repository.
-No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request: plan
-and spec content goes into the issue, never into a PR (the root `AGENTS.md`
-calls its own `docs/plans/` human-authored design history, not a Legion artifact). A skill step that says "save the plan
-to a file" is satisfied by the handoff write in the completion gate below; the planner's only
-commit is `plan: record handoff`.
+primary document, which is its spec. Legion sets no rule on whether a plan or spec goes in the
+repository: the planner commits a plan, a spec or spec code when the issue, its spec or the
+repository asks for it. Otherwise, a skill step that says "save the plan to a file" is satisfied by
+the handoff write in the completion gate below.
 
 A plan that departs from the spec's design records the departure in `plan.md` and in the required
 `.legion/<issue>/plan.json` `specDepartures`: `[]` means no departure; otherwise each bounded record names
 the spec, plan, evidence and outcome. The planner's role prompt defines that record. The planner
-never edits the spec. Whether the spec changes is the architect's decision
+never edits the issue's spec document. Whether the spec changes is the architect's decision
 (`skill://legion-architect`, section 1), and the reviewer reads the plan beside the spec.
 
 ## Implementer push and pull request
@@ -267,8 +265,8 @@ The implementer opens the pull request. After its implementation commit and veri
 pushes the issue branch under this exact name with the one push procedure every role uses
 (*Every role pushes its own commits*, below).
 
-The shared clone's `credential.helper` is `!gh auth git-credential`, so `jj git push`
-authenticates as your role's App from the same file your `gh` reads. Never handle a token.
+`jj git push` authenticates as your role's App through the clone's `!legion git-credential`, from
+the file your `gh` reads for your issue's repository. Never handle a token.
 
 Then open the pull request with `gh pr create`. The PR body **must** contain the
 line `Dispatch: <KEY>` — the daemon's fallback link from a PR to its Dispatch issue when the
@@ -330,7 +328,7 @@ or `review`), with the ordinary `write` tool: a JSON object with `schemaVersion:
 phase's own fields exactly as your role prompt spells them — the planner's `requiredSkills`,
 `gapAnalysis`, `planReview` and `specDepartures` records; the implementer's `proof` array; the
 tester's `implementerProof`, `failures` and, whenever it reports no failure, its own `proof`; the
-reviewer's `verdict`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
+reviewer's `decision`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
 entry, in either phase, is an object of six non-empty strings: `criterion` (the acceptance line it
 proves), `surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
 A handoff built from the one already on disk (a test handoff that accumulates review rounds) is
@@ -344,10 +342,10 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 Then push (below) and report completion: call the `legion` tool with `op: "handoff_complete"` and
-`summary` (two sentences for the architect; the tester adds `verdict: "pass"` or `"fail"`, the
-merger `ready: true`). **Push before you complete is a hard rule.** `handoff_complete` finds, with
-your pane's jj, the newest commit on the issue branch that carries `.legion/<KEY>/<phase>.json`
-and reports it to the daemon, and refuses — posting nothing — while:
+`summary` (two sentences for the architect; the tester, and no other role, adds `verdict: "pass"`
+or `"fail"`; the merger `ready: true`). **Push before you complete is a hard rule.**
+`handoff_complete` finds, with your pane's jj, the newest commit on the issue branch that carries
+`.legion/<KEY>/<phase>.json` and reports it to the daemon, and refuses — posting nothing — while:
 
 - the file has a change still in the working copy: commit it, then complete again;
 - the file is missing from the workspace: write it, then commit and push it;
@@ -431,8 +429,9 @@ Report completion to the architect: call the `legion` tool with `op: "handoff_co
 (`handoff_complete`; `read_record`, your issue's record, which is what "re-read your issue
 record" means; and `request_backward_move`), and nothing of yours runs `legion` from bash. The
 tool call is what the extension's phase stall records, and a turn that ends with the phase still
-open gets one reminder; do not complete again on that reminder when your first completion was
-accepted — it stands, and a second is refused because the issue has already left your phase.
+open gets one reminder (two when the first is answered with the tool call written as text again);
+do not complete again on a reminder when your first completion was accepted — it stands, and a
+second is refused because the issue has already left your phase.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or

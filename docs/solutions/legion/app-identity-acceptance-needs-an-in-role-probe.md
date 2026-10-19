@@ -81,5 +81,5 @@ instead of passing the phase (the `legion-worker` skill's production-like-surfac
 - [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §3 — why the
   review App can reply but not resolve a thread on the implementer's pull request, the reply
   grammar, and the GraphQL facts.
-- [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` is the
-  deployed build; a new subcommand is exercised live as `bun packages/daemon/src/cli/index.ts …`.
+- [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` and `gh` are
+  the deployed build; a branch's `legion` is built in the workspace and run by path.

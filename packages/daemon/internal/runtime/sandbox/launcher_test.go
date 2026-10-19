@@ -76,7 +76,7 @@ func TestABindingWriteRefusedAsAConflictIsRetriedOnceOverAFreshRead(t *testing.T
 	spec := workerSpec(t)
 	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
 	refreshed := ghconfig.Hosts("ghs_refreshed_lease")
-	served := conflictSecretUpdates(g, secret, 1, func(s *corev1.Secret) { s.Data[GitHubHostsKey] = []byte(refreshed) })
+	served := conflictSecretUpdates(g, secret, 1, func(s *corev1.Secret) { s.Data[GitHubHostsKey("sjawhar")] = []byte(refreshed) })
 
 	loc := g.spawn(spec)
 
@@ -87,8 +87,8 @@ func TestABindingWriteRefusedAsAConflictIsRetriedOnceOverAFreshRead(t *testing.T
 	if after.Annotations[launcherPodUIDAnnotation] != loc.Sandbox.PodUID {
 		t.Errorf("the Secret binds pod %q, want the new pod %q", after.Annotations[launcherPodUIDAnnotation], loc.Sandbox.PodUID)
 	}
-	if string(after.Data[GitHubHostsKey]) != refreshed {
-		t.Errorf("the retry wrote over the gh files written between read and write: %q", after.Data[GitHubHostsKey])
+	if string(after.Data[GitHubHostsKey("sjawhar")]) != refreshed {
+		t.Errorf("the retry wrote over the gh files written between read and write: %q", after.Data[GitHubHostsKey("sjawhar")])
 	}
 	hello := shimwire.LauncherHello{Token: string(after.Data[LauncherTokenFile]), Sandbox: loc.Sandbox.Name, Role: string(claim.RoleTester), PodUID: loc.Sandbox.PodUID, LauncherID: "l-1"}
 	if handler, reason := g.r.LauncherResolver()(hello); handler == nil {
@@ -102,7 +102,9 @@ func TestABindingWriteConflictedTwiceFailsTheLaunch(t *testing.T) {
 	g := newRig(t, nil)
 	spec := workerSpec(t)
 	secret := roleSecretName(SandboxName(spec.Claim), claim.RoleTester)
-	served := conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) { s.Data[GitHubHostsKey] = []byte(ghconfig.Hosts("ghs_refreshed_lease")) })
+	served := conflictSecretUpdates(g, secret, 2, func(s *corev1.Secret) {
+		s.Data[GitHubHostsKey("sjawhar")] = []byte(ghconfig.Hosts("ghs_refreshed_lease"))
+	})
 	g.launcher(spec.Claim)
 
 	err := failedLaunch(t, g, spec)
@@ -176,8 +178,10 @@ func TestANewGenerationStopsTheEarlierOneFirst(t *testing.T) {
 // agent-secrets key directory and gh volume are mounted in that role's container alone: no other
 // role, nor an init container, can read another role's credentials, the GitHub App token in its gh
 // files included. The issue's checkout, tree and sessions are what roles share. The gh volume
-// projects the role Secret's two gh keys as the files gh reads, hosts.yml and config.yml, and the
-// launcher volume the launcher token alone.
+// projects each owner's two gh keys of the role Secret as the files gh reads, <owner>/hosts.yml
+// and <owner>/config.yml, and the launcher volume the launcher token alone; the launching role's
+// agent is told, in its start command, the default owner's directory as GH_CONFIG_DIR, the volume
+// as LEGION_GH_OWNERS_DIR and the image's real gh as LEGION_GH_PATH.
 func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -185,10 +189,7 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l, err := r.prepare(rootSpec(t))
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := launchOf(t, r, rootSpec(t))
 	pod := r.podTemplate(l).Spec
 	containers := append(slices.Clone(pod.InitContainers), pod.Containers...)
 	for _, role := range claim.Roles {
@@ -219,14 +220,29 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 			t.Errorf("%s's launcher volume projects %+v, want only the launcher token", role, launcher)
 		}
 		gh := volumes[roleVolume("gh", role)].Secret
-		want := []corev1.KeyToPath{{Key: GitHubHostsKey, Path: ghconfig.HostsFile}, {Key: GitHubConfigKey, Path: ghconfig.ConfigFile}}
+		var want []corev1.KeyToPath
+		for _, owner := range staticOwners {
+			want = append(want, corev1.KeyToPath{Key: GitHubHostsKey(owner), Path: owner + "/" + ghconfig.HostsFile},
+				corev1.KeyToPath{Key: GitHubConfigKey(owner), Path: owner + "/" + ghconfig.ConfigFile})
+		}
 		if gh == nil || gh.SecretName != roleSecretName(l.name, role) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
-			t.Errorf("%s's gh volume projects %+v, want %s's %s as %s and %s as %s, read-only", role, gh, roleSecretName(l.name, role),
-				GitHubHostsKey, ghconfig.HostsFile, GitHubConfigKey, ghconfig.ConfigFile)
+			t.Errorf("%s's gh volume projects %+v, want %s's %+v, read-only", role, gh, roleSecretName(l.name, role), want)
 		}
 		mount := mountHolding(containerNamed(t, pod, string(role)), GHConfigDir)
 		if mount == nil || mount.Name != roleVolume("gh", role) || mount.MountPath != GHConfigDir || !mount.ReadOnly {
 			t.Errorf("%s's container mounts %+v at %s, want its gh volume read-only", role, mount, GHConfigDir)
+		}
+	}
+	start := map[string]string{}
+	for _, entry := range launcherCommand(l, r).Env {
+		name, value, _ := strings.Cut(entry, "=")
+		start[name] = value
+	}
+	for name, want := range map[string]string{
+		"GH_CONFIG_DIR": GHConfigDir + "/sjawhar", "LEGION_GH_OWNERS_DIR": GHConfigDir, "LEGION_GH_PATH": opts.Tools.GH,
+	} {
+		if start[name] != want {
+			t.Errorf("the launching role's agent is told %s=%q, want %q", name, start[name], want)
 		}
 	}
 }

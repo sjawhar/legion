@@ -59,6 +59,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+  tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
+  issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
+  first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
+  owner a command names, and git answers from that owner's directory through `legion git-credential`.
+  The controller's credential answer is per owner. An image built before it is refused by the
+  daemon's image probe. (This change took 28, then 29 once LEGION-694 landed at 28; pi-legion
+  v10.5.0 was released declaring 29 for sjawhar/legion#1998 without these shapes, so it takes 30,
+  the number above the released one.) Install this release with a `legion` built from the same
+  commit.
 - The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
   `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no
   userinfo, a host that is a plain DNS name, a dotted-quad IPv4 or a bracketed IPv6 address, a
@@ -378,6 +388,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
+  every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
+  result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's
+  description says `verdict` comes from the tester alone, where it said "when your role's
+  instructions require one"; the reviewer's prompt says its completion carries only a `summary`;
+  and `review.json` records the reviewer's decision as `decision`, no longer `verdict`.
+- The phase-stall follow-up for a final message holding a tool call written as text is sent once
+  more when the model answers it with the same call as text again (state `text-call`); a third, or a
+  first follow-up of any other kind, is the stall's last, so a stall sends at most two. The
+  follow-up texts and both patterns are unchanged.
 - Session attribution's `jj config path --user` gives up after 10 s and kills its process group.
   Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
   `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now

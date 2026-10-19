@@ -19475,9 +19475,17 @@ async function runDispatchCli(argv, rawEnv, io) {
 
 // ../envoy-client/bin/dispatch.ts
 var readText = (path2) => readFileSync4(path2 === "-" ? 0 : path2, "utf-8");
-process.exit(await runDispatchCli(Bun.argv.slice(2), process.env, {
-  stdout: (text) => process.stdout.write(text),
-  stderr: (text) => process.stderr.write(text),
+var pending = [];
+var writeTo = (stream) => (text) => {
+  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+  stream.write(text, () => resolve2());
+  pending.push(promise2);
+};
+var code = await runDispatchCli(Bun.argv.slice(2), process.env, {
+  stdout: writeTo(process.stdout),
+  stderr: writeTo(process.stderr),
   readText,
   cwd: process.cwd()
-}));
+});
+await Promise.all(pending);
+process.exit(code);

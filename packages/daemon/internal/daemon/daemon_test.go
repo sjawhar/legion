@@ -1116,6 +1116,13 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 		}
 	}))
 	t.Cleanup(dispatchServer.Close)
+	// Boot reads this process's environment, so the real gh is named here: the first gh on a
+	// machine's PATH may be a script, which boot refuses (RefuseScriptGH).
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_GH_PATH", executable)
 	cfg := testConfig(t)
 	cfg.DispatchURL = dispatchServer.URL
 	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
@@ -1152,6 +1159,12 @@ func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _
 	r.roles = append(r.roles, role)
 	// Each App has its own bot login, as a real token manager's leases do.
 	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-" + string(role) + "[bot]"}}, nil
+}
+
+func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := r.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
 }
 
 func (r *workflowTokenRecorder) Roles() []appauth.AppRole {

@@ -15,8 +15,16 @@ afterAll(() => {
 // no envoy.json of the person running the test is read.
 const home = path.join(rig, "caller-home");
 
-// The pane's gh, git and jj are whatever its PATH resolves: the daemon pins none, so the inherited
-// PATH needs no tool on it for the pane to be built.
+// The pane's git and jj are whatever its PATH resolves, and its gh the launcher directory's
+// wrapper over the real gh the daemon resolves on its PATH at boot: the inherited PATH holds a
+// stand-in gh, the one tool the daemon needs on it for the pane to be built. It reads as a
+// compiled program (no `#!` line), since the daemon refuses a script as the first gh on PATH.
+const outerBin = path.join(rig, "outer-bin");
+mkdirSync(outerBin);
+writeFileSync(path.join(outerBin, "gh"), "\x7fELF\x02\x01\x01\x00", { mode: 0o700 });
+const scriptBin = path.join(rig, "script-bin");
+mkdirSync(scriptBin);
+writeFileSync(path.join(scriptBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
 const inherited = {
   HOME: home,
   ANTHROPIC_API_KEY: "personal-key-must-not-reach-worker",
@@ -26,7 +34,8 @@ const inherited = {
   DISPATCH_TOKEN: "outer-dispatch-token",
   GH_TOKEN: "outer-github-token",
   GH_CONFIG_DIR: "/outer/gh",
-  PATH: "/outer/bin:/usr/bin",
+  LEGION_GH_PATH: "/outer/gh-binary",
+  PATH: `${outerBin}:/usr/bin`,
 };
 
 // The pane environment comes from the daemon's own functions, compiled and run by `go run`, which
@@ -45,17 +54,20 @@ test("strips an inherited Anthropic key and GitHub token, and gives the pane the
   // The daemon names no grant file on a pane: the `legion` tool mints its grants in-process, and
   // no agent runs `legion` from bash (LEGION-631).
   expect(workerEnv).not.toHaveProperty("LEGION_GRANT_FILE");
-  expect(workerEnv).not.toHaveProperty("LEGION_GH_PATH");
   expect(workerEnv).not.toHaveProperty("LEGION_GIT_PATH");
   expect(workerEnv).not.toHaveProperty("LEGION_JJ_PATH");
-  const ghConfigDir = `${rig}/state/secrets/legion-skillsrig-lweval-1-tester-gh`;
+  const ghRoot = `${rig}/state/secrets/legion-skillsrig-lweval-1-tester-gh`;
+  const ghConfigDir = `${ghRoot}/skills-rig`;
   expect(workerEnv).toMatchObject({
     GEMINI_API_KEY: "gemini-key",
     OPENAI_API_KEY: "openai-key",
-    PATH: `${rig}/state/bin:/outer/bin:/usr/bin`,
+    PATH: `${rig}/state/bin:${outerBin}:/usr/bin`,
     // The caller's own token and directory never reach the pane: the daemon's pane sets the three
-    // token variables empty beside the claim's directory, so gh reads the file and nothing else.
+    // token variables empty beside the claim's gh bundle, so gh reads the files and nothing else,
+    // and its wrapper runs the real gh the daemon found on its PATH, not the caller's.
     GH_CONFIG_DIR: ghConfigDir,
+    LEGION_GH_OWNERS_DIR: ghRoot,
+    LEGION_GH_PATH: path.join(outerBin, "gh"),
     GH_TOKEN: "",
     GITHUB_TOKEN: "",
     GH_HOST: "",
@@ -63,8 +75,9 @@ test("strips an inherited Anthropic key and GitHub token, and gives the pane the
     LEGION_ROLE: "tester",
     XDG_CONFIG_HOME: `${rig}/state/home/.config`,
   });
-  // The claim's gh files hold the rig's token in gh's own migrated shape, readable by the pane
-  // alone, as the daemon's tmux runtime writes them.
+  // The claim's gh bundle holds the rig's token in gh's own migrated shape, readable by the pane
+  // alone, as the daemon's tmux runtime writes it.
+  expect(statSync(ghRoot).mode & 0o777).toBe(0o700);
   expect(statSync(ghConfigDir).mode & 0o777).toBe(0o700);
   expect(statSync(path.join(ghConfigDir, "hosts.yml")).mode & 0o777).toBe(0o600);
   expect(readFileSync(path.join(ghConfigDir, "hosts.yml"), "utf8")).toContain(
@@ -151,4 +164,22 @@ test("refuses a profile envoy.json whose Envoy has no NATS server", () => {
       { daemonModule: DAEMON_MODULE }
     )
   ).toThrow("envoy: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)");
+}, 600_000);
+
+// The daemon refuses a script as the first gh on its PATH (a gh wrapper would answer in place of
+// the claim's App token), and so does the rig's reading of it; a gh the rig names, as an operator
+// names one with LEGION_GH_PATH, is the pane's real gh whatever it is, which is how the rig hands
+// panes its recording stand-in.
+test("refuses a script as the first gh on PATH and takes the gh the rig names", () => {
+  const claim = { project: "skillsrig", issue: "LWEVAL-1", role: "tester" } as const;
+  const launch = { rig, port: 13399, profile: "rig-profile" };
+  const shimmed = { ...inherited, PATH: `${scriptBin}:${outerBin}:/usr/bin` };
+  expect(() => workerPane(launch, shimmed, claim, { daemonModule: DAEMON_MODULE })).toThrow(
+    `the first gh on the daemon's PATH, ${path.join(scriptBin, "gh")}, is a script`
+  );
+  const named = workerPane(launch, shimmed, claim, {
+    daemonModule: DAEMON_MODULE,
+    ghPath: path.join(scriptBin, "gh"),
+  }).env;
+  expect(named.LEGION_GH_PATH).toBe(path.join(scriptBin, "gh"));
 }, 600_000);

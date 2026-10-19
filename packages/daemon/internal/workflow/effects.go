@@ -230,6 +230,11 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 // this label (prompts/roles/merger.md, step 2), which a test ties to it.
 const approvedHeadLabel = "Approved head"
 
+// testerVerdictLabel labels the tester's verdict a started worker's task carries. The reviewer's
+// prompt names it as the tester's result rather than its own (prompts/go/reviewer.md), which a test
+// ties to it.
+const testerVerdictLabel = "Tester's verdict"
+
 // start starts the phase worker of the issue's current phase, a start stamped with that phase. A
 // start that takes the phase over from a role still at work in it names that role, quiesce, so it
 // waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
@@ -274,13 +279,17 @@ func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
 // record already holds: one role runs several phases (the implementer runs implementing and
 // retro), and a resumed session cannot otherwise tell a new phase from its last.
+// A handoff's verdict is always the tester's, since the daemon accepts one from no other role on
+// a phase completion (api/handoff.go, VERDICT_ROLE_FORBIDDEN; the implementer's check report is no
+// phase completion and starts nobody), so the line names the tester: the reviewer it starts on a
+// pass reads it as the tester's report, never as a field of its own completion.
 func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, reason string) string {
 	text := continueLine(issue)
 	if handoff.HandoffCommit != "" {
 		text += " Handoff commit: " + handoff.HandoffCommit + "."
 	}
 	if handoff.Verdict != "" {
-		text += " Handoff verdict: " + handoff.Verdict + "."
+		text += " " + testerVerdictLabel + ": " + handoff.Verdict + "."
 	}
 	if pr != nil && pr.Number != 0 {
 		text += fmt.Sprintf(" Pull request: #%d.", pr.Number)
