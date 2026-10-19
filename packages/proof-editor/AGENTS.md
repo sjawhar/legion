@@ -15,7 +15,7 @@ held them. The cut that followed deleted them from the fork, so that commit stay
 source however far the fork line moves.
 
 The upstream modules this package imports at runtime come from the git dependency, pinned at
-**340653cfaeb52866aabfd2e9d3d1e9f0ba87f2cd** on the fork's cleaned `library` line. Moving that
+**dc6a852b2ab45463dc9d3d17762235450c8ff0d6** on the fork's cleaned `library` line. Moving that
 pin changes nothing in the table; it changes what `node_modules/proof-sdk-upstream` holds, and
 `tests/upstream-pin.test.ts` is what checks it.
 
@@ -129,7 +129,8 @@ copied file carries `// @ts-nocheck` any more. `tests/upstream-boundary.ts` is t
 names every binding this package imports across the boundary and fails `bun run typecheck` if
 one of them is `any`.
 
-The pinned source commit carries four fixes, each an open upstream pull request. The Dark Reader
+The pinned source commit carries five fixes; the first four are each an open upstream pull
+request. The Dark Reader
 fix (EveryInc/proof-sdk#81): peer-cursor colours and mark decorations avoid inline `style`
 attributes, because Dark Reader rewrites those attributes inside the contenteditable and
 ProseMirror reads the writes as content mutations. That can cause an endless redraw loop that
@@ -142,12 +143,17 @@ re-attributed the text between. The overlapping record marks fix (EveryInc/proof
 `proofComment` and `proofSuggestion` declare `excludes: ''`, so a comment or suggestion over text
 another one covers no longer cuts it out of the overlap; the plugin's removals take the mark with
 the acted-on id rather than every mark of its type over its text, and the markdown parser closes
-the nested span it is closing rather than every open span of the type. `tests/upstream-pin.test.ts`
-reads or runs the installed modules so a pin that loses any of them fails: it reads the Dark Reader
-fix where it lives, renders each proof mark, redraws a revised replacement in a happy-dom view,
-rejects an insert split by another, and comments twice over one word, round-trips that through
-markdown and deletes one of the two. Moving the pin changes the package dependency, `bun.lock`,
-`upstream/` and this file's source audit references; no Bun patch applies to this source.
+the nested span it is closing rather than every open span of the type. The Mermaid diagram types
+fix: the Mermaid preview's validator runs its flowchart checks only on the diagrams
+beautiful-mermaid renders as flowcharts or state diagrams, so a sequence, class, ER or xychart
+diagram reaches its own renderer instead of being refused with `Invalid mermaid header`.
+`tests/upstream-pin.test.ts` reads or runs the installed modules so a pin that loses any of them
+fails: it reads the Dark Reader fix where it lives, renders each proof mark, redraws a revised
+replacement in a happy-dom view, rejects an insert split by another, comments twice over one word,
+round-trips that through markdown and deletes one of the two, and renders one diagram of every
+Mermaid type while still refusing a flowchart that ends in an arrow. Moving the pin changes the
+package dependency, `bun.lock`, `upstream/` and this file's source audit references; no Bun patch
+applies to this source.
 
 ## No build step
 

@@ -55,6 +55,15 @@ legion start --config legion.yaml --check-config
     the credential your `models.yml` reads;
   - the probe pod cannot mount the providers Secret (`… cannot mount the providers Secret
     legion-<project>-providers …`): create the Secret with every key `provider_keys` names;
+  - the probe pod cannot mount a volume of your `runtime.kubernetes.pod` block that a `volume_mounts`
+    entry mounts (`… cannot mount volume "<name>", which runtime.kubernetes.pod.volumes gives it from
+    ConfigMap "<name>" …`, or `Secret "<name>"`, quoting the kubelet's `configmap "<name>" not found`,
+    `secret "<name>" not found` or the key it could not find): create the object in the daemon's
+    namespace, or fix the name or key in the block. The daemon refuses on the kubelet's first
+    `FailedMount` (a volume no container mounts is never attempted, so never refused), minutes into
+    the boot, and `legion probe-boot` shows the same refusal before a restart; a container waiting
+    `CreateContainerConfigError` for an object its environment reads (`… cannot configure its
+    container probe (waiting: CreateContainerConfigError) …`) has the same remedy;
   - the image names another NATS user than the daemon's seed: put the agents' seed in the providers
     Secret's `NATS_NKEY_SEED` key;
   - `capability <name> is missing: <detail>` in the quoted log: the image lacks a tool the capability

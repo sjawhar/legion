@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
+  `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
+  command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
+  code 0.
+
 ### Changed
 
 - `dispatch read`'s issue summary names the issue's page (`Link:`), on `DISPATCH_PUBLIC_URL` when
