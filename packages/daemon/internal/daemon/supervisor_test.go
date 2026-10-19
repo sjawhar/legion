@@ -15,6 +15,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -338,5 +339,83 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 				t.Fatalf("resolve(%q) = (%q, %d, stale=%t, known=%t, %v), want (a-claim, 2, false, true, nil)", boot2, launched, generation, stale, known, err)
 			}
 		})
+	}
+}
+
+// A registration in flight when the daemon's stop cuts its launch short — the process the launch
+// started registered while the launch still waited on the runtime — is refused, and the claim is
+// stored as the launch left it: launching at that generation with no process, no session and no
+// capability. The next boot's restore finds it an unfinished launch, puts it back to
+// launch_uncertain and relaunches it once its orphan reconciliation has run. A registration recorded
+// instead would store the claim registered with no process, which restore keeps as it is, arming
+// a registration deadline that has no process to probe or retire.
+func TestARegistrationInFlightWhenTheStopCutsItsLaunchShortIsRestoredAsAnUnfinishedLaunch(t *testing.T) {
+	project, _ := claim.ProjectToken("legion")
+	token, _ := claim.NewToken(project, "LEGION-1", claim.RoleImplementer)
+	store := &outboxClaimStore{}
+	newBoot := func(rt *fake.Runtime, launches *stallingRuntime) *supervisor {
+		sup := newSupervisor(context.Background(), nil, "legion", t.TempDir(), quietLogger())
+		sup.deps = supervise.Deps{
+			Runtime: rt, Conns: fake.NewConns(), Store: store, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+			Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+			Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+			PluginContract: api.DaemonAPIVersion,
+		}
+		if launches != nil {
+			sup.deps.Runtime = launches
+		}
+		t.Cleanup(sup.stop)
+		return sup
+	}
+	launches := newStallingRuntime(t, fake.NewRuntime(), false)
+	launches.stalling.Store(true)
+	first := newBoot(nil, launches)
+	queued := supervise.Claim{Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleImplementer, State: supervise.StateQueued}
+	if _, err := first.restore(context.Background(), []supervise.Claim{queued}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	m, _ := first.Machine(token)
+	stopping, stop := context.WithCancel(context.Background())
+	launched := make(chan error, 1)
+	go func() { launched <- m.Handle(stopping, supervise.RequestSpawn{Claim: token}) }()
+	select {
+	case <-launches.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the launch never reached the runtime")
+	}
+	registered := make(chan error, 1)
+	go func() {
+		registered <- m.Handle(context.Background(), supervise.RequestRegister{
+			Claim: token, Generation: 1, Session: "ses_late", SessionFile: "/sessions/late.jsonl",
+			CapabilityHash: []byte("late"), PluginContract: api.DaemonAPIVersion,
+		})
+	}()
+	stop()
+	if err := <-launched; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the cut-short launch returned %v, want its context's cancellation", err)
+	}
+	var refused *supervise.RefusedError
+	if err := <-registered; !errors.As(err, &refused) {
+		t.Fatalf("the registration in flight = %v, want it refused", err)
+	}
+
+	store.mu.Lock()
+	stored := store.claims[token]
+	store.mu.Unlock()
+	if stored.State != supervise.StateLaunching || stored.Generation != 1 || stored.Locator != nil || stored.SessionFile != "" || len(stored.CapabilityHash) != 0 {
+		t.Fatalf("the store holds %s at generation %d with locator %+v, session file %q and capability %x; want launching at 1 with no process, session or capability",
+			stored.State, stored.Generation, stored.Locator, stored.SessionFile, stored.CapabilityHash)
+	}
+
+	next := newBoot(fake.NewRuntime(), nil)
+	unfinished, err := next.restore(context.Background(), []supervise.Claim{stored})
+	if err != nil {
+		t.Fatalf("the next boot's restore: %v", err)
+	}
+	if len(unfinished) != 1 || unfinished[0] != token {
+		t.Fatalf("the next boot's unfinished launches = %v, want %s", unfinished, token)
+	}
+	if restored, _ := next.Machine(token); restored.Claim().State != supervise.StateLaunchUncertain || restored.Claim().Locator != nil {
+		t.Fatalf("the next boot restored %+v, want launch_uncertain with no process", restored.Claim())
 	}
 }

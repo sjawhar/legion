@@ -469,6 +469,18 @@ func (h *harness) must(ev Event) {
 	}
 }
 
+// handleWithoutPanic is handle, failing the test where ev panics the machine instead of ending the
+// whole run.
+func (h *harness) handleWithoutPanic(ev Event) error {
+	h.t.Helper()
+	defer func() {
+		if r := recover(); r != nil {
+			h.t.Fatalf("%T panicked the machine: %v", ev, r)
+		}
+	}()
+	return h.handle(ev)
+}
+
 func (h *harness) advance(d time.Duration) {
 	h.clock.Advance(d)
 	h.m.Wait()
