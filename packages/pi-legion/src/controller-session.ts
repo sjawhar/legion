@@ -6,6 +6,7 @@ import {
 } from "@legion/contracts";
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
+import { LegionDaemonApiError, type LegionDaemonClient } from "@legion/pi-shared/daemon-client";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, subscribeLegionNotice } from "@legion/pi-shared/role-claim-bridge";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
@@ -16,7 +17,6 @@ import {
   requiredEnvironment,
   requiredSecret,
 } from "./classify";
-import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
 import { daemonControllerSlackChannels, daemonLaunchedController } from "./slack-channels";
 
 type PersistedTranscript = (

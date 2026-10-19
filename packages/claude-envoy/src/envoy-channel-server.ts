@@ -1,6 +1,11 @@
 import { unwatchFile, watchFile } from "node:fs"
 import { rm } from "node:fs/promises"
-import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
+import {
+  agentSubject,
+  type DeliveryCapability,
+  ROLE_TOPIC_PREFIX,
+  zodSchemaApi,
+} from "@legion/contracts"
 import {
   type DispatchDelivery,
   expectsLaneReceipt,
@@ -34,6 +39,8 @@ import {
   expandSubscriptionTopics,
   mergeInterestSources,
 } from "@legion/envoy-client/transport"
+import { createLegionDaemonClient } from "@legion/pi-shared/daemon-client"
+import { findHandoffCommit } from "@legion/pi-shared/handoff-commit"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js"
@@ -48,6 +55,21 @@ import {
 } from "./channel-forwarder"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
+import {
+  endPane,
+  type LegionClaim,
+  legionPane,
+  logLegion,
+  startLegionClaim,
+  stopPane,
+} from "./legion-claim"
+import { createInboxNotifier, INBOX_CAPABILITIES, INBOX_VARIABLE } from "./legion-inbox"
+import {
+  executeLegionTool,
+  LEGION_TOOL_NAME,
+  type LegionToolRuntime,
+  legionToolDefinition,
+} from "./legion-tool"
 import {
   pruneStaleSessionHandoffs,
   readPersistedRole,
@@ -94,6 +116,12 @@ function undefinedOnNotFound(error: unknown): undefined {
 /** The MCP `serverInfo`; the version is the package's, so it is spelled once. */
 export const MCP_SERVER_INFO = { name: "envoy", version: packageVersion } as const
 
+/**
+ * The delivery modes a session whose deliveries are channel notifications advertises: Claude Code
+ * queues a notification for the model's next turn, which is an aside and cannot be a steer.
+ */
+export const CHANNEL_CAPABILITIES = ["aside"] as const satisfies readonly DeliveryCapability[]
+
 export interface ChannelNotification {
   readonly method: typeof CHANNEL_NOTIFICATION_METHOD
   readonly params: {
@@ -105,6 +133,10 @@ export interface ChannelNotification {
 export interface ChannelNotifier {
   notification(notification: ChannelNotification): Promise<void>
 }
+
+/** Why the heartbeat regained this session's role (`ChannelSession.onRoleRegained`). */
+export type RoleRegainReason = "reclaimed" | "reregistered"
+export type RoleRegainHook = (role: string, reason: RoleRegainReason) => Promise<void>
 
 export interface ChannelInboxEntry {
   readonly event_id: string
@@ -131,8 +163,16 @@ export interface ChannelSession {
   follow(topics: readonly string[]): Promise<readonly string[]>
   /** Stop following user-selected topics while retaining the direct session route. */
   unfollow(topics: readonly string[]): Promise<readonly string[]>
-  /** Persist the role held by an explicit envoy_role_set call. */
+  /** Persist the role held by an explicit envoy_role_set call, or by the Legion claim. */
   rememberRole(role: string): Promise<void>
+  /**
+   * Sets the one hook the heartbeat runs after it re-establishes this session as its held role's
+   * live holder: `"reclaimed"` when the listener had stopped naming this session and a soft claim
+   * took the role back, `"reregistered"` on the first healthy tick after a failed registration,
+   * when the listener may have answered "no holder" meanwhile. The Legion claim sends its daemon
+   * ready again from it. The hook runs detached from the heartbeat; a rejection is logged.
+   */
+  onRoleRegained(hook: RoleRegainHook): void
   /** Drain NATS, deregister this listener route, and release timer resources. */
   shutdown(): Promise<void>
 }
@@ -141,6 +181,12 @@ export interface ChannelSessionOptions {
   readonly identity: SessionIdentity
   readonly connection: ChannelForwarderConnection
   readonly notifier: ChannelNotifier
+  /**
+   * The delivery modes the session advertises to the listener, which Dispatch checks every
+   * targeted delivery against: the ones `notifier` honours (`CHANNEL_CAPABILITIES`, or
+   * `INBOX_CAPABILITIES` for the Legion bridge's inbox).
+   */
+  readonly capabilities: readonly DeliveryCapability[]
   readonly client: Pick<
     EnvoyClient,
     "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
@@ -442,7 +488,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       topics: forwarder.topics(),
       port: 0,
       title: "",
-      capabilities: ["aside"],
+      capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
     })
@@ -472,21 +518,44 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     await writePersistedRole(currentFile, { session_id: identity.id, role: persisted.role })
   }
 
-  const reassertRole = async (): Promise<void> => {
+  let regained: RoleRegainHook | undefined
+  /** Runs `regained` off the heartbeat's chain: it is a daemon round trip this side cannot bound,
+   * and every registry write queued behind the tick would wait on it. */
+  const fireRegained = (role: string, reason: RoleRegainReason): void => {
+    const hook = regained
+    if (hook === undefined) return
+    void Promise.resolve()
+      .then(() => hook(role, reason))
+      .catch((error: unknown) => {
+        process.stderr.write(
+          `envoy-channel: role ${role} regain hook failed (${reason}) — ${messageFor(error)}\n`,
+        )
+      })
+  }
+
+  /** `afterOutage`: the last tick's registration failed, so a holder the listener still names
+   * may have been answered "no holder" meanwhile. */
+  const reassertRole = async (afterOutage: boolean): Promise<void> => {
     if (heldRole === undefined) return
+    const role = heldRole
     const holder = await options.client
-      .getRole(heldRole)
-      .then((role) => role.holder, undefinedOnNotFound)
-    if (holder === identity.id) return
+      .getRole(role)
+      .then((info) => info.holder, undefinedOnNotFound)
+    if (holder === identity.id) {
+      if (afterOutage) fireRegained(role, "reregistered")
+      return
+    }
     const result = await options.client.setRole({
       sessionID: identity.id,
-      role: heldRole,
+      role,
       soft: true,
     })
     if (!result.claimed) {
       heldRole = undefined
       await rm(roleStateFile(options.stateDirectory, identity.id), { force: true })
+      return
     }
+    fireRegained(role, "reclaimed")
   }
 
   /**
@@ -624,17 +693,27 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   let heartbeatInFlight = false
   let heartbeatRequested = false
   let outageReported = false
+  // Set only by a failed registration, never by a failed role check after it: the listener answers
+  // "no holder" for a session whose registry entry lapsed, and only that warrants a
+  // `"reregistered"` regain. Cleared once a whole tick has succeeded.
+  let registrationFailed = false
   const heartbeat = async (): Promise<void> => {
     if (shuttingDown || heartbeatInFlight) return
     heartbeatInFlight = true
     try {
       await serialized(async () => {
         await adoptHandoff()
-        await register()
-        await reassertRole()
+        try {
+          await register()
+        } catch (error) {
+          registrationFailed = true
+          throw error
+        }
+        await reassertRole(registrationFailed)
         await transferRole()
         await syncRegisteredInterests()
       })
+      registrationFailed = false
       outageReported = false
     } catch (error) {
       if (outageReported) return
@@ -714,6 +793,9 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       await unsubscribing
       await dropping
       return removed
+    },
+    onRoleRegained(hook) {
+      regained = hook
     },
     async rememberRole(role) {
       heldRole = role
@@ -855,9 +937,16 @@ function pluginStateDirectory(): string {
  * Envoy off it serves no tool (`serveEnvoyOff`, `./envoy-off`). With Envoy on and inbound messages
  * off (`inbound.off`: no NATS server, or its seed refused), it serves the tools, which call the
  * listener, on an inbound-off session (`inboundOffChannelSession`, `./envoy-off`); the start notice
- * has said why on stderr. */
+ * has said why on stderr.
+ *
+ * In a Legion pane (a boot token on its environment, `legionPane`) it also serves the `legion` tool
+ * and boots the pane's claim (`./legion-claim`); a Legion pane whose Envoy is off, or takes no
+ * inbound messages, is stopped, since its task could never reach it. When `legion claude-bridge`
+ * names its inbox (`LEGION_CLAUDE_INBOX`), deliveries go there as user turns instead of channel
+ * notifications (`./legion-inbox`). */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
+  const pane = legionPane(process.env)
   // The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
   // set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
   // use, so a file that moved its server takes effect without a restart.
@@ -866,10 +955,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
   if (!envoy.enabled) {
-    await serveEnvoyOff(
-      MCP_SERVER_INFO,
-      `Envoy is off for this session: ${envoy.error ?? envoy.notice}`,
-    )
+    const refusal = `Envoy is off for this session: ${envoy.error ?? envoy.notice}`
+    if (pane !== undefined) stopPane(`a Legion pane needs Envoy for its task; ${refusal}`)
+    await serveEnvoyOff(MCP_SERVER_INFO, refusal)
     return
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
@@ -893,12 +981,29 @@ export async function runEnvoyChannelServer(): Promise<void> {
     token: envoy.token,
   })
   let runtime: ChannelToolRuntime | undefined
-  const toolDefinitions = channelToolDefinitions()
+  let claim: LegionClaim | undefined
+  const daemon = pane === undefined ? undefined : createLegionDaemonClient(pane.daemonUrl)
+  const toolDefinitions = [
+    ...channelToolDefinitions(),
+    ...(daemon === undefined ? [] : [legionToolDefinition()]),
+  ]
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (daemon !== undefined && request.params.name === LEGION_TOOL_NAME) {
+      const legionRuntime: LegionToolRuntime = {
+        daemon,
+        claim: () => claim?.capability(),
+        handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
+      }
+      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments))
+    }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
   })
+  const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
+  const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket)
+  const capabilities = inboxSocket === undefined ? CHANNEL_CAPABILITIES : INBOX_CAPABILITIES
+  const booting = new AbortController()
 
   const stopped = Promise.withResolvers<void>()
   let stopping = false
@@ -906,6 +1011,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   const stop = (): void => {
     if (stopping) return
     stopping = true
+    booting.abort()
     if (session === undefined) {
       stopped.resolve()
       return
@@ -924,6 +1030,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
   try {
     const { inbound } = envoy
     if ("off" in inbound) {
+      if (pane !== undefined) {
+        stopPane(
+          `a Legion pane's task reaches it over NATS, and inbound messages are off: ${inbound.off}`,
+        )
+      }
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
     } else {
       connection = await connect({
@@ -937,7 +1048,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
       session = await startChannelSession({
         identity,
         connection,
-        notifier: server,
+        notifier,
+        capabilities,
         client,
         heartbeatMs: envoy.heartbeatMs,
         configFile,
@@ -947,6 +1059,18 @@ export async function runEnvoyChannelServer(): Promise<void> {
       })
     }
     runtime = { identity, client, session }
+    if (pane !== undefined && daemon !== undefined && !stopping) {
+      claim = startLegionClaim({
+        pane,
+        sessionID: identity.id,
+        daemon,
+        client,
+        session,
+        signal: booting.signal,
+        log: logLegion,
+        stop: endPane,
+      })
+    }
     if (stopping) await session.shutdown()
     await stopped.promise
   } finally {

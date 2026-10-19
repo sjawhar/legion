@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
-      "@legion/contracts": ["../contracts/src/index.ts"]
+      "@legion/contracts": ["../contracts/src/index.ts"],
+      "@legion/contracts/legion-api": ["../contracts/src/legion-api.ts"]
     },
     "lib": ["ESNext"],
     "types": ["bun-types"],

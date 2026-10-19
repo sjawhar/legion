@@ -140,6 +140,58 @@ export class LegionDaemonContractError extends Error {
   }
 }
 
+// Bounds retries of the transient `claims/ready` request.
+const READY_RETRY_ATTEMPTS = 3;
+const READY_RETRY_DELAY_MS = 1_000;
+
+function isNetworkOrTimeoutError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
+
+  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
+  return (
+    code === "ConnectionRefused" ||
+    code === "ConnectionTimeout" ||
+    code === "EAI_AGAIN" ||
+    code === "ECONNREFUSED" ||
+    code === "ECONNRESET" ||
+    code === "EHOSTUNREACH" ||
+    code === "ENETUNREACH" ||
+    code === "ENOTFOUND" ||
+    code === "ETIMEDOUT" ||
+    (error instanceof TypeError &&
+      (error.message === "Failed to fetch" || error.message === "fetch failed"))
+  );
+}
+
+/** Runs a ready request, retrying only one that can pass on its own: a 5xx or a network failure.
+ * Each Legion host's claim (pi-legion's claim session, claude-envoy's Legion claim) sends its
+ * `claims/ready` through it, at boot and after each role regain. */
+export async function callReadyWithRetry(label: string, call: () => Promise<void>): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await call();
+      return;
+    } catch (error) {
+      const retryable =
+        error instanceof LegionDaemonApiError
+          ? error.status >= 500 && error.status < 600
+          : isNetworkOrTimeoutError(error);
+      if (!retryable) throw error;
+      if (attempt === READY_RETRY_ATTEMPTS) {
+        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
+        throw error;
+      }
+      console.error(
+        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
+      );
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
+      await retryDelay.promise;
+    }
+  }
+}
+
 /** `body` read through `schema`, or the reason it is not what the schema describes. */
 function parseStrictly<T>(
   schema: z.ZodType<T>,

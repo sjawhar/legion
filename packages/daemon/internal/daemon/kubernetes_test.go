@@ -788,7 +788,7 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
-	panes := tmuxOptions(cfg, "test", "omp", "", "", quietLogger())
+	panes := tmuxOptions(cfg, "test", nil, "", "", quietLogger())
 	for _, row := range []struct {
 		option    string
 		got, want time.Duration

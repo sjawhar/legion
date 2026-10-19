@@ -363,6 +363,12 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 			return runtime.Locator{}, fmt.Errorf("spawn %s: prompt file: %w", spec.Claim, err)
 		}
 	}
+	backend := runtime.Of(spec.Backend)
+	launcher, ok := r.launchers[backend]
+	if !ok {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: its role runs on %s, and the daemon resolved no %s launch (worker_backends)",
+			spec.Claim, backend, runtime.Backends[backend].Name)
+	}
 	workDir, err := r.workspaceDir(spec)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -374,12 +380,12 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 				if claim.IsTreeArchitect(spec.Role, spec.Issue, spec.Tree) {
 					verb = "resurrecting"
 				}
-				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded OMP session file is missing: %s",
-					spec.Issue, verb, spec.ResumeSessionFile)
+				return runtime.Locator{}, fmt.Errorf("Refusing to start %s fresh while %s: recorded %s session file is missing: %s",
+					spec.Issue, verb, runtime.Backends[backend].Name, spec.ResumeSessionFile)
 			}
 			return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 		}
-		r.log.Info("tmux runtime: resuming a recorded OMP session", "claim", spec.Claim, "session", spec.ResumeSessionFile)
+		r.log.Info("tmux runtime: resuming a recorded "+runtime.Backends[backend].Name+" session", "claim", spec.Claim, "backend", backend, "session", spec.ResumeSessionFile)
 	}
 	if err := makePaneHome(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
@@ -411,13 +417,16 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		path = spec.Env["PATH"]
 	}
 	path = workerbin.Path(path, r.stateDir)
-	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
+	inner, backendPairs, err := launcher.Launch(spec, Host{StateDir: r.stateDir, Legion: r.legion})
+	if err != nil {
+		return runtime.Locator{}, err
+	}
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
 	}, files)
-	return r.openPane(ctx, spec, ghWriter, paneCommand(pairs, command))
+	return r.openPane(ctx, spec, ghWriter, paneCommand(append(pairs, backendPairs...), command))
 }
 
 // openPane puts the pane on the server under the launch lock: into the window of a pane of the
@@ -469,7 +478,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter
 
 // awaitPaneCommand waits, bounded by the command timeout, until the pane's process runs the pane's
 // command. tmux reports a new pane's pid at fork, and until that child execs its command it is a
-// copy of the server, which a probe reads as not running OMP; supervision takes that for a death
+// copy of the server, which a probe reads as not running its harness; supervision takes that for a death
 // and relaunches the claim over its still-starting process (LEGION-274). A process that exits
 // meanwhile is left to the caller's identity read, which reports it; one still the server's copy
 // when the bound runs out is an error, and the caller kills its pane (killUnrecorded), so no

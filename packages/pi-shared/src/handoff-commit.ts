@@ -22,7 +22,7 @@ import { staleGitLockNote } from "./git-lock";
  * naming the remedy. Every other completion — retro, the merger's READY, a role reporting a phase
  * it does not run (which the daemon refuses naming whose phase it is) — reports the commit the
  * workspace stands on, `@-`. The implementer's report on its closed issue's production check
- * resolves no commit at all: `tools.ts` never asks this module for one.
+ * resolves no commit at all: `legion-phase-ops.ts` never asks this module for one.
  */
 
 /** Runs the pane's jj with `args` against the workspace at `cwd` and answers its trimmed stdout;
@@ -127,14 +127,14 @@ export async function findHandoffCommit(input: HandoffCommitInput): Promise<stri
       `${file} is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff`
     );
   }
-  const user = env.JJ_USER;
+  const user = env["JJ_USER"];
   if (user !== undefined && user !== "") {
     const author = await jj(
       ["log", "-r", carrying, "--no-graph", "-T", 'author.name() ++ "\\n" ++ author.email()'],
       workspace
     );
     const [name = "", email = ""] = author.split("\n", 2);
-    if (name !== user || email !== (env.JJ_EMAIL ?? "")) {
+    if (name !== user || email !== (env["JJ_EMAIL"] ?? "")) {
       throw new Error(
         `${file} is carried by commit ${carrying}, authored by ${name} <${email}>, not this pane's ${user}: run jj new, then write and commit this phase's handoff again`
       );

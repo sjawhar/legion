@@ -34,7 +34,7 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	}
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
 	var owners []string
-	s := specs{stateDir: stateDir, project: "s1",
+	s := specs{stateDir: stateDir, project: "s1", repositories: noRepositoriesView,
 		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
 			return ghrepo.MustParse("zeta/tools"), "main", nil
 		},

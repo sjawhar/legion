@@ -1104,7 +1104,9 @@ func (r *liveRig) checkSecondOwner() error {
 		return fmt.Errorf("%s's git ls-remote %s through the clone's helper = %q, %v; want its HEAD", c.name, url, refs, err)
 	}
 	note("operator", "%s's agent: git ls-remote %s HEAD: %s", c.name, url, oneLine(refs))
-	branch := "legion/" + strings.ToLower(c.issue) + "-must-not-land"
+	// The run's own name: if the refusal ever broke, the push would land on the repository every run
+	// shares, and only this run's "want none" below should fail for it.
+	branch := "legion/" + strings.ToLower(c.issue) + "-must-not-land-" + r.env.claimProject
 	out, err = r.asAgent(c, "git --git-dir="+clone+"/.git push "+url+" HEAD:refs/heads/"+branch+" 2>&1")
 	if err == nil || !strings.Contains(out+err.Error(), "403") {
 		return fmt.Errorf("%s's git push to %s was not refused 403 (%v): %s", c.name, url, err, oneLine(out))

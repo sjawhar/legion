@@ -9,8 +9,8 @@
 # LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint, and SMOKE_UPSTREAM_NATS,
 # the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name. It needs
 # agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked: the
-# agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
-# route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
+# agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), and no
+# Anthropic key reaches a pane; only a devbox whose sessions use that gateway can run it. The proof human's
 # reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
 # App), never a Legion App, so run the script from the operator's own Oh My Pi session, not a Legion
 # pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses to start otherwise

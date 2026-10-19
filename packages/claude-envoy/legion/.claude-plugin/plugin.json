@@ -1,0 +1,4 @@
+{
+  "name": "legion",
+  "description": "Legion's skills and task agents for a phase worker running on Claude Code, generated from the repository's skills/ and packages/pi-legion/agents by packages/claude-envoy/scripts/build.ts."
+}
