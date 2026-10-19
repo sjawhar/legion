@@ -397,10 +397,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 			a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", dispatch.LegionLabel)
 			return nil
 		}
-		return a.putNewRoot(ctx, tx, intake.DispatchIssue{
-			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: summary.HandedOver,
-			ResolvedRepo: summary.ResolvedRepo,
-		}, false)
+		return a.putNewRoot(ctx, tx, intake.ListedIssue(summary), false)
 	}
 	if summary.LastSeq > 0 && summary.LastSeq < stored.LastDispatchSeq {
 		return nil

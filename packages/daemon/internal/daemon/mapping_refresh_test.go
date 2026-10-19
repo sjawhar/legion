@@ -99,16 +99,18 @@ func mappingRig(t *testing.T, missing map[string]bool) (*workflowRuntime, *mappi
 }
 
 // prepareAsDelivered prepares fact as the Dispatch consumer does, delivering it again after a
-// held-back preparation (intake.RetryLater) until it is prepared or fails.
-func prepareAsDelivered(t *testing.T, w *workflowRuntime, fact intake.DispatchIssue) (intake.DispatchIssue, error) {
+// held-back preparation (intake.RetryLater) until it is prepared or fails. redelivered is whether
+// its first delivery is a redelivery; every one after it is.
+func prepareAsDelivered(t *testing.T, w *workflowRuntime, fact intake.DispatchIssue, redelivered bool) (intake.DispatchIssue, error) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		prepared, err := w.prepareRepository(context.Background(), fact)
+		prepared, err := w.prepareRepository(context.Background(), fact, redelivered)
 		var later *intake.RetryLater
 		if !errors.As(err, &later) || time.Now().After(deadline) {
 			return prepared, err
 		}
+		redelivered = true
 		time.Sleep(10 * time.Millisecond)
 	}
 }
@@ -169,7 +171,7 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 					t.Fatalf("GitHub filters = %v after a failed refresh, want zeta/tools not yet heard", filters)
 				}
 			}
-			if _, err := prepareAsDelivered(t, w, fact); err != nil {
+			if _, err := prepareAsDelivered(t, w, fact, false); err != nil {
 				t.Fatal(err)
 			}
 			engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
@@ -207,7 +209,7 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 	w.records = store
 	engine := workflow.New(store, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 	child := intake.DispatchIssue{Key: "LEGION-301", Parent: "LEGION-300", Seq: 1, Status: "todo", Title: "child", Rank: "A", ResolvedRepo: "zeta/tools"}
-	if _, err := w.prepareRepository(ctx, child); err != nil {
+	if _, err := w.prepareRepository(ctx, child, false); err != nil {
 		t.Fatal(err)
 	}
 	admitted := make(chan error, 1)
@@ -272,7 +274,7 @@ func TestAClosedTreesRepositoryStaysHeardAfterItIsUnmapped(t *testing.T) {
 		t.Fatalf("a restart hears %v, want %v", got, want)
 	}
 	reopened := intake.DispatchIssue{Key: "LEGION-300", Seq: 2, Status: "todo", Title: "root", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
-	if reopened, err = w.prepareRepository(ctx, reopened); err != nil {
+	if reopened, err = w.prepareRepository(ctx, reopened, false); err != nil {
 		t.Fatal(err)
 	}
 	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
@@ -341,7 +343,7 @@ func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testin
 	handOver := func(seq int64) {
 		t.Helper()
 		fact := intake.DispatchIssue{Key: "LEGION-301", Seq: seq, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "acme/widgets"}
-		prepared, err := prepareAsDelivered(t, w, fact)
+		prepared, err := prepareAsDelivered(t, w, fact, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -407,12 +409,12 @@ func TestAnIssueOnARepositoryMappedJustBeforeIsAdmittedOnIt(t *testing.T) {
 			client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
 			client.issue = tc.now
 			fact := intake.DispatchIssue{Key: "LEGION-302", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
-			prepared, err := prepareAsDelivered(t, w, fact)
+			prepared, err := prepareAsDelivered(t, w, fact, false)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(w.awaiting) != 0 || len(w.retried) != 0 {
-				t.Fatalf("held %v and retried %v after the event was prepared, want neither", w.awaiting, w.retried)
+			if len(w.awaiting) != 0 {
+				t.Fatalf("held %v after the event was prepared, want none", w.awaiting)
 			}
 			engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 			admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
@@ -469,7 +471,7 @@ func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *test
 			fact := intake.DispatchIssue{Key: "LEGION-305", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: repo}
 			if tc.heldFirst {
 				var later *intake.RetryLater
-				if _, err := w.prepareRepository(ctx, fact); !errors.As(err, &later) {
+				if _, err := w.prepareRepository(ctx, fact, false); !errors.As(err, &later) {
 					t.Fatalf("the first delivery = %v, want it held for the mapping", err)
 				}
 				testwait.Eventually(t, "the mapping read the held event asked for", func() bool {
@@ -478,12 +480,12 @@ func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *test
 				})
 			}
 			github.fail.Store(true)
-			if _, err := w.prepareRepository(ctx, fact); err == nil {
+			if _, err := w.prepareRepository(ctx, fact, tc.heldFirst); err == nil {
 				t.Fatal("the delivery whose branch read failed was prepared, want it retried")
 			}
 			github.fail.Store(false)
 			client.issue = tc.now
-			prepared, err := prepareAsDelivered(t, w, fact)
+			prepared, err := prepareAsDelivered(t, w, fact, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -495,10 +497,48 @@ func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *test
 			if got := recordedIssue(t, w, "LEGION-305"); (got != nil) != tc.admitted {
 				t.Fatalf("LEGION-305 = %+v, want recorded %t", got, tc.admitted)
 			}
-			if len(w.awaiting) != 0 || len(w.retried) != 0 {
-				t.Fatalf("held %v and retried %v after the event was prepared, want neither", w.awaiting, w.retried)
+			if len(w.awaiting) != 0 {
+				t.Fatalf("held %v after the event was prepared, want none", w.awaiting)
 			}
 		})
+	}
+}
+
+// An admission event held for a read of the mapping stays held under the sequence it was
+// delivered at while Dispatch moves on (a comment on the issue), so its redeliveries wait for the
+// one read it asked for rather than asking again. A withdrawal meanwhile ends the hold: the
+// redelivery, prepared as Dispatch now shows the issue, records nothing and leaves no hold.
+func TestAHeldEventKeepsItsDeliveredSequenceAndAWithdrawalEndsItsHold(t *testing.T) {
+	ctx := context.Background()
+	w, client, _, _ := mappingRig(t, map[string]bool{})
+	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
+	if err := w.refreshMapping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Every read of the mapping fails from here, so the hold's read never covers it.
+	client.mu.Lock()
+	client.err = errors.New("Dispatch is restarting")
+	client.mu.Unlock()
+	fact := intake.DispatchIssue{Key: "LEGION-306", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
+	var later *intake.RetryLater
+	client.issue = dispatch.Issue{Key: "LEGION-306", Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 1}
+	if _, err := w.prepareRepository(ctx, fact, false); !errors.As(err, &later) {
+		t.Fatalf("the first delivery = %v, want it held for a read of the mapping", err)
+	}
+	client.issue.LastSeq = 2
+	if _, err := w.prepareRepository(ctx, fact, true); !errors.As(err, &later) {
+		t.Fatalf("the redelivery after a comment = %v, want it still held", err)
+	}
+	if requested := w.mappingRequested.Load(); requested != 1 {
+		t.Fatalf("%d reads of the mapping requested, want one: the hold stays under the sequence its event was delivered at", requested)
+	}
+	client.issue = dispatch.Issue{Key: "LEGION-306", Status: "backlog", Title: "new", Rank: "A", ResolvedRepo: "zeta/tools", LastSeq: 3}
+	prepared, err := w.prepareRepository(ctx, fact, true)
+	if err != nil || prepared.Status != "backlog" {
+		t.Fatalf("the redelivery after the withdrawal = %s, %v; want it prepared as Dispatch shows it, in backlog", prepared.Status, err)
+	}
+	if len(w.awaiting) != 0 {
+		t.Fatalf("held %v after the withdrawal, want no hold left", w.awaiting)
 	}
 }
 

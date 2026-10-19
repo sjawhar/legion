@@ -322,14 +322,7 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	if recorded != nil {
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
-	parent := ""
-	if child.Parent != nil {
-		parent = *child.Parent
-	}
-	observed := intake.DispatchIssue{
-		Key: child.Key, Seq: child.LastSeq, Status: child.Status, Title: child.Title, Parent: parent, Rank: child.Rank, HandedOver: child.HandedOver,
-		ResolvedRepo: child.ResolvedRepo,
-	}
+	observed := intake.ObservedIssue(child)
 	if s.prepare != nil {
 		prepared, err := s.prepare(r.Context(), observed)
 		var later *intake.RetryLater
@@ -354,7 +347,7 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	if recorded != nil {
 		return s.clearChildReleaseRetry(w, r, child.Key)
 	}
-	return s.scheduleChildReleaseRetry(w, r, tree, child, parent)
+	return s.scheduleChildReleaseRetry(w, r, tree, child, intake.ObservedIssue(child).Parent)
 }
 
 func (s *server) clearChildReleaseRetry(w http.ResponseWriter, r *http.Request, issue string) bool {

@@ -51,6 +51,9 @@ func (loginTokens) InstalledOn(context.Context, appauth.AppRole, ghrepo.Reposito
 	return true, nil
 }
 
+// Forget drops nothing: every lease is minted afresh.
+func (loginTokens) Forget(appauth.AppRole, string) {}
+
 func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
 	lease, err := t.Token(ctx, role, owner)
 	lease.Token += "-read"

@@ -34,10 +34,10 @@ var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes 
 // cache's Sandbox, selecting the hash of its name, and headless with no external name, the shape
 // the launch checked before telling
 // the root's pod the cache's address. Asked inside the cache's own pod, its /healthz answers with
-// no token, ready at the head GitHub names for the repository's default branch, and its /tar
-// refuses a request without its token, 401 naming nothing, and answers its own token, which
-// reaches curl on its standard input (`-H @-`) from the file the pod mounts, never in a process's
-// argv.
+// no token, ready with a fetch no older than its refresh and two minutes, at the head GitHub named
+// for the repository's default branch at that fetch (headAtFetch), and its /tar refuses a request
+// without its token, 401 naming nothing, and answers its own token, which reaches curl on its
+// standard input (`-H @-`) from the file the pod mounts, never in a process's argv.
 func (r *liveRig) checkRepositoryCache() error {
 	name := CacheSandboxName(r.env.project, r.env.repo)
 	status, err := r.awaitCacheReady()
@@ -63,8 +63,14 @@ func (r *liveRig) checkRepositoryCache() error {
 	if err != nil {
 		return err
 	}
-	if !health.Ready || health.Repo != r.env.repo.String() || health.Head != head || health.Bytes <= 0 || health.LastFetchAt.IsZero() {
-		return fmt.Errorf("the cache's /healthz answered %+v, want ready for %s at %s's head %s", health, r.env.repo, r.defaultBranch, head)
+	if !health.Ready || health.Repo != r.env.repo.String() || health.Bytes <= 0 || health.LastFetchAt.IsZero() {
+		return fmt.Errorf("the cache's /healthz answered %+v, want ready for %s", health, r.env.repo)
+	}
+	if refresh := liveRepositoryCache().Refresh; time.Since(health.LastFetchAt) > refresh+2*time.Minute {
+		return fmt.Errorf("the cache's last fetch was at %s, more than its %s refresh and two minutes ago", health.LastFetchAt.Format(time.RFC3339), refresh)
+	}
+	if err := r.headAtFetch(r.defaultBranch, head, health); err != nil {
+		return err
 	}
 	tar := strings.Replace(curl, "curl -s", "curl -s -o /dev/null", 1) + "/tar"
 	refused, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", strings.Replace(curl, "curl -s", "curl -s -D -", 1)+"/tar")
@@ -390,6 +396,51 @@ func (r *liveRig) githubHead(branch string) (string, error) {
 		return "", fmt.Errorf("read refs/heads/%s of %s: GitHub named no commit", branch, r.env.repo)
 	}
 	return ref.Object.SHA, nil
+}
+
+// headAtFetch is nil when health's head is the one GitHub named for branch when the cache last
+// fetched (health.LastFetchAt, which checkRepositoryCache holds to the cache's refresh): branch's
+// head now, or a commit on branch's first-parent line below it whose next commit landed after that
+// fetch, less ten seconds, since GitHub writes a commit a moment before it moves the branch to it.
+// The run's repository is shared with other live runs, which merge into its default branch, so the
+// branch may move between the cache's refresh and this read; the cache takes the move at its next
+// refresh.
+func (r *liveRig) headAtFetch(branch, now string, health repocache.Health) error {
+	if health.Head == now {
+		return nil
+	}
+	github, err := r.github()
+	if err != nil {
+		return err
+	}
+	for child, steps := now, 0; steps < 50; steps++ {
+		var commit struct {
+			Commit struct {
+				Committer struct {
+					Date time.Time `json:"date"`
+				} `json:"committer"`
+			} `json:"commit"`
+			Parents []struct {
+				SHA string `json:"sha"`
+			} `json:"parents"`
+		}
+		if err := github.Get(r.ctx, "/commits/"+child, &commit); err != nil {
+			return fmt.Errorf("read commit %s of %s: %w", child, r.env.repo, err)
+		}
+		if len(commit.Parents) == 0 {
+			return fmt.Errorf("the cache serves %s, which is not on %s's first-parent line below its head %s", health.Head, branch, now)
+		}
+		if commit.Parents[0].SHA == health.Head {
+			landed := commit.Commit.Committer.Date
+			if landed.Before(health.LastFetchAt.Add(-10 * time.Second)) {
+				return fmt.Errorf("the cache serves %s from its fetch at %s, but %s's next commit on %s, %s, landed at %s, more than ten seconds before that fetch", health.Head, health.LastFetchAt, health.Head, branch, child, landed)
+			}
+			note("operator", "the cache serves %s, %s's head at its fetch at %s; %s has moved to %s since, its next commit %s landing at %s, which the cache's next refresh takes", health.Head, branch, health.LastFetchAt.Format(time.RFC3339), branch, now, child, landed.Format(time.RFC3339))
+			return nil
+		}
+		child = commit.Parents[0].SHA
+	}
+	return fmt.Errorf("the cache serves %s, which is not within 50 commits below %s's head %s on its first-parent line", health.Head, branch, now)
 }
 
 // deleteBranch deletes branch of the run's repository; one already gone is no failure.

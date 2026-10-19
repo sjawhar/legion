@@ -39,13 +39,16 @@ import (
 // It is absent for Stage 2 configurations, whose unchanged supervision proof deliberately has no
 // Dispatch, Apps, or Envoy stream configured.
 type workflowRuntime struct {
-	pool            *pgxpool.Pool
-	records         record.Store
-	engine          *workflow.Engine
-	admission       *admit.Admission
-	handlers        []intake.Handler
-	dispatch        dispatch.Client
-	tokens          appauth.Tokens
+	pool      *pgxpool.Pool
+	records   record.Store
+	engine    *workflow.Engine
+	admission *admit.Admission
+	handlers  []intake.Handler
+	dispatch  dispatch.Client
+	tokens    appauth.Tokens
+	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
+	// (tokenRefused).
+	forget          appauth.Forgetter
 	grants          *credential.Grants
 	projectID       string
 	dispatchProject string
@@ -95,9 +98,8 @@ type workflowRuntime struct {
 	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
 	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
-	// read covers; awaiting is each held admission event's request (awaitMappingRead), and retried
-	// each admission event whose preparation failed (markRetried), by issue key and then sequence,
-	// both under awaitingMu.
+	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
+	// and then the sequence it was delivered at, under awaitingMu.
 	repositories     *repositories
 	installs         appauth.Installations
 	mappingMu        sync.Mutex
@@ -106,7 +108,6 @@ type workflowRuntime struct {
 	mappingApplied   atomic.Uint64
 	awaitingMu       sync.Mutex
 	awaiting         map[string]map[int64]uint64
-	retried          map[string]map[int64]struct{}
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -225,8 +226,12 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if !ok {
 		return nil, fmt.Errorf("the GitHub App token source answers no App login, which the workflow judges pushes and reviews by")
 	}
+	forget, ok := tokens.(appauth.Forgetter)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
+	}
 	w := &workflowRuntime{
-		tokens: tokens, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
+		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
@@ -413,8 +418,7 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		if summary.Status != "todo" {
 			continue
 		}
-		if _, err := w.prepareIssue(ctx, intake.DispatchIssue{Key: summary.Key, Status: summary.Status, Parent: deref(summary.Parent),
-			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}, false); err != nil {
+		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
 	}
