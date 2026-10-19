@@ -11,7 +11,8 @@
   names the fix in its refusal: `use --issue <KEY>`, with the corrected command.
 - The `dispatch` command (`dist/dispatch.js`) refuses an ask, comment or message link as `--ref`
   to `comment`, `suggest`, `doc-edit` and `doc-read`, which used to act on the link's owner and
-  drop the item; the refusal names `--reply-to-ask`, `--reply-to` or `dispatch read`.
+  drop the item; the refusal names `reply_to_ask` (`--reply-to-ask`), `reply_to` (`--reply-to`) or
+  `dispatch read`.
 
 ### Added
 
