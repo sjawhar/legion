@@ -182,7 +182,7 @@ func TestGitHubHandlerBoundsTheBodyBytesItHoldsInABurst(t *testing.T) {
 }
 
 // A sender without the secret can declare a cap-sized body and then send it a few bytes at a time,
-// or send only its headers, holding its connection until the server's read timeout. It must not
+// or send only its headers, holding its connection until the route's body deadline. It must not
 // hold room for bytes it has not sent: GitHub gives a delivery 10 s, and one that waits behind such
 // senders is lost. Here three trickling senders and one that sent only headers are mid-body when a
 // signed 3.6 MB push arrives, and the push is served at once.
@@ -205,7 +205,7 @@ func TestGitHubHandlerServesADeliveryBehindSlowSenders(t *testing.T) {
 }
 
 // Connections that send only headers, or one byte of body, cost a sender almost nothing, so there
-// can be thousands of them, each held until the server's read timeout. They may hold room only for
+// can be thousands of them, each held until the route's body deadline. They may hold room only for
 // what they have sent: here enough of them to spend a whole budget at 16 KiB each, half with no
 // body byte yet and half with one, are waiting when a signed 3.6 MB push arrives, and the push is
 // served at once.
