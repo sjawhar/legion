@@ -299,6 +299,8 @@ go -C "$root/packages/envoy" build -o "$work/agent-secrets" ./cmd/agent-secrets
 note "built the e2e harness and agent-secrets from the checkout"
 
 harness_ok=
+# -test.timeout 150m must stay under the harness's staleRunBranchAge (4 hours): another run's
+# cache-lost-volume deletes a cache-b branch older than that as a killed run's leftover.
 if env \
   LEGION_E2E_RUNTIME_KUBECONFIG="$runtime_kubeconfig" \
   LEGION_E2E_RUNTIME_CONTEXT="$runtime_context" \
