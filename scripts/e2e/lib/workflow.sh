@@ -350,10 +350,21 @@ pull_request_product_files() {
 # changes-requested review and complete its phase. A review ends when its reviewer completes it —
 # the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
 # as the final approval is, rather than posted from the proof's own gh.
+#
+# The dispatched body must still end with the reviewer's own Legion footer
+# (`<!-- legion: {"session":"<id>","phase":"review"} -->`, prompts/roles/reviewer.md): once a
+# session is already recorded for the reviewer claim, intake.PullRequestReview.LegionSession
+# (packages/daemon/internal/intake/facts.go) must find it in the body and match the daemon's own
+# recorded session, or the review decides nothing (workflow/review.go's DecidesRound) — the very
+# first review from a fresh reviewer claim is the one exception, since the daemon has no recorded
+# session yet to compare against. Confirmed live, 2026-10-19: round 1's review (the fresh claim)
+# was accepted with no footer at all; round 2's review, posted with the smoke text as the whole
+# body and nothing else, was not — "a review decides nothing: the review App submitted it from a
+# session that is not the reviewer's" — and the round never left reviewing.
 request_changes_as_reviewer() {
   local issue=$1 round=$2 body=$3 app
   app=$(role_app reviewer) || return 1
-  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with this exact body text, followed by your own Legion footer exactly as your role's reviewer template always ends a review body (the smoke text replaces only the summary and findings, never the footer): $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review, the footer excepted."
   until_true 300 "$app's round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
 }
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
