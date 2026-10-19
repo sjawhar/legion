@@ -414,6 +414,25 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   defaults), often because the registration's answer never reached it. The daemon resumes the same
   session one generation later and counts a launch failure; after `launch_failure_limit` of them
   the claim fails.
+  While the tree's cleanup is reserved (the tree is closing), the retirement waits: the process is
+  kept, nothing is counted, and the deadline is tried again at the probe interval
+  (`probe_interval_seconds`, 30 seconds at the default).
+- **`supervise: the tree's cleanup is reserved and the retired process is stopped; suspending the
+  claim for the tree's close`** means the tree's cleanup was reserved while a retirement was
+  stopping the process. The claim is suspended by the daemon with no process, and the tree's close
+  retires it.
+- **`supervise: the lifecycle check of the retired process's relaunch failed; trying it again at
+  the probe interval`** means the daemon's Postgres did not answer the relaunch's lifecycle check
+  after a retirement stopped the process. The claim waits `launching` with no process and keeps
+  its task; the same relaunch is tried again every `probe_interval_seconds` until the store
+  answers, and the agent is handed its task once it is ready. A daemon restart meanwhile launches
+  the claim again as an unfinished launch. If the line keeps coming, look at the database.
+- **`supervise: refused a registration: the launch at its generation records no process`** and
+  **`supervise: dropped a stale event`** with `event=StreamHello fence=process` mean a process
+  registered or said hello for a launch the claim records no process for: a launch the daemon's
+  stop cut short, or a retired process whose relaunch is waiting. The registration is refused with
+  409 and the claim stays `launching`; the next boot, or the relaunch, starts the claim's process.
+  Nothing to do.
 
 ## The work loops or stops
 
