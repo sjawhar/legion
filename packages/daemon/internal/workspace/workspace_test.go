@@ -57,6 +57,9 @@ type recordingRunner struct {
 	commands     []Command
 	killClone    bool
 	failReadTree bool
+	// beforeLsRemote, when set, runs before each `git ls-remote`: GitHub changing between a fetch
+	// and its read of GitHub's HEAD.
+	beforeLsRemote func()
 }
 
 func (r *recordingRunner) Timeout() time.Duration { return r.timeout }
@@ -80,6 +83,9 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	}
 	if r.failReadTree && command.Argv[0] == "git" && slices.Contains(command.Argv, "read-tree") {
 		return Result{ExitCode: 1, Stderr: "forced read-tree failure for test"}, nil
+	}
+	if r.beforeLsRemote != nil && len(command.Argv) > 2 && command.Argv[0] == "git" && command.Argv[2] == "ls-remote" {
+		r.beforeLsRemote()
 	}
 
 	actual := command

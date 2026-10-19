@@ -221,9 +221,10 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 
 // Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
 // itself, the one address the runtime hands every pod's shim, and the runtime is given the
-// workflow's App tokens and the repositories Dispatch's mapping names, which its repository caches
-// follow. The host's own agent machinery never runs: no pane launcher is
-// installed, no Dispatch token file is written, and the workflow's boot has no worker-bin stage.
+// workflow's App tokens, its repository of an issue, already set when the runtime is built, and the
+// repositories Dispatch's mapping names, which its repository caches follow. The host's own agent
+// machinery never runs: no pane launcher is installed, no Dispatch token file is written, and the
+// workflow's boot has no worker-bin stage.
 func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
@@ -245,7 +246,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	awaitHealthz(t, cfg, done)
 
 	record.mu.Lock()
-	address, apps, mapped := record.address, record.apps, record.mapped
+	address, apps, repository, mapped := record.address, record.apps, record.repository, record.mapped
 	record.mu.Unlock()
 	if mapped == nil {
 		t.Fatal("the runtime was handed no mapping")
@@ -272,6 +273,12 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	}
 	if apps != tokens {
 		t.Errorf("the runtime was handed App tokens %v, want the workflow's", apps)
+	}
+	if repository == nil {
+		t.Fatal("the runtime was handed no repository rule, want the workflow's")
+	}
+	if repo, branch, err := repository(ctx, "LEGSMOKE-9"); err != nil || repo.String() != "acme/widgets" || branch != "main" {
+		t.Errorf("the runtime's repository of an unrecorded issue = %s@%s, %v; want the project's default acme/widgets@main", repo, branch, err)
 	}
 	for _, path := range []string{filepath.Join(cfg.StateDir, "bin"), filepath.Join(cfg.StateDir, "secrets", "dispatch-token")} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {

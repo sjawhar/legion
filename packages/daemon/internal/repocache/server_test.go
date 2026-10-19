@@ -100,8 +100,11 @@ func (r *testRunner) Run(ctx context.Context, command workspace.Command) (worksp
 			}
 		}
 		r.tokens = append(r.tokens, token)
-		held, release = r.held, r.release
-		r.held, r.release = nil, nil
+		// A fetch's read of GitHub's HEAD is a transfer too, but hold is for the next clone or fetch.
+		if !slices.Contains(command.Argv, "ls-remote") {
+			held, release = r.held, r.release
+			r.held, r.release = nil, nil
+		}
 	}
 	r.mu.Unlock()
 	if held != nil {

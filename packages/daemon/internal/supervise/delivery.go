@@ -291,8 +291,7 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 
 // adopt hands the working copy the role's App identity before every task reaches the agent, so
 // the task's commits are authored by the bot. A failure keeps the task from being sent. The
-// controller works no checkout, nor does a claim whose issue works no repository, so neither
-// adopts anything.
+// controller works no checkout, so it adopts nothing.
 func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	if m.deps.Identity == nil || role == claim.RoleController {
 		return nil
@@ -300,12 +299,9 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	if loc == nil {
 		return fmt.Errorf("adopt the working copy of %s: the claim has no locator", m.claim.Token)
 	}
-	id, adopt, err := m.deps.Identity(m.ctx, role, m.claim.Issue)
+	id, err := m.deps.Identity(m.ctx, role, m.claim.Issue)
 	if err != nil {
 		return fmt.Errorf("the git identity of %s: %w", m.claim.Token, err)
-	}
-	if !adopt {
-		return nil
 	}
 	return m.deps.Runtime.AdoptWorkingCopy(m.ctx, *loc, id)
 }

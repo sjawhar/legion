@@ -878,6 +878,45 @@ func TestFetchPointsTheFeedsHeadAtGitHubsDefaultBranch(t *testing.T) {
 	}
 }
 
+// GitHub renaming its default branch between a fetch and that fetch's read of GitHub's HEAD names a
+// branch the fetch did not bring. HEAD stays where it was, and the fetch says so, rather than naming
+// nothing: a cache whose HEAD named nothing could publish no head, and a restart while GitHub is
+// unreachable would end Serve. The next fetch brings the branch and moves HEAD to it.
+func TestFetchLeavesHeadUntilAFetchBringsGitHubsDefaultBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+	var logged []string
+	req.Log = func(line string) { logged = append(logged, line) }
+	first, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	head := func() string {
+		return strings.TrimSpace(runSetup(t, first.Feed, "git", "--git-dir="+first.Feed, "symbolic-ref", "HEAD"))
+	}
+	run.beforeLsRemote = func() {
+		run.beforeLsRemote = nil
+		runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-m", "main", "trunk")
+	}
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the Fetch GitHub renamed its branch under: %v", err)
+	}
+	if got := head(); got != "refs/heads/main" {
+		t.Errorf("after a fetch that did not bring trunk, the feed's HEAD names %s, want refs/heads/main still", got)
+	}
+	if want := "GitHub's default branch of acme/widgets is now trunk, which this fetch did not bring: HEAD stays at refs/heads/main until a fetch brings it"; !slices.Contains(logged, want) {
+		t.Errorf("the fetch did not say %q: %q", want, logged)
+	}
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the next Fetch: %v", err)
+	}
+	if got := head(); got != "refs/heads/trunk" {
+		t.Errorf("after the fetch that brought trunk, the feed's HEAD names %s, want refs/heads/trunk", got)
+	}
+}
+
 // A feed repository Fetch did not write is not taken as its own. Before this release an issue's
 // agents could write the issue volume's feed directory, so an upgraded volume may hold a repository
 // there carrying a hook, configuration or link that the token-holding fetch would run or follow.
@@ -934,6 +973,24 @@ func TestFetchTakesNoFeedItDidNotWrite(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		// git reads a key written on its section header's line, `[section]key=value`, and ends an
+		// unquoted value at `;`, so each of these sets what it names. `git config` never writes
+		// this form; an agent writing the file by hand could.
+		"a hooks path on a section header's line": func(t *testing.T, feed, marker string) {
+			hooks := filepath.Join(filepath.Dir(feed), "h")
+			writeExecutable(t, filepath.Join(hooks, "reference-transaction"), "#!/bin/sh\ntouch "+marker+"\n")
+			appendConfig(t, feed, "[core]hooksPath="+hooks+";]\n")
+		},
+		"an include on a section header's line": func(t *testing.T, feed, _ string) {
+			included := filepath.Join(filepath.Dir(feed), "c")
+			if err := os.WriteFile(included, []byte("[http]\n\tproxy = http://127.0.0.1:1\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			appendConfig(t, feed, "[include]path="+included+";]\n")
+		},
+		"an http.proxy on a section header's line": func(t *testing.T, feed, _ string) {
+			appendConfig(t, feed, "[http]proxy=http://127.0.0.1:1;]\n")
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			run := newLocalRunner(t)
@@ -973,6 +1030,43 @@ func TestFetchTakesNoFeedItDidNotWrite(t *testing.T) {
 	}
 }
 
+// git's update-server-info, which every `git repack` runs (the cache's due repack among them), writes
+// info/refs and objects/info/packs through a temporary sibling named <file>_XXXXXX and renames it
+// into place; a repack killed in between leaves that file. git never reads it, so a feed holding
+// one is still one a fetch wrote: kept, never removed and cloned again whole.
+func TestFetchKeepsAFeedHoldingAKilledRepacksServerInfoFiles(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+	var logged []string
+	req.Log = func(line string) { logged = append(logged, line) }
+	first, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	for _, leftover := range []string{"info/refs_XCPf7q", "objects/info/packs_cs3EN0"} {
+		path := filepath.Join(first.Feed, leftover)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("0000000000000000000000000000000000000000\trefs/heads/main\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := len(run.Calls())
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	if slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "is not one this fetch wrote") }) {
+		t.Errorf("Fetch refused a feed holding only git's own leftovers: %q", logged)
+	}
+	for _, call := range run.Calls()[before:] {
+		if commandWith(call.Argv, "git", "clone") {
+			t.Errorf("Fetch cloned the feed again: %q", call.Argv)
+		}
+	}
+}
+
 // writeExecutable writes an executable script at path, making its directory.
 func writeExecutable(t *testing.T, path, body string) {
 	t.Helper()
@@ -980,6 +1074,19 @@ func writeExecutable(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// appendConfig appends text to the bare repository gitDir's configuration file as it stands.
+func appendConfig(t *testing.T, gitDir, text string) {
+	t.Helper()
+	config, err := os.OpenFile(filepath.Join(gitDir, "config"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer config.Close()
+	if _, err := config.WriteString(text); err != nil {
 		t.Fatal(err)
 	}
 }

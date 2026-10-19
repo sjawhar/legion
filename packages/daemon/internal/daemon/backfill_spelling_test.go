@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -156,6 +157,54 @@ func TestTheBackfillRefusesARecordWhosePullRequestIsOnAnotherRepository(t *testi
 			}
 			if got.Repo != "acme/widgets" || got.GitHubRepo != "acme/widgets" {
 				t.Fatalf("LEGION-1 = %s (GitHub's %s), want acme/widgets", got.Repo, got.GitHubRepo)
+			}
+		})
+	}
+}
+
+// A record written before the record carried its repository may have no pull request yet but a
+// workspace a tmux daemon provisioned, which names the repository the issue works in. The fill
+// refuses a resolution elsewhere, naming the workspace and the fix, rather than provision the issue
+// anew in another repository and strand its unpushed work; a workspace under the resolved
+// repository, in any case, fills.
+func TestTheBackfillRefusesARecordWhoseWorkspaceIsInAnotherRepository(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main", "zeta/tools": "zeta/tools@main"})
+	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-1", ResolvedRepo: "acme/widgets"}}}
+	for _, tc := range []struct{ name, workspaceIn, want string }{
+		{"in another repository", "zeta/tools", "fill the repository of LEGION-1: Dispatch resolves it to acme/widgets, but its workspace %s is in zeta/tools: set the issue's repository in Dispatch to zeta/tools (dispatch issue-update --issue LEGION-1 --repo zeta/tools) and restart"},
+		{"in the resolved repository in another case", "ACME/Widgets", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			if _, err := pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch)
+				values ('LEGION-1', 'LEGION-1', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1, '', '')`); err != nil {
+				t.Fatal(err)
+			}
+			state := t.TempDir()
+			location, err := workspace.Location(state, ghrepo.MustParse(tc.workspaceIn), "LEGION-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(location.Dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			records := record.NewStore()
+			w := &workflowRuntime{pool: pool, records: records, log: quietLogger()}
+			err = backfillRepositories(ctx, pool, records, client, "LEGION", state,
+				newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), quietLogger())
+			got := recordedIssue(t, w, "LEGION-1")
+			if tc.want != "" {
+				if want := fmt.Sprintf(tc.want, location.Dir); err == nil || err.Error() != want {
+					t.Fatalf("backfill = %v, want %q", err, want)
+				}
+				if got.Repo != "" {
+					t.Fatalf("LEGION-1 = %s after a refused backfill, want it unfilled", got.Repo)
+				}
+				return
+			}
+			if err != nil || got.Repo != "acme/widgets" {
+				t.Fatalf("backfill = %v, LEGION-1 = %s; want it filled with acme/widgets", err, got.Repo)
 			}
 		})
 	}

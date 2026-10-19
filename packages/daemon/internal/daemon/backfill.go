@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -32,10 +33,11 @@ func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records recor
 // spelling of it, both from one read of GitHub per repository. One read of Dispatch's listing
 // serves every record. A record Dispatch resolves to no repository, or does not list, refuses the
 // boot, naming each one, before any is filled: the operator sets the project's default repository
-// in Dispatch and restarts. So does a record whose pull request is on another repository than the
-// one Dispatch resolves, as GitHub names either: the pull request names the repository the issue
-// worked in, and a record on another would create its branch there and disarm a stranger's pull
-// request; the operator sets the issue's repository in Dispatch to the pull request's.
+// in Dispatch and restarts. So does a record whose pull request, or failing one, whose workspace (a
+// tmux daemon's, issueWorkspaces), is in another repository than the one Dispatch resolves, as
+// GitHub names either: it names the repository the issue worked in, and a record on another would
+// create its branch there, disarm a stranger's pull request, and strand the workspace's unpushed
+// work; the operator sets the issue's repository in Dispatch to that one.
 //
 // The record keeps the spelling of the shared clone under stateDir that spells the repository
 // case-insensitively, since the issue's workspace and its sessions were made under that spelling
@@ -125,6 +127,15 @@ func fillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 				issue.Key, repo, pull.Number, pull.Repo, pull.Repo, issue.Key, pull.Repo))
 			continue
 		}
+		workspaces, err := issueWorkspaces(stateDir, issue.Key)
+		if err != nil {
+			return fmt.Errorf("fill the repository of %s: %w", issue.Key, err)
+		}
+		if dir, in, ok := workspaceElsewhere(workspaces, repo, read.Name); ok {
+			elsewhere = append(elsewhere, fmt.Sprintf("%s: Dispatch resolves it to %s, but its workspace %s is in %s: set the issue's repository in Dispatch to %s (dispatch issue-update --issue %s --repo %s)",
+				issue.Key, repo, dir, in, in, issue.Key, in))
+			continue
+		}
 		fills = append(fills, filled{issue.Key, spelling, read.DefaultBranch, read.Name.String()})
 	}
 	if len(elsewhere) > 0 {
@@ -145,6 +156,33 @@ func fillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 			"defaultBranch", fill.branch, "githubRepo", fill.github)
 	}
 	return nil
+}
+
+// issueWorkspaces is every workspace a tmux daemon provisioned for issue under stateDir, by the
+// repository its path names (workspace.Location: <state>/workspaces/<owner>/<name>/<issue>).
+// Kubernetes pods provision their own, so a daemon on that runtime has none.
+func issueWorkspaces(stateDir, issue string) (map[string]string, error) {
+	dirs, err := filepath.Glob(filepath.Join(stateDir, "workspaces", "*", "*", strings.ToLower(issue)))
+	if err != nil {
+		return nil, fmt.Errorf("list the workspaces of %s: %w", issue, err)
+	}
+	workspaces := map[string]string{}
+	for _, dir := range dirs {
+		name := filepath.Dir(dir)
+		workspaces[filepath.Base(filepath.Dir(name))+"/"+filepath.Base(name)] = dir
+	}
+	return workspaces, nil
+}
+
+// workspaceElsewhere is a workspace of workspaces in another repository than resolved or GitHub's
+// name of it, in any case, with that repository.
+func workspaceElsewhere(workspaces map[string]string, resolved, named ghrepo.Repository) (dir, in string, ok bool) {
+	for repo, dir := range workspaces {
+		if !strings.EqualFold(repo, resolved.String()) && !strings.EqualFold(repo, named.String()) {
+			return dir, repo, true
+		}
+	}
+	return "", "", false
 }
 
 // nameRepositories names every record of project that carries its repository but was written
