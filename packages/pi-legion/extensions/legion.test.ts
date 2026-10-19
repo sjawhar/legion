@@ -1556,6 +1556,8 @@ describe("Legion OMP extension", () => {
             generation: 2,
             phase: "retro",
             status: "in_progress",
+            repo: "acme/widgets",
+            defaultBranch: "main",
             workers: {},
           },
         },
@@ -1563,6 +1565,12 @@ describe("Legion OMP extension", () => {
         heldOutboxRows: [],
         strandedClaims: [],
         capabilities: [],
+        repositories: {
+          owners: ["acme"],
+          mapped: [{ repo: "acme/widgets", default: true }],
+          refused: [],
+          caches: [],
+        },
       };
       const booted = await bootPane({
         role: options.role ?? "implementer",
@@ -1629,6 +1637,52 @@ describe("Legion OMP extension", () => {
 
       expect(result).toEqual(followUp("written as text"));
       expect(result).toEqual(followUp("handoff_complete"));
+    });
+
+    // A follow-up for a tool call written as text that is answered with the same call, as text,
+    // gets one more: the call it failed to make is still the next step. A third gets none, so a
+    // stall sends at most two follow-ups.
+    test("a second tool call written as text in the same stall gets one more follow-up, and a third gets none", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      const textCall =
+        'court\n<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>\n<parameter name="summary">Round 1 reviewed.</parameter>\n</invoke>';
+
+      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
+      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
+      expect(await worker.settles(textCall)).toBeUndefined();
+      expect(await worker.settles("Still here.")).toBeUndefined();
+
+      // A new inbound event starts a new stall, with its own follow-ups.
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
+    });
+
+    test("a follow-up for a text call answered in plain words, or WAITING, is the stall's last", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      const textCall = '<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>';
+
+      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
+      expect(await worker.settles("I think I already completed.")).toBeUndefined();
+      expect(await worker.settles(textCall)).toBeUndefined();
+
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
+      expect(await worker.settles("WAITING: the architect")).toBeUndefined();
+      expect(await worker.settles(textCall)).toBeUndefined();
+    });
+
+    test("a plain stall's one follow-up answered with a text call gets none: only a text call earns the second", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+      expect(
+        await worker.settles(
+          '<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>'
+        )
+      ).toBeUndefined();
     });
 
     test("one follow-up per stall: the next settle is quiet until a new inbound event opens the next stall", async () => {
@@ -1884,6 +1938,15 @@ describe("Legion OMP extension", () => {
       const resumedClosed = await bootStalling({ branch: completed.entries });
       await resumedClosed.arrives(envoyEvent);
       expect(await resumedClosed.settles("Answered the question.")).toBeUndefined();
+
+      // A worker relaunched after its first text-call follow-up keeps that stall's second.
+      const textCall = '<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>';
+      const afterTextCall = await bootStalling({});
+      await afterTextCall.arrives(assignment);
+      await afterTextCall.settles(textCall);
+      const resumedTextCall = await bootStalling({ branch: afterTextCall.entries });
+      expect(await resumedTextCall.settles(textCall)).toEqual(followUp("written as text"));
+      expect(await resumedTextCall.settles(textCall)).toBeUndefined();
     });
 
     test("a sub-architect is never nudged", async () => {

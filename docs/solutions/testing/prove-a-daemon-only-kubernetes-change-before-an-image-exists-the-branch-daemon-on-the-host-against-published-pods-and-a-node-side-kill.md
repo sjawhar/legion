@@ -48,9 +48,9 @@ The Kubernetes runtime's own supported host shape proves a daemon-only change on
   `worker_stream_port` the pods can dial, `envoy_url`/`nats_urls`/`dispatch_url` at the same
   gateway, `state_dir` under the instance's scratch root. `resync_interval_seconds: 60` so the
   backstop is observable within the run.
-- Start it from the issue workspace: `bun packages/daemon/src/cli/index.ts start <project>
-  --config <that file>`. `--check-config` first; the run needs `DISPATCH_TOKEN` in the
-  environment when `dispatch_url` is set.
+- Start the branch's daemon from the issue workspace: build it (`go build -o /tmp/<issue>-legion
+  ./cmd/legion` in `packages/daemon`) and run `/tmp/<issue>-legion start --config <that file>`,
+  with `--check-config` first, which names any bearer file the configuration cannot read.
 - The pods run the published image unchanged. The change under test is on the host: the death
   path, the probe, the relaunch decision. The pod side (shim, OMP, the extension's boot
   handshake) is exactly what production runs.

@@ -63,9 +63,25 @@ const handed = true
 
 var fixedNow = time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 
+// testRepositories serves every repository the admission tests record issues on, each at main, and
+// leaves out acme/gadgets, whose review App is not installed.
+var testRepositories = servedRepositories{"sjawhar/legion": "main", "acme/widgets": "main", "acme/tools": "release/v7.1"}
+
+type servedRepositories map[string]string
+
+func (r servedRepositories) ResolveRepository(resolved string) (workflow.Resolution, error) {
+	if branch, ok := r[resolved]; ok {
+		return workflow.Resolution{Repo: resolved, DefaultBranch: branch, GitHubRepo: resolved}, nil
+	}
+	if resolved == "acme/gadgets" {
+		return workflow.Resolution{Refusal: "the review App is not installed on acme/gadgets", LeftOut: true}, nil
+	}
+	return workflow.Resolution{Refusal: resolved + " is not mapped to project " + testProject + " in Dispatch"}, nil
+}
+
 func newAdmission(t *testing.T, cap int, log *slog.Logger) *Admission {
 	t.Helper()
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Clock: func() time.Time { return fixedNow }}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Clock: func() time.Time { return fixedNow }}, log)
 	admission := New(record.NewStore(), engine, cap, testProject, log)
 	admission.now = func() time.Time { return fixedNow }
 	return admission
@@ -198,7 +214,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank, HandedOver: true}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: rank, HandedOver: true}); err != nil {
 			t.Fatalf("put active issue: %v", err)
 		}
 		slots, err := records.Slots(context.Background(), tx)
@@ -213,7 +229,7 @@ func seedSlotted(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 
 func seedWaiting(t *testing.T, pool *pgxpool.Pool, key, rank string) {
 	t.Helper()
-	putIssue(t, pool, record.Issue{Key: key, Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank, HandedOver: true})
+	putIssue(t, pool, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: key, Tree: key, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: rank, HandedOver: true})
 }
 
 func inTx(t *testing.T, pool *pgxpool.Pool, fn func(pgx.Tx)) {

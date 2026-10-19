@@ -121,7 +121,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	for _, v := range pod.Volumes {
 		volumes[v.Name] = v
 	}
-	for _, name := range []string{provisionVolume, feedVolume, tempVolume} {
+	for _, name := range []string{provisionVolume, tempVolume} {
 		if _, ok := volumes[name]; ok {
 			t.Errorf("the controller's pod has the %s volume, which only provisioning a workspace needs", name)
 		}

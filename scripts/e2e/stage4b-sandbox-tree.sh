@@ -1138,7 +1138,7 @@ nats_urls:
 dispatch_url: $dispatch_base
 dispatch_token_file: $work/dispatch-token
 projects:
-  $project: { repo: $repo }
+  $project: {}
 gates:
   design: "${design_gate:-off}"
 admission_cap: $admission_cap
@@ -2991,6 +2991,16 @@ for key in $stale; do
   note "moved stale todo issue $key to backlog"
 done
 [ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "$project still holds todo issues"
+# The project's repository is Dispatch's mapping, not a key of legion.yaml: the daemon boots only
+# on a project with a repository mapped, and records an issue on the repository Dispatch resolves
+# for it, so $repo is mapped to $project as its default before the daemon starts. A mapping already
+# so is left as it is; the write names $project alone.
+if ! dispatch_get settings/repo-projects | jq -e --arg repo "$repo" --arg project "$project" \
+  'any(.[]; .repo == $repo and .project == $project and .default == true)' >/dev/null; then
+  dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null ||
+    fail "map $repo to $project as its default repository in production Dispatch"
+  note "mapped $repo to $project as its default repository"
+fi
 # The configured stream carries both halves of the workflow's intake. Each `last` call reads one
 # ordered-consumer message under its 20-second budget instead of draining every matching subject.
 # Dispatch publishes every project's issue events under subjects that name the issue, so any

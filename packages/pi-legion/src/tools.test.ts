@@ -224,6 +224,23 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
   });
 });
 
+// Every role reads one description, and the daemon accepts a verdict from the tester alone
+// (VERDICT_ROLE_FORBIDDEN): it may not leave another role to infer from its own instructions that
+// it reports one.
+test("the legion tool's description gives a verdict to the tester alone", () => {
+  const tool = createLegionTool({
+    pi,
+    daemon: recordingDaemon({}).daemon,
+    controllerGrant: noControllerGrant,
+    onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
+    resolveDocument: noDocumentLookup,
+    session: () => claimSession("reviewer"),
+  });
+  expect(tool.description).toContain("`verdict` pass|fail from the tester alone");
+  expect(tool.description).not.toContain("when your role's instructions require one");
+});
+
 test("a workflow refusal tells the agent both its code and message", async () => {
   const refusal = Object.assign(
     new Error(

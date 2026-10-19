@@ -12,7 +12,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -51,10 +50,10 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 			}
 			t.Cleanup(st.Close)
 			records := record.NewStore()
-			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
+			root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
 			putOutboxIssue(t, pool, records, root)
 			parent := root.Key
-			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+			child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
 			if tc.withChild {
 				putOutboxIssue(t, pool, records, child)
 			}
@@ -76,7 +75,7 @@ func TestAReservedTreeCloseFinishesItsCleanupAfterReadmission(t *testing.T) {
 			t.Cleanup(sup.stop)
 			runner := &outbox{log: quietLogger(),
 				dispatchProject: "LEGION",
-				pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
+				pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 				},
@@ -177,10 +176,10 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 			st := outboxTreeStore(t, pool, "LEGION-208")
 			records := record.NewStore()
 			until := time.Now().Add(-time.Minute)
-			root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
+			root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
 			putOutboxIssue(t, pool, records, root)
 			parent := root.Key
-			child := record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "V"}
+			child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "V"}
 			putOutboxIssue(t, pool, records, child)
 
 			rt := fake.NewRuntime()
@@ -218,7 +217,7 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 			}
 
 			runner := &outbox{log: quietLogger(), dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{},
-				project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
+				project: "legion", stateDir: t.TempDir(),
 				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-209"}, nil
 				},
@@ -252,7 +251,7 @@ func TestANeverOpenedTreesLingerClosesFinishWithoutRetrying(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "waiting", Phase: phase.Admitted, Generation: 1,
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "waiting", Phase: phase.Admitted, Generation: 1,
 		Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	st := outboxTreeStore(t, pool) // no slot ever opened the tree
@@ -264,19 +263,19 @@ func TestANeverOpenedTreesLingerClosesFinishWithoutRetrying(t *testing.T) {
 		PluginContract: 24,
 	}
 	t.Cleanup(sup.stop)
-	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 1, "legion", quietLogger())
 	var logs bytes.Buffer
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
+		pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
 		remove: func(context.Context, workspace.Workspace) error { return nil },
 	}
 
 	// A person moves the waiting root to backlog: it leaves the line and lingers.
-	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "backlog", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "backlog", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
 		t.Fatalf("apply the backlog: %v", err)
 	}
 	rows := func() (closes, all int) {

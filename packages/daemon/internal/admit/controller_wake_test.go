@@ -50,7 +50,7 @@ func tick(t *testing.T, pool *pgxpool.Pool, admission *Admission, eventID string
 }
 
 func unlabelledTodo(key string) intake.DispatchIssue {
-	return intake.DispatchIssue{Key: key, Seq: 1, Type: "issue.updated", Status: "todo", Title: key, Rank: "M"}
+	return intake.DispatchIssue{Key: key, ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.updated", Status: "todo", Title: key, Rank: "M"}
 }
 
 // An issue nobody handed to Legion moving into todo is a new candidate for the controller's walk,

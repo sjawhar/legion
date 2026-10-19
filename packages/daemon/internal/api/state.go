@@ -57,6 +57,75 @@ type State struct {
 	// — each open deployment row with the legion.yaml line that records a decision. Never null; a
 	// gap is reported here, never refused (contract 16).
 	Capabilities []CapabilityState `json:"capabilities"`
+	// Repositories is the project's repository mapping as the daemon serves it: the owners its
+	// roles' credentials span, each repository it serves with its cache, each mapped repository it
+	// leaves out with why (a GitHub App not installed on it), and the caches of repositories the
+	// mapping no longer names. Never null: a daemon with no workflow serves none.
+	Repositories RepositoriesView `json:"repositories"`
+}
+
+// RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
+// Refused and Caches are sorted, and never null. Caches are the repository caches of repositories
+// the mapping no longer names, each kept until its RetainedUntil (contract 32).
+type RepositoriesView struct {
+	Owners  []string                `json:"owners"`
+	Mapped  []MappedRepositoryView  `json:"mapped"`
+	Refused []RefusedRepositoryView `json:"refused"`
+	Caches  []CacheView             `json:"caches"`
+}
+
+// MappedRepositoryView is a repository the daemon serves, as GitHub names it, whether it is the
+// project's default in Dispatch, and, under the Kubernetes runtime, its repository cache once the
+// runtime has made one (absent before, and under tmux).
+type MappedRepositoryView struct {
+	Repo    string     `json:"repo"`
+	Default bool       `json:"default"`
+	Cache   *CacheView `json:"cache,omitempty"`
+}
+
+// CacheView is a repository cache as the Kubernetes runtime shows it: its repository and Sandbox;
+// its state — starting, cloning, ready, failing with the kubelet's reason, or refused, naming the
+// Service of its name that is not its own and why — and, while its pod is Ready behind its own
+// Service, its address; from its last health read (the runtime's minute tick) the default
+// branch's head, when it last fetched GitHub and the bytes it serves, or why its /healthz could not
+// be read; and, for a repository the mapping no longer names, until when it is kept (contract 32).
+type CacheView struct {
+	Repo          string    `json:"repo"`
+	Sandbox       string    `json:"sandbox"`
+	State         string    `json:"state"`
+	Reason        string    `json:"reason,omitempty"`
+	Ready         bool      `json:"ready"`
+	Address       string    `json:"address,omitempty"`
+	Head          string    `json:"head,omitempty"`
+	LastFetchAt   time.Time `json:"lastFetchAt,omitzero"`
+	Bytes         int64     `json:"bytes,omitzero"`
+	HealthError   string    `json:"healthError,omitempty"`
+	RetainedUntil time.Time `json:"retainedUntil,omitzero"`
+}
+
+// RefusedRepositoryView is a mapped repository the daemon leaves out, as Dispatch maps it, and why.
+type RefusedRepositoryView struct {
+	Repo   string `json:"repo"`
+	Reason string `json:"reason"`
+}
+
+// MarshalJSON keeps the four lists arrays on the wire.
+func (r RepositoriesView) MarshalJSON() ([]byte, error) {
+	type wire RepositoriesView
+	out := wire(r)
+	if out.Owners == nil {
+		out.Owners = []string{}
+	}
+	if out.Mapped == nil {
+		out.Mapped = []MappedRepositoryView{}
+	}
+	if out.Refused == nil {
+		out.Refused = []RefusedRepositoryView{}
+	}
+	if out.Caches == nil {
+		out.Caches = []CacheView{}
+	}
+	return json.Marshal(out)
 }
 
 // CapabilityState is one row of that report. Status is "present", "unchecked", "withheld",
@@ -179,6 +248,11 @@ type Issue struct {
 	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
 	Status string `json:"status"`
+	// Repo is the repository (owner/name) the issue targets and DefaultBranch that repository's
+	// default branch, both taken when the daemon first recorded the issue and never changed after.
+	// Both are absent on an issue the workflow does not record (an operator's claim, Unrecorded).
+	Repo          string `json:"repo,omitempty"`
+	DefaultBranch string `json:"defaultBranch,omitempty"`
 	// HoldReason is why a held issue is held, when its hold has one: `escalated` once its architect
 	// sent it to the controller. Absent otherwise, and absent while the issue's tree lingers or is
 	// closed: the record keeps the reason, and the view shows it again once the tree is re-admitted.
@@ -272,6 +346,8 @@ type PhaseView struct {
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
 type PullRequestView struct {
+	// Repo is the repository (owner/name) the pull request is in, its issue's.
+	Repo           string `json:"repo"`
 	Number         int    `json:"number"`
 	Head           string `json:"head"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`

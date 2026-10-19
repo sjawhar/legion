@@ -627,8 +627,9 @@ func noGitRepository() ([]ghRemote, error) { return nil, nil }
 
 // gh reads the repository of a command naming none from the working directory's git remotes, and
 // readGitRemotes reads them with git as gh does: every fetch and push URL `git remote -v` prints,
-// insteadOf applied, and every remote's gh-resolved setting; a directory that is no git repository
-// has none.
+// insteadOf applied, a partial clone's fetch line too (git prints its filter after it, as
+// `(fetch) [blob:none]`), and every remote's gh-resolved setting; a directory that is no git
+// repository has none.
 func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git on this machine")
@@ -646,6 +647,8 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 		{"remote", "add", "upstream", "gh:sjawhar/legion"},
 		{"config", "url.git@github.com:.insteadOf", "gh:"},
 		{"config", "remote.origin.gh-resolved", "base"},
+		{"config", "remote.upstream.promisor", "true"},
+		{"config", "remote.upstream.partialclonefilter", "blob:none"},
 	} {
 		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
@@ -661,6 +664,40 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	}
 	if err != nil || !slices.Equal(remotes, want) {
 		t.Errorf("readGitRemotes = %+v, %v; want %+v", remotes, err, want)
+	}
+}
+
+// git prints a remote's URL and partial clone filter as they are configured, so whitespace in
+// either lets gh's greedy reading of the line take another URL than the one before its first
+// ` (`: readGitRemotes refuses such a line, naming it, rather than count an owner gh may not act
+// on. The three shapes the gates probed, each gh acting on evilown's repository: a filter holding a
+// second `<url> (fetch)`, the same after a GitHub URL, and a URL holding a second URL.
+func TestReadGitRemotesRefusesALineGhReadsOtherwise(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git on this machine")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	for _, tc := range []struct{ name, url, filter string }{
+		{"a filter holding a second URL", "https://example.com/a/b", "blob:none https://github.com/evilown/y (fetch)"},
+		{"a filter closing and reopening its brackets", "https://github.com/acme/widgets", "x] https://github.com/evilown/y (fetch) [y"},
+		{"a URL holding a second URL", "https://example.com/x https://github.com/evilown/y", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			config := [][]string{{"init", "-q"}, {"remote", "add", "origin", tc.url}}
+			if tc.filter != "" {
+				config = append(config, []string{"config", "remote.origin.promisor", "true"}, []string{"config", "remote.origin.partialclonefilter", tc.filter})
+			}
+			for _, args := range config {
+				if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+			}
+			if remotes, err := readGitRemotes(); err == nil || !strings.Contains(err.Error(), "git remote -v printed") || !strings.Contains(err.Error(), "evilown") {
+				t.Errorf("readGitRemotes = %+v, %v; want the line naming evilown refused", remotes, err)
+			}
+		})
 	}
 }
 

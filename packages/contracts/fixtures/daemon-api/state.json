@@ -22,6 +22,8 @@
       "generation": 3,
       "phase": "implementing",
       "status": "in_progress",
+      "repo": "acme/widgets",
+      "defaultBranch": "main",
       "architect": {
         "session": "ses_architect_208",
         "state": "ready",
@@ -94,6 +96,7 @@
         }
       },
       "pullRequest": {
+        "repo": "acme/widgets",
         "number": 1247,
         "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
         "checksVerdict": "pending",
@@ -115,6 +118,8 @@
       "generation": 1,
       "phase": "held",
       "status": "in_progress",
+      "repo": "zeta/tools",
+      "defaultBranch": "release/v7.1",
       "holdReason": "escalated",
       "workers": {
         "implementer": {
@@ -262,5 +267,53 @@
       "status": "withheld",
       "detail": "dispatch://LEGION-551, dispatch://LEGION-205: acts under a production identity of its own"
     }
-  ]
+  ],
+  "repositories": {
+    "owners": [
+      "acme",
+      "zeta"
+    ],
+    "mapped": [
+      {
+        "repo": "acme/widgets",
+        "default": true,
+        "cache": {
+          "repo": "acme/widgets",
+          "sandbox": "legion-legion-cache-acme-widgets-d782c874",
+          "state": "ready",
+          "ready": true,
+          "address": "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+          "head": "34a7ac80e9c3389ffbc1bbeece371ccacc043992",
+          "lastFetchAt": "2026-10-16T19:20:30Z",
+          "bytes": 6612345678
+        }
+      },
+      {
+        "repo": "zeta/tools",
+        "default": false,
+        "cache": {
+          "repo": "zeta/tools",
+          "sandbox": "legion-legion-cache-zeta-tools-1b2c3d4e",
+          "state": "failing",
+          "reason": "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+          "ready": false
+        }
+      }
+    ],
+    "refused": [
+      {
+        "repo": "acme/gadgets",
+        "reason": "the review App is not installed on acme/gadgets"
+      }
+    ],
+    "caches": [
+      {
+        "repo": "acme/legacy",
+        "sandbox": "legion-legion-cache-acme-legacy-0a1b2c3d",
+        "state": "starting",
+        "ready": false,
+        "retainedUntil": "2026-10-23T09:00:00Z"
+      }
+    ]
+  }
 }

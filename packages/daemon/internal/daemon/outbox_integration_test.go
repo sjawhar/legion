@@ -19,7 +19,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -295,6 +294,9 @@ func (d *blockingDispatch) MessageBodiesSince(context.Context, string, time.Time
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *blockingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -445,6 +447,9 @@ func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *refusingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
 type boardDispatch struct {
@@ -475,6 +480,9 @@ func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) (
 }
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
+}
+func (d *boardDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
 }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
@@ -589,7 +597,7 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	records := record.NewStore()
 	// A tree's close is the expiry of its linger, so the tree lingers when the row runs.
 	until := time.Now().Add(-time.Minute)
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
@@ -602,7 +610,7 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root claim: %v", err)
 	}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir()}
 
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop the root at its tree's close: %v", err)
@@ -625,7 +633,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	until := time.Now().Add(-time.Minute)
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.TreeClosable = (&workflowRuntime{pool: pool, records: records}).treeClosable // exactly what daemon.go wires in production
@@ -651,7 +659,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	}
 
 	// The workflow's own close of that same tree goes through and releases the root.
-	runner := &outbox{pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch}
+	runner := &outbox{pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir()}
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{
 		Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation,
 	}, time.Now())); err != nil {
@@ -675,7 +683,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what daemon.go wires in production
@@ -692,7 +700,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 	conn := fake.NewConn()
 	sup.deps.Conns.(*fake.Conns).Register(token, conn)
 	runner := &outbox{
-		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
+		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 		log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
@@ -738,7 +746,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 
 	// The phase ends while the retry waits: the work the task asks for is done.
 	putOutboxIssue(t, pool, records, record.Issue{
-		Key: issue.Key, Project: issue.Project, Tree: issue.Tree, Title: issue.Title, Phase: phase.Testing, Generation: 1, Status: "testing",
+		Key: issue.Key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: issue.Project, Tree: issue.Tree, Title: issue.Title, Phase: phase.Testing, Generation: 1, Status: "testing",
 	})
 	prompts := len(conn.Prompts())
 
@@ -764,7 +772,7 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -786,7 +794,7 @@ func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	now := time.Now().UTC()
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
+		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 		now: func() time.Time { return now }, log: slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "the retry's task", Generation: issue.Generation}, now))

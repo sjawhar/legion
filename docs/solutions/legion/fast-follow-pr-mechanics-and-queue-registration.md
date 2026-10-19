@@ -125,7 +125,7 @@ fact, and correcting it is worth the extra CI run a body edit costs.
 
 ## Related
 
-- [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` is the
-  deployed build; the follow-up's live proof also uses `bun packages/daemon/src/cli/index.ts …`.
+- [worker-pane-shell-gotchas](worker-pane-shell-gotchas.md) §13 — the pane's `legion` and `gh` are
+  the deployed build; a follow-up's live proof runs the branch's own build by path.
 - [conflict-only-rebases-keep-the-diff-auditable](conflict-only-rebases-keep-the-diff-auditable.md)
   — the same never-rebase-without-a-conflict rule applies to the follow-up branch.

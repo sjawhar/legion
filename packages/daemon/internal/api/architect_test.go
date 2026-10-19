@@ -113,6 +113,10 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
 
+func (r *statusRecorder) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
+
 var _ dispatch.Client = (*statusRecorder)(nil)
 
 func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder, *statusRecorder) {
@@ -142,14 +146,14 @@ func seedTree(t *testing.T, h *harness, root string, children ...string) {
 	records := record.NewStore()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		if err := records.PutIssue(context.Background(), tx, record.Issue{
-			Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Status: "in_progress",
+			Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Status: "in_progress",
 		}); err != nil {
 			return err
 		}
 		for _, child := range children {
 			parent := root
 			if err := records.PutIssue(context.Background(), tx, record.Issue{
-				Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent,
+				Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent,
 				Phase: phase.Planning, Status: "in_progress",
 			}); err != nil {
 				return err
@@ -431,8 +435,8 @@ func TestABrokenParentChainIsTheTreeRootArchitects(t *testing.T) {
 	records := record.NewStore()
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		for _, child := range []record.Issue{
-			{Key: "LEGION-211", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
-			{Key: "LEGION-212", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
 		} {
 			if err := records.PutIssue(context.Background(), tx, child); err != nil {
 				return err
@@ -511,11 +515,11 @@ func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *t
 	seedTree(t, h, "LEGION-208")
 	root, child := "LEGION-208", "LEGION-209"
 	statuses.issues = map[string]dispatch.Issue{
-		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
-		"LEGION-209": {Key: "LEGION-209", Status: "backlog", Parent: &root},
-		"LEGION-210": {Key: "LEGION-210", Status: "triage", Parent: &child},
-		"LEGION-211": {Key: "LEGION-211", Status: "in_progress", Parent: &root},
-		"LEGION-212": {Key: "LEGION-212", Status: "backlog"},
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root},
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "triage", Parent: &child},
+		"LEGION-211": {Key: "LEGION-211", ResolvedRepo: "acme/widgets", Status: "in_progress", Parent: &root},
+		"LEGION-212": {Key: "LEGION-212", ResolvedRepo: "acme/widgets", Status: "backlog"},
 	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
@@ -565,9 +569,9 @@ func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing
 	seedTree(t, h, "LEGION-208", "LEGION-209") // the first attempt's todo event recorded LEGION-209
 	root := "LEGION-208"
 	statuses.issues = map[string]dispatch.Issue{
-		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
-		"LEGION-209": {Key: "LEGION-209", Status: "todo", Parent: &root},    // the first attempt released it
-		"LEGION-210": {Key: "LEGION-210", Status: "backlog", Parent: &root}, // its write is the one that failed
+		"LEGION-208": {Key: "LEGION-208", ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", ResolvedRepo: "acme/widgets", Status: "todo", Parent: &root},    // the first attempt released it
+		"LEGION-210": {Key: "LEGION-210", ResolvedRepo: "acme/widgets", Status: "backlog", Parent: &root}, // its write is the one that failed
 	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 

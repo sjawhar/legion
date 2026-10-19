@@ -14,11 +14,9 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -80,7 +78,6 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	repo            ghrepo.Repository
 	log             *slog.Logger
 	// now is the moment a row is listed, claimed, renewed and retried at; clock arms the lanes'
 	// timers — the sweep's, a lane's wait for its next due row, a running row's lease renewal.
@@ -92,9 +89,10 @@ type outbox struct {
 	provision func(context.Context, workspace.Request) (workspace.Workspace, error)
 	remove    func(context.Context, workspace.Workspace) error
 	// provisionMu runs the workspace provisions and removals one at a time: every issue's
-	// workspace of this outbox is a jj workspace of one shared clone, and the clone's `jj git
+	// workspace is a jj workspace of its repository's shared clone, and the clone's `jj git
 	// fetch` and `workspace add` corrupt it when two run at once. Lanes run issues side by side,
-	// so without it two issues' starts could both be provisioning.
+	// so without it two issues' starts could both be provisioning. One lock serves every
+	// repository's clone.
 	provisionMu sync.Mutex
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
@@ -105,9 +103,6 @@ type outbox struct {
 	// limitsMu guards it (deferral, noteLimit).
 	limitsMu sync.Mutex
 	limits   map[githubrest.Budget]rateLimit
-	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of): the
-	// base an issue's branch is created at and its workspace provisioned from.
-	defaultBranch func(context.Context, ghrepo.Repository) (string, error)
 	// The lane registry (outbox_lanes.go). mu guards running, laneCtx and lanes; running is true
 	// between Run's start and its stop, laneCtx is Run's context, which every lane runs under, and
 	// lanes is each live lane by its key. wg counts the lane goroutines, so Run returns only once
@@ -128,14 +123,14 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, githubAPI string, defaultBranch func(context.Context, ghrepo.Repository) (string, error), tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
-		defaultBranch: defaultBranch, log: log, now: time.Now, clock: supervise.RealClock{},
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
+		log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -1090,6 +1085,8 @@ func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string
 // (C4): then the daemon provisions and removes none on its host.
 func (r *outbox) podsProvision() bool { return r.supervisor.deps.Runtime.ProvisionsWorkspaces() }
 
+// provisionWorkspace provisions issue's workspace in the repository its record names, at the
+// default branch the record names, as the implement App for that repository's owner.
 func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) error {
 	if r.podsProvision() {
 		return nil
@@ -1097,24 +1094,21 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	if r.repo.IsZero() {
-		return errors.New("workspace provisioning has no configured repository")
-	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
-	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", r.repo.Owner(), issue.Key, err)
-	}
-	base, err := r.defaultBranch(ctx, r.repo)
+	repo, err := issue.Repository()
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
-	// One provision at a time (provisionMu): the issue's workspace is added to the clone every
-	// issue of this project shares, and a second issue's lane provisioning beside this one would
-	// have the clone fetching and adding under both.
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), issue.Key, err)
+	}
+	// One provision at a time (provisionMu): the issue's workspace is added to its repository's
+	// shared clone, which every issue on that repository shares, and a second issue's lane
+	// provisioning beside this one would have the clone fetching and adding under both.
 	r.provisionMu.Lock()
 	defer r.provisionMu.Unlock()
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, DefaultBranch: base, CredentialHelper: workspace.GitHubCredentialHelper,
+		StateDir: r.stateDir, Repo: repo, Issue: issue.Key, DefaultBranch: issue.DefaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
 	}); err != nil {
@@ -1184,28 +1178,29 @@ func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload 
 		r.log.Info("outbox issue branch of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key, "tree", issue.Tree)
 		return nil
 	}
-	if err := r.createBranch(ctx, issue.Key); err != nil {
+	if err := r.createBranch(ctx, issue); err != nil {
 		return fmt.Errorf("create the branch of %s, which its roles' starts wait for: %w", issue.Key, err)
 	}
 	return nil
 }
 
-// createBranch creates issue's branch on GitHub at the repository's default branch, as GitHub
-// names it, unless GitHub already has it, as the implement App: the App of the roles that write an
-// issue branch (appauth.AppRoleFor), and the one workspace provisioning clones with.
-func (r *outbox) createBranch(ctx context.Context, issue string) error {
+// createBranch creates issue's branch on GitHub, in the repository its record names, at the
+// default branch the record names, unless GitHub already has it, as the implement App for that
+// repository's owner: the App of the roles that write an issue branch (appauth.AppRoleFor), and
+// the one workspace provisioning clones with.
+func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
 	defer cancel()
-	base, err := r.defaultBranch(ctx, r.repo)
+	repo, err := issue.Repository()
 	if err != nil {
 		return err
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s: %w", r.repo.Owner(), err)
+		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
-	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue), base)
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repo)}
+	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
@@ -1214,9 +1209,6 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	}
 	if r.podsProvision() {
 		return nil
-	}
-	if r.repo.IsZero() {
-		return errors.New("workspace removal has no configured repository")
 	}
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
@@ -1246,7 +1238,11 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 			return wait.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
 		}
 	}
-	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
+	repo, err := issue.Repository()
+	if err != nil {
+		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
+	}
+	working, err := workspace.Location(r.stateDir, repo, row.Issue)
 	if err != nil {
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}

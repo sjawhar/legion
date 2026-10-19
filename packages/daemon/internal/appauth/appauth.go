@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,11 +43,14 @@ var Roles = []AppRole{Implement, Review}
 // GitIdentity is the bot identity that jj and git must use for work a role performs.
 type GitIdentity = runtime.GitIdentity
 
-// Lease is one installation-token lease, including its expiry and the App bot identity.
+// Lease is one installation-token lease, including its expiry, when it was minted and the App bot
+// identity.
 type Lease struct {
 	Token     string
 	ExpiresAt time.Time
-	Identity  GitIdentity
+	// Minted is when GitHub issued the token: one moments old may not be accepted yet.
+	Minted   time.Time
+	Identity GitIdentity
 }
 
 // TransientError is a GitHub answer that says nothing about the App or its installation, so the
@@ -180,6 +184,26 @@ func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Le
 	return m.lease(ctx, role, owner, "read:", readPermissions)
 }
 
+// Forgetter drops the leases a token source holds for an App role and owner, so the next one is
+// minted: a token GitHub refused (401) is not served again from the cache.
+type Forgetter interface {
+	Forget(role AppRole, owner string)
+}
+
+// Forget drops every lease cached for role and owner, the write token's and the read token's.
+func (m *Manager) Forget(role AppRole, owner string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.leases, leaseKey("", role, owner))
+	delete(m.leases, leaseKey("read:", role, owner))
+}
+
+// leaseKey is the cache key of role's lease for owner under prefix: the write token's under "",
+// the read token's under "read:".
+func leaseKey(prefix string, role AppRole, owner string) string {
+	return prefix + string(role) + ":" + strings.ToLower(strings.TrimSpace(owner))
+}
+
 // lease serves the cached lease under prefix+role+owner while more than refreshWindow remains, and
 // otherwise mints one with permissions (nil: the installation's own), sharing one exchange among
 // concurrent callers.
@@ -188,7 +212,7 @@ func (m *Manager) lease(ctx context.Context, role AppRole, owner, prefix string,
 	if owner == "" {
 		return Lease{}, fmt.Errorf("GitHub App owner must not be empty")
 	}
-	cacheKey := prefix + string(role) + ":" + strings.ToLower(owner)
+	cacheKey := leaseKey(prefix, role, owner)
 	now := m.now()
 
 	m.mu.Lock()
@@ -221,6 +245,10 @@ func (m *Manager) lease(ctx context.Context, role AppRole, owner, prefix string,
 	return lease, err
 }
 
+// mint mints role's installation token for owner. An installation the daemon found that answers
+// the exchange 404 was removed since (errInstallationGone): it is forgotten and looked for once
+// more, so a removed App answers ErrNotInstalled and an App installed there again mints on its new
+// installation. A configured installation answering 404 is not installed either.
 func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissions map[string]string) (Lease, error) {
 	app, err := m.app(role)
 	if err != nil {
@@ -235,6 +263,17 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 		return Lease{}, err
 	}
 	lease, err := m.exchange(ctx, jwt, installation, permissions)
+	if errors.Is(err, errInstallationGone) && configuredInstallation(app, owner) == "" {
+		m.forgetInstallation(role, owner)
+		if installation, err = m.installation(ctx, role, app, owner); err != nil {
+			return Lease{}, err
+		}
+		lease, err = m.exchange(ctx, jwt, installation, permissions)
+	}
+	if errors.Is(err, errInstallationGone) {
+		m.forgetInstallation(role, owner)
+		return Lease{}, fmt.Errorf("%w: %s's installation %s on %s answers %w", ErrNotInstalled, role, installation, owner, err)
+	}
 	if err != nil {
 		return Lease{}, err
 	}
@@ -259,10 +298,8 @@ func (m *Manager) app(role AppRole) (config.GitHubApp, error) {
 
 func (m *Manager) installation(ctx context.Context, role AppRole, app config.GitHubApp, owner string) (string, error) {
 	ownerKey := strings.ToLower(owner)
-	for configuredOwner, installation := range app.Installations {
-		if strings.EqualFold(configuredOwner, owner) && installation != "" {
-			return installation, nil
-		}
+	if installation := configuredInstallation(app, owner); installation != "" {
+		return installation, nil
 	}
 	m.mu.Lock()
 	if installations := m.installations[role]; installations != nil {
@@ -287,10 +324,35 @@ func (m *Manager) installation(ctx context.Context, role AppRole, app config.Git
 	installation := m.installations[role][ownerKey]
 	m.mu.Unlock()
 	if installation == "" {
-		return "", fmt.Errorf("github_app_not_installed: %s not installed on %s", role, owner)
+		return "", fmt.Errorf("%w: %s not installed on %s", ErrNotInstalled, role, owner)
 	}
 	return installation, nil
 }
+
+// configuredInstallation is the installation app's configuration names for owner, if any.
+func configuredInstallation(app config.GitHubApp, owner string) string {
+	for configuredOwner, installation := range app.Installations {
+		if strings.EqualFold(configuredOwner, owner) && installation != "" {
+			return installation
+		}
+	}
+	return ""
+}
+
+// forgetInstallation drops the installation found for role on owner, for the next mint to look
+// for it again.
+func (m *Manager) forgetInstallation(role AppRole, owner string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.installations[role], strings.ToLower(owner))
+}
+
+// errInstallationGone is a token exchange GitHub answers 404: the installation is no longer there.
+var errInstallationGone = errors.New("the installation is gone")
+
+// ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
+// about the owner, not GitHub's trouble, which a retry would only repeat.
+var ErrNotInstalled = errors.New("github_app_not_installed")
 
 func (m *Manager) discoverInstallations(ctx context.Context, app config.GitHubApp) (map[string]string, error) {
 	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
@@ -381,7 +443,11 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		body := refusalBody(response)
-		return Lease{}, transient(response, body, fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body))))
+		failed := fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body)))
+		if response.StatusCode == http.StatusNotFound {
+			return Lease{}, fmt.Errorf("%w: %w", errInstallationGone, failed)
+		}
+		return Lease{}, transient(response, body, failed)
 	}
 	body, err := readBody(response, "GitHub App token exchange")
 	if err != nil {
@@ -398,7 +464,7 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 	if err != nil || payload.Token == "" {
 		return Lease{}, fmt.Errorf("GitHub App token exchange returned an invalid response")
 	}
-	return Lease{Token: payload.Token, ExpiresAt: expiresAt}, nil
+	return Lease{Token: payload.Token, ExpiresAt: expiresAt, Minted: m.now()}, nil
 }
 
 func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken string) (GitIdentity, error) {
@@ -433,45 +499,26 @@ func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken st
 }
 
 func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken string) (GitIdentity, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app", nil)
+	slug, err := m.appSlug(ctx, jwt)
 	if err != nil {
 		return GitIdentity{}, err
 	}
-	m.appHeaders(request, jwt)
-	response, err := m.client.Do(request)
-	if err != nil {
-		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
-	}
-	body, err := readBody(response, "GitHub App identity lookup")
-	if err != nil {
-		return GitIdentity{}, err
-	}
-	var app struct {
-		Slug string `json:"slug"`
-	}
-	if err := json.Unmarshal(body, &app); err != nil || app.Slug == "" {
-		return GitIdentity{}, fmt.Errorf("GitHub App identity lookup returned an invalid app slug")
-	}
-
-	login := app.Slug + "[bot]"
-	request, err = http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
+	login := slug + "[bot]"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
 	if err != nil {
 		return GitIdentity{}, err
 	}
 	request.Header.Set("Authorization", "token "+installationToken)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "legion-daemon")
-	response, err = m.client.Do(request)
+	response, err := m.client.Do(request)
 	if err != nil {
 		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App bot identity lookup: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode))
 	}
-	body, err = readBody(response, "GitHub App bot identity lookup")
+	body, err := readBody(response, "GitHub App bot identity lookup")
 	if err != nil {
 		return GitIdentity{}, err
 	}
@@ -489,6 +536,34 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 		Name:  login,
 		Email: id + "+" + login + "@users.noreply.github.com",
 	}, nil
+}
+
+// appSlug is the slug of the App jwt signs for, read from GET /app: its bot login is the slug's,
+// "<slug>[bot]".
+func (m *Manager) appSlug(ctx context.Context, jwt string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app", nil)
+	if err != nil {
+		return "", err
+	}
+	m.appHeaders(request, jwt)
+	response, err := m.client.Do(request)
+	if err != nil {
+		return "", &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
+	}
+	body, err := readBody(response, "GitHub App identity lookup")
+	if err != nil {
+		return "", err
+	}
+	var app struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(body, &app); err != nil || app.Slug == "" {
+		return "", fmt.Errorf("GitHub App identity lookup returned an invalid app slug")
+	}
+	return app.Slug, nil
 }
 
 func (m *Manager) appHeaders(request *http.Request, jwt string) {

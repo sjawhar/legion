@@ -282,10 +282,10 @@ type Deps struct {
 	// Secrets is the secrets broker's enrollment routes for the runtime's pods. nil
 	// deploys with no broker: no identity is kept, and nothing is enrolled or revoked.
 	Secrets Enroller
-	// Identity is the git identity a role's commits carry: its App's bot. Every delivery hands it
-	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
-	// nothing.
-	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// Identity is the git identity a role's commits carry on issue: its App's bot, minted for the
+	// owner of the repository the issue works. Every delivery hands it to the agent's working copy
+	// before the task. nil, for a daemon with no workflow or no GitHub Apps, adopts nothing.
+	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
 	// VolumeLost is told of a claim whose issue's volume was found lost as it relaunches that claim
 	// fresh, so the daemon can tell the issue's other claims (IssueVolumeLost): their sessions were
 	// on the same volume. nil tells no one.

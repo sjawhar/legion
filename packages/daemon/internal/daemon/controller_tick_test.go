@@ -41,7 +41,7 @@ func TestTheControllerTickQueuesOneWakeWhileASlotIsFree(t *testing.T) {
 	if ok, err := st.RegisterController(context.Background(), token, generation, "ses-controller", []byte("secret"), time.Now(), 0); err != nil || !ok {
 		t.Fatalf("register the controller = %t, %v", ok, err)
 	}
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
 		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},
@@ -80,7 +80,7 @@ func TestTheControllerTickQueuesOneWakeWhileASlotIsFree(t *testing.T) {
 func TestTheControllerTickComesShortlyAfterTheRuntimeStarts(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories}, log)
 	admission := admit.New(record.NewStore(), engine, 1, "CAPTURE", log)
 	w := &workflowRuntime{
 		pool: pool, admission: admission, handlers: []intake.Handler{engine, admission},

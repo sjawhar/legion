@@ -16,9 +16,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// A pane commits as its role's App, minted for its repository's owner: the launch carries the six
-// git identity variables every worker pane gets, nothing else of the Apps, and a launch whose
-// identity cannot be resolved does not happen.
+// A pane commits as its role's App, minted for the owner of the repository its issue works: the
+// launch carries the six git identity variables every worker pane gets, nothing else of the Apps,
+// and a launch whose identity cannot be resolved does not happen.
 func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	stateDir := t.TempDir()
 	token, err := claim.NewToken("s1", "S1-1", claim.RoleImplementer)
@@ -34,28 +34,24 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	}
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
 	var owners []string
-	s := specs{stateDir: stateDir, project: "s1", identity: func(_ context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
-		if role != claim.RoleImplementer {
-			t.Errorf("identity asked for %s, want the claim's role", role)
-		}
-		owners = append(owners, owner)
-		return bot, nil
-	}}
+	s := specs{stateDir: stateDir, project: "s1",
+		repository: func(context.Context, string) (ghrepo.Repository, string, error) {
+			return ghrepo.MustParse("zeta/tools"), "main", nil
+		},
+		identity: func(_ context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+			if role != claim.RoleImplementer {
+				t.Errorf("identity asked for %s, want the claim's role", role)
+			}
+			owners = append(owners, owner)
+			return bot, nil
+		}}
 	spec, err := s.SpawnSpec(context.Background(), c)
-	if err != nil {
-		t.Fatalf("SpawnSpec: %v", err)
+	if err != nil || spec.Repository != ghrepo.MustParse("zeta/tools") {
+		t.Fatalf("SpawnSpec = %q, %v; want zeta/tools, the runtime's to locate the workspace from", spec.Repository, err)
 	}
-	if spec.Repository != (ghrepo.Repository{}) {
-		t.Errorf("the launch names repository %q with none configured", spec.Repository)
+	if want := []string{"zeta"}; !slices.Equal(owners, want) {
+		t.Errorf("identity asked for owners %q, want the recorded repository's owner alone, %q", owners, want)
 	}
-	s.repo, s.defaultBranch = ghrepo.MustParse("acme/widgets"), mainBranch
-	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.Repository != (ghrepo.MustParse("acme/widgets")) {
-		t.Errorf("SpawnSpec with a configured repository = %q, %v; want acme/widgets, the runtime's to locate the workspace from", spec.Repository, err)
-	}
-	if want := []string{"", "acme"}; !slices.Equal(owners, want) {
-		t.Errorf("identity asked for owners %q, want the launch's repository's owner each time, %q", owners, want)
-	}
-	s.repo = ghrepo.Repository{}
 	identity := map[string]string{
 		"JJ_USER": bot.Name, "JJ_EMAIL": bot.Email,
 		"GIT_AUTHOR_NAME": bot.Name, "GIT_AUTHOR_EMAIL": bot.Email,

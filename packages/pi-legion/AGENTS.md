@@ -89,7 +89,13 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 30's per-owner gh bundle
+number is the one `DaemonAPIVersion` declares, last bumped by contract 32's repository cache
+(sjawhar/legion#1986: `workspace-init cache`, the issue pods' `LEGION_REPOSITORY_CACHE_URL` and
+`LEGION_REPOSITORY_CACHE_TOKEN_FILE`, and the state's `repositories[].cache` and `caches`), after
+contract 31's issue repository on
+`GET /legion/v1/state` and `read_record` (sjawhar/legion#1986: each issue's `repo` and
+`defaultBranch`, its pull request's `repo`, and the state's `repositories`, the project's mapping
+as the daemon serves it), after contract 30's per-owner gh bundle
 (sjawhar/legion#1986: `LEGION_GH_OWNERS_DIR` with one gh directory per owner, `LEGION_GH_PATH`,
 the `legion gh` wrapper and `legion git-credential`, and the controller's per-owner credential
 answer), after contract 29's daemon-launched controller (sjawhar/legion#1998: its pod enrolled
@@ -384,8 +390,10 @@ assignment, which opens even a closed phase, and the dashboard shows it twice. O
 that `agent_end` starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
-message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
-sent follow-up stays quiet until the next Envoy delivery or assignment. The state is appended to the
+message holding a tool call written as text is told so. One follow-up per stall, except that a
+follow-up for a text call answered by a text call again gets one more (state `text-call`), so a stall
+sends at most two; a WAITING reply or the stall's last follow-up stays quiet until the next Envoy
+delivery or assignment. The state is appended to the
 transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`) through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`),

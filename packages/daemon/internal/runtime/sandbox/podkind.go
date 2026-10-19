@@ -41,6 +41,9 @@ type podKind interface {
 	initVolumes(l launch) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(l launch) []corev1.EnvVar
+	// agentMounts are what each launcher container mounts of its kind beyond what every launcher
+	// container mounts.
+	agentMounts() []corev1.VolumeMount
 	// provision readies what a new pod needs before relaunch writes its launcher Secrets and sets
 	// its Sandbox, s, running, under nothing but the pod's own launch turn: each pod works on a
 	// volume of its own, so no pod's provisioning waits on another's.
@@ -109,23 +112,25 @@ func (issuePod) secretAnnotations(l launch) map[string]string {
 
 // initContainers are workspace-fetch and workspace-init, so the provisioning token never shares a
 // process with anything an agent of the issue can write (Stage 4b Task 4b.6b): workspace-fetch
-// mounts the provisioning Secret, its own TMPDIR, and the feed, and clones the repository from
-// GitHub into the feed; workspace-init mounts the issue's volume, the feed read-only, and the
-// config home, and does all the volume's work from the feed, with no credential, starting an issue
-// with no branch at the repository's default branch the spec names. Each takes the resources of
-// the role whose launch creates the pod.
+// mounts the provisioning Secret, its own TMPDIR, and the feed alone of the issue's volume (its
+// feedSubPath, read-write), and fills the feed — from the repository's cache when one is ready
+// (fetchEnvironment), then from GitHub for what it lacks, or from GitHub alone; workspace-init
+// mounts the issue's volume, the feed over it read-only, and the config home, and does all the
+// volume's work from the feed, with no credential, making the issue's clone shared with the feed
+// and starting an issue with no branch at the repository's default branch the spec names. Each
+// takes the resources of the role whose launch creates the pod.
 func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 	legion, resources := r.tools.Legion, r.resources[l.spec.Role]
 	return []corev1.Container{{
 		Name:       fetchContainer,
 		Image:      r.image,
 		Command:    []string{legion, "workspace-init", "fetch", "--repo", l.spec.Repository.String(), "--feed", FeedDir},
-		Env:        fetchEnvironment(),
+		Env:        fetchEnvironment(l),
 		WorkingDir: FeedDir,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: provisionVolume, MountPath: ProvisionDir, ReadOnly: true},
 			{Name: tempVolume, MountPath: initTempDir},
-			{Name: feedVolume, MountPath: FeedDir},
+			{Name: issueVolume, MountPath: FeedDir, SubPath: feedSubPath},
 		},
 		Resources:       resources,
 		SecurityContext: restrictedContainer(),
@@ -141,7 +146,7 @@ func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 		WorkingDir: TreeRoot,
 		VolumeMounts: []corev1.VolumeMount{
 			{Name: issueVolume, MountPath: TreeRoot},
-			{Name: feedVolume, MountPath: FeedDir, ReadOnly: true},
+			readOnlyFeed(),
 			{Name: configVolume, MountPath: xdgConfigHome},
 		},
 		Resources:       resources,
@@ -149,18 +154,31 @@ func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 	}}
 }
 
+// readOnlyFeed is the issue volume's feed mounted read-only at FeedDir, over the volume's own mount
+// at TreeRoot: what every container of an issue pod but workspace-fetch sees of the feed.
+func readOnlyFeed() corev1.VolumeMount {
+	return corev1.VolumeMount{Name: issueVolume, MountPath: FeedDir, SubPath: feedSubPath, ReadOnly: true}
+}
+
 // initVolumes are the provisioning material only the init containers mount: the provisioning
-// Secret, workspace-fetch's in-memory TMPDIR, and the feed it fills for workspace-init.
+// Secret, with the provisioning token and the repository cache's bearer token, and
+// workspace-fetch's in-memory TMPDIR. The feed is the issue volume's own (FeedDir).
 func (issuePod) initVolumes(l launch) []corev1.Volume {
 	return []corev1.Volume{
 		{Name: provisionVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: secretName(l.name), Items: []corev1.KeyToPath{{Key: provisionTokenKey, Path: provisionTokenKey}},
+			SecretName: secretName(l.name),
+			Items: []corev1.KeyToPath{
+				{Key: provisionTokenKey, Path: provisionTokenKey}, {Key: cacheTokenKey, Path: cacheTokenKey},
+			},
 			DefaultMode: new(int32(0o440)),
 		}}},
-		{Name: feedVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
 		{Name: tempVolume, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}},
 	}
 }
+
+// agentMounts are the feed, read-only: the issue's clone keeps its objects there
+// (objects/info/alternates), and no agent writes what workspace-fetch, the token's holder, reads.
+func (issuePod) agentMounts() []corev1.VolumeMount { return []corev1.VolumeMount{readOnlyFeed()} }
 
 // agentEnv tells each agent its tree, issue and workspace, where its gh reads its credentials, and
 // uv's directories on the issue's volume.
@@ -203,9 +221,15 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 
 // provision is what a new issue pod needs before it starts: it reads whether workspace-init must
 // find the issue's volume holding retained sessions (never under a session database, which keeps
-// none on it), mints the provisioning token for the repository's owner, and writes it to the pod's
-// init-only provisioning Secret. It waits on no other pod: the issue's clone lives on the issue's
-// own volume, which no other pod mounts.
+// none on it), mints the provisioning token for the repository's owner, makes sure the repository
+// has its cache (EnsureRepositoryCache: one a sweep has not made yet is made now), since a fresh
+// feed comes from that cache alone, waits until the cache's Service is its own
+// (awaitCacheService), since the fetch presents the cache's token at that Service's name, and
+// writes the token to the pod's init-only provisioning Secret with the cache's bearer token. It
+// waits on no other pod, the cache's included: the fetch waits for the cache to be ready itself,
+// and the issue's clone lives on the issue's own volume, which no other pod mounts. A cache that
+// cannot be made, or whose Service is not its own by the boot timeout, fails the launch, with
+// nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
 	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionsInDatabase {
 		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
@@ -221,10 +245,21 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 	if err != nil {
 		return fmt.Errorf("mint the provisioning token for %s: %w", owner, err)
 	}
+	cache, err := r.ensureRepositoryCache(ctx, l.spec.Repository)
+	if err != nil {
+		return err
+	}
+	if err := r.awaitCacheService(ctx, l.spec.Repository, cache); err != nil {
+		return err
+	}
+	bearer := r.cacheBearer(cache.Name)
+	if bearer == "" {
+		return fmt.Errorf("the repository cache %s of %s holds no token", cache.Name, l.spec.Repository)
+	}
 	if err := r.upsertSecret(ctx, corev1.Secret{
 		ObjectMeta: r.secretMeta(s, *l, secretName(s.Name)),
 		Type:       corev1.SecretTypeOpaque,
-		Data:       map[string][]byte{provisionTokenKey: []byte(token)},
+		Data:       map[string][]byte{provisionTokenKey: []byte(token), cacheTokenKey: []byte(bearer)},
 	}); err != nil {
 		return fmt.Errorf("write its provisioning secret: %w", err)
 	}
@@ -292,6 +327,9 @@ func (controllerPod) agentEnv(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
 	return append(env, ghAgentEnv(l)...)
 }
+
+// agentMounts are none: the controller's pod has no feed.
+func (controllerPod) agentMounts() []corev1.VolumeMount { return nil }
 
 // provision readies nothing: the controller's pod provisions no workspace and mints no token.
 func (controllerPod) provision(context.Context, *Runtime, *launch, *sandbox) error { return nil }

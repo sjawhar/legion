@@ -60,7 +60,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-1", "A")
 			seedSlotted(t, pool, "LEGION-9", "Z")
 			inTx(t, pool, func(tx pgx.Tx) {
@@ -85,7 +85,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 				}
 			})
 
-			apply(t, pool, admission, "written-by-"+tc.name, intake.DispatchIssue{Key: "LEGION-1", Seq: 2, Type: "issue.updated", Status: tc.status, Title: "LEGION-1", Rank: "A", ActorSession: tc.actor}, engine)
+			apply(t, pool, admission, "written-by-"+tc.name, intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: tc.status, Title: "LEGION-1", Rank: "A", ActorSession: tc.actor}, engine)
 			got := issue(t, pool, "LEGION-1")
 			var reasserted int
 			var told []record.Notice
@@ -142,8 +142,8 @@ func TestAnOutsideSessionsWriteWhereNoTreeRunsIsAPersonsMove(t *testing.T) {
 	}{
 		{name: "a running tree's child parked", key: "LEGION-2", status: "backlog",
 			issues: []record.Issue{
-				{Key: "LEGION-1", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1},
-				{Key: "LEGION-2", Project: testProject, Title: "LEGION-2", Tree: "LEGION-1", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1},
+				{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1},
+				{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-2", Tree: "LEGION-1", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1},
 			},
 			slots: []string{"LEGION-1"},
 			taken: func(t *testing.T, pool *pgxpool.Pool) {
@@ -153,14 +153,14 @@ func TestAnOutsideSessionsWriteWhereNoTreeRunsIsAPersonsMove(t *testing.T) {
 			}},
 		{name: "a root waiting for its slot parked", key: "LEGION-5", status: "backlog",
 			issues: []record.Issue{
-				{Key: "LEGION-1", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1},
-				{Key: "LEGION-5", Project: testProject, Title: "LEGION-5", Tree: "LEGION-5", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 1},
+				{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1},
+				{Key: "LEGION-5", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-5", Tree: "LEGION-5", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 1},
 			},
 			slots: []string{"LEGION-1"},
 			taken: func(t *testing.T, pool *pgxpool.Pool) { assertWaiting(t, pool, nil) }},
 		{name: "a lingering root set back to todo", key: "LEGION-5", status: "todo",
 			issues: []record.Issue{
-				{Key: "LEGION-5", Project: testProject, Title: "LEGION-5", Tree: "LEGION-5", Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", HandedOver: true, LingerUntil: &until, LastDispatchSeq: 1},
+				{Key: "LEGION-5", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-5", Tree: "LEGION-5", Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", HandedOver: true, LingerUntil: &until, LastDispatchSeq: 1},
 			},
 			taken: func(t *testing.T, pool *pgxpool.Pool) {
 				if got := issue(t, pool, "LEGION-5"); got.Generation != 2 || got.LingerUntil != nil {
@@ -177,7 +177,7 @@ func TestAnOutsideSessionsWriteWhereNoTreeRunsIsAPersonsMove(t *testing.T) {
 			write := func(actor string) (*pgxpool.Pool, result) {
 				pool := migratedPool(t)
 				admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-				engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+				engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 				for _, seeded := range tc.issues {
 					putIssue(t, pool, seeded)
 				}
@@ -188,7 +188,7 @@ func TestAnOutsideSessionsWriteWhereNoTreeRunsIsAPersonsMove(t *testing.T) {
 						}
 					}
 				})
-				apply(t, pool, admission, "written", intake.DispatchIssue{Key: tc.key, Seq: 2, Type: "issue.updated", Status: tc.status, Title: tc.key,
+				apply(t, pool, admission, "written", intake.DispatchIssue{Key: tc.key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: tc.status, Title: tc.key,
 					Parent: deref(tc.issues[len(tc.issues)-1].Parent), Rank: "B", HandedOver: true, ActorSession: actor}, engine)
 				var got result
 				for _, seeded := range tc.issues {
@@ -252,10 +252,10 @@ func TestOnlyAChangeFromTheStatusDispatchLastShowedIsAStatusWrite(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 			seedSlotted(t, pool, "LEGION-1", "A")
 			event := func(seq int64, actor, status, title string) {
-				apply(t, pool, admission, "event-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", Seq: seq, Type: "issue.updated", Status: status,
+				apply(t, pool, admission, "event-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: status,
 					Title: title, Rank: "A", HandedOver: true, ActorSession: actor}, engine)
 			}
 			// Dispatch shows the admitted root in_progress: the daemon's own write, which decode passes
@@ -340,7 +340,7 @@ func TestAnEditReachesTheSameOutcomeWhetherOrNotTheSetBackHasFinished(t *testing
 				admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 				seedSlotted(t, pool, "LEGION-1", "A")
 				event := func(seq int64, actor, status, title string) {
-					apply(t, pool, admission, "event-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", Seq: seq, Type: "issue.updated", Status: status,
+					apply(t, pool, admission, "event-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: status,
 						Title: title, Rank: "A", HandedOver: true, ActorSession: actor}, admission.engine)
 				}
 				event(2, "", "in_progress", "LEGION-1")
@@ -377,10 +377,10 @@ func TestAnEditReachesTheSameOutcomeWhetherOrNotTheSetBackHasFinished(t *testing
 func TestAParkAndATodoWhileThePromotionsWriteIsOnItsWayRunTheTreeAgain(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
-	putIssue(t, pool, record.Issue{Key: "LEGION-1", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	putIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "LEGION-1", Tree: "LEGION-1", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "A", HandedOver: true, LastDispatchSeq: 1})
 	write := func(seq int64, status string) {
-		apply(t, pool, admission, "person-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", Seq: seq, Type: "issue.updated", Status: status, Title: "LEGION-1", Rank: "A", HandedOver: true}, engine)
+		apply(t, pool, admission, "person-"+strconv.FormatInt(seq, 10), intake.DispatchIssue{Key: "LEGION-1", ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated", Status: status, Title: "LEGION-1", Rank: "A", HandedOver: true}, engine)
 	}
 	write(2, "todo")
 	if got := issue(t, pool, "LEGION-1"); got.Status != "in_progress" || got.Generation != 1 {

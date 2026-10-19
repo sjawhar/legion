@@ -59,6 +59,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 32 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
+  repository gets a repository cache pod running the image's `legion workspace-init cache`, and
+  an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only
+  the delta from GitHub; `legion state`'s `repositories` carries each mapped repository's `cache`
+  (its `state`: `starting`, `cloning`, `ready`, `failing`, or `refused` while a Service of its
+  name is not its own or the daemon's Services watch is failing) and the `caches` of repositories
+  no longer mapped. An image built before it is refused by the daemon's image probe. Install this
+  release with a `legion` built from the same commit.
+- Daemon API contract 31 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
+  `legion state --json` carry each recorded issue's `repo` and `defaultBranch`, its pull request's
+  `repo`, and the state's `repositories` (the project's mapping as the daemon serves it: `owners`,
+  `mapped`, and `refused` with each left-out repository's `reason`). The strict reader refuses a
+  state without `repositories`. Install this release with a `legion` built from the same commit.
 - Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
   tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
   issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
@@ -388,6 +401,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- A reviewer no longer passes a `verdict` to `handoff_complete`, which the daemon refuses from
+  every role but the tester (`VERDICT_ROLE_FORBIDDEN`). The reviewer's task names the tester's
+  result as `Tester's verdict: pass` rather than `Handoff verdict: pass`; the `legion` tool's
+  description says `verdict` comes from the tester alone, where it said "when your role's
+  instructions require one"; the reviewer's prompt says its completion carries only a `summary`;
+  and `review.json` records the reviewer's decision as `decision`, no longer `verdict`.
+- The phase-stall follow-up for a final message holding a tool call written as text is sent once
+  more when the model answers it with the same call as text again (state `text-call`); a third, or a
+  first follow-up of any other kind, is the stall's last, so a stall sends at most two. The
+  follow-up texts and both patterns are unchanged.
 - Session attribution's `jj config path --user` gives up after 10 s and kills its process group.
   Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
   `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now

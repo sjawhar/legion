@@ -63,6 +63,8 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 		{name: "an account GitHub does not know", login: "a-ghost", status: http.StatusNotFound, wantCalls: 1},
 		{name: "an installation that may not read the permission", login: "a-member", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "4999"},
 			wantLog: "level=ERROR msg=\"workflow: GitHub refuses the review App's installation", wantCalls: 1},
+		{name: "a 401 for the review App's token, retried with a fresh one", login: "a-writer", status: http.StatusUnauthorized,
+			wantErr: "401", wantWait: tokenRefusedWait, wantCalls: 1},
 		{name: "a 403 out of rate limit", login: "a-writer", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset},
 			wantErr: "403", wantWait: 90 * time.Second, wantCalls: 1},
 		{name: "a 403 with retry-after", login: "a-writer", status: http.StatusForbidden, header: map[string]string{"Retry-After": "120"},
@@ -137,6 +139,77 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// GitHub answers 401 for a review App token it has not yet accepted (a token minted moments
+// before) as for one whose installation was removed since. Neither says anything about the
+// author, so a 401 decides nothing and keeps nothing, and GitHub's rate limit is not held for it.
+// A token older than the acceptance window is dropped and the delivery retried with a fresh mint,
+// which either reads the permission or, for a removed App, is refused as not installed; a younger
+// one is kept and tried again once it is that old.
+func TestA401ForTheReviewAppsTokenIsRetriedWithAFreshOne(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		minted   time.Duration
+		wantWait time.Duration
+		forgot   string
+	}{
+		{"a token older than the window is minted again", -time.Hour, tokenRefusedWait, "review acme"},
+		{"a token moments old is tried again as it is", -time.Second, tokenAcceptWindow - time.Second, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := reviewPermissionPool(t)
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls == 1 {
+					http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+					return
+				}
+				fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
+			}))
+			defer server.Close()
+			w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+			tokens := &forgettingTokens{minted: time.Now().Add(tc.minted)}
+			w.tokens, w.forget = tokens, tokens
+			review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer"}
+			_, err := w.reviewerCanWrite(context.Background(), review)
+			var later *intake.RetryLater
+			if !errors.As(err, &later) || later.After > tc.wantWait || later.After < tc.wantWait-time.Second {
+				t.Fatalf("a 401 = %v, want a retry after about %s", err, tc.wantWait)
+			}
+			if tokens.forgot != tc.forgot {
+				t.Fatalf("forgot %q, want %q", tokens.forgot, tc.forgot)
+			}
+			if left := w.rateLimitLeft(); left > 0 {
+				t.Fatalf("a 401 held GitHub's rate limit for %s, want no hold", left)
+			}
+			if canWrite, err := w.reviewerCanWrite(context.Background(), review); err != nil || !canWrite {
+				t.Fatalf("the retried review = %v, %v; want the writer's write access read again", canWrite, err)
+			}
+			if calls != 2 {
+				t.Fatalf("GitHub was asked %d times, want twice: the 401 kept no answer", calls)
+			}
+		})
+	}
+}
+
+// forgettingTokens are outboxTokens whose leases were minted at minted, recording the cached token
+// Forget drops.
+type forgettingTokens struct {
+	outboxTokens
+	minted time.Time
+	forgot string
+}
+
+func (t *forgettingTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.outboxTokens.Token(ctx, role, owner)
+	lease.Minted = t.minted
+	return lease, err
+}
+
+func (t *forgettingTokens) Forget(role appauth.AppRole, owner string) {
+	t.forgot = string(role) + " " + owner
 }
 
 // Any account can review a public repository's pull request, so an account GitHub gives no write
@@ -263,6 +336,51 @@ func TestAReviewMintThatFailsTransientlyHoldsTheLimitWithoutMintingAgain(t *test
 	}
 }
 
+// A review on a repository whose owner the review App is not installed on (installed once, then
+// removed, while a record still names the repository, which GitHub intake keeps hearing) decides
+// nothing: the mint's refusal is answered at once as no write access, logged at error naming the
+// owner, and held for the permission window, rather than returned for a delivery that would mint
+// again on every redelivery. The review App's own review is restored from what was delivered.
+func TestAReviewOnAnOwnerTheReviewAppIsNotInstalledOnDecidesNothing(t *testing.T) {
+	pool := reviewPermissionPool(t)
+	var logged syncBuffer
+	w := reviewPermissionRuntime(pool, "http://unused.invalid", slog.New(slog.NewJSONHandler(&logged, nil)))
+	tokens := &notInstalledTokens{}
+	w.tokens = tokens
+	review := func(author string) intake.PullRequestReview {
+		return intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: author, Body: "delivered body"}
+	}
+	for range 2 {
+		canWrite, err := w.reviewerCanWrite(context.Background(), review("a-writer"))
+		if err != nil || canWrite {
+			t.Fatalf("a review on an owner with no review App = %v, %v; want no write access and no error", canWrite, err)
+		}
+	}
+	if tokens.calls != 1 {
+		t.Fatalf("the review App was minted %d times for one author inside the permission window, want once", tokens.calls)
+	}
+	if !strings.Contains(logged.String(), `"installation_owner":"acme"`) || !strings.Contains(logged.String(), `"level":"ERROR"`) {
+		t.Fatalf("log = %s, want an error naming the owner the review App is not installed on", logged.String())
+	}
+	w.reviewAppLogin = "legion-review[bot]"
+	if body, err := w.reviewBody(context.Background(), review("legion-review[bot]")); err != nil || body != "delivered body" {
+		t.Fatalf("the review App's own review body = %q, %v; want the delivered body and no error", body, err)
+	}
+}
+
+// notInstalledTokens is a review App not installed on any owner: every mint is refused as
+// appauth refuses one (appauth.ErrNotInstalled), counted.
+type notInstalledTokens struct{ calls int }
+
+func (t *notInstalledTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	t.calls++
+	return appauth.Lease{}, fmt.Errorf("%w: %s not installed on %s", appauth.ErrNotInstalled, role, owner)
+}
+
+func (t *notInstalledTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	return t.Token(ctx, role, owner)
+}
+
 // transientOnceTokens answers its first mint with appauth.TransientError and every one after with
 // a lease, so a test can tell a retried mint from one the hold should have skipped.
 type transientOnceTokens struct{ calls int }
@@ -287,7 +405,7 @@ func reviewPermissionPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"})
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: "LEGION-208", Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", State: record.PullRequestOpen})
 	}); err != nil {
@@ -297,6 +415,7 @@ func reviewPermissionPool(t *testing.T) *pgxpool.Pool {
 }
 
 func reviewPermissionRuntime(pool *pgxpool.Pool, githubAPI string, log *slog.Logger) *workflowRuntime {
-	return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, tokens: outboxTokens{},
+	tokens := &forgettingTokens{}
+	return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, tokens: tokens, forget: tokens,
 		githubAPI: githubAPI, log: log, reviewAppLogin: "legion-reviewer[bot]"}
 }

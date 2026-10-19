@@ -222,4 +222,26 @@ package api
 // sjawhar/legion#1999 landed at 28; main then landed sjawhar/legion#2003 at 29 and released
 // pi-legion v10.5.0 declaring it without these shapes, so this branch takes the number above it,
 // as the collision note says.)
-const DaemonAPIVersion = 30
+//
+// 31: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
+// targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
+// when the daemon first records it: `GET /legion/v1/state` and `read_record` answer `repo` and
+// `defaultBranch` on every issue and `repo` on its pull request, and the state answers
+// `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
+// repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
+// plugin at 30 reads the state with a strict schema that knows none of these fields, so it
+// refuses the state.
+//
+// 32: sjawhar/legion#1986 (the repository cache) -- the daemon runs one repository cache pod per
+// served repository, whose one container is the image's `legion workspace-init cache`, and every
+// issue pod's `workspace-init fetch` is told its repository's cache (`LEGION_REPOSITORY_CACHE_URL`)
+// and that cache's bearer token (`LEGION_REPOSITORY_CACHE_TOKEN_FILE`), and fills a fresh feed
+// from that cache alone, verified, fetching only the delta from GitHub; its `workspace-init
+// provision` makes the issue's clone shared with the feed, which now lives on the issue's own
+// volume. An image whose `legion` was built before 32 exits 2 on the unknown subcommand in every
+// cache pod, and its fetch clones from GitHub, ignoring the cache, so the daemon's image probe,
+// which holds the image's pi-legion to this number, refuses such an image at boot instead. The
+// state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
+// its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
+// `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither.
+const DaemonAPIVersion = 32

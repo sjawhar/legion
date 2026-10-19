@@ -25,6 +25,7 @@ const baseCommit = "c0ffee0123456789abcdef0123456789abcdef01"
 type github struct {
 	refs          map[string]string
 	defaultBranch string
+	fullName      string
 	create        func() (int, string)
 	mu            sync.Mutex
 	read          []string
@@ -42,7 +43,11 @@ func (g *github) serve(t *testing.T) string {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
 			g.reading(r.URL.Path)
-			_, _ = io.WriteString(w, `{"full_name":"acme/widgets","default_branch":"`+g.defaultBranch+`"}`)
+			fullName := g.fullName
+			if fullName == "" {
+				fullName = "acme/widgets"
+			}
+			_, _ = io.WriteString(w, `{"full_name":"`+fullName+`","default_branch":"`+g.defaultBranch+`"}`)
 		case r.Method == http.MethodGet && isRef:
 			g.reading(r.URL.Path)
 			commit, found := g.refs[branch]
@@ -151,6 +156,21 @@ func TestDefaultBranchReadsTheRepository(t *testing.T) {
 	g.defaultBranch = ""
 	if _, err := DefaultBranch(context.Background(), widgets(g.serve(t)), ghrepo.MustParse("acme/widgets")); err == nil || !strings.Contains(err.Error(), "named no default branch") {
 		t.Fatalf("empty default_branch: %v, want a refusal", err)
+	}
+}
+
+// Read is the repository as GitHub names it, its own spelling of owner and name (`full_name`) and
+// its default branch: Dispatch keeps a mapping lowercased, and GitHub's events, and the subjects
+// Envoy publishes them on, carry GitHub's spelling.
+func TestReadIsTheRepositoryAsGitHubNamesIt(t *testing.T) {
+	g := &github{defaultBranch: "release/v7.1", fullName: "Acme/Widgets"}
+	got, err := Read(context.Background(), widgets(g.serve(t)), ghrepo.MustParse("acme/widgets"))
+	if err != nil || got.Name != ghrepo.MustParse("Acme/Widgets") || got.DefaultBranch != "release/v7.1" {
+		t.Fatalf("Read = %+v, %v; want Acme/Widgets at release/v7.1", got, err)
+	}
+	g.fullName = "acme"
+	if _, err := Read(context.Background(), widgets(g.serve(t)), ghrepo.MustParse("acme/widgets")); err == nil || !strings.Contains(err.Error(), "full_name") {
+		t.Fatalf("a full_name that is no owner/name: %v, want a refusal naming it", err)
 	}
 }
 

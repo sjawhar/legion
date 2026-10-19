@@ -22,26 +22,32 @@ import (
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — a fetch, a jj operation, or a git configuration edit — each bounded independently. The
-// two clones that copy the whole repository are the exceptions, under FetchTimeout and
-// CloneTimeout instead (below).
+// exceptions are the fetch's transfers and the checks of what the repository cache streamed, under
+// FetchTimeout, and the shared clone's own clone, under CloneTimeout (both below).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
-// enough for a large repository's slow but steadily progressing transfer to finish.
+// FetchTimeout is the one bound for everything whose duration follows the repository's size and
+// the network's speed in a fetch, once it may start: every attempt of a transfer from GitHub, and,
+// for a feed filled from the repository cache, the cache's stream and its verification too, all
+// together (Fetch). It is long enough for a large repository's slow but steadily progressing
+// transfer to finish.
 const FetchTimeout = 30 * time.Minute
 
-// CloneTimeout bounds the shared clone's own clone (ensureRepoClone): it copies and imports every
-// object of the repository, from a pod's feed or from GitHub, so its duration follows the
-// repository's size as the fetch's does. A 3.4 GB repository (816k objects, 421 refs) cloned from a
-// local feed in 253 s with four cores and 281 s with two on a 64-core devbox, using no more than
-// about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once a sandbox
-// slows it at all.
+// CloneTimeout is the one bound the shared clone's own clone (ensureRepoClone) gives the steps
+// whose duration follows the repository's size, all together, as the fetch's share FetchTimeout:
+// from GitHub, a `jj git clone` that copies and imports every object; from a pod's feed, a `git
+// clone --shared` that copies no object but checks out the working tree, then jj's import of every
+// commit, each given what remains. A 3.4 GB repository (816k objects, 421 refs) cloned from a local
+// feed by `jj git clone` in 253 s with four cores and 281 s with two on a 64-core devbox, using no
+// more than about two cores either way, so CommandTimeout's fixed 5 minutes is no bound for it once
+// a sandbox slows it at all.
 const CloneTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
-// hold the runner's own slow-command budget (RunChecked), each attempt of the fetch's clone holds
-// what remains of FetchTimeout instead (Fetch), and the shared clone's clone holds CloneTimeout
-// (ensureRepoClone) — never a budget shared across the whole provisioning sequence.
+// hold the runner's own slow-command budget (RunChecked), each of the fetch's transfers and checks
+// holds what remains of FetchTimeout instead (Fetch), and each size-following step of the shared
+// clone's clone holds what remains of CloneTimeout (ensureRepoClone) — never a budget shared
+// across the whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string

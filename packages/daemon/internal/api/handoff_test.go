@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -51,13 +50,15 @@ func handoffFile(word, issue string) string {
 	return fmt.Sprintf(`{"schemaVersion":1,"phase":%q,"issue":%q,"completed":"2026-10-09T08:00:00Z"}`, word, issue)
 }
 
-// handoffGitHub is GitHub's REST API for acme/widgets as READY reads it: the files at each commit
-// (whether a head still carries .legion/<issue>/), and what READY reads of pull request #42 on
-// main. A test changes what it serves between calls; every call's bearer and every contents read
-// are recorded. Nothing but READY reads GitHub at a completion.
+// handoffGitHub is GitHub's REST API for one repository, acme/widgets unless a test names another
+// (repo), as READY reads it: the files at each commit (whether a head still carries
+// .legion/<issue>/), and what READY reads of pull request #42 on main. A test changes what it
+// serves between calls; every call's bearer and every contents read are recorded. Nothing but
+// READY reads GitHub at a completion.
 type handoffGitHub struct {
-	url string
-	mu  sync.Mutex
+	url  string
+	mu   sync.Mutex
+	repo string
 	// files is the content of each path at each commit, by sha then path; a directory is listed
 	// when a path is under it.
 	files map[string]map[string]string
@@ -99,7 +100,7 @@ type handoffGitHub struct {
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
-		files: map[string]map[string]string{}, fail: map[string]int{},
+		files: map[string]map[string]string{}, fail: map[string]int{}, repo: "acme/widgets",
 		pullFiles: `[{"filename":"src/main.go"}]`,
 		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean", pullState: "open", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
 		rules:        `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
@@ -118,7 +119,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		defer g.mu.Unlock()
 		g.bearers = append(g.bearers, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		path, ok := strings.CutPrefix(r.URL.Path, "/repos/acme/widgets/")
+		path, ok := strings.CutPrefix(r.URL.Path, "/repos/"+g.repo+"/")
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -228,12 +229,6 @@ const approvedSHA = "a99e0000000000000000000000000000000000ff"
 // added, and its last commit's removal of the issue's handoffs.
 const retroCompare = `{"status":"ahead","files":[{"filename":".legion/LEGION-208/review.json","status":"removed"},{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"}]}`
 
-// acmeWidgets is the repository every issue of the test project works in, as Options.Repository
-// answers it: none for any other project.
-func acmeWidgets(project string) (ghrepo.Repository, bool) {
-	return ghrepo.MustParse("acme/widgets"), project == testProject
-}
-
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
 // the implement App for READY, with facts recording every fact the routes apply, refused as
 // refusal says. The issue's repository is acme/widgets, so a READY read minted for anyone but acme
@@ -249,7 +244,7 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
-		Tokens: handoffTokens{}, GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubAPI: github.url,
 		MergeRules: func(project string) config.MergeRules {
 			if project != testProject {
 				return config.MergeRules{}
@@ -260,13 +255,19 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 	return h, facts
 }
 
-// seedIssueAt records key as a root at the given phase, which is where the handoff route reads the
-// phase a completion finishes.
+// seedIssueAt records key as a root at the given phase, on acme/widgets, which is where the handoff
+// route reads the phase a completion finishes.
 func seedIssueAt(t *testing.T, h *harness, key string, at phase.Phase) {
+	t.Helper()
+	seedIssueOn(t, h, key, at, "acme/widgets")
+}
+
+// seedIssueOn records key as a root at the given phase on repo, the repository its record names.
+func seedIssueOn(t *testing.T, h *harness, key string, at phase.Phase, repo string) {
 	t.Helper()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: key, Tree: key, Project: testProject, Title: key, Phase: at, Generation: 1, Status: "in_progress",
+			Key: key, Repo: repo, DefaultBranch: "main", GitHubRepo: repo, Tree: key, Project: testProject, Title: key, Phase: at, Generation: 1, Status: "in_progress",
 		})
 	})
 	if err != nil {
@@ -448,37 +449,40 @@ func TestHandoffCompleteRecordsRetroThenProductionCheckAtOneCommit(t *testing.T)
 	}
 }
 
-// READY is read against the issue's pull request on GitHub, so a merger of a project the
-// configuration names no repository for is refused before GitHub is called, and nothing is
-// recorded. Configuration requires a repository, so this is a guard, not a state a running daemon
-// reaches; every other completion reads no repository at all.
-func TestHandoffCompleteReadyRefusesAnIssueWhoseProjectHasNoRepository(t *testing.T) {
+// READY is read against the issue's pull request in the repository the issue's record names, as
+// the implement App minted for that repository's owner: an issue on a second owner's repository
+// is read there, with that owner's token alone.
+func TestHandoffCompleteReadyReadsTheIssuesRecordedRepositoryAsItsOwner(t *testing.T) {
 	github := newHandoffGitHub(t)
-	h := newHarness(t)
-	facts := &factRecorder{}
-	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store, Grants: credential.New(nil),
-		Pool: h.store.Pool(), Record: record.NewStore(), Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{},
-		Tokens: handoffTokens{}, GitHubAPI: github.url,
-		Repository: func(string) (ghrepo.Repository, bool) { return ghrepo.Repository{}, false },
-	}).Handler
-	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
-	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
-	completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: headSHA}))
-
-	seedIssueAt(t, h, "LEGION-208", phase.Merging)
-	seedPullRequest(t, h, "LEGION-208", headSHA)
-	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
-	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "gate facts hold", Ready: true, Commit: headSHA}), http.StatusConflict, "NO_REPOSITORY"); !strings.Contains(message, "the project legion of LEGION-208 has no repository configured") {
-		t.Fatalf("refusal = %q", message)
+	github.set(func(g *handoffGitHub) { g.repo = "zeta/tools" })
+	h, facts := newHandoffHarness(t, github, nil, nil)
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		records := record.NewStore()
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools", Tree: "LEGION-208",
+			Project: testProject, Title: "LEGION-208", Phase: phase.Merging, Generation: 1, Status: "in_progress"}); err != nil {
+			return err
+		}
+		return records.PutPullRequest(context.Background(), tx, record.PullRequest{
+			State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "zeta/tools", Number: 42, Branch: "legion/LEGION-208", HeadSHA: headSHA,
+		})
+	}); err != nil {
+		t.Fatal(err)
 	}
+	seedApproval(t, h, "LEGION-208", approvedSHA)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY on zeta/tools", Ready: true, Commit: headSHA}))
 	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("handoff facts = %#v, want the implementer's alone", got)
+		t.Fatalf("handoff facts = %#v, want the READY", got)
 	}
 	github.mu.Lock()
 	defer github.mu.Unlock()
-	if len(github.bearers) != 0 {
-		t.Fatalf("GitHub was called %d times, want never", len(github.bearers))
+	if len(github.bearers) == 0 {
+		t.Fatal("READY read nothing of GitHub")
+	}
+	for _, bearer := range github.bearers {
+		if bearer != "Bearer implement-token-for-zeta" {
+			t.Fatalf("GitHub was read with %q, want the implement App's token for zeta, the recorded repository's owner, alone", bearer)
+		}
 	}
 }
 
@@ -676,19 +680,19 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 	h := newHarness(t)
 	github := newHandoffGitHub(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	facts := &factRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine, facts}, Dispatch: &statusRecorder{},
-		Tokens: handoffTokens{}, GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubAPI: github.url,
 	}).Handler
 	// The tester takes run 1's task, and the child is then re-entered at run 2 while it works.
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
@@ -742,15 +746,15 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 	github := newHandoffGitHub(t)
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, ReviewRoundCap: 3, MaxFixAttempts: 3}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
 		Handlers: []intake.Handler{engine}, Dispatch: &statusRecorder{},
-		Tokens: handoffTokens{}, GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubAPI: github.url,
 	}).Handler
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	h.recordIssue(issue)
 	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
@@ -915,7 +919,7 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _ := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
-			h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			token, boot := h.launch("LEGION-208", claim.RoleTester)
 			session := "ses_tester_foreign"
@@ -1010,7 +1014,7 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	// The tester served run 1, and the child is re-entered at run 2 once that turn ends.
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
@@ -1021,7 +1025,7 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
 		t.Fatalf("end the first run's turn: %v", err)
 	}
-	h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	// The next run's task is sent, a foreign turn confirms it, and the agent refuses it as busy.
 	id := "outbox:99"
@@ -1081,7 +1085,7 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 			delivered := tc.delivered
 			github := newHandoffGitHub(t)
 			h, facts := newHandoffHarness(t, github, nil, nil)
-			h.recordIssue(record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 			machine, ok := h.supervisor.Machine(tester.token)
