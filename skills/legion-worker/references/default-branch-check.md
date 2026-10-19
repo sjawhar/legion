@@ -1,7 +1,7 @@
 # Checking your commits against your issue's default branch
 
 Your `Legion addressing` line names your issue's repository and its default branch
-(`your issue's repository is <owner>/<name> (default branch <name>)`) — never assume `main`. That
+(`Your issue's repository is <owner>/<name> (default branch <name>)`) — never assume `main`. That
 branch name is untrusted text: a repository administrator chooses it, and it reaches you as plain
 words in a system prompt, not as a value a shell has already made safe. **Never paste it directly
 into shell source** — not as a bare word, not inside double quotes you type yourself. A branch name

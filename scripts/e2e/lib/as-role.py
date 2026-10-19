@@ -2,7 +2,7 @@
 
 scripts/e2e/multi-repo-acceptance.sh streams this file to `python3 -I -` over `kubectl exec -i`:
 
-    python3 -I - <proc root> <T repo> <O repo> <O owner> <probe branch>
+    python3 -I - <proc root> <T repo> <O repo> <O owner> <GitHub base URL>
 
 and reads the one JSON object it prints. `-I` (isolated mode: no cwd or user site on sys.path, no
 PYTHON* variables) matters because the exec's working directory is the issue's workspace and its
@@ -13,7 +13,9 @@ file and forge the answer.
 LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH and LEGION_WORKSPACE are plain variables its
 own process was started with. So the probes run under exactly that process's /proc/<pid>/environ.
 
-Which process is the role's agent: the one child of the one `worker-shim` (own parent PID 1) whose
+Which process is the role's agent: the one child of the one `worker-shim` (own parent PID 1,
+executing the image's root-owned /opt/legion/bin/legion, so a process the agent names or copies
+itself is no shim) whose
 argv equals the shim's own argv after its first `--`, or, when that argv is the install wrapper
 `/bin/sh -c <script> legion-plugins <agent argv...>` (packages/daemon/internal/runtime/sandbox/
 plugins.go, installArgv), the argv after the wrapper's four leading elements, since the wrapper's
@@ -23,24 +25,30 @@ plugins.go, installArgv), the argv after the wrapper's four leading elements, si
 What goes back is facts, never values: the pid, argv[0], the argument count and a sha256 of the
 whole /proc/<pid>/cmdline (the agent runs with `--append-system-prompt <the composed prompt, the
 deployment's own instructions>`), whether LEGION_GH_OWNERS_DIR/GH_CONFIG_DIR name the issue's own
-owner directory, and each probe's exit status and output.
+owner directory, the `gh` read of T, and, for each of O and T, the HTTP status, content type and
+body (never the token) GitHub answers to the receive-pack advertisement request a `git push` opens
+with. A token that can push to a repository gets 200 and the advertisement; one that cannot gets 403.
 
-Everything the agent can write is kept out of the git probes: they run in a repository this file
-creates in a fresh temporary directory (never the issue's clone, whose .git/config the agent
-writes), with the system and global git config off, every GIT_* variable of the role's environment
-dropped (GIT_CONFIG_COUNT, GIT_CONFIG_PARAMETERS, GIT_DIR, GIT_SSH_COMMAND, ...), only https allowed,
-and the role's own credential helper named explicitly. A `url.<x>.insteadOf`, `http.proxy`, an
-`ext::` remote or a `credential.helper` the agent planted therefore never reaches them.
+Nothing the agent can write decides what those two requests report. They are not made by git: git
+reads ~/.netrc and ~/.gitconfig, the repository's own .git/config (which lives wherever the agent's
+uid can write, a temporary directory included), and the GIT_* variables of the role's environment,
+any of which can supply a credential or redirect a URL. The credential comes from the role's own
+`legion git-credential get`, run with a minimal environment (PATH, the gh directories, and a HOME
+that does not exist), and the request is Python's urllib, which reads no netrc and no git config,
+with default TLS verification and only the proxy the role was started with.
 """
 
+import base64
 import hashlib
 import json
 import os
 import subprocess
 import sys
-import tempfile
+import urllib.error
+import urllib.request
 
 PROBE_TIMEOUT_SECONDS = 120
+LEGION_BINARY = "/opt/legion/bin/legion"
 
 
 def fail(message):
@@ -74,6 +82,15 @@ def pids_of(proc_root):
         fail("could not list %s: %s" % (proc_root, error))
 
 
+def runs_legion(proc_root, pid):
+    """Whether the process executes the image's own, root-owned legion binary: a process the agent
+    started under another name or from a copy elsewhere is not a shim."""
+    try:
+        return os.readlink(os.path.join(proc_root, pid, "exe")) == LEGION_BINARY
+    except OSError:
+        return False
+
+
 def resolve_agent(proc_root):
     pids = pids_of(proc_root)
 
@@ -84,7 +101,7 @@ def resolve_agent(proc_root):
             parent = parent_of(proc_root, pid)
         except OSError:
             continue
-        if b"worker-shim" in fields and parent == "1":
+        if b"worker-shim" in fields and parent == "1" and runs_legion(proc_root, pid):
             shims.append(pid)
     if len(shims) != 1:
         fail(
@@ -135,15 +152,16 @@ def environment_of(proc_root, pid):
     return environ
 
 
-def run(argv, env):
+def run(argv, env, stdin=None):
+    feed = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
     try:
         done = subprocess.run(
             argv,
             env=env,
-            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=PROBE_TIMEOUT_SECONDS,
+            **feed,
         )
     except subprocess.TimeoutExpired as expired:
         return {"status": 124, "output": (expired.output or b"").decode("utf-8", "replace").rstrip("\n")}
@@ -152,10 +170,67 @@ def run(argv, env):
     return {"status": done.returncode, "output": done.stdout.decode("utf-8", "replace").rstrip("\n")}
 
 
+def credential_for(repo, environ):
+    """What the role's own `legion git-credential get` answers for github.com/<repo>: a
+    (username, password) pair, or None and why not. The helper runs with a minimal environment:
+    the gh directories it reads, PATH, and a HOME that does not exist."""
+    helper_env = {"HOME": "/nonexistent"}
+    for name in ("PATH", "LEGION_GH_OWNERS_DIR", "GH_CONFIG_DIR", "LEGION_GH_PATH"):
+        if name in environ:
+            helper_env[name] = environ[name]
+    asked = run(
+        ["legion", "git-credential", "get"],
+        helper_env,
+        stdin=("protocol=https\nhost=github.com\npath=%s\n\n" % repo).encode(),
+    )
+    answer = dict(
+        line.split("=", 1) for line in asked["output"].splitlines() if "=" in line
+    )
+    if asked["status"] != 0 or "password" not in answer:
+        return None, "legion git-credential answered nothing for %s (exit %d)" % (repo, asked["status"])
+    return (answer.get("username", ""), answer["password"]), ""
+
+
+def advertisement_of(base_url, repo, environ):
+    """GitHub's answer to the request a `git push` of <repo> opens with, made with the role's own
+    credential: 200 and the receive-pack advertisement for a token that can push, 403 for one that
+    cannot."""
+    pair, why = credential_for(repo, environ)
+    if pair is None:
+        return {"status": 0, "content_type": "", "output": why}
+    username, password = pair
+    proxy = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({"https": proxy} if proxy else {})
+    )
+    request = urllib.request.Request(
+        "%s/%s.git/info/refs?service=git-receive-pack" % (base_url, repo),
+        headers={
+            "Authorization": "Basic " + base64.b64encode(("%s:%s" % (username, password)).encode()).decode(),
+            "User-Agent": "legion-second-owner-probe",
+            "Accept": "*/*",
+        },
+    )
+    try:
+        with opener.open(request, timeout=PROBE_TIMEOUT_SECONDS) as response:
+            content_type = response.headers.get("Content-Type", "")
+            response.read(1)
+            return {"status": response.status, "content_type": content_type, "output": ""}
+    except urllib.error.HTTPError as error:
+        body = error.read(4096).decode("utf-8", "replace").replace(password, "<token>")
+        return {
+            "status": error.code,
+            "content_type": error.headers.get("Content-Type", ""),
+            "output": body.strip(),
+        }
+    except (urllib.error.URLError, OSError) as error:
+        return {"status": 0, "content_type": "", "output": str(error).replace(password, "<token>")}
+
+
 def main():
     if len(sys.argv) != 6:
-        fail("usage: as-role.py <proc root> <T repo> <O repo> <O owner> <probe branch>")
-    proc_root, t_repo, o_repo, o_owner, branch = sys.argv[1:]
+        fail("usage: as-role.py <proc root> <T repo> <O repo> <O owner> <GitHub base URL>")
+    proc_root, t_repo, o_repo, o_owner, base_url = sys.argv[1:]
 
     pid = resolve_agent(proc_root)
     cmdline = read_file(proc_root, pid, "cmdline")
@@ -163,80 +238,21 @@ def main():
     environ = environment_of(proc_root, pid)
     owners_dir = environ.get("LEGION_GH_OWNERS_DIR", "")
 
-    result = {
-        "pid": pid,
-        "argv0": os.fsdecode(argv[0]) if argv else "",
-        "argc": len(argv),
-        "sha256": hashlib.sha256(cmdline).hexdigest(),
-        "env_match": owners_dir != "" and environ.get("GH_CONFIG_DIR") == owners_dir + "/" + o_owner,
-        "read": run(["gh", "api", "repos/" + t_repo, "--jq", ".full_name"], environ),
-    }
-
-    probe_env = {key: value for key, value in environ.items() if not key.startswith("GIT_")}
-    probe_env.update(
-        {
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_ALLOW_PROTOCOL": "https",
-            "GIT_TERMINAL_PROMPT": "0",
-        }
-    )
-    with tempfile.TemporaryDirectory(prefix="as-role-") as scratch:
-        git = [
-            "git",
-            "-C",
-            scratch,
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "credential.helper=",
-            "-c",
-            "credential.helper=!legion git-credential",
-            "-c",
-            "credential.useHttpPath=true",
-            "-c",
-            "credential.interactive=false",
-            "-c",
-            "protocol.allow=never",
-            "-c",
-            "protocol.https.allow=always",
-        ]
-        made = run(["git", "init", "-q", scratch], probe_env)
-        if made["status"] != 0:
-            fail("could not create the probe repository: %s" % made["output"])
-        made = run(
-            git
-            + [
-                "-c",
-                "user.name=legion-probe",
-                "-c",
-                "user.email=legion-probe@localhost.invalid",
-                "-c",
-                "commit.gpgsign=false",
-                "commit",
-                "-q",
-                "--allow-empty",
-                "-m",
-                "probe",
-            ],
-            probe_env,
+    print(
+        json.dumps(
+            {
+                "pid": pid,
+                "argv0": os.fsdecode(argv[0]) if argv else "",
+                "argc": len(argv),
+                "sha256": hashlib.sha256(cmdline).hexdigest(),
+                "env_match": owners_dir != ""
+                and environ.get("GH_CONFIG_DIR") == owners_dir + "/" + o_owner,
+                "read": run(["gh", "api", "repos/" + t_repo, "--jq", ".full_name"], environ),
+                "push_o": advertisement_of(base_url, o_repo, environ),
+                "push_t": advertisement_of(base_url, t_repo, environ),
+            }
         )
-        if made["status"] != 0:
-            fail("could not commit in the probe repository: %s" % made["output"])
-        for name, repo in (("push_o", o_repo), ("push_t", t_repo)):
-            result[name] = run(
-                git
-                + [
-                    "push",
-                    "--no-verify",
-                    "--dry-run",
-                    "https://github.com/" + repo,
-                    "HEAD:refs/heads/" + branch,
-                ],
-                probe_env,
-            )
-
-    print(json.dumps(result))
+    )
 
 
 main()

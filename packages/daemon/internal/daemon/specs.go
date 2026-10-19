@@ -222,7 +222,7 @@ func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repositor
 	if repo.IsZero() {
 		return fragment, nil
 	}
-	return fragment + " " + fmt.Sprintf("your issue's repository is %s (default branch %s); %s",
+	return fragment + " " + fmt.Sprintf("Your issue's repository is %s (default branch %s); %s",
 		repo.String(), defaultBranch, RepositoriesClause(repositories)), nil
 }
 

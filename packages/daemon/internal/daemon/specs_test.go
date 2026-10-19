@@ -148,7 +148,7 @@ func TestAWorkersAddressingNamesItsRepositoryAndTheProjects(t *testing.T) {
 		}
 		return spec.Prompt.Addressing
 	}
-	const own = "your issue's repository is acme/widgets (default branch release/v7.1); "
+	const own = "Your issue's repository is acme/widgets (default branch release/v7.1); "
 	for _, tc := range []struct {
 		name string
 		view api.RepositoriesView

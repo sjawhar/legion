@@ -150,6 +150,14 @@ func pane() error {
 // bundle holds the rig's token.
 const rigOwner = "skills-rig"
 
+// rigRepository and rigDefaultBranch are the repository and default branch a rig worker's
+// addressing names, as a real pane's does for its issue; the branch is not `main`, since the skills
+// tell a worker never to assume one.
+const (
+	rigRepository    = rigOwner + "/project"
+	rigDefaultBranch = "trunk"
+)
+
 // realGH is the first gh on path, which the daemon resolves at boot (LEGION_GH_PATH) and refuses
 // to boot without.
 func realGH(path string) (string, error) {
@@ -177,9 +185,15 @@ func systemPromptArgument(req paneRequest, token claim.Token) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	repository, err := ghrepo.Parse("the rig's repository", rigRepository)
+	if err != nil {
+		return "", err
+	}
 	addressing, err := daemon.AddressingFragment(req.Project, supervise.Claim{
 		Token: token, Project: req.Project, Tree: req.Issue, Issue: req.Issue, Role: role, Generation: 1,
-	}, ghrepo.Repository{}, "", api.RepositoriesView{})
+	}, repository, rigDefaultBranch, api.RepositoriesView{
+		Mapped: []api.MappedRepositoryView{{Repo: rigRepository, Default: true}},
+	})
 	if err != nil {
 		return "", err
 	}

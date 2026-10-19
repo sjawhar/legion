@@ -503,12 +503,25 @@ resolve_proc_root() {
   printf '%s' /proc
 }
 
-# as_role_probe <pod> <container> <proc root> <probe branch> runs lib/as-role.py in the role's
+# resolve_github_url prints the base URL as-role.py asks about push access: https://github.com,
+# except in a test, which must set MULTIREPO_TEST_SEAM=1 to point it at a stub with
+# MULTIREPO_GITHUB_URL (refused without the marker, as MULTIREPO_PROC_ROOT is).
+resolve_github_url() {
+  if [ -n "${MULTIREPO_GITHUB_URL:-}" ]; then
+    [ "${MULTIREPO_TEST_SEAM:-}" = 1 ] ||
+      fail "MULTIREPO_GITHUB_URL is set without MULTIREPO_TEST_SEAM=1: this is a test-only seam, never a production input"
+    printf '%s' "$MULTIREPO_GITHUB_URL"
+    return
+  fi
+  printf '%s' https://github.com
+}
+
+# as_role_probe <pod> <container> <proc root> <github url> runs lib/as-role.py in the role's
 # container with that file as stdin, and prints its JSON object.
 as_role_probe() {
-  local pod=$1 container=$2 proc_root=$3 branch=$4
+  local pod=$1 container=$2 proc_root=$3 github_url=$4
   kubectl exec -i "$pod" -c "$container" -- python3 -I - \
-    "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$branch" <"$as_role_script"
+    "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$github_url" <"$as_role_script"
 }
 
 # second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
@@ -517,12 +530,13 @@ as_role_probe() {
 # not merge proof by itself); the pod is bound to the issue by its legion.dev/issue label, as
 # `cache` binds it. The credential evidence is lib/as-role.py's, run once under one resolved agent
 # process: the role's own LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR name the issue's owner directory;
-# `gh api repos/<T> --jq .full_name` reads T and says T; a dry-run push to O's own repository
-# succeeds (the positive control: the network, the credential helper and the ref are sound); and
-# the same push to T fails with git's own permission refusal naming T, never merely a nonzero exit,
-# which a bad ref, an unreachable network or an unanswered credential helper would also give. Each
-# push runs from a probe repository the prober makes (never the issue's clone), outside everything
-# the agent can write.
+# `gh api repos/<T> --jq .full_name` reads T and says T; and GitHub's answer, with the credential
+# the role's own `legion git-credential` hands out, to the request a `git push` opens with
+# (`GET <repo>.git/info/refs?service=git-receive-pack`): for O, 200 and a receive-pack
+# advertisement (the positive control: the network, the helper and the token are sound); for T, 403
+# with GitHub's own refusal body, never merely a failure, which an unreachable network or an
+# unanswered helper would also give. No git runs: git reads ~/.netrc, config files and a scratch
+# repository, every one of which the agent's uid can write while the check runs.
 second_owner() {
   local child=$1 pod=$2 container=${3:-implementer} pr_repo pr_number phase merged ok=1
   command -v kubectl >/dev/null || fail "second-owner: kubectl is required and is not on PATH"
@@ -544,18 +558,22 @@ second_owner() {
   fi
   [ "$merged" = true ] || ok=0
 
-  local proc_root probe_file
+  local proc_root github_url probe_file
   proc_root=$(resolve_proc_root)
+  github_url=$(resolve_github_url)
   probe_file="$MULTIREPO_EVIDENCE_DIR/second-owner-probe.raw"
   raw_fetch "$probe_file" "second-owner: the credential probes in $pod ($container)" \
-    as_role_probe "$pod" "$container" "$proc_root" "legion-probe-$$-$(date +%s)"
+    as_role_probe "$pod" "$container" "$proc_root" "$github_url"
   jq -e '
     (.pid | type == "string") and (.argv0 | type == "string") and (.argc | type == "number")
     and (.sha256 | type == "string") and (.env_match | type == "boolean")
-    and ([.read, .push_o, .push_t] | all(type == "object" and (.status | type == "number") and (.output | type == "string")))
+    and (.read | type == "object" and (.status | type == "number") and (.output | type == "string"))
+    and ([.push_o, .push_t] | all(type == "object" and (.status | type == "number")
+      and (.content_type | type == "string") and (.output | type == "string")))
   ' "$probe_file" >/dev/null || fail "second-owner: the probe in $pod did not answer the object lib/as-role.py prints"
 
-  local pid argv0 argc sha256 env_match read_out read_status push_o_out push_o_status push_t_out push_t_status
+  local pid argv0 argc sha256 env_match read_out read_status
+  local push_o_status push_o_type push_t_status push_t_body
   pid=$(jq -r .pid "$probe_file")
   argv0=$(jq -r .argv0 "$probe_file")
   argc=$(jq -r .argc "$probe_file")
@@ -563,20 +581,29 @@ second_owner() {
   env_match=$(jq -r .env_match "$probe_file")
   read_out=$(jq -r .read.output "$probe_file")
   read_status=$(jq -r .read.status "$probe_file")
-  push_o_out=$(jq -r .push_o.output "$probe_file")
   push_o_status=$(jq -r .push_o.status "$probe_file")
-  push_t_out=$(jq -r .push_t.output "$probe_file")
+  push_o_type=$(jq -r .push_o.content_type "$probe_file")
   push_t_status=$(jq -r .push_t.status "$probe_file")
+  push_t_body=$(jq -r .push_t.output "$probe_file")
 
   [ "$env_match" = true ] || ok=0
   [ "$read_status" = 0 ] && [ "$(lower "$read_out")" = "$repo_t" ] || ok=0
-  [ "$push_o_status" = 0 ] || ok=0
-  [ "$push_t_status" != 0 ] || ok=0
-  # One line of git's own output, anchored to T: its permission refusal, or its 403 on T's URL. A
-  # 403 for another repository, or T's URL on one line and a 403 on another, never counts.
+  # The positive control: GitHub gives O's token the receive-pack advertisement, as it does a token
+  # that can push.
+  [ "$push_o_status" = 200 ] || ok=0
+  case "$(lower "$push_o_type")" in
+    application/x-git-receive-pack-advertisement*) ;;
+    *) ok=0 ;;
+  esac
+  # The refusal: 403 with GitHub's own whole-body refusal — a token that cannot write ("Write access
+  # to repository not granted.") or one the repository does not grant ("Permission to <T>.git denied
+  # to <who>."), naming T. Any other status (a 404, a 5xx, 0 for no answer) or body (another
+  # repository's refusal, extra lines) is not the refusal.
   local t_repo_re
   t_repo_re=$(regex_escape "$LEGION_E2E_REPO_T")
-  printf '%s\n' "$push_t_out" | grep -qiE "^(remote: Permission to ${t_repo_re}\.git denied|fatal: unable to access 'https://github\.com/${t_repo_re}/?': The requested URL returned error: 403)" || ok=0
+  [ "$push_t_status" = 403 ] || ok=0
+  [ "$(printf '%s\n' "$push_t_body" | wc -l)" = 1 ] || ok=0
+  printf '%s\n' "$push_t_body" | grep -qixE "(Write access to repository not granted\.|Permission to ${t_repo_re}\.git denied to [^[:space:]]+\.)" || ok=0
 
   summary second-owner "pullRequest.repo: $pr_repo
 pullRequest.number: $pr_number
@@ -587,13 +614,10 @@ role pid: $pid
 role cmdline: argv0=$argv0 argc=$argc sha256=$sha256
 role env: LEGION_GH_OWNERS_DIR/GH_CONFIG_DIR name the issue's own owner directory: $env_match
 as role: gh api repos/$LEGION_E2E_REPO_T --jq .full_name = $read_out (exit $read_status)
-positive control: dry-run push to $LEGION_E2E_REPO_O as role, exit $push_o_status
+positive control: GET $LEGION_E2E_REPO_O.git/info/refs?service=git-receive-pack as role: HTTP $push_o_status, $push_o_type
+negative probe: the same request for $LEGION_E2E_REPO_T as role: HTTP $push_t_status
 ---
-$push_o_out
----
-negative probe: dry-run push to $LEGION_E2E_REPO_T as role, exit $push_t_status
----
-$push_t_out
+$push_t_body
 " >/dev/null
   check second-owner "$ok"
 }
