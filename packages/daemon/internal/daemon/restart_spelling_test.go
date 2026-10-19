@@ -156,22 +156,3 @@ func TestTheBootNamesARecordWithNoGitHubSpellingBeforeSubscribing(t *testing.T) 
 		}
 	})
 }
-
-// A record whose tree's root is not recorded refuses the heard set, naming both, rather than leave
-// GitHub intake hearing no repository at all: the set a boot subscribes with and a mapping refresh
-// replaces the consumer's filters with.
-func TestTheHeardSetRefusesARecordWhoseTreeRootIsNotRecorded(t *testing.T) {
-	ctx := context.Background()
-	pool := isolatedOutboxPool(t)
-	if _, err := pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch, github_repo)
-		values ('LEGION-10', 'LEGION-9', 'LEGION', 'child', 'implementing', 1, 'in_progress', 'A', 1, 'zeta/tools', 'main', 'zeta/tools')`); err != nil {
-		t.Fatal(err)
-	}
-	repos := newRepositories("LEGION")
-	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
-	w := &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, repositories: repos, log: quietLogger()}
-	heard, err := w.heardAtBoot(ctx)
-	if want := "the tree root LEGION-9 of LEGION-10 is not recorded"; err == nil || err.Error() != want {
-		t.Fatalf("heardAtBoot = %v, %v; want the refusal %q", repositoryNames(heard), err, want)
-	}
-}

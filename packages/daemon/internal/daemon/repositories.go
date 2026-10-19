@@ -96,7 +96,7 @@ func (r *repositories) Owners() []string {
 }
 
 // Accepted is every served repository, as GitHub names it, sorted by name: what GitHub intake
-// hears, beside the repositories a live record names.
+// hears, beside the repositories the project's records name.
 func (r *repositories) Accepted() []ghrepo.Repository {
 	mapped := r.Mapped()
 	repos := make([]ghrepo.Repository, 0, len(mapped))
@@ -282,11 +282,11 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 
 // refreshMapping reads the repository mapping again, for Dispatch's settings.repo_project.updated
 // on the project and for an issue on a left-out repository coming up for admission. It has GitHub
-// intake hear every repository the new mapping serves and every repository a live record names,
-// so a repository unmapped while its issues run is still heard, and only then publishes the new
-// mapping: a refresh that fails before the subscription took publishes nothing, so a repository
-// is never served, and an issue never recorded on it, while GitHub intake does not hear it, and
-// the issue's next admission recheck refreshes again.
+// intake hear every repository the new mapping serves and every repository a record of the
+// project names, so a repository unmapped while an issue is recorded on it is still heard, and
+// only then publishes the new mapping: a refresh that fails before the subscription took
+// publishes nothing, so a repository is never served, and an issue never recorded on it, while
+// GitHub intake does not hear it, and the issue's next admission recheck refreshes again.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -301,8 +301,8 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	for _, mapped := range accepted {
 		served = append(served, mapped.Repo)
 	}
-	// The live-record snapshot, the subscription update and the publication run under the lock
-	// every fact applies under (intake.SerializeFacts), which an admission holds from resolving an
+	// The record snapshot, the subscription update and the publication run under the lock every
+	// fact applies under (intake.SerializeFacts), which an admission holds from resolving an
 	// issue's repository through committing its record: one that resolved a repository of the old
 	// mapping commits before the snapshot reads it, so the repository it recorded stays heard, and
 	// one that resolves after resolves against the new mapping.
@@ -330,7 +330,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 }
 
 // heardAtBoot is what GitHub intake hears when the boot opens it: the served repositories of the
-// mapping the boot read and every repository a live record names.
+// mapping the boot read and every repository a record of the project names.
 func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository, error) {
 	var heard []ghrepo.Repository
 	err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
@@ -342,12 +342,15 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 }
 
 // heardRepositories is what GitHub intake hears: every repository of served and every repository
-// a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
-// GitHub spells it, which Envoy's subjects carry and NATS matches case-sensitively, whatever
-// spelling a record keeps for its workspace (a backfilled record keeps its clone's): a served
-// repository as GitHub names it (nameAccepted), and any other as its record keeps GitHub's
-// spelling (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub. A record
-// whose tree root is not recorded is an error, never a set that leaves its repository unheard.
+// a record of the project names, as tx reads the records, once each, sorted. A record is heard
+// whatever its tree's state, since a root that lingers or closed comes back, by re-admission, a
+// hand-over or an orphan's carry, on the repository it keeps, with no refresh between; a fact
+// from a repository an issue is recorded on reaches only that issue (workflow's issueForBranch
+// and ownPullRequest). Each is spelled as GitHub spells it, which Envoy's subjects carry and NATS
+// matches case-sensitively, whatever spelling a record keeps for its workspace (a backfilled
+// record keeps its clone's): a served repository as GitHub names it (nameAccepted), and any other
+// as its record keeps GitHub's spelling (record.Issue.GitHubRepo), so a restart subscribes with
+// no read of GitHub.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -355,29 +358,10 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 	}
 	issues, err := w.records.Issues(ctx, tx)
 	if err != nil {
-		return nil, fmt.Errorf("read the repositories live records name: %w", err)
+		return nil, fmt.Errorf("read the repositories the project's records name: %w", err)
 	}
-	// Each tree's liveness, read once: a tree's issues all share its root.
-	liveTrees := map[string]bool{}
 	for _, issue := range issues {
 		if _, ok := heard[strings.ToLower(issue.GitHubRepo)]; ok {
-			continue
-		}
-		live, read := liveTrees[issue.Tree]
-		if !read {
-			root, err := w.records.Issue(ctx, tx, issue.Tree)
-			if err != nil {
-				return nil, err
-			}
-			if root == nil {
-				return nil, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
-			}
-			if live, err = record.TreeLive(ctx, w.records, tx, *root); err != nil {
-				return nil, err
-			}
-			liveTrees[issue.Tree] = live
-		}
-		if !live {
 			continue
 		}
 		repo, err := ghrepo.Parse("GitHub's spelling of the repository of "+issue.Key, issue.GitHubRepo)

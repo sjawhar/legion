@@ -25,7 +25,7 @@ import (
 // A mapping change at runtime reaches the daemon through its Dispatch consumer: on Dispatch's
 // settings.repo_project.updated of its project, it reads the mapping again. A newly mapped
 // repository both Apps are installed on is served (GitHub intake hears it, its owner joins the
-// owners), one missing an App is left out and not heard, and a repository unmapped while a live
+// owners), one missing an App is left out and not heard, and a repository unmapped while a
 // record names it is still heard, so its running issue's facts still arrive. Its owner leaves the
 // owners every role's gh bundle mints for: one App uninstalled there would otherwise fail every
 // pane's bundle, and the issue's own panes keep that owner as their default (appauth's
