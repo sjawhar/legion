@@ -514,9 +514,25 @@ func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) err
 	return nil
 }
 
+// gitRemoteLine is a line of `git remote -v` as git prints it: `<name>\t<url> (fetch)` or
+// ` (push)`, a fetch line of a remote with a partial clone filter followed by ` [<filter>]`
+// (builtin/remote.c). git prints the URL and the filter as they are configured, so either can hold
+// whitespace, and gh's reading (ghRemoteLine) then takes another URL from the line; the URL and the
+// filter accepted here hold none of the whitespace gh's `\s` matches.
+var gitRemoteLine = regexp.MustCompile(`^([^\t]+)\t([^\t\n\f\r ]+) \((fetch|push)\)( \[[^\t\n\f\r ]+\])?$`)
+
+// ghRemoteLine is gh's own reading of a `git remote -v` line (remoteRE, cli/cli v2.98.0
+// git/client.go:26): unanchored and greedy, so gh takes the URL before the line's last
+// whitespace-preceded `(fetch)` or `(push)`, and trims the name and URL it captures.
+var ghRemoteLine = regexp.MustCompile(`(.+)\s+(.+)\s+\((push|fetch)\)`)
+
 // readGitRemotes is the working directory's git remotes as gh reads them, with git itself: every
-// fetch and push URL `git remote -v` prints, and every remote's gh-resolved setting; none for a
-// directory that is no git repository, or where no git runs, since gh then reads none either.
+// fetch and push URL `git remote -v` prints, a partial clone's fetch line included (git prints the
+// remote's filter after it, `(fetch) [blob:none]`), and every remote's gh-resolved setting; none
+// for a directory that is no git repository, or where no git runs, since gh then reads none either.
+// A line is read only when it has git's shape (gitRemoteLine, a filter on a fetch line alone) and
+// gh's own reading of it (ghRemoteLine) names the same remote, URL and kind; any other line is
+// refused, since gh could act on a repository this reading never counted.
 func readGitRemotes() ([]ghRemote, error) {
 	lines, err := gitLines("remote", "-v")
 	if err != nil {
@@ -524,12 +540,13 @@ func readGitRemotes() ([]ghRemote, error) {
 	}
 	var remotes []ghRemote
 	for _, line := range lines {
-		name, rest, _ := strings.Cut(line, "\t")
-		address, kind, found := strings.Cut(rest, " (")
-		if name == "" || !found || (kind != "fetch)" && kind != "push)") {
+		git := gitRemoteLine.FindStringSubmatch(line)
+		gh := ghRemoteLine.FindStringSubmatch(line)
+		if git == nil || (git[3] == "push" && git[4] != "") || gh == nil ||
+			strings.TrimSpace(gh[1]) != git[1] || strings.TrimSpace(gh[2]) != git[2] || gh[3] != git[3] {
 			return nil, fmt.Errorf("git remote -v printed %q", line)
 		}
-		remotes = append(remotes, ghRemote{name: name, url: address})
+		remotes = append(remotes, ghRemote{name: git[1], url: git[2]})
 	}
 	if lines == nil {
 		return nil, nil
