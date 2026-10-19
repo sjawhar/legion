@@ -76,6 +76,10 @@ type Kubernetes struct {
 	// PluginsFromBinary is whether Plugins was filled from the binary's linked pair rather than
 	// read from the file; false while Plugins holds the file's own setting or is nil.
 	PluginsFromBinary bool
+	// Setup is `runtime.kubernetes.setup`: the argv every role's container runs before each start
+	// of its Oh My Pi, after a stale-plugin relaunch's install and with the environment and working
+	// directory Oh My Pi gets; Oh My Pi starts only once it exits 0. Nil when the file sets none.
+	Setup []string
 	// RepositoryCache is `runtime.kubernetes.repository_cache`, settled: the file's members where it
 	// sets them and the defaults (DefaultRepositoryCache) for the rest, field by field.
 	RepositoryCache RepositoryCacheConfig
@@ -401,7 +405,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles", "agent_secrets", "plugins", "repository_cache")
+		"role_profiles", "agent_secrets", "plugins", "repository_cache", "setup")
 	if err != nil {
 		return nil, err
 	}
@@ -462,10 +466,31 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Plugins, err = readPlugins(fields["plugins"]); err != nil {
 		return nil, err
 	}
+	if block.Setup, err = readSetup(fields["setup"]); err != nil {
+		return nil, err
+	}
 	if block.RepositoryCache, err = readRepositoryCache(fields["repository_cache"]); err != nil {
 		return nil, err
 	}
 	return block, nil
+}
+
+// readSetup reads `runtime.kubernetes.setup`, an argv of non-empty strings (readStrings), nil when
+// absent. An empty list is refused: it names no command to run, and leaving the key out is how a
+// file runs none. A shell command is the argv [/bin/sh, -c, '<command>'].
+func readSetup(value *yaml.Node) ([]string, error) {
+	const key = kubernetesKey + ".setup"
+	if value == nil {
+		return nil, nil
+	}
+	argv, err := readStrings(value, key)
+	if err != nil {
+		return nil, err
+	}
+	if len(argv) == 0 {
+		return nil, fmt.Errorf("%s must name a command: leave it out to run none", key)
+	}
+	return argv, nil
 }
 
 // readRepositoryCache reads `runtime.kubernetes.repository_cache`, settled: each member the file

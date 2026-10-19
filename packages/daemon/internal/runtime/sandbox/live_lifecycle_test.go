@@ -629,7 +629,7 @@ func (r *liveRig) checkStalePluginInstall() error {
 	// The negative control: the published pi-legion@9.6.1 by exact version. The daemon's loader
 	// (config.readPluginSource) and the release's linked bare versions admit only an exact
 	// version, an absolute tarball path, or an http(s) URL — never a dist-tag or a range — and
-	// installScript's bunSpec turns that version into @sjawhar/pi-legion@9.6.1 before bun ever
+	// installBlock's bunSpec turns that version into @sjawhar/pi-legion@9.6.1 before bun ever
 	// sees it (LEGION-164), so bun fetches it from the registry inside the pod: a devbox run
 	// proves the version→package mapping end to end, not just a tarball install. The install
 	// still lands — so the earlier generation's own directory is gone once this one's own `rm -rf

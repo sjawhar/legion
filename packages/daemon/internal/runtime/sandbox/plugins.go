@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -78,34 +79,37 @@ if (got !== want) {
 }
 `
 
-// installScript is the install wrapper an installing launch's agent argv runs before Oh My Pi
-// starts (LEGION-164): it drops any earlier generation's install under the role's plugins
-// root (one role's directory is never another's, and no earlier generation of it should ever run
-// beside this one), installs the exact pair the daemon named at this generation's own directory,
-// checks that the installed pi-legion declares this daemon's contract (pluginCheckScript), and
-// execs its own argv — the agent's real command — only once all of that has succeeded. Every line
-// but the final exec writes to stderr: the shim reads the child's stdout as the RPC frame stream
-// (shim.go), so nothing of the install may write there. bun is called by its image path; a pod
-// whose image lacks it fails the same way, with the shell's own "not found" on stderr. Each
+// startName is the start wrapper's $0 (startArgv): what the shell names itself in its own
+// messages, and what a role container's process list shows for the wrapper before its exec.
+const startName = "legion-start"
+
+// installBlock is the part of the start wrapper an installing launch runs first (LEGION-164): it
+// drops any earlier generation's install under the role's plugins root (one role's directory is
+// never another's, and no earlier generation of it should ever run beside this one), installs the
+// exact pair the daemon named at this generation's own directory, and checks that the installed
+// pi-legion declares this daemon's contract (pluginCheckScript). It runs in a subshell, so its cd
+// into the generation directory ends with it and what runs after it starts in the container's
+// working directory, and with its stdout on stderr: the shim reads the child's stdout as the RPC
+// frame stream (shim.go), so nothing of the install may write there. A failure exits the
+// subshell non-zero, which `set -e` makes the wrapper's own exit. bun is called by its image path;
+// a pod whose image lacks it fails the same way, with the shell's own "not found" on stderr. Each
 // source is handed to `bun add` as bunSpec renders it — a tarball path or URL verbatim, an exact
 // version as the scoped package at that version — so the install can never read a bare version as
 // a package name of its own. The directory, the two specs and the contract are each shell-quoted
 // into the script (shellprefix.Literal): they travel as literal text the daemon renders, never as
 // something the shell expands.
-func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
+func installBlock(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
 	root, genDir := pluginsRoot(stateHome), pluginGenDir(stateHome, generation)
 	legionSpec := bunSpec("@sjawhar/pi-legion", plugins.PiLegion)
 	envoySpec := bunSpec("@sjawhar/pi-envoy", plugins.PiEnvoy)
 	failMsg := fmt.Sprintf("legion plugins: installing %s and %s failed", legionSpec, envoySpec)
-	return fmt.Sprintf(`set -eu
-{
+	return fmt.Sprintf(`(
   rm -rf -- %s/g*
   mkdir -p -- %s && cd -- %s
   /usr/local/bin/bun add --exact %s %s \
     || { echo %s; exit 1; }
   node -e %s %s/node_modules/@sjawhar/pi-legion/package.json %d
-} 1>&2
-exec "$@"
+) 1>&2
 `,
 		shellprefix.Literal(root),
 		shellprefix.Literal(genDir), shellprefix.Literal(genDir),
@@ -117,15 +121,58 @@ exec "$@"
 	)
 }
 
-// installArgv wraps agent in the install wrapper (installScript) when plugins is set: the agent
-// argv rides as positional parameters after $0 (legion-plugins), never quoted into the script
-// itself, so none of it is reparsed by the shell. plugins is nil for a plain launch, which
-// installArgv returns agent unchanged for — every tmux launch, and every Kubernetes launch that
-// is not installing a stale-plugin relaunch's pair into a kept pod (relaunch.go).
-func installArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, agent []string) []string {
-	if plugins == nil {
+// setupBlock runs the deployment's setup command (runtime.kubernetes.setup), whose words are the
+// wrapper's positional parameters after their count: $1 is the count n, the n words after it the
+// command, and the rest the agent's argv. It shifts the count away, runs the first n words in a
+// subshell that keeps only them as its "$@" and execs them, with stdin from /dev/null, so the
+// command never reads the RPC frames the shim writes to the agent, and stdout on stderr, so it
+// never writes into the frame stream the shim reads. A command that exits non-zero ends the
+// wrapper with its status before Oh My Pi starts, after a line naming the status; otherwise its n
+// words are shifted away and "$@" is the agent's argv alone. A count of 0 runs nothing.
+const setupBlock = `n=$1
+shift
+if [ "$n" -gt 0 ]; then
+  (
+    i=0
+    for word do
+      if [ "$i" -eq 0 ]; then set --; fi
+      [ "$i" -lt "$n" ] || break
+      set -- "$@" "$word"
+      i=$((i + 1))
+    done
+    exec "$@"
+  ) </dev/null 1>&2 || {
+    status=$?
+    echo "legion setup: runtime.kubernetes.setup exited $status; not starting Oh My Pi" >&2
+    exit "$status"
+  }
+  shift "$n"
+fi
+`
+
+// startScript is the start wrapper an agent argv runs in before Oh My Pi starts when the launch
+// installs a stale-plugin relaunch's pair (plugins set), the deployment names a setup command, or
+// both: the install (installBlock) when plugins is set, then the setup command (setupBlock), then
+// `exec "$@"` into the agent's real command, only once everything before it has succeeded, so the
+// shim's child is Oh My Pi itself from then on.
+func startScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
+	script := "set -eu\n"
+	if plugins != nil {
+		script += installBlock(stateHome, generation, plugins)
+	}
+	return script + setupBlock + "exec \"$@\"\n"
+}
+
+// startArgv wraps agent in the start wrapper (startScript) when plugins or setup is set:
+// `/bin/sh -c '<script>' legion-start <len(setup)> <setup…> <agent…>`. The setup command and the
+// agent argv ride as positional parameters after $0 (startName), never quoted into the script
+// itself, so none of either is reparsed by the shell. With neither set — every tmux launch, and
+// every Kubernetes launch of a deployment that names no setup command and is not installing a
+// stale-plugin relaunch's pair into a kept pod (relaunch.go) — agent is returned unchanged.
+func startArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, setup, agent []string) []string {
+	if plugins == nil && len(setup) == 0 {
 		return agent
 	}
-	script := installScript(stateHome, generation, plugins)
-	return append([]string{"/bin/sh", "-c", script, "legion-plugins"}, agent...)
+	argv := []string{"/bin/sh", "-c", startScript(stateHome, generation, plugins), startName, strconv.Itoa(len(setup))}
+	return append(append(argv, setup...), agent...)
 }

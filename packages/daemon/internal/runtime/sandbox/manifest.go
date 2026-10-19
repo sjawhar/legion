@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
@@ -87,6 +88,8 @@ var runtimeOwned = map[string]bool{
 	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
 	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
+	"GIT_CONFIG_COUNT": true, "GIT_CONFIG_KEY_0": true, "GIT_CONFIG_VALUE_0": true,
+	"GIT_CONFIG_KEY_1": true, "GIT_CONFIG_VALUE_1": true, "GIT_CONFIG_KEY_2": true, "GIT_CONFIG_VALUE_2": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
 	"AGENT_SECRETS_URL": true, "AGENT_SECRETS_KEY_DIR": true, slackChannelsVariable: true,
@@ -798,7 +801,8 @@ func (r *Runtime) LaunchBound() time.Duration {
 // start command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
-// issue's volume leads PATH.
+// issue's volume leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the role
+// runs, in the issue's clone or outside it (gitCredentialEnv).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -823,6 +827,7 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	add("PATH", podPath(legionDir))
 	add("PI_SHELL_PREFIX", shellprefix.For(legionDir))
 	add("GIT_TERMINAL_PROMPT", "0")
+	env = append(env, gitCredentialEnv()...)
 	if broker := r.agentSecrets; broker != nil {
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
@@ -850,6 +855,36 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	if r.sessionDSNKey != "" {
 		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
 		add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
+	}
+	return env
+}
+
+// gitCredentialPairs are the git configuration entries gitCredentialEnv sets: the helper for
+// https://github.com reset, then set to `legion git-credential` (workspace.GitHubCredentialHelper),
+// and credential.useHttpPath on for github.com, so git hands the helper the path whose owner picks
+// the token.
+var gitCredentialPairs = [][2]string{
+	{"credential.https://github.com.helper", ""},
+	{"credential.https://github.com.helper", workspace.GitHubCredentialHelper},
+	{"credential.https://github.com.useHttpPath", "true"},
+}
+
+// gitCredentialEnv is gitCredentialPairs as GIT_CONFIG_COUNT, GIT_CONFIG_KEY_<n> and
+// GIT_CONFIG_VALUE_<n>, which git reads after every configuration file, as it reads `-c`. Every git
+// a role process runs then answers https://github.com from the role's gh files, in the issue's
+// clone or outside it: a clone the setup command makes (runtime.kubernetes.setup: Oh My Pi's
+// marketplace clone among them), or a repository an agent clones for itself. The reset drops every
+// helper a configuration file names for github.com, the image's or a repository's, and the helper
+// it sets is the one the issue's clone already names, so git in the clone asks what it asked
+// before. Any other host is left to the configuration files. `legion git-credential` answers only
+// an owner of the project, from that owner's directory of LEGION_GH_OWNERS_DIR (ghAgentEnv), and
+// `legion gh` adds its own entry after these (withGitHubUseHTTPPath, cmd/legion/gh.go).
+func gitCredentialEnv() []corev1.EnvVar {
+	env := []corev1.EnvVar{{Name: "GIT_CONFIG_COUNT", Value: strconv.Itoa(len(gitCredentialPairs))}}
+	for i, pair := range gitCredentialPairs {
+		env = append(env,
+			corev1.EnvVar{Name: "GIT_CONFIG_KEY_" + strconv.Itoa(i), Value: pair[0]},
+			corev1.EnvVar{Name: "GIT_CONFIG_VALUE_" + strconv.Itoa(i), Value: pair[1]})
 	}
 	return env
 }

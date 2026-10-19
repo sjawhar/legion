@@ -6,6 +6,7 @@ import (
 	"flag"
 	"maps"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
@@ -461,6 +462,87 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	want := shellprefix.For("/opt/legion/bin")
 	if got != want {
 		t.Fatalf("PI_SHELL_PREFIX\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// Every git a role process runs answers https://github.com from the role's own helper, outside
+// any clone too — a clone the setup command makes, Oh My Pi's marketplace clone among them: the
+// GIT_CONFIG pairs the role is told reset every helper a configuration file names for github.com
+// (a planted global one here) and set `legion git-credential` with the repository's path, whose
+// owner picks the token. Another scheme, host or port is left to the configuration files. A real
+// git runs `git credential fill` in a directory that is no repository, with a stand-in `legion`
+// first on PATH, for a workflow role and the controller alike.
+func TestEveryRolesGitAsksItsOwnHelperForGitHubOutsideAnyClone(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git in this environment")
+	}
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The stand-in answers `git-credential get` with a token naming the owner of git's path, and
+	// nothing without a path, as `legion git-credential` does (cmd/legion/gitcredential.go).
+	legion := "#!/bin/sh\n[ \"$1 $2\" = 'git-credential get' ] || exit 0\n" +
+		"while read -r line; do case $line in path=*) p=${line#path=} ;; esac; done\n" +
+		"[ -n \"$p\" ] || exit 1\necho username=x-access-token\necho \"password=role-token-for-${p%%/*}\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "legion"), []byte(legion), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(dir, "gitconfig")
+	if err := os.WriteFile(global, []byte("[credential]\n\thelper = \"!f() { echo username=planted; echo password=planted; }; f\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "no-repository")
+	if err := os.Mkdir(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, spec := range map[string]runtime.SpawnSpec{"a workflow role": workerSpec(t), "the controller": controllerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			var gitEnv []string
+			for name, value := range envOf(workerOf(t, r, spec)) {
+				if strings.HasPrefix(name, "GIT_CONFIG_") {
+					gitEnv = append(gitEnv, name+"="+value)
+				}
+			}
+			if len(gitEnv) == 0 {
+				t.Fatal("the role is told no GIT_CONFIG pairs")
+			}
+			for _, tc := range []struct{ url, want string }{
+				{"https://github.com/acme/agent-skills.git", "role-token-for-acme"},
+				{"https://github.com/sjawhar/legion-smoke", "role-token-for-sjawhar"},
+				{"http://github.com/acme/agent-skills.git", "planted"},
+				{"https://github.com:8443/acme/agent-skills.git", "planted"},
+				{"https://github.com.evil.example/acme/agent-skills.git", "planted"},
+				{"https://evil.example/acme/agent-skills.git", "planted"},
+			} {
+				fill := exec.Command("git", "credential", "fill")
+				fill.Dir = outside
+				fill.Stdin = strings.NewReader("url=" + tc.url + "\n\n")
+				for _, entry := range os.Environ() {
+					if !strings.HasPrefix(entry, "GIT_") && !strings.HasPrefix(entry, "PATH=") {
+						fill.Env = append(fill.Env, entry)
+					}
+				}
+				fill.Env = append(fill.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
+					"GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1", "GIT_CEILING_DIRECTORIES="+dir, "GIT_TERMINAL_PROMPT=0")
+				fill.Env = append(fill.Env, gitEnv...)
+				out, err := fill.Output()
+				got := ""
+				for _, line := range strings.Split(string(out), "\n") {
+					if value, ok := strings.CutPrefix(line, "password="); ok {
+						got = value
+					}
+				}
+				if err != nil || got != tc.want {
+					t.Errorf("%s: password %q (%v), want %q", tc.url, got, err, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -945,7 +1027,9 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 // address configured: each address-valued argument of every launcher's command and of the
 // generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
 // variable the runtime itself sets in the generation's environment, an address being a value with a
-// scheme. An address added to a launch and not to handedAddresses is one the daemon could move
+// scheme. The git credential entries (gitCredentialEnv) are not addresses but git configuration
+// keys the binary fixes, `credential.https://github.com.helper` among them, so no configuration
+// moves them. An address added to a launch and not to handedAddresses is one the daemon could move
 // without any role it re-adopts being relaunched (evaluate). A workflow role's launch and the
 // controller's, each enrolled with the secrets broker here, are each held to that one list.
 func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
@@ -975,8 +1059,12 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 					}
 				}
 			}
+			gitConfig := map[string]bool{}
+			for _, entry := range gitCredentialEnv() {
+				gitConfig[entry.Name] = true
+			}
 			for _, pair := range start.Env {
-				if name, value, _ := strings.Cut(pair, "="); runtimeOwned[name] && strings.Contains(value, "://") {
+				if name, value, _ := strings.Cut(pair, "="); runtimeOwned[name] && !gitConfig[name] && strings.Contains(value, "://") {
 					carried[name] = value
 				}
 			}
