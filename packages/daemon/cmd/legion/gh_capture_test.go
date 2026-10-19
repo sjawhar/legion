@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -232,15 +233,17 @@ func realGHForCapture(t *testing.T) string {
 // an option's value read as that option's from the leaf command's own help, GH_REPO under an
 // explicit endpoint, -R under GH_REPO, --help=false, a name in --repos under --org, -R after an
 // optional-value shorthand, every argument of a plural slot, a placeholder gh fills from GH_REPO,
-// the working directory's own repository — the issue owner's write token only for the issue
-// owner's repository and for a command naming none run where only that owner's remotes are,
-// another owner's read-only token for that owner's. A command the wrapper cannot read for certain
-// (a gh alias or an extension, run, as `gh help`'s target or after --version, a command gh's own
-// help does not list, `gh extension exec`, a search qualifier it cannot read, GH_HOST naming
-// another host, an argument a later gh's usage names otherwise, one naming none run in a clone of
-// another owner's repository or beside another owner's remote), one naming two owners, and one
-// naming an owner the bundle does not hold are refused with exit 2 and send nothing; no alias or
-// extension runs, none is installed, and gh's own help and version answer.
+// the working directory's own repository as gh reads its remotes whatever their scheme — the issue
+// owner's write token only for the issue owner's repository and for a command naming none run
+// where only that owner's remotes are, another owner's read-only token for that owner's, and the
+// git gh runs itself asking the wrapper for the owner in its path. A command the wrapper cannot
+// read for certain (a gh alias or an extension, run, as `gh help`'s target or after --version, a
+// command gh's own help does not list, `gh extension exec`, a search qualifier it cannot read,
+// GH_HOST naming another host, an argument a later gh's usage names otherwise), one naming two
+// owners — an option or another repository naming one owner while gh takes the command's own from
+// the working directory or GH_REPO, or a workspace whose remotes name two — and one naming an owner
+// the bundle does not hold are refused with exit 2 and send nothing; no alias or extension runs,
+// none is installed, and gh's own help and version answer.
 func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	gh := realGHForCapture(t)
 	git, err := exec.LookPath("git")
@@ -260,6 +263,10 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	home := t.TempDir()
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "legion"), []byte("#!/bin/sh\n"+testMainEnv+"=1 exec '"+os.Args[0]+"' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The pane's `gh` wrapper, first on PATH, as the runtimes install it.
+	if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\nexec '"+filepath.Join(bin, "legion")+"' gh \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	base := []string{
@@ -352,13 +359,14 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	}
 	ghEnv := []string{testMainEnv + "=1"}
 	// check runs `legion gh args…` in dir: refused with exit 2 and refuse's text, sending nothing,
-	// or sending GitHub alone owner's token on every request.
+	// or sending GitHub alone owner's token on every request. A refusal of an option a gh version
+	// lacks names both texts, joined by "||", either of which passes.
 	check := func(dir string, env, args []string, owner, refuse string) {
 		t.Helper()
 		what := "legion gh " + strings.Join(args, " ")
 		code, out := runIn(dir, append(append([]string{}, ghEnv...), env...), os.Args[0], append([]string{"gh"}, args...)...)
 		if refuse != "" {
-			if code != 2 || !strings.Contains(out, refuse) {
+			if code != 2 || !slices.ContainsFunc(strings.Split(refuse, "||"), func(text string) bool { return strings.Contains(out, text) }) {
 				t.Errorf("%s = exit %d, %q; want exit 2 containing %q", what, code, out, refuse)
 			}
 			if sent := proxy.take(); len(sent) != 0 {
@@ -441,11 +449,12 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		check(home, tc.env, tc.args, tc.owner, tc.refuse)
 	}
 
-	// A command naming no repository acts on the one gh reads from the working directory's git
-	// remotes: in the issue's own workspace, with acme's remote alone, it carries acme's token; in
-	// a clone of another owner's repository, inside or outside the project, beside another
-	// owner's `upstream`, or under `gh repo set-default`'s gh-resolved naming another, it is
-	// refused; -R names the repository there.
+	// A command naming no repository, or naming another while gh takes the command's own from the
+	// working directory, acts on the repository gh reads from the working directory's git remotes,
+	// as gh reads them whatever their scheme: in the issue's own workspace it carries acme's
+	// token; in a clone of sjawhar's, sjawhar's; in a clone outside the project, or a workspace
+	// whose remotes name two owners, or an option naming another owner than the one gh acts on, it
+	// is refused; -R names the repository there.
 	workspace := func(remotes [][]string) string {
 		dir := t.TempDir()
 		for _, args := range append([][]string{{"init", "-q"}}, remotes...) {
@@ -455,28 +464,51 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		}
 		return dir
 	}
-	issueWorkspace := workspace([][]string{{"remote", "add", "origin", "https://github.com/acme/widgets"}})
+	origin := []string{"remote", "add", "origin", "https://github.com/acme/widgets"}
+	issueWorkspace := workspace([][]string{origin})
 	otherClone := workspace([][]string{{"remote", "add", "origin", "https://github.com/sjawhar/legion"}})
 	outsideClone := workspace([][]string{{"remote", "add", "origin", "https://github.com/octocat/hello"}})
-	upstream := workspace([][]string{{"remote", "add", "origin", "https://github.com/acme/widgets"}, {"remote", "add", "upstream", "git@github.com:sjawhar/legion.git"}})
-	setDefault := workspace([][]string{{"remote", "add", "origin", "https://github.com/acme/widgets"}, {"config", "remote.origin.gh-resolved", "sjawhar/legion"}})
-	for _, tc := range []struct {
+	upstream := workspace([][]string{origin, {"remote", "add", "upstream", "git@github.com:sjawhar/legion.git"}})
+	setDefault := workspace([][]string{origin, {"config", "remote.origin.gh-resolved", "sjawhar/legion"}})
+	gitPlusHTTPS := workspace([][]string{{"remote", "add", "origin", "git+https://github.com/sjawhar/legion"}})
+	type row struct {
 		dir    string
+		env    []string
 		args   []string
 		owner  string
 		refuse string
-	}{
-		{issueWorkspace, []string{"pr", "view", "1", "--json", "title"}, "acme", ""},
-		{issueWorkspace, []string{"api", "repos/{owner}/{repo}"}, "acme", ""},
-		{otherClone, []string{"pr", "view", "1", "--json", "title"}, "", `remote "origin" (https://github.com/sjawhar/legion) names sjawhar`},
-		{otherClone, []string{"repo", "view", "--json", "nameWithOwner"}, "", "names sjawhar"},
-		{otherClone, []string{"api", "repos/{owner}/{repo}"}, "", "name it in the endpoint"},
-		{otherClone, []string{"-R", "acme/widgets", "pr", "view", "1", "--json", "title"}, "acme", ""},
-		{outsideClone, []string{"pr", "list", "--json", "title"}, "", "names octocat"},
-		{upstream, []string{"pr", "list", "--json", "title"}, "", `remote "upstream" (git@github.com:sjawhar/legion.git) names sjawhar`},
-		{setDefault, []string{"pr", "list", "--json", "title"}, "", "remote.origin.gh-resolved sjawhar/legion names sjawhar"},
-	} {
-		check(tc.dir, nil, tc.args, tc.owner, tc.refuse)
+	}
+	rows := []row{
+		{issueWorkspace, nil, []string{"pr", "view", "1", "--json", "title"}, "acme", ""},
+		{issueWorkspace, nil, []string{"api", "repos/{owner}/{repo}"}, "acme", ""},
+		{otherClone, nil, []string{"pr", "view", "1", "--json", "title"}, "sjawhar", ""},
+		{otherClone, nil, []string{"repo", "view", "--json", "nameWithOwner"}, "sjawhar", ""},
+		{otherClone, nil, []string{"api", "repos/{owner}/{repo}"}, "sjawhar", ""},
+		{otherClone, nil, []string{"-R", "acme/widgets", "pr", "view", "1", "--json", "title"}, "acme", ""},
+		{outsideClone, nil, []string{"pr", "list", "--json", "title"}, "", `"octocat" is not an owner of this project`},
+		{upstream, nil, []string{"pr", "list", "--json", "title"}, "", `remote "upstream" (git@github.com:sjawhar/legion.git)`},
+		{setDefault, nil, []string{"pr", "list", "--json", "title"}, "", "remote.origin.gh-resolved sjawhar/legion"},
+		// Round 4's: remote spellings gh reads as github.com's (deep 2, quality A, final B1).
+		{gitPlusHTTPS, nil, []string{"pr", "view", "1", "--json", "title"}, "sjawhar", ""},
+		// Round 4's: an option or another repository naming one owner while gh acts on the
+		// working directory's (deep 1, quality B, final B2), and the options of deep 3.
+		{issueWorkspace, nil, []string{"pr", "comment", "5", "--body", "https://github.com/sjawhar/legion/pull/2"}, "acme", ""},
+		{issueWorkspace, nil, []string{"issue", "edit", "5", "--add-blocked-by", "https://github.com/sjawhar/legion/issues/9"}, "", "more than one owner||is no option"},
+		{issueWorkspace, nil, []string{"repo", "fork", "--org", "sjawhar", "--clone=false", "--remote=false"}, "", "more than one owner"},
+		{issueWorkspace, nil, []string{"issue", "create", "--title", "t", "--body", "b", "--blocked-by", "1,https://github.com/sjawhar/legion/issues/5"}, "", "more than one owner||is no option"},
+		{otherClone, nil, []string{"pr", "comment", "1", "--body", "https://github.com/acme/widgets/pull/9"}, "sjawhar", ""},
+		{otherClone, nil, []string{"issue", "close", "3", "--duplicate-of", "https://github.com/acme/widgets/issues/1"}, "", "more than one owner||is no option"},
+		{otherClone, nil, []string{"repo", "sync", "--source", "acme/widgets"}, "", "more than one owner"},
+		{otherClone, nil, []string{"issue", "develop", "3", "--branch-repo", "acme/widgets", "--name", "x"}, "", "more than one owner"},
+		{outsideClone, nil, []string{"pr", "comment", "1", "--body", "https://github.com/sjawhar/legion/pull/2"}, "", `"octocat" is not an owner of this project`},
+		{home, []string{"GH_REPO=acme/widgets"}, []string{"issue", "close", "3", "--duplicate-of", "https://github.com/sjawhar/legion/issues/5"}, "", "more than one owner||is no option"},
+		{issueWorkspace, []string{"GH_REPO=sjawhar/legion"}, []string{"project", "link", "1", "--owner", "acme"}, "", "more than one owner"},
+	}
+	for _, scheme := range []string{"git+https://github.com/sjawhar/legion.git", "ftp://github.com/sjawhar/legion", "ftps://github.com/sjawhar/legion", "file://github.com/sjawhar/legion", "github.com://sjawhar/legion", "git@github.com/sjawhar:legion"} {
+		rows = append(rows, row{workspace([][]string{origin, {"remote", "add", "upstream", scheme}}), nil, []string{"pr", "list", "--json", "title"}, "", "more than one owner"})
+	}
+	for _, tc := range rows {
+		check(tc.dir, tc.env, tc.args, tc.owner, tc.refuse)
 	}
 	// gh's own help, its topics and its version still answer, exit 0, and send nothing.
 	for _, args := range [][]string{{"help"}, {"help", "pr", "view"}, {"help", "environment"}, {"pr", "view", "--help"}, {"--version"}} {
@@ -495,6 +527,28 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(home, ".data", "gh", "extensions", "gh-stack")); err == nil {
 		t.Errorf("legion gh stack installed gh's stack extension")
+	}
+
+	// The git gh runs itself (a clone, a fork's parent, `pr checkout`) authenticates through the
+	// credential helper gh names after its own executable, GH_PATH (quality C). `legion gh` sets it
+	// to the pane's wrapper, so the helper gh writes is the wrapper's `auth git-credential`, and
+	// git, told useHttpPath as `legion gh` tells gh's git, gets the token of the owner in each
+	// request's path from it, never GH_CONFIG_DIR's acme token for sjawhar's repository.
+	gitConfig := filepath.Join(home, "gh-gitconfig")
+	if code, out := run(append([]string{"GIT_CONFIG_GLOBAL=" + gitConfig}, ghEnv...), os.Args[0], "gh", "auth", "setup-git", "--hostname", "github.com"); code != 0 {
+		t.Fatalf("legion gh auth setup-git = exit %d: %s", code, out)
+	}
+	if sent := proxy.take(); len(sent) != 0 {
+		t.Errorf("legion gh auth setup-git sent %+v, want nothing", sent)
+	}
+	written, err := os.ReadFile(gitConfig)
+	if wrapperHelper := "helper = !" + filepath.Join(bin, "gh") + " auth git-credential"; err != nil || !strings.Contains(string(written), wrapperHelper) {
+		t.Fatalf("the helper gh wrote = %q, %v; want %q", written, err, wrapperHelper)
+	}
+	ghGit := []string{"GIT_CONFIG_GLOBAL=" + gitConfig, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=credential.https://github.com.useHttpPath", "GIT_CONFIG_VALUE_0=true"}
+	for repo, owner := range map[string]string{"sjawhar/legion": "sjawhar", "Acme/widgets": "acme"} {
+		run(ghGit, git, "-c", "credential.interactive=false", "ls-remote", "https://github.com/"+repo)
+		wantSent("git ls-remote "+repo+" through the helper gh wrote", owner, true)
 	}
 
 	helper := []string{"-c", "credential.helper=", "-c", "credential.helper=!legion git-credential", "-c", "credential.useHttpPath=true", "-c", "credential.interactive=false"}

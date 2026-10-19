@@ -330,24 +330,61 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		owner   string                         // "" with no refusal: not named
 		err     string                         // a refusal containing this
 	}{
-		// The final gates' at 96e1672cd. A command naming no repository acts on the working
-		// directory's: every github.com remote and gh-resolved setting must be the token's owner's.
-		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(acmeClone)},
-		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "base"})},
-		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(sjawharClone), err: `the working directory's remote "origin" (https://github.com/sjawhar/legion) names sjawhar`},
-		{argv: []string{"repo", "view"}, env: pane, remotes: remotes(sjawharClone), err: "name the repository with -R <owner>/<repo>"},
-		{argv: []string{"api", "repos/{owner}/{repo}"}, env: pane, remotes: remotes(sjawharClone), err: "name it in the endpoint"},
-		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(ghRemote{name: "origin", url: "https://github.com/octocat/hello"}), err: "names octocat"},
-		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "git@github.com:sjawhar/legion.git"}), err: `remote "upstream" (git@github.com:sjawhar/legion.git) names sjawhar`},
-		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "sjawhar/legion"}), err: "remote.origin.gh-resolved sjawhar/legion names sjawhar"},
-		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "fork", url: "ssh://git@ssh.github.com:443/Sjawhar/legion"}), err: "names sjawhar"},
+		// The final gates' at 96e1672cd, as round 4 reads them. A command naming no repository acts
+		// on the working directory's: every github.com remote and gh-resolved setting names an
+		// owner, and they must name one.
+		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(acmeClone), owner: "acme"},
+		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "base"}), owner: "acme"},
+		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"repo", "view"}, env: pane, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"api", "repos/{owner}/{repo}"}, env: pane, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(ghRemote{name: "origin", url: "https://github.com/octocat/hello"}), owner: "octocat"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "git@github.com:sjawhar/legion.git"}), err: `more than one owner, acme (the working directory's remote "origin" (https://github.com/Acme/widgets.git)) and sjawhar (the working directory's remote "upstream" (git@github.com:sjawhar/legion.git))`},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "sjawhar/legion"}), err: "sjawhar (the working directory's remote.origin.gh-resolved sjawhar/legion)"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "fork", url: "ssh://git@ssh.github.com:443/Sjawhar/legion"}), err: "more than one owner"},
 		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "work", url: "git@gh-work:sjawhar/legion.git"}), err: "is an ssh remote whose host gh may read as github.com"},
-		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "mirror", url: "https://gitlab.example.com/sjawhar/legion"}, ghRemote{name: "local", url: "/srv/legion"})},
-		{argv: []string{"pr", "list"}, env: map[string]string{"GH_CONFIG_DIR": "/owners", "LEGION_GH_OWNERS_DIR": "/owners"}, remotes: remotes(acmeClone), err: "while it sends no owner's token"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "mirror", url: "https://gitlab.example.com/sjawhar/legion"}, ghRemote{name: "local", url: "/srv/legion"}), owner: "acme"},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_CONFIG_DIR": "/owners", "LEGION_GH_OWNERS_DIR": "/owners"}, remotes: remotes(acmeClone), owner: "acme"},
 		{argv: []string{"pr", "list"}, env: pane, remotes: func() ([]ghRemote, error) { return nil, fmt.Errorf("bad config line 3") }, err: "cannot be read (bad config line 3)"},
 		{argv: []string{"-R", "acme/widgets", "pr", "view", "1"}, env: pane, remotes: remotes(sjawharClone), owner: "acme"},
 		{argv: []string{"pr", "list"}, env: paneWith("GH_REPO", "acme/widgets"), remotes: remotes(sjawharClone), owner: "acme"},
 		{argv: []string{"pr", "view", "--help"}, env: pane, remotes: remotes(sjawharClone)},
+		// Round 4's: a remote URL gh reads as github.com's whatever its scheme, as gh's own parser
+		// reads it (deep 2, quality A, final B1).
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "git+https://github.com/sjawhar/legion.git"}), err: "more than one owner"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "ftp://github.com/sjawhar/legion"}), err: "more than one owner"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "ftps://github.com/sjawhar/legion"}), err: "more than one owner"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "file://github.com/sjawhar/legion"}), err: "more than one owner"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "github.com://sjawhar/legion"}), err: "more than one owner"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "git@github.com/sjawhar:legion"}), err: "more than one owner"},
+		{argv: []string{"pr", "list"}, remotes: remotes(ghRemote{name: "origin", url: "git+https://github.com/sjawhar/legion"}), owner: "sjawhar"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "GIT+HTTPS://github.com/sjawhar/legion"}), err: "is an ssh remote whose host gh may read as github.com"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "https://github.com/%zz/legion"}), err: "is a URL this cannot read as gh does"},
+		{argv: []string{"pr", "list"}, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "https://github.com/sjawhar/legion/extra"}), err: "names no OWNER/REPO"},
+		// Round 4's: an option or another repository naming one owner while gh takes the command's
+		// own repository from the working directory or GH_REPO (deep 1, quality B, final B2).
+		{argv: []string{"pr", "comment", "5", "--body", "https://github.com/sjawhar/legion/pull/2"}, remotes: remotes(acmeClone), owner: "acme"},
+		{argv: []string{"issue", "edit", "5", "--add-blocked-by", "https://github.com/sjawhar/legion/issues/9"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"pr", "comment", "1", "--body", "https://github.com/acme/widgets/pull/9"}, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"pr", "comment", "1", "--body", "https://github.com/sjawhar/legion/pull/2"}, remotes: remotes(ghRemote{name: "origin", url: "https://github.com/octocat/hello"}), owner: "octocat"},
+		{argv: []string{"issue", "close", "3", "--duplicate-of", "https://github.com/acme/widgets/issues/1"}, remotes: remotes(sjawharClone), err: "more than one owner"},
+		{argv: []string{"issue", "edit", "3", "--add-sub-issue", "https://github.com/acme/widgets/issues/1"}, remotes: remotes(sjawharClone), err: "more than one owner"},
+		{argv: []string{"issue", "create", "--title", "t", "--body", "b", "--parent", "https://github.com/acme/widgets/issues/1"}, remotes: remotes(sjawharClone), err: "more than one owner"},
+		{argv: []string{"repo", "sync", "--source", "acme/widgets"}, remotes: remotes(sjawharClone), err: "more than one owner"},
+		{argv: []string{"issue", "develop", "3", "--branch-repo", "acme/widgets", "--name", "x"}, remotes: remotes(sjawharClone), err: "more than one owner"},
+		{argv: []string{"issue", "close", "3", "--duplicate-of", "https://github.com/sjawhar/legion/issues/5"}, env: acme, err: "more than one owner, acme (GH_REPO acme/widgets) and sjawhar"},
+		{argv: []string{"repo", "fork", "--org", "sjawhar", "--clone=false", "--remote=false"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"repo", "fork", "acme/widgets", "--org", "sjawhar", "--clone=false"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"issue", "transfer", "3", "sjawhar/legion"}, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"issue", "transfer", "3", "sjawhar/legion"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		// Round 4's minor findings: options mentioning URLs or a team, and project link and unlink,
+		// which read GH_REPO with -R a plain string (deep 3, deep 4).
+		{argv: []string{"issue", "create", "--title", "t", "--body", "b", "--blocked-by", "1,https://github.com/sjawhar/legion/issues/5"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"issue", "create", "--title", "t", "--body", "b", "--blocking", "https://github.com/acme/widgets/issues/5"}, remotes: remotes(acmeClone), owner: "acme"},
+		{argv: []string{"project", "link", "1"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, remotes: remotes(acmeClone), owner: "sjawhar"},
+		{argv: []string{"project", "link", "1", "--owner", "acme"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, err: "more than one owner"},
+		{argv: []string{"project", "unlink", "1", "--team", "sjawhar/core"}, env: acme, err: "more than one owner"},
+		{argv: []string{"project", "link", "1", "--team", "core", "-R", "acme/widgets"}, err: `"core" names no owner`},
 		// --version is gh's alone; before anything, gh reads the next word as a command, an
 		// alias's or an extension's among them.
 		{argv: []string{"--version"}},
@@ -362,15 +399,15 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"extension", "exec", "hello"}, err: "`gh extension exec` runs another program"},
 		{argv: []string{"help", "extension", "exec"}, err: "`gh extension exec` runs another program"},
 		// Options name a repository as arguments do: by ghOptionKinds, an issue by URL among them,
-		// a github.com URL given any other option, and one a later gh adds refused.
+		// and one a later gh adds refused; a URL in an option naming none is text.
 		{argv: []string{"issue", "edit", "1", "--add-blocked-by", "https://github.com/sjawhar/legion/issues/2", "-R", "acme/widgets"}, err: "more than one owner"},
 		{argv: []string{"issue", "edit", "1", "--add-sub-issue", "2", "-R", "acme/widgets"}, owner: "acme"},
 		{argv: []string{"issue", "create", "--title", "t", "--body", "b", "--parent", "https://github.com/sjawhar/legion/issues/1"}, owner: "sjawhar"},
 		{argv: []string{"repo", "sync", "acme/widgets", "--source", "sjawhar/legion"}, err: "more than one owner"},
-		{argv: []string{"pr", "comment", "1", "--body", "https://github.com/sjawhar/legion/pull/2", "-R", "acme/widgets"}, err: "more than one owner"},
+		{argv: []string{"pr", "comment", "1", "--body", "https://github.com/sjawhar/legion/pull/2", "-R", "acme/widgets"}, owner: "acme"},
 		{argv: []string{"pr", "comment", "1", "--body", "https://example.com/sjawhar/legion", "-R", "acme/widgets"}, owner: "acme"},
 		{argv: []string{"repo", "edit", "acme/widgets", "--homepage", "https://github.com/sjawhar/legion"}, owner: "acme"},
-		{argv: []string{"pr", "view", "1", "--mirror", "sjawhar/legion", "-R", "acme/widgets"}, help: ghWithARepositoryOption, err: "names a repository, an owner or a URL in a way this does not know"},
+		{argv: []string{"pr", "view", "1", "--mirror", "sjawhar/legion", "-R", "acme/widgets"}, help: ghWithARepositoryOption, err: "names a repository, an owner, a team or a URL in a way this does not know"},
 		// gh api's placeholders as gh reads them, the colon form too, in a typed field's value.
 		{argv: []string{"api", "graphql", "-F", "o=:owner", "-F", "r=:repo", "-f", "query=q"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
 		{argv: []string{"api", "repos/:owner/:repo/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
@@ -514,7 +551,7 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"pr", "view", "1", "-R"}, err: "has no value"},
 		{argv: []string{"pr", "view", "1", "-R="}, err: `"=" names no owner`},
 		{argv: []string{"search", "issues", "--owner", "acme", "repo:sjawhar/x"}, err: "more than one owner"},
-		{argv: []string{"issue", "transfer", "3", "sjawhar/legion"}, err: "names a second repository"},
+		{argv: []string{"issue", "transfer", "3", "sjawhar/legion"}, owner: "sjawhar"},
 		{argv: []string{"label", "clone", "acme/widgets", "-R", "sjawhar/legion"}, err: "more than one owner"},
 		{argv: []string{"secret", "set", "TOKEN", "--org", "acme", "-R", "sjawhar/x"}, err: "more than one owner"},
 		{argv: []string{"auth", "status", "-h", "ghe.example.com"}, err: "another host"},
@@ -604,20 +641,32 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 // in a working directory that is no git repository.
 func legionGh(t *testing.T, env map[string]string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
-	return legionGhIn(t, t.TempDir(), env, args...)
+	return legionGhIn(t, t.TempDir(), env, "", args...)
 }
 
-// legionGhIn runs `legion gh args…` as legionGh does, in the working directory dir.
-func legionGhIn(t *testing.T, dir string, env map[string]string, args ...string) (code int, stdout, stderr string) {
+// ghWrapperDir is a directory holding a pane's `gh` wrapper, a script running this test binary as
+// `legion gh`, for the head of a test's PATH.
+func ghWrapperDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\n"+testMainEnv+"=1 exec '"+os.Args[0]+"' gh \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// legionGhIn runs `legion gh args…` as legionGh does, in the working directory dir with stdin,
+// its PATH this process's behind a `gh` wrapper (ghWrapperDir) unless env names one.
+func legionGhIn(t *testing.T, dir string, env map[string]string, stdin string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], append([]string{"gh"}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = []string{testMainEnv + "=1", "PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
+	cmd.Env = []string{testMainEnv + "=1", "PATH=" + ghWrapperDir(t) + ":" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
 	for name, value := range env {
 		cmd.Env = append(cmd.Env, name+"="+value)
 	}
 	var out, errb bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errb
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader(stdin), &out, &errb
 	err := cmd.Run()
 	if exit, ok := err.(*exec.ExitError); ok {
 		return exit.ExitCode(), out.String(), errb.String()
@@ -631,11 +680,15 @@ func legionGhIn(t *testing.T, dir string, env map[string]string, args ...string)
 // `legion gh` execs the real gh (LEGION_GH_PATH) as `gh`, with its arguments untouched and
 // GH_CONFIG_DIR pointed at the directory of the owner the command names, and at the issue's
 // owner's (the GH_CONFIG_DIR it was given) when it names none, reading --help=false as no help. It
-// reads each command from the real gh's own help. A command naming an owner the bundle holds no
-// directory for is refused, exit 2, naming the owner, and so are one it cannot read, a gh alias,
-// and one naming none run in a clone of another owner's repository; the real gh never runs. Each
-// of the three variables it needs is required, and an unset one is named with exit 2; --help with
-// no real gh to hand it to is legion's usage.
+// reads each command from the real gh's own help. The real gh runs with GH_PATH naming the `gh`
+// wrapper first on PATH, so the git gh runs asks `legion gh auth git-credential`, which answers by
+// the path's owner as `legion git-credential` does; with useHttpPath on for github.com, and gh's
+// update check and prompts off. A command naming an owner the bundle holds no directory for is
+// refused, exit 2, naming the owner, and so are one it cannot read, a gh alias, and any command
+// when PATH's first gh is the real gh; the real gh never runs. In a clone of an owner's
+// repository, a command naming none runs as that owner's. Each of the three variables it needs is
+// required, and an unset one is named with exit 2; --help with no real gh to hand it to is
+// legion's usage.
 func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 	root, defaultDir := gitCredentialBundle(t)
 	help, err := filepath.Abs(ghHelpDir)
@@ -643,17 +696,21 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The stub answers `[<command>] --help` with the saved help of that command, gh's own for none,
-	// as the real gh would, and every other run with its argv and GH_CONFIG_DIR.
+	// as the real gh would, and every other run with its argv and GH_CONFIG_DIR, then the rest of
+	// the environment `legion gh` gives it.
 	stub := filepath.Join(t.TempDir(), "gh")
 	script := "#!/bin/sh\nfor last; do :; done\n" +
 		"if [ \"$last\" = --help ]; then\n" +
 		"  path=$(printf '%s ' \"$@\" | sed -e 's/--help $//' -e 's/ $//' -e 's/ /_/g')\n" +
 		"  exec cat '" + help + "'/\"${path:-gh}\".txt\nfi\n" +
-		"printf '%s|%s|%s\\n' \"$0\" \"$GH_CONFIG_DIR\" \"$*\"\n"
+		"printf '%s|%s|%s\\n' \"$0\" \"$GH_CONFIG_DIR\" \"$*\"\n" +
+		"printf 'env %s|%s|%s=%s|%s|%s\\n' \"$GH_PATH\" \"$GIT_CONFIG_COUNT\" \"$GIT_CONFIG_KEY_0\" \"$GIT_CONFIG_VALUE_0\" \"$GH_NO_UPDATE_NOTIFIER\" \"$GH_PROMPT_DISABLED\"\n"
 	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	env := map[string]string{"LEGION_GH_PATH": stub, "GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root}
+	wrappers := ghWrapperDir(t)
+	env := map[string]string{"LEGION_GH_PATH": stub, "GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root, "PATH": wrappers + ":" + os.Getenv("PATH")}
+	wantEnv := "env " + filepath.Join(wrappers, "gh") + "|1|credential.https://github.com.useHttpPath=true|1|1\n"
 	for _, tc := range []struct {
 		args []string
 		dir  string
@@ -665,7 +722,7 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 		{[]string{"api", "repos/sjawhar/legion-smoke", "--help=false", "-q", "."}, filepath.Join(root, "sjawhar")},
 	} {
 		code, stdout, stderr := legionGh(t, env, tc.args...)
-		want := stub + "|" + tc.dir + "|" + strings.Join(tc.args, " ") + "\n"
+		want := stub + "|" + tc.dir + "|" + strings.Join(tc.args, " ") + "\n" + wantEnv
 		if code != 0 || stdout != want {
 			t.Errorf("legion gh %q = exit %d, stdout %q, stderr %q; want exit 0 and %q", tc.args, code, stdout, stderr, want)
 		}
@@ -687,7 +744,24 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 		}
 	}
 
-	// In a clone of sjawhar's repository, a command naming none would send acme's token there.
+	// gh's own git asks the wrapper, which answers with the token of the owner in git's path.
+	for path, token := range map[string]string{"sjawhar/legion-smoke.git": "ghs_sjawhar_read", "acme/widgets.git": "ghs_acme_write"} {
+		code, stdout, stderr := legionGhIn(t, t.TempDir(), env, "protocol=https\nhost=github.com\npath="+path+"\n\n", "auth", "git-credential", "get")
+		if want := "username=x-access-token\npassword=" + token + "\n"; code != 0 || stdout != want {
+			t.Errorf("legion gh auth git-credential get for %s = exit %d, stdout %q, stderr %q; want %q", path, code, stdout, stderr, want)
+		}
+	}
+	if code, stdout, _ := legionGhIn(t, t.TempDir(), env, "protocol=https\nhost=github.com\n\n", "auth", "git-credential", "get"); code == 0 || stdout != "" {
+		t.Errorf("legion gh auth git-credential get with no path = exit %d, stdout %q; want no answer", code, stdout)
+	}
+	// With the real gh first on PATH, gh's own git would answer with GH_CONFIG_DIR's token.
+	unwrapped := map[string]string{"PATH": filepath.Dir(stub) + ":" + os.Getenv("PATH")}
+	maps.Copy(unwrapped, map[string]string{"LEGION_GH_PATH": stub, "GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root})
+	if code, stdout, stderr := legionGh(t, unwrapped, "pr", "list"); code != 2 || stdout != "" || !strings.Contains(stderr, "the first gh on PATH is the real gh") {
+		t.Errorf("legion gh with the real gh first on PATH = exit %d, stdout %q, stderr %q; want exit 2 naming it", code, stdout, stderr)
+	}
+
+	// In a clone of sjawhar's repository, a command naming none acts on sjawhar's repository.
 	clone := t.TempDir()
 	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", "https://github.com/sjawhar/legion-smoke"}} {
 		git := exec.Command("git", args...)
@@ -696,11 +770,13 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 			t.Fatalf("git %v: %v: %s", args, err, out)
 		}
 	}
-	if code, stdout, stderr := legionGhIn(t, clone, env, "pr", "list"); code != 2 || stdout != "" || !strings.Contains(stderr, `remote "origin" (https://github.com/sjawhar/legion-smoke) names sjawhar`) {
-		t.Errorf("legion gh pr list in a clone of sjawhar's repository = exit %d, stdout %q, stderr %q; want exit 2 naming the remote and no gh run", code, stdout, stderr)
+	for _, args := range [][]string{{"pr", "list"}, {"pr", "list", "-R", "sjawhar/legion-smoke"}} {
+		if code, stdout, stderr := legionGhIn(t, clone, env, "", args...); code != 0 || !strings.HasPrefix(stdout, stub+"|"+filepath.Join(root, "sjawhar")+"|") {
+			t.Errorf("legion gh %q in that clone = exit %d, stdout %q, stderr %q; want sjawhar's directory", args, code, stdout, stderr)
+		}
 	}
-	if code, stdout, _ := legionGhIn(t, clone, env, "pr", "list", "-R", "sjawhar/legion-smoke"); code != 0 || !strings.Contains(stdout, filepath.Join(root, "sjawhar")) {
-		t.Errorf("legion gh pr list -R sjawhar/legion-smoke in that clone = exit %d, stdout %q; want sjawhar's directory", code, stdout)
+	if code, stdout, stderr := legionGhIn(t, clone, env, "", "pr", "list", "-R", "acme/widgets"); code != 0 || !strings.HasPrefix(stdout, stub+"|"+filepath.Join(root, "acme")+"|") {
+		t.Errorf("legion gh pr list -R acme/widgets in that clone = exit %d, stdout %q, stderr %q; want acme's directory", code, stdout, stderr)
 	}
 
 	for _, missing := range []string{"LEGION_GH_PATH", "GH_CONFIG_DIR", "LEGION_GH_OWNERS_DIR"} {
@@ -719,5 +795,22 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 	code, _, stderr := legionGh(t, map[string]string{}, "--help")
 	if code != 0 || !usageOf(stderr, "gh") {
 		t.Errorf("legion gh --help with no LEGION_GH_PATH = exit %d, stderr %q; want exit 0 and its usage", code, stderr)
+	}
+}
+
+// The git gh runs reads credential.useHttpPath from GIT_CONFIG_COUNT's entries, added after any
+// the environment already holds and in place of a stale entry at the next index; a count that is
+// no number is refused.
+func TestWithGitHubUseHTTPPathAddsToGitsConfiguration(t *testing.T) {
+	got, err := withGitHubUseHTTPPath([]string{"A=1", "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.x", "GIT_CONFIG_VALUE_0=y", "GIT_CONFIG_KEY_1=stale", "GIT_CONFIG_VALUE_1=stale"})
+	want := []string{"A=1", "GIT_CONFIG_KEY_0=core.x", "GIT_CONFIG_VALUE_0=y", "GIT_CONFIG_KEY_1=credential.https://github.com.useHttpPath", "GIT_CONFIG_VALUE_1=true", "GIT_CONFIG_COUNT=2"}
+	if err != nil || !slices.Equal(got, want) {
+		t.Errorf("withGitHubUseHTTPPath = %q, %v; want %q", got, err, want)
+	}
+	if got, err := withGitHubUseHTTPPath([]string{"A=1"}); err != nil || !slices.Equal(got, []string{"A=1", "GIT_CONFIG_KEY_0=credential.https://github.com.useHttpPath", "GIT_CONFIG_VALUE_0=true", "GIT_CONFIG_COUNT=1"}) {
+		t.Errorf("withGitHubUseHTTPPath with no count = %q, %v", got, err)
+	}
+	if _, err := withGitHubUseHTTPPath([]string{"GIT_CONFIG_COUNT=x"}); err == nil || !strings.Contains(err.Error(), "no count") {
+		t.Errorf("withGitHubUseHTTPPath with GIT_CONFIG_COUNT=x = %v, want a refusal", err)
 	}
 }
