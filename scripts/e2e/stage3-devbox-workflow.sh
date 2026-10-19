@@ -1106,15 +1106,15 @@ restart_scenarios() {
   pass
 
   begin in-agent-credentials
-  # One bash command on purpose. The pane's gh is a plain gh (the daemon's PATH's, mise's here: the
-  # daemon was started with its directory first, ahead of this box's gh wrapper), reading the role's
-  # App token from the gh files under GH_CONFIG_DIR, the claim's directory the daemon writes; no
-  # grant and no `legion gh` are in the path of a GitHub call, and GH_TOKEN is set empty so nothing
-  # outranks the file. Each output carries a marker the instruction itself cannot produce (the
-  # instruction holds the unexpanded command), so only the pane's own bash tool output satisfies a
-  # check.
+  # One bash command on purpose. The pane's gh is a plain gh (the daemon's PATH's: $realbin's own
+  # gh, a symlink to mise's real gh, ahead of this box's own shims — real_bin_path, lib/rig.sh),
+  # reading the role's App token from the gh files under GH_CONFIG_DIR, the claim's directory the
+  # daemon writes; no grant and no `legion gh` are in the path of a GitHub call, and GH_TOKEN is
+  # set empty so nothing outranks the file. Each output carries a marker the instruction itself
+  # cannot produce (the instruction holds the unexpanded command), so only the pane's own bash
+  # tool output satisfies a check.
   send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-DIR=\$GH_CONFIG_DIR\"; echo \"CRED-TOKEN=\${GH_TOKEN-unset}.\"; echo \"CRED-VIEWER=\$(gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(gh pr view $pr_number --repo $repo --json url --jq .url)\". Wait after reporting."
-  until_true 240 "the real Go pane bash tool to resolve the daemon's gh" session_contains "$restart_issue" implementer "CRED-GH=$real_gh"
+  until_true 240 "the real Go pane bash tool to resolve the daemon's gh" session_contains "$restart_issue" implementer "CRED-GH=$realbin/gh"
   until_true 240 "the implementer pane to name its claim's gh directory" session_contains "$restart_issue" implementer "CRED-DIR=$state/secrets/"
   until_true 240 "the implementer pane to carry an empty GH_TOKEN" session_contains "$restart_issue" implementer "CRED-TOKEN=."
   implement_app=$(role_app implementer)
@@ -1139,7 +1139,7 @@ restart_scenarios() {
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
-  note "real implementer pane ran $real_gh with GH_CONFIG_DIR=$cred_dir (0700; config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number"
+  note "real implementer pane ran $realbin/gh (-> $real_gh) with GH_CONFIG_DIR=$cred_dir (0700; config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number"
   pass
 
   begin pending-dispatch-status-write
