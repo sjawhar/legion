@@ -14,9 +14,11 @@
 # --key-file names a file holding the plaintext Anthropic API key alone (one line; a trailing
 # newline is read past): refused unless it is a regular file only its owner can read (no group or
 # other permission bit). The preflight below reads it once, before any pane exists, to prove it is
-# readable; every later call reads it fresh again, so a key the caller rotates mid-run takes effect
-# on the key command's very next call, though Oh My Pi itself caches the value for a running agent
-# and only re-runs the command on a 401 (the profile's own models.yml comment has this).
+# readable; every later call reads it fresh again, so a key the caller rewrites in place (the same
+# path, new content) takes effect on the key command's very next call — re-pointing --key-file's
+# own path to a new file does nothing, since the key command is written with the resolved path
+# baked in — though Oh My Pi itself caches the value for a running agent and only re-runs the
+# command on a 401 (the profile's own models.yml comment has this).
 #
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
 #   <dir>/anthropic-key      the key command the profile names: reads --key-file fresh, for that
@@ -108,7 +110,8 @@ for file in models.yml config.yml; do
   [ ! -e "$agent/$file" ] || refuse "$agent/$file exists; this installs a fresh profile's model route only"
 done
 
-key_file=$(realpath -- "$key_file" 2>/dev/null) || refuse "--key-file does not exist"
+resolved_key_file=$(realpath -e -- "$key_file" 2>/dev/null) || refuse "--key-file $key_file does not exist"
+key_file=$resolved_key_file
 [ -f "$key_file" ] || refuse "--key-file $key_file is not a regular file"
 perms=$(stat -c %a -- "$key_file") || refuse "--key-file $key_file: stat failed"
 case $perms in

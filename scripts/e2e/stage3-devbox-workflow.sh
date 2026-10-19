@@ -433,7 +433,7 @@ production_audit() {
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || fail "could not read $prod_envoy_url/v1/sessions"
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
   envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then
