@@ -96,8 +96,9 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 // (shellprefix.Literal) or in double quotes with no expansion.
 var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('/(?:[^']|'\\'')*'|"/[^"$` + "`" + `\\]*"|/[A-Za-z0-9_./:-]*) gh "\$@"\n?$`)
 
-// ghWrapperMaxBytes bounds the wrapper read: a script longer than any wrapper Legion installs is
-// no wrapper, and is refused whole rather than matched by its start.
+// ghWrapperMaxBytes bounds the wrapper read: a script longer is refused whole rather than matched
+// by its start. A wrapper whose quoted legion path takes it past the bound (a state directory near
+// PATH_MAX) is refused too, which refuses every command rather than letting one through.
 const ghWrapperMaxBytes = 4096
 
 // ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute

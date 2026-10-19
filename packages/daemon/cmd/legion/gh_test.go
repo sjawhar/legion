@@ -877,16 +877,27 @@ func TestTheRuntimesGhWrappersAreOnesLegionGhAccepts(t *testing.T) {
 		}
 	}
 
-	// The whole script is read: one that starts as a wrapper and goes on past the bound is none.
-	line := "#!/bin/sh\nexec '/" + strings.Repeat("a", ghWrapperMaxBytes) + "' gh \"$@\"\n"
-	long := line[:ghWrapperMaxBytes-len("' gh \"$@\"\n")] + "' gh \"$@\"\n"
+	// The whole script is read, to the bound: a wrapper at the bound passes, and one a byte past it
+	// is refused by the bound alone, its first ghWrapperMaxBytes+1 bytes a whole wrapper, whatever
+	// follows; the pattern's anchors refuse anything that goes on after a wrapper within it.
+	wrapperOf := func(size int) string {
+		head, tail := "#!/bin/sh\nexec '/", "' gh \"$@\"\n"
+		return head + strings.Repeat("a", size-len(head)-len(tail)) + tail
+	}
+	atBound, pastBound := wrapperOf(ghWrapperMaxBytes), wrapperOf(ghWrapperMaxBytes+1)
+	if !ghWrapperScript.MatchString(pastBound) {
+		t.Fatalf("the pattern refuses a wrapper of %d bytes, so the bound is not what refuses it", len(pastBound))
+	}
 	for name, tc := range map[string]struct {
 		script string
 		want   bool
 	}{
-		"a wrapper at the bound":    {long, true},
-		"one going on past it":      {long + "rm -rf ~\n", false},
-		"a wrapper of a short path": {"#!/bin/sh\nexec '/opt/legion/bin/legion' gh \"$@\"\n", true},
+		"a wrapper at the bound":              {atBound, true},
+		"a wrapper a byte past it":            {pastBound, false},
+		"a wrapper a byte past it, then more": {pastBound + "rm -rf ~\n", false},
+		"a wrapper at the bound, then more":   {atBound + "rm -rf ~\n", false},
+		"a short wrapper, then more":          {"#!/bin/sh\nexec '/opt/legion/bin/legion' gh \"$@\"\nrm -rf ~\n", false},
+		"a wrapper of a short path":           {"#!/bin/sh\nexec '/opt/legion/bin/legion' gh \"$@\"\n", true},
 	} {
 		if got, err := isGhWrapper(strings.NewReader(tc.script)); err != nil || got != tc.want {
 			t.Errorf("isGhWrapper(%s, %d bytes) = %t, %v; want %t", name, len(tc.script), got, err, tc.want)
