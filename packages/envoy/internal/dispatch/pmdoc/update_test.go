@@ -367,6 +367,79 @@ func TestUpdatePreservesMarksAcrossAstralEdit(t *testing.T) {
 	}
 }
 
+// Two emoji that share half of their UTF-16 pair are one unit apart to a diff that reads units, and
+// ygo stores a Delete or Insert cut inside a pair as two U+FFFD. Each case writes the old text and
+// then the new one into a ygo document and reads back what it stores, through Read and through a
+// y-prosemirror decode of the whole state, as the document's readers see it.
+func TestUpdateRewritesEmojiThatShareHalfOfAPair(t *testing.T) {
+	for name, test := range map[string]struct{ was, now string }{
+		"a shared high surrogate": {was: "before \U0001F4CA after", now: "before \U0001F4CB after"},
+		"a shared low surrogate":  {was: "before \U0001F60A after", now: "before \U0001FA0A after"},
+		"a run of them":           {was: "\U0001F4CA\U0001F4CA\U0001F4CA", now: "\U0001F4CA\U0001F4CB\U0001F4CA"},
+		"marked text":             {was: "before **\U0001F4CA** after", now: "before **\U0001F4CB** after"},
+		// The text a split pair left behind: ygo counts each U+FFFD as one unit, as the diff does.
+		"text a split pair already damaged": {was: "\uFFFD\uFFFD PIPE", now: "\U0001F4CA PIPE"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			seed, err := Parse(test.was + "\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := Parse(test.now + "\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			doc := crdt.New()
+			frag := doc.GetXmlFragment("prosemirror")
+			for _, tree := range []*Node{seed, want} {
+				doc.Transact(func(txn *crdt.Transaction) { err = Update(txn, frag, tree) })
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := Read(frag)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(want) {
+				gotJSON, _ := got.JSON()
+				t.Fatalf("Update stored %s, want %q", gotJSON, test.now)
+			}
+			if decoded := decodeWithYProsemirror(t, crdt.EncodeStateAsUpdateV1(doc, nil)); !decoded.Equal(want) {
+				decodedJSON, _ := decoded.JSON()
+				t.Fatalf("y-prosemirror decoded %s, want %q", decodedJSON, test.now)
+			}
+		})
+	}
+}
+
+// simpleDiff reads the text a ygo document holds as runes and counts them as ygo counts its units
+// (units16). It assumes that text is valid UTF-8, which ygo keeps true at both doors: an insert of
+// invalid UTF-8 panics, and an update carrying it is refused.
+func TestAYgoDocumentNeverHoldsInvalidUTF8Text(t *testing.T) {
+	writer := crdt.New()
+	text := writer.GetText("t")
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("YText.Insert of invalid UTF-8 did not panic")
+			}
+		}()
+		writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "\xff\xfe", nil) })
+	}()
+
+	writer = crdt.New()
+	text = writer.GetText("t")
+	writer.Transact(func(txn *crdt.Transaction) { text.Insert(txn, 0, "qzqz", nil) })
+	update := bytes.Replace(crdt.EncodeStateAsUpdateV1(writer, nil), []byte("qzqz"), []byte{0xff, 0xfe, 0xff, 0xfe}, 1)
+	if bytes.Contains(update, []byte("qzqz")) {
+		t.Fatal("the update does not carry the text as one run of bytes")
+	}
+	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err == nil {
+		t.Error("an update carrying invalid UTF-8 text was applied")
+	}
+}
+
 // A run carrying two comments is written as two Y attribute keys, read back as both, decoded by
 // y-prosemirror as both, and rewritten as nothing.
 func TestUpdateWritesEachOfTwoMarksOfOneTypeOnOneRun(t *testing.T) {

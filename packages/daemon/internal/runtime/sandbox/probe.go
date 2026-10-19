@@ -111,12 +111,13 @@ type ImageProbe struct {
 // attempt's verdict is definitive — the API refusing what was sent (400, 401, 403, 422, or a
 // create's 404), an image the kubelet cannot use, a pod whose probe container exited on its own
 // and Failed, a log without the OK line or confirming another contract, or not resolving the
-// agents' models, or not checking the capability list, a providers Secret the pod cannot mount —
-// or waiting: a pod the pool has no room for (stuck), which counts against no attempt budget, since
-// a full pool says nothing about the image and the daemon must stay up until it has room — or
-// transient: anything else, a pod the kubelet itself failed included, retried under p.Retry
-// (worker-image-probe.ts:318-338, 470-508). The report counts the attempts that waited on capacity
-// and keeps the last one's reason, for the pool-capacity row of the capability report.
+// agents' models, or not checking the capability list, a ConfigMap or Secret the pod cannot mount,
+// or its container cannot be configured for — or waiting: a pod the pool has no room for (stuck),
+// which counts against no attempt budget, since a full pool says nothing about the image and the
+// daemon must stay up until it has room — or transient: anything else, a pod the kubelet itself
+// failed included, retried under p.Retry (worker-image-probe.ts:318-338, 470-508). The report
+// counts the attempts that waited on capacity and keeps the last one's reason, for the
+// pool-capacity row of the capability report.
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
 		return bootprobe.ImageReport{}, errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
@@ -413,30 +414,56 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 	return uid, bootprobe.Outcome{}, true
 }
 
-// providersMountRecheck is how often a Pending probe pod's events are read for a providers Secret
-// the kubelet cannot mount.
-const providersMountRecheck = 15 * time.Second
+// mountRecheck is how often a scheduled Pending probe pod's events are read for a mount the kubelet
+// cannot make: the providers Secret, or an operator volume (a ConfigMap or Secret
+// runtime.kubernetes.pod.volumes gives the pod). Each read is an event list against the API
+// server, so they are not made on every poll of the store; fifteen seconds still finds the
+// kubelet's first FailedMount, which it records within seconds of binding the pod, early in a
+// budget minutes long.
+const mountRecheck = 15 * time.Second
 
 // stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
-// can still change it: an image the kubelet cannot use; a pod the pool has no room for, which the
-// scheduler leaves Pending with PodScheduled=False Unschedulable, waited on (bootprobe.Outcome.Waiting)
-// once it has been so for longer than the boot timeout — the same bound the liveness rules give an
-// issue pod (observe.go), long enough for Karpenter to add a node under the pool's limits when it
-// can, so a cold pool scaling up is not mistaken for a full one — rather than counted against the
-// attempt budget, since a full pool says nothing about the image — reachable within the attempt by
-// construction, since the attempt's budget (ImageProbe.Budget, internal/daemon's ProbeBudget)
-// always clears the boot timeout by at least a minute; or a providers Secret it cannot mount,
-// which leaves the pod Pending, never Failed, and which its events say. They are read at
-// most every providersMountRecheck; mountRead holds when they last were.
+// can still change it. It stops on an image the kubelet cannot use (definitiveWaiting), the
+// image's own refusal; on a container the kubelet cannot configure, waiting
+// CreateContainerConfigError with a message saying a ConfigMap or Secret the container reads, or a
+// key of one, is missing (missingObject) — the kubelet builds the container's env from those
+// objects at each sync (pkg/kubelet/kubelet_pods.go, makeEnvironmentVariables) and fails the same
+// way until the operator creates what is missing, so this is a refusal quoting the message and not
+// the image's fault, while a CreateContainerConfigError saying anything else is left to the budget;
+// on a pod the pool has no room for, which the scheduler leaves Pending with PodScheduled=False
+// Unschedulable, waited on (bootprobe.Outcome.Waiting) once it has been so for longer than the boot
+// timeout — the same bound the liveness rules give an issue pod (observe.go), long enough for
+// Karpenter to add a node under the pool's limits when it can, so a cold pool scaling up is not
+// mistaken for a full one — rather than counted against the attempt budget, since a full pool says
+// nothing about the image — reachable within the attempt by construction, since the attempt's
+// budget (ImageProbe.Budget, internal/daemon's ProbeBudget) always clears the boot timeout by at
+// least a minute; and on a mount the kubelet cannot make, which leaves the pod Pending, never
+// Failed, and which only its events say: the providers Secret (providersMountFailure) or an
+// operator volume (missingVolume), each a refusal naming the object and quoting the kubelet.
+//
+// Events are read only once the pod is scheduled (pod.Spec.NodeName != ""): the kubelet mounts
+// only a pod bound to it, so an unscheduled pod has no FailedMount to find, and the capacity stop,
+// whose pod holds no node, costs no read. They are read for every scheduled Pending probe pod at
+// most every mountRecheck — mountRead holds when they last were — one podEvents call per read
+// feeding the providers matcher first, when the pod mounts the providers Secret, then the general
+// matcher over the same list. A FailedMount of any other form (the kubelet's ConfigMap or Secret
+// watch not yet synced, the object not yet registered with its manager, the pod's volumes not all
+// mounted yet) is one the kubelet retries, and is left to the budget.
 //
 // Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
 // and the next attempt, after the retry's longest wait, creates it again: a probe pod that could
 // not be placed holds no node, so recreating it costs the pool nothing, and the new pod asks the
 // scheduler afresh rather than keeping one object Pending across the daemon's whole wait.
 func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest string, mountRead *time.Time) *bootprobe.Outcome {
-	if reason := probeWaiting(pod); definitiveWaiting[reason] {
-		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
+	w := probeWaiting(pod)
+	if w != nil && definitiveWaiting[w.Reason] {
+		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, w.Reason)
 		return &unusable
+	}
+	if w != nil && w.Reason == "CreateContainerConfigError" && missingObject(w.Message) {
+		refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot configure its container %s (waiting: %s), a ConfigMap or Secret it reads being missing: %s",
+			name, probeContainer, w.Reason, w.Message)}
+		return &refused
 	}
 	if pod.Status.Phase != corev1.PodPending {
 		return nil
@@ -452,42 +479,136 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 			return &waiting
 		}
 	}
-	if !r.mountsProviders() || r.now().Sub(*mountRead) < providersMountRecheck {
+	if pod.Spec.NodeName == "" || r.now().Sub(*mountRead) < mountRecheck {
 		return nil
 	}
 	*mountRead = r.now()
-	failure := r.providersMountFailure(ctx, pod)
-	if failure == "" {
-		return nil
-	}
-	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
-		name, ProvidersSecretName(r.project), strings.Join(r.providersKeys(), ", "), failure)}
-	return &refused
-}
-
-// providersMountFailure is the kubelet's FailedMount message for the providers volume when the
-// Secret, or one of the keys it is asked for, is missing (`secret "<name>" not found` from the
-// kubelet's watching secret manager, `secrets "<name>" not found` from the API server that one on
-// the Get or Cache strategy asks, `references non-existent secret key: <key>`, pkg/volume/secret),
-// or "" when the pod's events hold none. Every other FailedMount, such as `failed to sync secret
-// cache: timed out waiting for the condition` while the kubelet's watch catches up, is one the
-// kubelet retries, and is left to the budget.
-func (r *Runtime) providersMountFailure(ctx context.Context, pod *corev1.Pod) string {
 	events, err := r.podEvents(ctx, pod)
 	if err != nil {
-		return ""
+		return nil
 	}
+	if r.mountsProviders() {
+		secret := ProvidersSecretName(r.project)
+		if failure := providersMountFailure(events, secret); failure != "" {
+			refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
+				name, secret, strings.Join(r.providersKeys(), ", "), failure)}
+			return &refused
+		}
+	}
+	if volume, message := missingVolume(events); message != "" {
+		return r.volumeRefusal(name, volume, message)
+	}
+	return nil
+}
+
+// providersMountFailure is the kubelet's FailedMount message, among events, for the providers
+// volume when secret (the providers Secret), or one of the keys it is asked for, is missing
+// (`secret "<name>" not found` from the kubelet's watching secret manager, `secrets "<name>" not
+// found` from the API server that one on the Get or Cache strategy asks, `references non-existent
+// secret key: <key>`, pkg/volume/secret), or "" when the events hold none. Every other FailedMount,
+// such as `failed to sync secret cache: timed out waiting for the condition` while the kubelet's
+// watch catches up, is one the kubelet retries, and is left to the budget.
+func providersMountFailure(events []corev1.Event, secret string) string {
 	for _, event := range events {
 		if event.Reason != "FailedMount" || !strings.Contains(event.Message, `volume "`+providersVolume+`"`) {
 			continue
 		}
-		secret := ProvidersSecretName(r.project)
 		if strings.Contains(event.Message, `secret "`+secret+`" not found`) || strings.Contains(event.Message, `secrets "`+secret+`" not found`) ||
 			strings.Contains(event.Message, "references non-existent secret key: ") {
 			return event.Message
 		}
 	}
 	return ""
+}
+
+// mountedVolume is the volume a kubelet FailedMount event names, `MountVolume.SetUp failed for
+// volume "<name>" : <error>` (pkg/volume/util/operationexecutor's GenerateMsgDetailed, quoting the
+// volume's name as the pod spec gives it).
+var mountedVolume = regexp.MustCompile(`volume "([^"]+)"`)
+
+// missingVolume is the first FailedMount among events naming a volume other than the providers
+// one, whose message says a ConfigMap or Secret, or a key of one, is missing (missingObject), as
+// its volume's name and the message whole; or "" and "" when the events hold none. A FailedMount
+// naming no volume, such as the kubelet's `Unable to attach or mount volumes` summary of a pod's
+// still-pending mounts, is left to the budget, and one on the providers volume to the providers
+// rule (providersMountFailure).
+func missingVolume(events []corev1.Event) (volume, message string) {
+	for _, event := range events {
+		if event.Reason != "FailedMount" {
+			continue
+		}
+		named := mountedVolume.FindStringSubmatch(event.Message)
+		if named == nil || named[1] == providersVolume || !missingObject(event.Message) {
+			continue
+		}
+		return named[1], event.Message
+	}
+	return "", ""
+}
+
+// missingObjectForm is the kubelet's wording for a ConfigMap or Secret that is not there, with the
+// object's name — the one piece that varies — a wildcard: `configmap "<name>" not found` and
+// `secret "<name>" not found` from its watching object manager (pkg/kubelet/util/manager, each a
+// NotFound on the singular resource), `configmaps "<name>" not found` and `secrets "<name>" not
+// found` from the API server when the manager is on the Get or Cache strategy and asks it, and
+// `couldn't find key <key> in ConfigMap <namespace>/<name>` or `… in Secret <namespace>/<name>`
+// from the container's env (pkg/kubelet/kubelet_pods.go, makeEnvironmentVariables). The other
+// pieces are literal, so a reworded message falls back to the retry.
+var missingObjectForm = regexp.MustCompile(`(configmaps?|secrets?) "[^"]*" not found|couldn't find key \S+ in (ConfigMap|Secret) `)
+
+// missingObject reports whether message, a FailedMount event's or a CreateContainerConfigError
+// waiting state's, says a ConfigMap or Secret, or a key the pod asks of one, is missing: one of
+// missingObjectForm's, or a volume's key that is not in the object it mounts (`configmap references
+// non-existent config key: <key>`, pkg/volume/configmap; `references non-existent secret key:
+// <key>`, pkg/volume/secret). Each is one the kubelet repeats at every sync until the operator
+// creates what is missing, so none is worth the budget.
+func missingObject(message string) bool {
+	return missingObjectForm.MatchString(message) ||
+		strings.Contains(message, "configmap references non-existent config key: ") ||
+		strings.Contains(message, "references non-existent secret key: ")
+}
+
+// volumeRefusal is the refusal for an operator volume the kubelet cannot mount, for the reason
+// message gives: naming the ConfigMap or Secret the pod block (runtime.kubernetes.pod.volumes)
+// gives the volume from when the block holds it, so the operator reads which object to create or
+// which key to add, or saying the block does not name it, since a volume of that name reached the
+// pod from elsewhere.
+func (r *Runtime) volumeRefusal(name, volume, message string) *bootprobe.Outcome {
+	from := "which runtime.kubernetes.pod.volumes does not name"
+	if i := slices.IndexFunc(r.pod.Volumes, func(v corev1.Volume) bool { return v.Name == volume }); i >= 0 {
+		from = "which runtime.kubernetes.pod.volumes gives it from " + volumeSources(r.pod.Volumes[i])
+	}
+	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount volume %q, %s: %s", name, volume, from, message)}
+	return &refused
+}
+
+// volumeSources names the objects a pod-block volume is filled from: its ConfigMap or Secret, or
+// for a projected volume each ConfigMap and Secret source in the block's order joined by " and ",
+// its ServiceAccount token sources not among them, since the kubelet mints those and no object can
+// be missing for one. The loader (config/kubernetes.go, readPodVolumes) admits exactly one of the
+// three kinds, so the last return is for a volume no file can produce.
+func volumeSources(v corev1.Volume) string {
+	switch {
+	case v.ConfigMap != nil:
+		return fmt.Sprintf("ConfigMap %q", v.ConfigMap.Name)
+	case v.Secret != nil:
+		return fmt.Sprintf("Secret %q", v.Secret.SecretName)
+	case v.Projected != nil:
+		var sources []string
+		for _, source := range v.Projected.Sources {
+			switch {
+			case source.ConfigMap != nil:
+				sources = append(sources, fmt.Sprintf("ConfigMap %q", source.ConfigMap.Name))
+			case source.Secret != nil:
+				sources = append(sources, fmt.Sprintf("Secret %q", source.Secret.Name))
+			}
+		}
+		if len(sources) == 0 {
+			return "a projected volume with no ConfigMap or Secret source"
+		}
+		return strings.Join(sources, " and ")
+	}
+	return "a source of another kind"
 }
 
 // unfinished is the detail of an attempt whose pod did not finish within the budget: the pod's
@@ -506,8 +627,8 @@ func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, bu
 		return detail
 	}
 	detail := fmt.Sprintf("probe pod %s still %s after %s", name, phaseOf(pod), budget)
-	if reason := probeWaiting(pod); reason != "" {
-		detail += fmt.Sprintf(" (container %s waiting: %s)", probeContainer, reason)
+	if w := probeWaiting(pod); w != nil && w.Reason != "" {
+		detail += fmt.Sprintf(" (container %s waiting: %s)", probeContainer, w.Reason)
 	}
 	detail += "; events: " + r.events(ctx, pod)
 	if tail, err := r.probeLog(ctx, name); err == nil && tail != "" {
@@ -516,14 +637,16 @@ func (r *Runtime) unfinished(ctx context.Context, name string, uid types.UID, bu
 	return detail
 }
 
-// probeWaiting is the probe container's waiting reason, when the pod reports one.
-func probeWaiting(pod *corev1.Pod) string {
+// probeWaiting is the probe container's waiting state, or nil when the pod reports none: its
+// Reason is what stuck and unfinished judge and quote, its Message the kubelet's own words, which
+// only a CreateContainerConfigError is read for (missingObject).
+func probeWaiting(pod *corev1.Pod) *corev1.ContainerStateWaiting {
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.Name == probeContainer && status.State.Waiting != nil {
-			return status.State.Waiting.Reason
+			return status.State.Waiting
 		}
 	}
-	return ""
+	return nil
 }
 
 // probeLog is the probe container's last log lines, kept to probeLogBytes from the tail's end

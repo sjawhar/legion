@@ -11,6 +11,25 @@
 
 ### Changed
 
+- The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
+  plugin opened for the role the session holds (`whileHolding`), which used to leave the session
+  deaf to that role's notices without saying so. `envoy_role_set` refuses to move off such a role,
+  naming the role and the subscriptions; a move off any other role names the role it released
+  (`details.released`). `envoy_unsubscribe` keeps them open, listing them as kept
+  (`details.kept`), and an empty `topics` list closes nothing.
+- A role is no longer lost, claimed twice or claimed for the wrong session when role moves and
+  session switches race. Every session event and heartbeat tick now converges pi-envoy to the
+  session Oh My Pi is on, whatever order the events came in: that session's agent subject is the
+  one open and registered, and it holds the role its own records name (a fork's copy of its
+  parent's, none after a `/new`, its own after a resume), every other role handed back at the
+  listener. A `/fork` keeps the role whatever overtakes it; a `/new` or resume never carries it,
+  ends it as the switch lands, and receives no message addressed to the session it replaced; a
+  resumed session whose records name the role takes it back; a switch Oh My Pi rolls back, or one
+  that fails before its event, settles on the session the host stays on. A role the session moves
+  off is handed back under the session the listener names for it (a fork's parent, until the fork
+  carried it). A role ended by a move no session event announced is warned of, naming who claims
+  it again. The agent is told of each id change a fork or branch makes once, in the session it
+  names.
 - `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
   `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
   address.

@@ -300,6 +300,21 @@ no `provider_keys` (the Google provider answered long workflow turns with empty 
 agents are not Gemini-backed). No YubiKey touch is required, and no key value enters the script's
 shell, a pane, an argv, or the transcript.
 
+The proof human's `gh` has to stay authenticated for the whole run. A full run takes about 70
+minutes, longer than the one hour a GitHub App installation token lives. The devbox shim keeps it
+authenticated, because it asks for a current token on every call. A `GH_TOKEN` exported once does
+not: it expires partway through, and every later `gh` call, the review-round waits and the
+teardown's pull request close included, fails with `HTTP 401: Bad credentials`. A run started
+outside the shim exports no `GH_TOKEN` (it outranks any config file) and instead points
+`GH_CONFIG_DIR` at a private 0700 directory holding gh's `config.yml` (`version: "1"`) and a 0600
+`hosts.yml` (`github.com:` with `oauth_token: <token>`, `user: x-access-token` and
+`git_protocol: https`). A background loop rewrites `hosts.yml` from a newly minted
+`sjawhar-agent` installation token at least every 4 minutes, since a cached mint can hand out a
+token with as little as 5 minutes left. It writes a temporary file in the same directory and
+renames it over the old one, so no `gh` reads a half-written file, and it stops when the run
+exits. `require_proof_human` still checks that this `gh` acts as `sjawhar-agent[bot]` before the
+run's first write.
+
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
 checkout's two plugins in an isolated OMP profile and runs the Go daemon with a separate state
@@ -734,6 +749,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `image-probe` | `ProbeImage` on the image under test, with the daemon's own probe command (`--role-references` with the checkout's role prompts' references, and `--provider-env-dir`, the run having a provider key), its probe pod carrying the operator's pod, passes; its log confirms `daemon-api-version` equal to the daemon's contract, `agent-models=resolved` (every task agent the prompts dispatch resolved its model under the operator's pod) and `capabilities=checked` (every image-site capability of the list every worker is held to present, the table printed before the OK line), and the report carries the `model-fallback=<on|off>` mark the pod read; the probe pod, read while the probe runs, carries one container whose cpu and memory request equals its limit and equals the probe's own reservation (`probeReservation()`, 250m and 1Gi over a 5Gi disk bound and a 1Gi disk request, the one the daemon's `imageProbe` hands it and no role's share), `status.qosClass` `Guaranteed` and no affinity, and the same pod with its cpu limit raised past its request is refused by the reservation rule naming the container (the negative control); and the probe Sandbox is deleted |
 | `image-probe-negative` | with `modelRoles.oracle` removed from the run's ConfigMap, `ProbeImage` on the same image is refused naming `task agent oracle` and `role oracle is not configured`; the ConfigMap is restored before the check ends, so every later check boots on it |
 | `image-probe-capability-negative` | on a second runtime built from the run's Options with `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium` added to the operator's pod env (the shared runtime's pod untouched), `ProbeImage` on the same image is refused naming `capability browser is missing`: the probe runs the browser the variable names as Oh My Pi would, so a wrong value in an operator's pod env is caught at boot; the probe Sandbox is deleted |
+| `image-probe-missing-volume-negative` | on a second runtime built from the run's Options with a volume `operator-missing`, from ConfigMap `<operator ConfigMap>-missing`, which does not exist, added to the operator's pod volumes and mounted at `/etc/legion-operator-missing` (the shared runtime's pod untouched), `ProbeImage` on the same image is refused naming `cannot mount volume "operator-missing"`, `ConfigMap "<name>"` and the kubelet's `configmap "<name>" not found`, within 45 s of the probe pod's `PodScheduled` transition (two 15 s event rechecks and slack for the poll's tick and the kubelet's first volume sync; the noted durations show how soon after scheduling it came) and with no retry (no `never completed within its retry budget`): a FailedMount for an operator volume whose object is missing is read on the first event read after the kubelet records it, not waited out to the budget; the probe Sandbox is deleted |
 | `root-ready` | Spawn of the root: its Sandbox Ready, the returned locator's `podUid`, role container and process incarnation, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
 | `resources` | every container of the root's pod, the two init containers included, reserves cpu and memory with request equal to limit and equal to what the rig configured for its role (`liveResources`: the implementer's and tester's both overridden, the reviewer's memory overridden, the rest `config.DefaultResources()`; the init containers carry the root's own reservation, the role whose Spawn created the pod), so the pod is `Guaranteed`; carries the ephemeral-storage limit and request configured for its role, the request under the limit (the tester's 30Gi limit from `liveOverrides`, every other role's bound the daemon's default — the node-disk bound between pods of unrelated trees, which QoS does not read); and it carries no affinity; inside the pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal` is within 3 % of Σ memory of the role containers, as gVisor sizes the sandbox from the pod cgroup (a gVisor pod exposes no cgroup files, so each container's values are read from the API) |
@@ -2067,6 +2083,17 @@ retro, and planning, whose planner runs its gap analyst and up to three plan-rev
 its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
 line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
 that quotes it.
+
+`request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
+tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
+the Legion footer naming its own session, as its role ends every review. The daemon sets aside a
+review-App review whose footer does not name the session recorded on the reviewer's claim, and that
+session is recorded at the reviewer's first completion, so a round from the second on that told the
+reviewer to post a body verbatim, footer-less, would decide nothing and leave the issue in
+`reviewing`. `NOTE` is a further step the round asks of the reviewer, never part of the review. The
+round waits for `reviewer_requested_changes_from ROUND SESSION`: the review App's ROUND-th
+changes-requested review whose last footer names the session the daemon's state gives the reviewer,
+read as the daemon reads it. `lib/reviewer-footer.test.ts` drives both against a fake `gh`.
 
 The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's

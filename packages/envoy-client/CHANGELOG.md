@@ -11,6 +11,10 @@
 
 ### Changed
 
+- The `envoy_unsubscribe` and `envoy_role_set` descriptions say what an Oh My Pi session keeps:
+  unsubscribe keeps the subscriptions another plugin holds for the session's role, and a move to a
+  different role is refused while any are held. A host without such subscriptions behaves as
+  before.
 - `dispatch read`'s issue summary names the issue's page (`Link:`), on `DISPATCH_PUBLIC_URL` when
   it is set, so an agent asked about an issue repeats a link rather than building one.
 - `slack_post` refuses a reply linking an address inside the cluster before it asks the broker

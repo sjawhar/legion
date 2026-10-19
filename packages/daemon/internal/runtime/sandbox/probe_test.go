@@ -686,6 +686,211 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 	}
 }
 
+// An operator volume the kubelet cannot mount — a ConfigMap or Secret runtime.kubernetes.pod.volumes
+// gives the pod — leaves the probe pod Pending, never Failed: a FailedMount event saying the
+// ConfigMap or Secret, or one of the keys the volume asks of it, is missing is the answer, a
+// refusal naming the volume, the object the pod block gives it from, and the kubelet's message,
+// given once rather than retried to the budget. A projected volume is named by each of its
+// ConfigMap and Secret sources, its token source not among them; a volume the pod block does not
+// name is said so. Any other FailedMount is one the kubelet retries (its ConfigMap cache not yet
+// synced, the object not yet registered with its manager, the pod's volumes not all mounted yet),
+// and the attempt runs to its budget.
+func TestProbeImageRefusesAnOperatorVolumeThePodCannotMount(t *testing.T) {
+	configMap := func(volume, name string) corev1.Volume {
+		return corev1.Volume{Name: volume, VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: name}}}}
+	}
+	secret := func(volume, name string) corev1.Volume {
+		return corev1.Volume{Name: volume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: name}}}
+	}
+	volumes := []corev1.Volume{
+		configMap("operator-route", "legion-operator-route"),
+		secret("operator-token", "legion-operator-token"),
+		configMap("operator-missing", "legion-missing"),
+		secret("operator-secret-missing", "legion-missing"),
+		// The token source first, as the operator route's own token volume has one: a refusal
+		// lists the ConfigMap and Secret sources alone.
+		{Name: "operator-projected", VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{Sources: []corev1.VolumeProjection{
+			{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{Audience: "operator-audience", Path: "token"}},
+			{ConfigMap: &corev1.ConfigMapProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "a"}}},
+			{Secret: &corev1.SecretProjection{LocalObjectReference: corev1.LocalObjectReference{Name: "b"}}},
+		}}}},
+	}
+	var mounts []corev1.VolumeMount
+	for _, volume := range volumes {
+		mounts = append(mounts, corev1.VolumeMount{Name: volume.Name, MountPath: "/etc/legion-operator/" + volume.Name, ReadOnly: true})
+	}
+	mount := func(volume, failure string) string {
+		return `MountVolume.SetUp failed for volume "` + volume + `" : ` + failure
+	}
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+		want          []string
+	}{
+		{"the ConfigMap missing", mount("operator-missing", `configmap "legion-missing" not found`), true,
+			[]string{`cannot mount volume "operator-missing"`, `ConfigMap "legion-missing"`}},
+		{"the ConfigMap missing, as the API server says it", mount("operator-missing", `configmaps "legion-missing" not found`), true,
+			[]string{`cannot mount volume "operator-missing"`, `ConfigMap "legion-missing"`}},
+		{"the Secret missing", mount("operator-secret-missing", `secret "legion-missing" not found`), true,
+			[]string{`cannot mount volume "operator-secret-missing"`, `Secret "legion-missing"`}},
+		{"a ConfigMap key missing", mount("operator-route", "configmap references non-existent config key: models.yml"), true,
+			[]string{`ConfigMap "legion-operator-route"`}},
+		{"a Secret key missing", mount("operator-token", "references non-existent secret key: token"), true,
+			[]string{`Secret "legion-operator-token"`}},
+		{"a projected volume's sources missing", mount("operator-projected", `[configmap "a" not found, secret "b" not found]`), true,
+			[]string{`ConfigMap "a" and Secret "b"`}},
+		{"a volume the pod block does not name", mount("controller-added", `configmap "x" not found`), true,
+			[]string{`cannot mount volume "controller-added", which runtime.kubernetes.pod.volumes does not name: ` + mount("controller-added", `configmap "x" not found`)}},
+		{"the kubelet's configmap cache not synced", mount("operator-route", "failed to sync configmap cache: timed out waiting for the condition"), false, nil},
+		{"the ConfigMap not registered with the kubelet's manager yet", mount("operator-route", `object "legion"/"legion-operator-route" not registered`), false, nil},
+		{"the pod's volumes not all mounted yet",
+			"Unable to attach or mount volumes: unmounted volumes=[operator-route], unattached volumes=[]: timed out waiting for the condition", false, nil},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Pod.Volumes, o.Pod.VolumeMounts = volumes, mounts }))
+			g.waits("ContainerCreating")
+			if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+				ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+				InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+				Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: testCase.message,
+			}, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, append(testCase.want, testCase.message)...)
+				if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+					t.Errorf("ProbeImage = %v, retried a volume the pod can never mount", err)
+				}
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a volume the pod cannot mount, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)")
+			if err != nil && strings.Contains(err.Error(), "cannot mount volume") {
+				t.Errorf("ProbeImage = %v, refused a mount failure the kubelet retries", err)
+			}
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+		})
+	}
+}
+
+// The kubelet's first FailedMount lands after the probe's first event read, as a rule: the pod is
+// bound, the store shows its node, and stuck reads events on that pass, before the kubelet has
+// tried the mount. The event is then found on the next read, mountRecheck later, rather than
+// waited out to the budget: with no event yet, the first read leaves the attempt waiting and no
+// read follows while the clock stands; once the event exists and the clock has moved past
+// mountRecheck, the next pass reads again and refuses, one Sandbox created, two event reads made.
+func TestProbeImageFindsAFailedMountOnTheRecheck(t *testing.T) {
+	volume := corev1.Volume{Name: "operator-route", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: "legion-operator-route"}}}}
+	g := newProbeRig(t, nil, withOptions(func(o *Options) {
+		o.Pod.Volumes = []corev1.Volume{volume}
+		o.Pod.VolumeMounts = []corev1.VolumeMount{{Name: volume.Name, MountPath: "/etc/legion-operator/" + volume.Name, ReadOnly: true}}
+	}))
+	var eventReads atomic.Int32
+	g.kube.PrependReactor("list", "events", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		eventReads.Add(1)
+		return false, nil, nil
+	})
+	g.waits("ContainerCreating")
+	message := `MountVolume.SetUp failed for volume "operator-route" : configmap "legion-operator-route" not found`
+	stop := make(chan struct{})
+	t.Cleanup(func() { close(stop) })
+	go func() {
+		// The kubelet's turn: after the first read, the event, then time passes.
+		for eventReads.Load() == 0 {
+			select {
+			case <-stop:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		time.Sleep(50 * time.Millisecond) // a few passes of the wait loop with the clock still
+		if _, err := g.kube.CoreV1().Events(testNamespace).Create(g.ctx, &corev1.Event{
+			ObjectMeta:     metav1.ObjectMeta{Name: probeSandboxName + ".mount", Namespace: testNamespace},
+			InvolvedObject: corev1.ObjectReference{Kind: "Pod", Name: probeSandboxName, Namespace: testNamespace},
+			Reason:         "FailedMount", Type: corev1.EventTypeWarning, Message: message,
+		}, metav1.CreateOptions{}); err != nil {
+			t.Error(err)
+			return
+		}
+		g.advance(mountRecheck)
+		if pod := g.pod(probeSandboxName); pod != nil {
+			g.update(pod, func(*corev1.Pod) {}) // nudge the wait loop rather than waiting on its tick
+		}
+	}()
+
+	err := g.probe(probeOptions(t))
+
+	wantContains(t, err, `cannot mount volume "operator-route"`, `ConfigMap "legion-operator-route"`, message)
+	if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+		t.Errorf("ProbeImage = %v, waited a FailedMount that landed after the first read out to the budget", err)
+	}
+	if n := g.creates.Load(); n != 1 {
+		t.Errorf("ran the probe %d times for a volume the pod cannot mount, want once", n)
+	}
+	if n := eventReads.Load(); n != 2 {
+		t.Errorf("read the pod's events %d times, want the first pass's read and the one recheck", n)
+	}
+}
+
+// A container the kubelet cannot configure — its environment or a mount reading a ConfigMap or
+// Secret that is missing, or a key of one — leaves the probe pod Pending with the container
+// waiting CreateContainerConfigError, never Failed: a waiting message saying the ConfigMap or
+// Secret, or the key, is missing is the answer, a refusal naming the container and the kubelet's
+// message, given once rather than retried to the budget. A CreateContainerConfigError saying
+// anything else is left to the budget, whose detail quotes the waiting reason.
+func TestProbeImageRefusesAContainerTheKubeletCannotConfigure(t *testing.T) {
+	for _, testCase := range []struct {
+		name, message string
+		refused       bool
+	}{
+		{"a ConfigMap missing", `configmap "legion-missing" not found`, true},
+		{"a Secret missing", `secret "legion-missing" not found`, true},
+		{"a ConfigMap key missing", "couldn't find key models.yml in ConfigMap legion/legion-operator-route", true},
+		{"a Secret key missing", "couldn't find key token in Secret legion/legion-operator-token", true},
+		{"a container spec the kubelet could not generate for another reason", `failed to generate container "probe" spec: something else`, false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			g.finishes(func(p *corev1.Pod) {
+				p.Status = corev1.PodStatus{Phase: corev1.PodPending, ContainerStatuses: []corev1.ContainerStatus{{
+					Name: probeContainer, State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CreateContainerConfigError", Message: testCase.message}},
+				}}}
+			})
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
+
+			if testCase.refused {
+				wantContains(t, err, "cannot configure its container probe", "CreateContainerConfigError", testCase.message)
+				if err != nil && strings.Contains(err.Error(), "never completed within its retry budget") {
+					t.Errorf("ProbeImage = %v, retried a container the kubelet can never configure", err)
+				}
+				if n := g.creates.Load(); n != 1 {
+					t.Errorf("ran the probe %d times for a container the kubelet cannot configure, want once", n)
+				}
+				return
+			}
+			wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)", "(container probe waiting: CreateContainerConfigError)")
+			if err != nil && strings.Contains(err.Error(), "cannot configure its container") {
+				t.Errorf("ProbeImage = %v, refused a CreateContainerConfigError the kubelet may yet clear", err)
+			}
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+		})
+	}
+}
+
 // unschedulable leaves a probe pod as the scheduler leaves one the pool has no room for: Pending,
 // on no node, with PodScheduled=False Unschedulable and the scheduler's message, since age before
 // the rig's clock.

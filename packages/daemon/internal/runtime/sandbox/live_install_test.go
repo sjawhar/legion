@@ -458,6 +458,114 @@ func (r *liveRig) checkImageProbeCapabilityRefusal() error {
 	return nil
 }
 
+// image-probe-missing-volume-negative: with a volume operator-missing, from a ConfigMap
+// `<operator ConfigMap>-missing` that does not exist, added to the operator's pod volumes and
+// mounted at /etc/legion-operator-missing (the kubelet skips a volume no container mounts), the
+// probe on the same image refuses naming the volume, the ConfigMap runtime.kubernetes.pod.volumes
+// gives it from, and the kubelet's own `configmap "<name>" not found`: a FailedMount for an operator
+// volume whose object is missing is read on the first event read after the pod is scheduled
+// (mountRecheck), never retried to the budget. The refusal is timed from the pod's PodScheduled
+// transition, read from the second runtime's store while the probe runs. The probe runs on a
+// second runtime, built from the run's Options with the volume and its mount added to copies of
+// the pod's slices, so the shared runtime's pod is never changed; it shares the run's listener,
+// which no probe uses, and ends with the check.
+func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
+	if err := r.startRuntimeOnce(); err != nil {
+		return err
+	}
+	missing := r.env.operatorConfigMap + "-missing"
+	if out, err := r.kubectl("get", "configmap", missing, "-o", "name"); err == nil {
+		return fmt.Errorf("ConfigMap %s exists (%s): the check relies on no ConfigMap of that name", missing, strings.TrimSpace(out))
+	} else if !strings.Contains(err.Error(), "(NotFound)") {
+		return err
+	}
+	opts := r.runtimeOptions(r.streamAddress(), r.ln)
+	opts.Pod.Volumes = append(slices.Clone(r.pod.Volumes), corev1.Volume{Name: "operator-missing", VolumeSource: corev1.VolumeSource{
+		ConfigMap: &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: missing}},
+	}})
+	opts.Pod.VolumeMounts = append(slices.Clone(r.pod.VolumeMounts), corev1.VolumeMount{Name: "operator-missing", MountPath: "/etc/legion-operator-missing", ReadOnly: true})
+	ctx, stop := context.WithCancel(r.ctx)
+	defer stop()
+	rt, err := New(ctx, r.rc, opts)
+	if err != nil {
+		return fmt.Errorf("a runtime whose pod mounts ConfigMap %s: %w", missing, err)
+	}
+	note("operator", "pod volumes for this probe: the fixture's %d and operator-missing from ConfigMap %s, which does not exist, mounted read-only at /etc/legion-operator-missing beside the fixture's %d mounts",
+		len(r.pod.Volumes), missing, len(r.pod.VolumeMounts))
+	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
+	probe := probeName(r.env.project, digest, "")
+	// The probe pod is scheduled, then read for its FailedMount, then deleted with its Sandbox,
+	// all inside ProbeImage: the last pod the second runtime's store held is kept for its
+	// PodScheduled transition.
+	watching, stopWatching := context.WithCancel(ctx)
+	defer stopWatching()
+	lastSeen := make(chan *corev1.Pod, 1)
+	go func() {
+		var last *corev1.Pod
+		defer func() { lastSeen <- last }()
+		for {
+			if pod := rt.storedPod(probe); pod != nil {
+				last = pod
+			}
+			select {
+			case <-watching.Done():
+				return
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+	}()
+	p := r.imageProbe()
+	started := time.Now()
+	_, refusal := rt.ProbeImage(ctx, p)
+	refusedAt := time.Now()
+	stopWatching()
+	pod := <-lastSeen
+	if refusal == nil {
+		return fmt.Errorf("ProbeImage passed with volume operator-missing naming ConfigMap %s, which does not exist", missing)
+	}
+	for _, want := range []string{`cannot mount volume "operator-missing"`, `ConfigMap "` + missing + `"`} {
+		if !strings.Contains(refusal.Error(), want) {
+			return fmt.Errorf("the probe's refusal does not say %q: %v", want, refusal)
+		}
+	}
+	kubelet := []string{`configmap "` + missing + `" not found`, `configmaps "` + missing + `" not found`}
+	if !slices.ContainsFunc(kubelet, func(form string) bool { return strings.Contains(refusal.Error(), form) }) {
+		return fmt.Errorf("the probe's refusal carries neither of the kubelet's forms %q: %v", kubelet, refusal)
+	}
+	if strings.Contains(refusal.Error(), "never completed within its retry budget") {
+		return fmt.Errorf("the probe retried the mount to its budget instead of refusing it on the first read: %v", refusal)
+	}
+	if pod == nil {
+		return fmt.Errorf("the probe pod %s was never read while the probe ran, so the refusal's bound from its scheduling is unproven", probe)
+	}
+	var scheduledAt time.Time
+	if scheduled := podCondition(pod, corev1.PodScheduled); scheduled != nil && scheduled.Status == corev1.ConditionTrue {
+		scheduledAt = scheduled.LastTransitionTime.Time
+	}
+	if scheduledAt.IsZero() {
+		return fmt.Errorf("the probe pod %s as last read (phase %s) carries no PodScheduled=True condition, so the refusal's bound from its scheduling is unproven", probe, pod.Status.Phase)
+	}
+	sinceScheduled := refusedAt.Sub(scheduledAt)
+	// The reads after scheduling fall at the first poll, then every mountRecheck; a kubelet whose
+	// first mount attempt lands after the first recheck is found on the second, so the bound allows
+	// two rechecks, with 15 s of slack for the poll's tick, the API server's second-truncated
+	// transition time and the kubelet's first volume sync. The refusal's own claim is "within one
+	// read of the kubelet's first FailedMount", which the noted durations show; this bound only says
+	// the attempt was not waited out.
+	if limit := 2*mountRecheck + 15*time.Second; sinceScheduled > limit {
+		return fmt.Errorf("the refusal came %s after the probe pod was scheduled, past the %s two event reads every %s, the poll's tick and the kubelet's first volume sync allow", sinceScheduled.Round(time.Second), limit, mountRecheck)
+	}
+	note("runtime", "refused %s after ProbeImage was called, %s after the pod was scheduled: %s", refusedAt.Sub(started).Round(time.Second), sinceScheduled.Round(time.Second), lineContaining(refusal.Error(), "cannot mount volume"))
+	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
+		_, err := r.getSandbox(probe)
+		return apierrors.IsNotFound(err), ignoreNotFound(err)
+	}); err != nil {
+		return err
+	}
+	note("runtime", "probe Sandbox %s deleted after the attempt", probe)
+	return nil
+}
+
 // imageProbe is the probe as the daemon asks for it: its contract, the references of the role
 // prompts it hands every pod (prompts.RoleReferences), and the probe's own fixed reservation
 // (internal/daemon/kubernetes.go imageProbe, probeReservation) — 250m and 1Gi, not a role's share,

@@ -740,9 +740,9 @@ primary_issue() {
       # Round 1 left the bot's thread answered and resolved by the implementer: the reviewer, the
       # independent party, adjudicates the finding now, with its reply, and names the thread to the
       # implementer as accepted (already resolved, the implementer having closed it first).
-      review_note=" A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer, reply on that thread in your own words, and name its thread id to the implementer as accepted, as your role says for a bot's thread (the change is needed: the spec asks for it)."
+      review_note="A bot's review thread on the pull request asks whether the file change is needed, and the implementer answered it: judge the answer, reply on that thread in your own words, and name its thread id to the implementer as accepted, as your role says for a bot's thread (the change is needed: the spec asks for it)."
     fi
-    request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope.$review_note"
+    request_changes_as_reviewer "$root_issue" "$round" "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope." "$review_note"
     # The round ends when the reviewer completes it: its review, its handoff commit, its completion.
     wait_for_phase "$root_issue" implementing 1200
     assert_handoff_committer "$root_issue" reviewer reviewing "$round"

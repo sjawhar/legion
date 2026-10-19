@@ -200,6 +200,9 @@ fork's parent). If a different live session holds it — the parent of a `/fork`
 the child, or a second process on the same transcript — the listener refuses atomically and the
 resumed session logs a warning and holds nothing. Only an explicit `envoy_role_set` is
 last-claim-wins. Re-running `envoy_role_set` for a role this session already holds is harmless.
+Moving to a different role is refused while another plugin holds subscriptions that last only as
+long as this session keeps its current role (the refusal names them), and `envoy_unsubscribe`
+keeps those subscriptions open, listing them as kept.
 
 ## Legion role claims
 
