@@ -3,7 +3,9 @@
 package sandbox
 
 import (
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -32,5 +34,27 @@ func TestEachRunsCacheIssueNamesABranchOfItsOwn(t *testing.T) {
 			t.Fatalf("runs %s and %s both push %s", other, project, branch)
 		}
 		branches[branch] = project
+	}
+}
+
+// A run killed past its test timeout skips its teardown and leaves its cache-b branch behind.
+// Each run sweeps such leftovers first: a branch of cache-b's shape whose commit is the harness's
+// own and older than any run lives (staleRunBranchAge). A run still in flight has a younger
+// commit, so no live run's branch is taken, and nothing the harness did not write is either.
+func TestASweepTakesOnlyTheHarnessesOwnBranchesOlderThanAnyRun(t *testing.T) {
+	now := time.Date(2026, 10, 19, 16, 0, 0, 0, time.UTC)
+	old, young := now.Add(-staleRunBranchAge-time.Minute), now.Add(-time.Hour)
+	own := func(name string) string { return runCommitMessage(name) }
+	branches := []runBranch{
+		{"legion/S4A-1861345169", own("legion/S4A-1861345169"), old},
+		{"legion/S4A-9", own("legion/S4A-9"), old},
+		{"legion/S4A-2050000000", own("legion/S4A-2050000000"), young},
+		{"legion/S4A-1111111111", "a person's commit", old},
+		{"legion/S4A-1222222222-extra", own("legion/S4A-1222222222-extra"), old},
+		{"legion/LEGSMOKE-3", own("legion/LEGSMOKE-3"), old},
+	}
+	got := staleRunBranches(branches, now)
+	if want := []string{"legion/S4A-1861345169", "legion/S4A-9"}; !slices.Equal(got, want) {
+		t.Fatalf("staleRunBranches = %q, want %q", got, want)
 	}
 }
