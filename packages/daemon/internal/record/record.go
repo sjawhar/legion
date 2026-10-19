@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -83,6 +84,12 @@ type Issue struct {
 	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
 	// repository by it, read from the record at boot.
 	GitHubRepo string
+}
+
+// Repository is the repository the record names (Repo) in the spelling the record keeps: what
+// every repository-dependent action of the issue works and mints for its owner.
+func (i Issue) Repository() (ghrepo.Repository, error) {
+	return ghrepo.Parse("the repository of "+i.Key, i.Repo)
 }
 
 // RepoNote is what the daemon last said on a Dispatch issue about its repository: the resolved

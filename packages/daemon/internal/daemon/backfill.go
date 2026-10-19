@@ -165,7 +165,7 @@ func nameRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 	}
 	names := make(map[string]string, len(unnamed))
 	for _, issue := range unnamed {
-		repo, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+		repo, err := issue.Repository()
 		if err != nil {
 			return err
 		}

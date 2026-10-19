@@ -17,7 +17,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -113,14 +112,6 @@ type outbox struct {
 	laneCtx context.Context
 	lanes   map[record.LaneKey]*outboxLane
 	wg      sync.WaitGroup
-}
-
-// issueRepository is the repository issue's record names, which every repository-dependent row
-// acts on: its branch's creation, its workspace's provisioning and removal, and its pull
-// request's READY merge and disarm, each with the implement App's token minted for that
-// repository's owner.
-func issueRepository(issue record.Issue) (ghrepo.Repository, error) {
-	return ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
 }
 
 // outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
@@ -1103,7 +1094,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	repo, err := issueRepository(issue)
+	repo, err := issue.Repository()
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
@@ -1200,7 +1191,7 @@ func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload 
 func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
 	defer cancel()
-	repo, err := issueRepository(issue)
+	repo, err := issue.Repository()
 	if err != nil {
 		return err
 	}
@@ -1247,7 +1238,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 			return wait.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
 		}
 	}
-	repo, err := issueRepository(issue)
+	repo, err := issue.Repository()
 	if err != nil {
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}

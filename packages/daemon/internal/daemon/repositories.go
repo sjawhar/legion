@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
-	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -270,20 +269,12 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var accepted []mappedRepository
 	var refused []refusedRepository
-	err := bootprobe.Run(ctx, "repository mapping read", appMintRetry, w.log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
-		var err error
-		accepted, refused, err = readMapping(attempt, w.dispatch, w.dispatchProject, w.installs)
-		if err == nil {
-			return bootprobe.Outcome{Passed: true}
-		}
-		var transient *appauth.TransientError
-		if errors.As(err, &transient) || dispatch.Unreachable(err) {
-			return bootprobe.Outcome{Detail: err.Error()}
-		}
-		return bootprobe.Outcome{Refusal: err}
-	})
+	err := onAppSchedule(ctx, "repository mapping read", appMintRetry, w.log, func(err error) bool { return appTransient(err) || dispatch.Unreachable(err) },
+		func(ctx context.Context) error {
+			var err error
+			accepted, refused, err = readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
+			return err
+		})
 	if err != nil {
 		return err
 	}
@@ -298,19 +289,13 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 // retry, and logs the mapping the daemon serves.
 func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 	var named []mappedRepository
-	err := bootprobe.Run(ctx, "repository read", appMintRetry, w.log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
-		var err error
-		if named, err = nameAccepted(attempt, w.repositories.Mapped(), w.defaultBranches); err == nil {
-			return bootprobe.Outcome{Passed: true}
-		}
-		var transient *appauth.TransientError
+	err := onAppSchedule(ctx, "repository read", appMintRetry, w.log, func(err error) bool {
 		var answer *githubrest.Answer
-		if errors.As(err, &transient) || errors.As(err, &answer) && answer.Status >= 500 {
-			return bootprobe.Outcome{Detail: err.Error()}
-		}
-		return bootprobe.Outcome{Refusal: err}
+		return appTransient(err) || errors.As(err, &answer) && answer.Status >= 500
+	}, func(ctx context.Context) error {
+		var err error
+		named, err = nameAccepted(ctx, w.repositories.Mapped(), w.defaultBranches)
+		return err
 	})
 	if err != nil {
 		return err
@@ -397,14 +382,8 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 			return
 		case <-w.mappingChanged:
 		}
-		if err := bootprobe.Run(ctx, "repository mapping refresh", retry, w.log, func(ctx context.Context) bootprobe.Outcome {
-			attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-			defer cancel()
-			if err := w.refreshMapping(attempt); err != nil {
-				return bootprobe.Outcome{Detail: err.Error()}
-			}
-			return bootprobe.Outcome{Passed: true}
-		}); err != nil {
+		everyFailure := func(error) bool { return true }
+		if err := onAppSchedule(ctx, "repository mapping refresh", retry, w.log, everyFailure, w.refreshMapping); err != nil {
 			return
 		}
 	}
@@ -486,7 +465,7 @@ func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghre
 		return ghrepo.Repository{}, "", fmt.Errorf("%s is not recorded, so it works the project's default repository, and project %s serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on",
 			key, w.dispatchProject)
 	}
-	repo, err := ghrepo.Parse("the repository of "+key, issue.Repo)
+	repo, err := issue.Repository()
 	if err != nil {
 		return ghrepo.Repository{}, "", err
 	}

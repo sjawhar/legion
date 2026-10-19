@@ -811,13 +811,7 @@ func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools ma
 // with the repository as the clone's path spells it, in path order. A directory of the layout that
 // holds no git checkout is not one.
 func sharedClones(stateDir string) ([]workspace.Workspace, error) {
-	// Location lays every repository's clone out as <root>/<owner>/<name>; a probe repository
-	// names the root without restating that layout here.
-	probe, err := workspace.Location(stateDir, ghrepo.MustParse("owner/name"), "probe")
-	if err != nil {
-		return nil, err
-	}
-	paths, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(probe.Clone)), "*", "*"))
+	paths, err := filepath.Glob(filepath.Join(workspace.CloneRoot(stateDir), "*", "*"))
 	if err != nil {
 		return nil, fmt.Errorf("list the shared clones: %w", err)
 	}

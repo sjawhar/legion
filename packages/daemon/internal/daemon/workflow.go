@@ -146,6 +146,30 @@ var appMintAttempt = 15 * time.Second
 // attempt inside the 180 s Stage 3 gives a daemon to answer /healthz.
 var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Second, Attempts: 5}
 
+// onAppSchedule runs attempt until it passes, on retry (appMintRetry, or that schedule unbounded),
+// each try bounded by appMintAttempt: a failure transient calls GitHub's or Dispatch's own trouble
+// is tried again, and any other is refused at once (bootprobe.Run).
+func onAppSchedule(ctx context.Context, name string, retry bootprobe.Retry, log *slog.Logger, transient func(error) bool, attempt func(context.Context) error) error {
+	return bootprobe.Run(ctx, name, retry, log, func(ctx context.Context) bootprobe.Outcome {
+		bounded, cancel := context.WithTimeout(ctx, appMintAttempt)
+		defer cancel()
+		switch err := attempt(bounded); {
+		case err == nil:
+			return bootprobe.Outcome{Passed: true}
+		case transient(err):
+			return bootprobe.Outcome{Detail: err.Error()}
+		default:
+			return bootprobe.Outcome{Refusal: err}
+		}
+	})
+}
+
+// appTransient is a failure GitHub reports as its own trouble (appauth.TransientError).
+func appTransient(err error) bool {
+	var transient *appauth.TransientError
+	return errors.As(err, &transient)
+}
+
 // appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
 // installation, so a daemon serving no repository yet still knows the review App's login, as one
 // attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
@@ -154,22 +178,15 @@ var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Seco
 // review App's and count no fix attempt, and is refused, as is a review App that names no login.
 func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
-	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
+	err := onAppSchedule(ctx, "GitHub App logins read", appMintRetry, log, appTransient, func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
-			login, err := apps.AppLogin(attempt, role)
-			if err == nil {
-				logins[role] = login
-				continue
+			login, err := apps.AppLogin(ctx, role)
+			if err != nil {
+				return err
 			}
-			var transient *appauth.TransientError
-			if errors.As(err, &transient) {
-				return bootprobe.Outcome{Detail: err.Error()}
-			}
-			return bootprobe.Outcome{Refusal: err}
+			logins[role] = login
 		}
-		return bootprobe.Outcome{Passed: true}
+		return nil
 	})
 	if err != nil {
 		return "", err
@@ -185,20 +202,13 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
 // token passed asks GitHub only for the review token.
 func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
-	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
+	return onAppSchedule(ctx, "GitHub App tokens mint", appMintRetry, log, appTransient, func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
-			if _, err := tokens.Token(attempt, role, owner); err != nil {
-				err = fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
-				var transient *appauth.TransientError
-				if errors.As(err, &transient) {
-					return bootprobe.Outcome{Detail: err.Error()}
-				}
-				return bootprobe.Outcome{Refusal: err}
+			if _, err := tokens.Token(ctx, role, owner); err != nil {
+				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			}
 		}
-		return bootprobe.Outcome{Passed: true}
+		return nil
 	})
 }
 
