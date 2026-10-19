@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-781",
+  "completed": "2026-10-19T12:36:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
+  "head": "e4d28dc28dcee5f68a9212c687a19b3dd2e7635a",
+  "proof": [
+    {
+      "criterion": "Done-when 2 (the upgrade, plan D11) and 3 (legion state --json and read_record list each open check; LegionStateResponse carries the field): the daemon's first boot on this release moves an issue left in production_check to awaiting_merge, the phase constraints admit accepting and refuse production_check, and the state shows an open check",
+      "surface": "the head's real `legion` binary (go build ./cmd/legion at e4d28dc2; the same reads at 9dd6a1d2 and 30b7d518) booted with `legion start` on the pod's embedded Postgres 16.4 over a database migrated through 0046 and seeded as the old daemon leaves it (root PROOF781-1 in production_check with a merged pull request, child PROOF781-2 held from production_check, PROOF781-3 in reviewing), a tmux stub and the Stage 1 omp stub on PATH, port 15781, no dispatch_url (an API-only daemon: no workflow, no outbox lanes)",
+      "command": "legion start --config /tmp/legion-proof/legion.yaml (log: migrationsApplied 1, boot gate daemonApiVersion 31); pgexec 'select max(version) from schema_version' 'select key, phase, held_from from issues'; legion state --port 15781 --json | jq '.issues[\"PROOF781-1\"].check'; legion state --port 15781 | sed -n 3p; bun -e 'LegionStateResponse.parse(<the served document>)' (packages/contracts); then a seeded production_checks row (looks 1, look_open false, last_wake_kind merge, bound +336 h) and issues.phase = 'accepting' on PROOF781-3",
+      "observed": "schema 47; PROOF781-1 awaiting_merge, PROOF781-2 held with held_from awaiting_merge, PROOF781-3 reviewing; pull_requests.merge_sha and production_checks present; `open production checks: none` before the seed; after it `.issues[\"PROOF781-1\"].check` = {repo acme/widgets, pullRequest 781, mergeCommit 4b7d2a1f..., openedAt, looks 1, lookOpen false, lastWake {kind merge, detail <sha>, at}, nextWakeAt +336 h, last false} and the line `open production checks: 1; the oldest, PROOF781-1 #781 at 4b7d2a1, look 1 woken by merge at 2026-10-19T12:29:36Z, bound 2026-11-02T12:29:36Z`; PROOF781-3 read back as phase accepting, status needs_review; the whole document parsed through the strict LegionStateResponse; a restart against the same store applied nothing more (migrationsApplied 0, boot 2)",
+      "headSha": "e4d28dc28dcee5f68a9212c687a19b3dd2e7635a",
+      "negativeControl": "`update issues set phase = 'production_check'` on the migrated database → `violates check constraint \"issues_phase_check\"`; closing the seeded check (closed_at, outcome not_run) → `.check` is null and the line reads `open production checks: none`; a pane manifest declaring contract 30 against this daemon → `legion start` refused: `pi-legion ... speaks daemon API contract 30; this daemon requires 31` (nothing started)"
+    },
+    {
+      "criterion": "Done-when 1, 2 and 3's engine rules (the reviewer's approval → accepting with no worker and no status write; sign_off only in accepting → retro; the architect's backward move with issue; CI red in accepting; the child's and root's close rows; the lingering member's merge; the check's reports, wakes, look bound, whole-check bound and last look; the linger's wait; re-admission leaving the check; ReenterChild closing it; the boot sweep; the outbox's check rows and GitHub compare; the API's check report)",
+      "surface": "the daemon's Postgres harness (real migrations, intake.ApplyFact through the engine, the outbox executor against an httptest GitHub) on the pod's embedded Postgres, and CI's Tests job with the NATS tests the pod cannot run",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54329/postgres?sslmode=disable go test -count=1 ./internal/workflow/ ./internal/admit/ ./internal/record/ ./internal/store/ ./internal/api/ ./internal/projection/ ./internal/config/ ./internal/wait/ ./cmd/... (whole packages) and ./internal/daemon/ ./internal/intake/ with the testcontainers/NATS tests skipped by name; CI Tests run 39252682227 at e4d28dc2 runs them all (internal/daemon/check_wake_test.go: server.started and issue.deployed on a real NATS waking the check through a fake GitHub compare)",
+      "observed": "every package `ok` at e4d28dc2 (workflow 117 s, admit 30 s, api 95 s, store 51 s, record 30 s, cmd/legion 82 s, daemon with its NATS tests skipped, intake's decode tests); the new tests: accepting_test.go, merge_close_test.go, check_test.go, migration_0047_test.go, outbox_check_test.go, check_wake_test.go, handoff_test.go's check-report cases, architect_test.go's backward move with issue; the only failures in the pod are environmental (rootless Docker not found, no cgo for internal/supervise's table tests, LEGION_WORKSPACE set in the pod for one launcher test)",
+      "headSha": "e4d28dc28dcee5f68a9212c687a19b3dd2e7635a",
+      "negativeControl": "SIGNOFF_OUTSIDE_ACCEPTING in reviewing and awaiting_merge, ACCEPTANCE_IS_SIGN_OFF for the architect's handoff_complete, BACKWARD_REFUSED for a planner's move from accepting, CHECK_NOT_OPEN / CHECK_LOOK_NOT_OPEN / CHECK_VERDICT_REQUIRED, a check_compare answered `behind` or 404 waking nothing, a second issue.deployed changing nothing, and a phase completion without a commit still refused MISSING_FIELD — each asserted in the harness"
+    },
+    {
+      "criterion": "Done-when 7 (Dispatch writes issue.deployed once per shipped pull request by intake or by the reconcile; server.started at a stamped start; the contracts carry both shapes)",
+      "surface": "Dispatch's delivery package on a scratch Postgres on the pod (every migration but 0072's pgvector, so storetest's template cannot use it; deliveryTestPool migrates in place), the contracts' bun tests, and CI's Legion Envoy and Contracts job for the pgvector-backed and NATS-backed tests (started_test.go on testnats)",
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54329/dispatch_scratch?sslmode=disable go test -count=1 ./internal/dispatch/delivery/ -run 'Deployed|TheWaitingSQL' and the whole package minus its NATS tests; bun test packages/contracts; bun run check:go",
+      "observed": "TestDeployedEventWaitsForAShippingRun, TestDeployedEventIsWrittenOncePerPullRequest, TestReconcileWritesTheDeployedEvent, TestIntakeWritesTheDeployedEvent PASS (payload {repo, number, run_id, completed_at}, actor system/delivery-timeline, the marker set, a second pass writes none); every non-NATS delivery test ok (122 PASS); contracts 206 pass; the Go contract generation check clean",
+      "headSha": "e4d28dc28dcee5f68a9212c687a19b3dd2e7635a",
+      "negativeControl": "a merged pull request with no shipping run, one whose run was created before the merge or failed, and one outside the deploy repository each write no event; an unstamped Dispatch build publishes no server.started (started_test.go, CI)"
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/phase/phase.go, workflow/table.go, workflow/engine.go, workflow/effects.go, workflow/stranded.go, workflow/resume.go, admit/admit.go, api/architect.go: accepting replaces production_check; sign_off only in accepting; the architect's request_backward_move names its issue",
+    "packages/daemon/internal/store/migrations/0047_accepting_and_production_checks.up.sql (+ migration_0047_test.go): the phase data move and constraints, pull_requests.merge_sha, production_checks, the outbox kinds",
+    "packages/daemon/internal/record/record.go, store.go, outbox.go; internal/wait/wait.go; internal/config/config.go, stage3.go: ProductionCheck, CheckLook, check_compare/check_look/check_bound, wait.Until, production_check_hours",
+    "packages/daemon/internal/workflow/check.go (new), linger.go, pullrequest.go, resume.go, engine.go; internal/intake/facts.go: the close, looks, reports, wakes, bounds, the linger wait, the boot sweep and compares",
+    "packages/daemon/internal/daemon/outbox.go, daemon.go, workflow.go; internal/dispatch/client.go, types.go; cmd/legion/main.go: the check rows' executors, wait.Until in settle, daemon.Build, Dispatch's /healthz build, builtFromRepository, legion state's line",
+    "packages/daemon/internal/intake/consume.go, decode.go; internal/api/handoff.go, state.go, version.go (31); internal/projection/project.go; packages/contracts/fixtures/daemon-api/state.json, version.json",
+    "packages/contracts/src/legion-api.ts, dispatch-api.ts; packages/pi-legion/package.json, src/tools.ts, src/handoff-commit.ts",
+    "packages/envoy/internal/dispatch/store/migrations/0114_delivery_deployed_event.{up,census}.sql; internal/dispatch/delivery/deployed.go (new), store.go, intake.go, intakes.go, reconcile.go; internal/dispatch/startup/started.go (new); cmd/dispatch/main.go; packages/dispatch/web (event-type enumerations)",
+    "skills/legion-worker (SKILL.md, references/merge-gate.md, references/pr-body.md), skills/legion-architect, skills/legion-retro, skills/legion-controller, skills/AGENTS.md; packages/daemon/internal/prompts/{go,roles}; AGENTS.md, README.md; docs/site content and media; packages/{envoy,contracts,pi-legion}/AGENTS.md",
+    "scripts/e2e/lib/workflow.sh, stage3-devbox-workflow.sh, stage4b-sandbox-tree.sh, stage3-4b13b-acceptance.sh, README.md"
+  ],
+  "trickyParts": [
+    "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
+    "A check start row carries CheckLook and is fenced on the open check and its look in the outbox's supervise(), not on the generation or the lingering tree; an operator hold met by one ends the look",
+    "lingerExpired returns wait.Until while a tree's check is open, which rolls the fact back without consuming the linger event id; the outbox's retry honours the moment; closeCheck re-arms LingerClose when the last check of a lingering tree closes",
+    "The handoff route tells a check report (implementer on a done issue with an open check) from a phase completion before requiring a commit; api cannot import workflow (a test import cycle), so the predicate is issue.Phase == done",
+    "The daemon API collided with main's 30 (sjawhar/legion#1986) during the forward merge: this branch is 31",
+    "The Stage 4b mid-turn hold must start before READY, since the merge is now the close and can land seconds after READY; both rigs use production_check_hours 0.25 because a look open at the bound is deferred by the 2 h look bound"
+  ],
+  "deviations": [
+    "Plan departures 1-3 built as the plan records them (the child's Sandbox goes Suspended at the first look's pending, not at the close; production_check_hours (336 by default); builtFromRepository constant guarded by the revision)",
+    "Architect's addition: at a release boot the daemon reads Dispatch's build commit from GET /healthz (dispatch.Client.BuildCommit) and compares it against open checks in sjawhar/legion as `dispatch build <sha>`, idempotent with the server.started wake; skipped when it equals the daemon's own revision (one compare)",
+    "daemon.Run takes a daemon.Build{Revision, Repository} parameter (no daemon.Options existed); workflow.Config gained BuiltFrom; DaemonBooted gained Revision and DispatchBuild",
+    "DaemonAPIVersion is 31, not the plan's 30: main released pi-legion v10.8.3 declaring 30 for sjawhar/legion#1986 before this branch merged",
+    "The rigs set production_check_hours 0.25 (not 0.1) and Stage 4b linger_hours 0.5 (was 0.3); Stage 4b's child-4 hold starts before the merger's READY; the bound's last look is its own checkpoint `production-check-bound` in both scripts",
+    "Dispatch's first pass after the deploy writes issue.deployed once for every already-shipped pull request with an issue_key and no marker (the 28-day population); the daemon ignores one with no open check",
+    "api/handoff.go decides a check report by issue.Phase == done rather than workflow.RoleFor == \"\" (an import cycle in tests); the two agree for every done issue",
+    "The live proofs (Stage 3 on the devbox, Stage 4b on the cluster) were rewritten and syntax-checked but not run: a pod has no tmux, model gateway, smoke-repo App or NATS; reported to the architect"
+  ],
+  "openQuestions": [
+    "Whether a person runs Stage 3 (and Stage 4b through done) on the devbox at this head before the architect accepts, or the pod's real-binary proof plus CI and the harness stand and this issue's own production check (Done-when 6) observes the live wake — sent to the architect",
+    "Whether Dispatch's migration 0114 should stamp the already-shipped population so the first pass writes no backfill of issue.deployed events"
+  ],
+  "discoveredComplexity": [
+    "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
+    "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
+    "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
+  ]
+}
