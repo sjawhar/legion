@@ -67,7 +67,7 @@ func TestMigrationStampsThePullRequestsAlreadyShipped(t *testing.T) {
 		{"acme/gadgets", 5, false},
 	} {
 		var stamped bool
-		if err := store.Pool.QueryRow(ctx, `select deployed_event_at is not null from delivery_pull_requests where repo = $1::timestamptz and number = $2`,
+		if err := store.Pool.QueryRow(ctx, `select deployed_event_at is not null from delivery_pull_requests where repo = $1 and number = $2`,
 			tc.repo, tc.number).Scan(&stamped); err != nil {
 			t.Fatalf("read %s#%d: %v", tc.repo, tc.number, err)
 		}
