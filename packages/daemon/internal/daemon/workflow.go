@@ -39,13 +39,16 @@ import (
 // It is absent for Stage 2 configurations, whose unchanged supervision proof deliberately has no
 // Dispatch, Apps, or Envoy stream configured.
 type workflowRuntime struct {
-	pool            *pgxpool.Pool
-	records         record.Store
-	engine          *workflow.Engine
-	admission       *admit.Admission
-	handlers        []intake.Handler
-	dispatch        dispatch.Client
-	tokens          appauth.Tokens
+	pool      *pgxpool.Pool
+	records   record.Store
+	engine    *workflow.Engine
+	admission *admit.Admission
+	handlers  []intake.Handler
+	dispatch  dispatch.Client
+	tokens    appauth.Tokens
+	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
+	// (tokenRefused).
+	forget          appauth.Forgetter
 	grants          *credential.Grants
 	projectID       string
 	dispatchProject string
@@ -223,8 +226,12 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if !ok {
 		return nil, fmt.Errorf("the GitHub App token source answers no App login, which the workflow judges pushes and reviews by")
 	}
+	forget, ok := tokens.(appauth.Forgetter)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
+	}
 	w := &workflowRuntime{
-		tokens: tokens, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
+		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,

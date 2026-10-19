@@ -83,7 +83,7 @@ func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.Pu
 	}
 	canWrite, err := w.readPermission(ctx, repository, review.Author)
 	if err != nil {
-		return false, w.holdIfLimited(err)
+		return false, err
 	}
 	if !canWrite {
 		w.keepNoWriteAccess(key)
@@ -122,32 +122,26 @@ func rateLimitRefusal(left time.Duration, what string) *intake.RetryLater {
 		Err: fmt.Errorf("%s: GitHub's rate limit stands for another %s, so this read was not made", what, left)}
 }
 
-// holdIfLimited holds GitHub's rate limit (holdRateLimit) when err is an intake.RetryLater, and
-// returns err unchanged either way, as every read past the rate-limit check above must do with
-// whatever it meets: reviewAppClient's mint, readPermission's read, and reviewBody's own read of
-// the review.
-func (w *workflowRuntime) holdIfLimited(err error) error {
-	var later *intake.RetryLater
-	if errors.As(err, &later) && !errors.Is(err, errTokenRefused) {
-		w.holdRateLimit(later.After)
+// tokenRefused answers a 401 for the review App's token lease on repository. GitHub answers it for
+// a token it has not yet accepted, one minted moments before, as for one whose installation was
+// removed since, and neither says anything of the author or the review, so the delivery is retried,
+// unheld by the rate limit: a token younger than tokenAcceptWindow is kept and tried again once it
+// is that old, as Octokit's auth-app does; an older one is dropped (appauth.Forgetter) and the
+// delivery retried after tokenRefusedWait with a fresh mint, which either reads it or, for a
+// removed App, is refused as not installed (appauth.ErrNotInstalled).
+func (w *workflowRuntime) tokenRefused(repository ghrepo.Repository, lease appauth.Lease, err error) error {
+	if age := time.Since(lease.Minted); age < tokenAcceptWindow {
+		return &intake.RetryLater{After: tokenAcceptWindow - age,
+			Err: fmt.Errorf("GitHub has not yet accepted the review App's token minted %s ago, tried again once it is %s old: %w", age.Round(time.Millisecond), tokenAcceptWindow, err)}
 	}
-	return err
+	w.forget.Forget(appauth.Review, repository.Owner())
+	return &intake.RetryLater{After: tokenRefusedWait,
+		Err: fmt.Errorf("GitHub refused the review App's token, which is minted again: %w", err)}
 }
 
-// tokenRefused answers a 401 for the review App's token on repository: GitHub answers it for a
-// token it has not yet accepted (one minted moments before) as for one whose installation was
-// removed since, and neither says anything of the author or the review, so the cached token is
-// dropped (appauth.Forgetter) and the delivery retried after tokenRefusedWait, unheld: the fresh
-// mint either reads it or, for a removed App, is refused as not installed (appauth.ErrNotInstalled).
-func (w *workflowRuntime) tokenRefused(repository ghrepo.Repository, err error) error {
-	if forgetter, ok := w.tokens.(appauth.Forgetter); ok {
-		forgetter.Forget(appauth.Review, repository.Owner())
-	}
-	return &intake.RetryLater{After: tokenRefusedWait, Err: fmt.Errorf("%w: %w", errTokenRefused, err)}
-}
-
-// errTokenRefused marks tokenRefused's retry, which is no rate limit to hold.
-var errTokenRefused = errors.New("GitHub refused the review App's token, which is minted again")
+// tokenAcceptWindow is how old an installation token must be before GitHub's refusal of it is
+// read as more than its not yet being accepted.
+const tokenAcceptWindow = 5 * time.Second
 
 // tokenRefusedWait is how long a delivery whose review App token GitHub refused waits before it is
 // tried with a fresh one.
@@ -164,6 +158,7 @@ func (w *workflowRuntime) reviewAppClient(ctx context.Context, repository ghrepo
 	if err != nil {
 		var transient *appauth.TransientError
 		if errors.As(err, &transient) {
+			w.holdRateLimit(time.Minute)
 			return githubrest.Client{}, appauth.Lease{}, &intake.RetryLater{After: time.Minute,
 				Err: fmt.Errorf("mint the review App token for %s: a transient failure minting it, retry in %s: %w", repository.Owner(), time.Minute, err)}
 		}
@@ -196,6 +191,7 @@ func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.
 		}
 		switch {
 		case refused.RateLimited:
+			w.holdRateLimit(refused.RetryAfter)
 			return false, &intake.RetryLater{After: refused.RetryAfter,
 				Err: fmt.Errorf("read %s's permission on %s: GitHub's rate limit, retry in %s: %w", login, repository.String(), refused.RetryAfter, err)}
 		case refused.Status == http.StatusNotFound:
@@ -207,7 +203,7 @@ func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.
 				"app", appauth.Review, "bot", lease.Identity.Name, "installation_owner", repository.Owner(), "repo", repository.String(), "login", login, "status", refused.Status, "body", refused.Body)
 			return false, nil
 		case refused.Status == http.StatusUnauthorized:
-			return false, w.tokenRefused(repository, fmt.Errorf("read %s's permission on %s: %w", login, repository.String(), err))
+			return false, w.tokenRefused(repository, lease, fmt.Errorf("read %s's permission on %s: %w", login, repository.String(), err))
 		}
 		return false, fmt.Errorf("read %s's permission on %s: %w", login, repository.String(), err)
 	}

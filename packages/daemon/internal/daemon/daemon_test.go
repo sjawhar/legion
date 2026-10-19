@@ -1231,6 +1231,9 @@ func (r *workflowTokenRecorder) AppLogin(_ context.Context, role appauth.AppRole
 	return "legion-" + string(role) + "[bot]", nil
 }
 
+// Forget drops nothing: every lease is minted afresh.
+func (r *workflowTokenRecorder) Forget(appauth.AppRole, string) {}
+
 // InstalledOn answers each App installed on every repository but those missing names.
 func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
 	return !r.missing[string(role)+" "+repo.String()], nil

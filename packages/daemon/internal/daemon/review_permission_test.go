@@ -63,7 +63,7 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 		{name: "an account GitHub does not know", login: "a-ghost", status: http.StatusNotFound, wantCalls: 1},
 		{name: "an installation that may not read the permission", login: "a-member", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "4999"},
 			wantLog: "level=ERROR msg=\"workflow: GitHub refuses the review App's installation", wantCalls: 1},
-		{name: "a review App token GitHub no longer accepts", login: "a-writer", status: http.StatusUnauthorized,
+		{name: "a 401 for the review App's token, retried with a fresh one", login: "a-writer", status: http.StatusUnauthorized,
 			wantErr: "401", wantWait: tokenRefusedWait, wantCalls: 1},
 		{name: "a 403 out of rate limit", login: "a-writer", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset},
 			wantErr: "403", wantWait: 90 * time.Second, wantCalls: 1},
@@ -143,48 +143,69 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 
 // GitHub answers 401 for a review App token it has not yet accepted (a token minted moments
 // before) as for one whose installation was removed since. Neither says anything about the
-// author, so a 401 decides nothing and keeps nothing: the cached token is dropped and the delivery
-// retried, whose fresh mint either reads the permission or, for a removed App, is refused as not
-// installed. GitHub's rate limit is not held for it.
+// author, so a 401 decides nothing and keeps nothing, and GitHub's rate limit is not held for it.
+// A token older than the acceptance window is dropped and the delivery retried with a fresh mint,
+// which either reads the permission or, for a removed App, is refused as not installed; a younger
+// one is kept and tried again once it is that old.
 func TestA401ForTheReviewAppsTokenIsRetriedWithAFreshOne(t *testing.T) {
-	pool := reviewPermissionPool(t)
-	calls := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		if calls == 1 {
-			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
-			return
-		}
-		fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
-	}))
-	defer server.Close()
-	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
-	tokens := &forgettingTokens{}
-	w.tokens = tokens
-	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer"}
-	_, err := w.reviewerCanWrite(context.Background(), review)
-	var later *intake.RetryLater
-	if !errors.As(err, &later) || later.After != tokenRefusedWait {
-		t.Fatalf("a 401 = %v, want a %s retry", err, tokenRefusedWait)
-	}
-	if tokens.forgot != "review acme" {
-		t.Fatalf("forgot %q, want the review App's token for acme", tokens.forgot)
-	}
-	if left := w.rateLimitLeft(); left > 0 {
-		t.Fatalf("a 401 held GitHub's rate limit for %s, want no hold", left)
-	}
-	if canWrite, err := w.reviewerCanWrite(context.Background(), review); err != nil || !canWrite {
-		t.Fatalf("the retried review = %v, %v; want the writer's write access read again", canWrite, err)
-	}
-	if calls != 2 {
-		t.Fatalf("GitHub was asked %d times, want twice: the 401 kept no answer", calls)
+	for _, tc := range []struct {
+		name     string
+		minted   time.Duration
+		wantWait time.Duration
+		forgot   string
+	}{
+		{"a token older than the window is minted again", -time.Hour, tokenRefusedWait, "review acme"},
+		{"a token moments old is tried again as it is", -time.Second, tokenAcceptWindow - time.Second, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := reviewPermissionPool(t)
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				if calls == 1 {
+					http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+					return
+				}
+				fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
+			}))
+			defer server.Close()
+			w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+			tokens := &forgettingTokens{minted: time.Now().Add(tc.minted)}
+			w.tokens, w.forget = tokens, tokens
+			review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer"}
+			_, err := w.reviewerCanWrite(context.Background(), review)
+			var later *intake.RetryLater
+			if !errors.As(err, &later) || later.After > tc.wantWait || later.After < tc.wantWait-time.Second {
+				t.Fatalf("a 401 = %v, want a retry after about %s", err, tc.wantWait)
+			}
+			if tokens.forgot != tc.forgot {
+				t.Fatalf("forgot %q, want %q", tokens.forgot, tc.forgot)
+			}
+			if left := w.rateLimitLeft(); left > 0 {
+				t.Fatalf("a 401 held GitHub's rate limit for %s, want no hold", left)
+			}
+			if canWrite, err := w.reviewerCanWrite(context.Background(), review); err != nil || !canWrite {
+				t.Fatalf("the retried review = %v, %v; want the writer's write access read again", canWrite, err)
+			}
+			if calls != 2 {
+				t.Fatalf("GitHub was asked %d times, want twice: the 401 kept no answer", calls)
+			}
+		})
 	}
 }
 
-// forgettingTokens are outboxTokens that record the cached token Forget drops.
+// forgettingTokens are outboxTokens whose leases were minted at minted, recording the cached token
+// Forget drops.
 type forgettingTokens struct {
 	outboxTokens
+	minted time.Time
 	forgot string
+}
+
+func (t *forgettingTokens) Token(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.outboxTokens.Token(ctx, role, owner)
+	lease.Minted = t.minted
+	return lease, err
 }
 
 func (t *forgettingTokens) Forget(role appauth.AppRole, owner string) {
@@ -394,6 +415,7 @@ func reviewPermissionPool(t *testing.T) *pgxpool.Pool {
 }
 
 func reviewPermissionRuntime(pool *pgxpool.Pool, githubAPI string, log *slog.Logger) *workflowRuntime {
-	return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, tokens: outboxTokens{},
+	tokens := &forgettingTokens{}
+	return &workflowRuntime{pool: pool, records: projectRecords{Store: record.NewStore(), project: "LEGION"}, tokens: tokens, forget: tokens,
 		githubAPI: githubAPI, log: log, reviewAppLogin: "legion-reviewer[bot]"}
 }
