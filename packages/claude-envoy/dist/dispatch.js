@@ -16627,6 +16627,17 @@ function dispatchRefFromUrl(value, serverUrl) {
 }
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
+function innerRefProblem(tool, ref, refText) {
+  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message")
+    return;
+  if (tool === "dispatch_read" || tool === "dispatch_ask")
+    return;
+  const owner = refOwnerName(ref);
+  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
+  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+}
 var toolSchemas = new Map;
 function toolSchema(tool) {
   const cached2 = toolSchemas.get(tool);
@@ -16662,6 +16673,10 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
     ref = parseDispatchRef(refText);
     if (ref === null) {
       problems.push(tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem);
+    } else {
+      const inner = innerRefProblem(tool, ref, refText);
+      if (inner !== undefined)
+        problems.push(inner);
     }
   }
   const issueArgument = args.issue;
