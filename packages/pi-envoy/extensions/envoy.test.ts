@@ -6286,6 +6286,98 @@ describe("envoy OMP extension", () => {
     expect(holders.get(role)).toBe("ses_sr_c");
   });
 
+  for (const meanwhile of ["the listener reaped it", "a third session took the role"] as const) {
+    test(`a hold taken back on returning to its abandoned session is claimed before it is trusted, when ${meanwhile}`, async () => {
+      const role = "legion-controller";
+      const notice = "notifications.legion.ACME.controller";
+      const {
+        fixture,
+        live,
+        context,
+        manager,
+        holders,
+        claimSessions,
+        refuseRegistrations,
+        failHandBacks,
+        tick,
+      } = await gatedRoleFixture(`taken-back-claimed-${meanwhile.length}`, "ses_tb");
+      const own = [...manager.branch()];
+      // A /new lands during a listener outage, so the hand-back of ses_tb is abandoned.
+      const refused = refuseRegistrations(2);
+      failHandBacks(2);
+      await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+      await fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_tb_n", { fresh: true })
+      );
+      await refused;
+      if (meanwhile === "a third session took the role") holders.set(role, "ses_third");
+      else holders.delete(role);
+      // A resume back to ses_tb, whose records name the role.
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      manager.id = "ses_tb";
+      manager.branch = () => own;
+      const before = claimSessions.length;
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_tb"));
+      expect(claimSessions.slice(before)).toEqual([`${role}@ses_tb`]);
+      if (meanwhile === "a third session took the role") {
+        expect(holders.get(role)).toBe("ses_third");
+        // The session does not hold the role, so a plugin opens no notices bound to it.
+        await expect(subscribeLegionNotice("ses_tb", notice, live("ses_tb"), role)).rejects.toThrow(
+          "does not hold role"
+        );
+      } else {
+        expect(holders.get(role)).toBe("ses_tb");
+        // The claim confirmed the hold, so later ticks only re-register.
+        const confirmed = claimSessions.length;
+        for (let ticks = 0; ticks < 2; ticks += 1) {
+          tick();
+          for (let step = 0; step < 10; step += 1) await new Promise<void>((r) => setImmediate(r));
+        }
+        expect(claimSessions.length).toBe(confirmed);
+      }
+    });
+  }
+
+  test("a registration outside a pass takes an abandoned hold back, so its moved last_seen is not read as a newer holder", async () => {
+    const role = "legion-controller";
+    const { fixture, live, context, manager, holders, refuseRegistrations, failHandBacks } =
+      await gatedRoleFixture("abandoned-hold-registered-outside-pass", "ses_op");
+    const own = [...manager.branch()];
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+    // A /new during a listener outage abandons the hold of ses_op.
+    const outage = refuseRegistrations(2);
+    failHandBacks(2);
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      live("ses_op_n", { fresh: true })
+    );
+    await outage;
+    // A resume to a session whose records name the role waits on the abandoned hold.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    live("ses_op_c", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    const resumedBranch = manager.branch;
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_op_c"));
+    // A resume back to ses_op meets another outage, so its pass registers nothing; the model's
+    // envoy_subscribe then registers ses_op outside any pass.
+    const second = refuseRegistrations(2);
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    manager.id = "ses_op";
+    manager.branch = () => own;
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_op"));
+    await second;
+    expect((await subscribeTool.execute("", { topics: ["team.standup"] })).isError).not.toBe(true);
+    // Back to the session whose records name the role: it takes the role.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    manager.id = "ses_op_c";
+    manager.branch = resumedBranch;
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_op_c"));
+    expect(holders.get(role)).toBe("ses_op_c");
+  });
+
   test("a fork's run that ends after the host moved keeps the announcement, so the parent's frames arrive before any pass", async () => {
     const { fixture, live, context } = await gatedRoleFixture("fork-run-ends-after-move", "ses_fe");
     await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);

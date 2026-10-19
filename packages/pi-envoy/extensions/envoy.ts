@@ -538,6 +538,10 @@ export default function envoyExtension(pi: PiApi): void {
   // it, which a pass that keeps the role for another session supersedes by naming it.
   let claimedRoleTopic: string | undefined;
   let claimedRoleSessionID: string | undefined;
+  // Whether that hold came back from a hand-back a session event left (`settleEndedHolds`) rather
+  // than from a claim the listener granted: nothing has checked it at the listener since, so a pass
+  // claims it softly, naming it, before trusting it.
+  let holdUnconfirmed = false;
   // Holds this process gave up locally while the listener still names them, keyed by
   // `<topic>@<session>`: a session event that ends the role at once leaves its hold here, and the
   // next pass hands it back (`settleEndedHolds`).
@@ -1483,9 +1487,16 @@ export default function envoyExtension(pi: PiApi): void {
 
   // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
-  // stays out of them.
-  const registerSession = () =>
-    requireEnvoy().client.subscribe({
+  // stays out of them. A registration moves the session's `last_seen` at the listener, even one
+  // whose answer is lost, so a hold this process abandoned under that session is its own again
+  // first: a pending hand-back under that session's id, which the next pass settles.
+  const registerSession = () => {
+    for (const [topic, hold] of abandonedHolds) {
+      if (hold.id !== sessionID) continue;
+      abandonedHolds.delete(topic);
+      pendingHandBacks.set(`${topic}@${sessionID}`, { topic, id: sessionID });
+    }
+    return requireEnvoy().client.subscribe({
       sessionID,
       directory: sessionDirectory,
       topics: [
@@ -1505,6 +1516,7 @@ export default function envoyExtension(pi: PiApi): void {
       driving: false,
       selfSubscribed: true,
     });
+  };
 
   /**
    * A heartbeat pass's follow-up while this process holds the host session's role under that
@@ -1675,7 +1687,7 @@ export default function envoyExtension(pi: PiApi): void {
   // session holds this process's own abandoned hold of `topic` (`abandonedHolds`), and answers
   // whether the claim waits on it. The first read is recorded on the hold; one that differs from
   // it means another process registers that session (this process's own registration of it takes
-  // the hold back first, in `reconcileNow`), which is the newer holder from then on, and the hold
+  // the hold back first, in `registerSession`), which is the newer holder from then on, and the hold
   // is dropped. A read that fails, or finds another holder, leaves the next pass to decide.
   const observeAbandonedHold = async (
     topic: string,
@@ -1734,6 +1746,7 @@ export default function envoyExtension(pi: PiApi): void {
     });
     if (result.claimed) {
       refusedRoles.delete(id);
+      holdUnconfirmed = false;
       // The listener names this claim's session for the role now, so no hold of it this process
       // gave up is left to hand back or wait on (one under this same id would end the new hold).
       abandonedHolds.delete(topic);
@@ -2001,13 +2014,6 @@ export default function envoyExtension(pi: PiApi): void {
     if (registration === undefined) {
       establishedSession = host;
       ensureHeartbeat(context);
-      // Registering the session an abandoned hold names moves its `last_seen`, so that hold is
-      // this process's again: one under the host session's own id, which the pass settles.
-      for (const [topic, hold] of abandonedHolds) {
-        if (hold.id !== host) continue;
-        abandonedHolds.delete(topic);
-        pendingHandBacks.set(`${topic}@${host}`, { topic, id: host });
-      }
     }
     const decided = await roleMoves.run(() =>
       settleRole(context, host, cause, registration === undefined)
@@ -2029,9 +2035,10 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Settles the holds session events gave up (`pendingHandBacks`), once the pass has handed back
   // any other role it held. One of the role the host session wants (a resume Oh My Pi rolled back
-  // to the session that held it) is this process's hold again, which this pass and every later
-  // one keep, carry or hand back as any hold, so no hand-back opens the role to another claim on
-  // the way; a claim of a role drops every hand-back of it left pending, so there is at most one.
+  // to the session that held it) is this process's hold again, unconfirmed until a soft claim
+  // naming it checks it at the listener (`holdUnconfirmed`), and kept, carried or handed back as
+  // any hold from then on, so no hand-back opens the role to another claim on the way; a claim of a
+  // role drops every hand-back of it left pending, so there is at most one.
   // Any other is handed back. One the listener does not take back stays pending while it is under
   // the host session's own id (a tree navigation), which this process heartbeats and no other can
   // rightly hold; under a session it has left, it is abandoned to the listener's reaping
@@ -2045,6 +2052,7 @@ export default function envoyExtension(pi: PiApi): void {
       if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {
         claimedRoleTopic = hold.topic;
         claimedRoleSessionID = hold.id;
+        holdUnconfirmed = true;
         restored = true;
         continue;
       }
@@ -2102,7 +2110,7 @@ export default function envoyExtension(pi: PiApi): void {
       roleSettledFor = host;
       return true;
     }
-    if (heldRole() === desired && claimedRoleSessionID === host) {
+    if (!holdUnconfirmed && heldRole() === desired && claimedRoleSessionID === host) {
       roleSettledFor = host;
       return cause.heartbeat === true
         ? reassertRoleNow(host, desired, cause.afterOutage === true, context)
