@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-19T15:36:00Z",
+  "completed": "2026-10-19T15:48:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "ed8d194765f72b6e2ee4fcc1d4d0fba629e95d9f",
+  "head": "54ddc86a374327a8c169d8c52090af6b3fae0fa1",
   "proof": [
     {
       "criterion": "Done-when 2 (the upgrade, plan D11) and 3 (legion state --json and read_record list each open check; LegionStateResponse carries the field): the daemon's first boot on this release moves an issue left in production_check to awaiting_merge, the phase constraints admit accepting and refuse production_check, and the state shows an open check",
@@ -33,9 +33,9 @@
     {
       "criterion": "Done-when 5 (Stage 4b drives the new order on the Sandbox runtime: the acceptance before the merge, the close at the merge with the pod gone and the Sandbox Suspended, the check open after the first look's pending, the bound's last look); round 4: the script's teardown deletes every durable consumer the daemon opens for the project, the third (legion-go-<project>-dispatch-server) included, so hygiene passes and the next run's prerequisites admit it",
       "surface": "scripts/e2e/stage4b-sandbox-tree.sh on the devbox against the production cluster (namespace legion), the surface the spec names; a pod cannot run it",
-      "command": "bun test scripts/e2e/lib/stage4b-consumers.test.ts (the tester's red test: delete_consumers taken from the script by name, run against a stubbed nats_stream whose `consumers` lists every legion-go-<project>-<suffix> consume.go declares and whose `delete` records each name); bash -n scripts/e2e/stage4b-sandbox-tree.sh; then the stage itself, pending: run by the devbox holder at head ed8d1947 with the 2dce61d9 worker image (script and test-only changes since), LEGION_E2E_RUNTIME_CONTEXT=... LEGION_E2E_IMAGE=... bash scripts/e2e/stage4b-sandbox-tree.sh, the log tarball attached to LEGION-781 with a comment on sjawhar/legion#2059",
-      "observed": "round 4 at ed8d1947: the red test red before the fix (`delete_consumers must delete legion-go-LEGSMOKE-dispatch-server`) and green after (1 pass; it reads the suffixes from consume.go, so a fourth durable would reach it unnamed); the stage's end-game checkpoints (accepting, sign_off, the merge's close with the pod gone and the Sandbox Suspended, the check's pending look and its close under production_check_hours 0.25, the linger close at 0.5) are not yet observed: the run at 2dce61d9 was stopped on hygiene's leftover durable, and the next run is at this head",
-      "headSha": "ed8d194765f72b6e2ee4fcc1d4d0fba629e95d9f",
+      "command": "bun test scripts/e2e/lib/stage4b-consumers.test.ts (the tester's red test: delete_consumers taken from the script by name, run against a stubbed nats_stream whose `consumers` lists every legion-go-<project>-<suffix> consume.go declares and whose `delete` records each name); bash -n scripts/e2e/stage4b-sandbox-tree.sh; then the stage itself, pending: run by the devbox holder at head 54ddc86a with the 2dce61d9 worker image (GitHub's compare 2dce61d9...54ddc86a lists .legion/, two test files and scripts/e2e/ only), LEGION_E2E_RUNTIME_CONTEXT=... LEGION_E2E_IMAGE=... bash scripts/e2e/stage4b-sandbox-tree.sh, the log tarball attached to LEGION-781 with a comment on sjawhar/legion#2059",
+      "observed": "round 4 at ed8d1947: the red test red before the fix (`delete_consumers must delete legion-go-LEGSMOKE-dispatch-server`) and green after (1 pass; it reads the suffixes from consume.go, so a fourth durable would reach it unnamed); the stage's end-game checkpoints (accepting, sign_off, the merge's close with the pod gone and the Sandbox Suspended, the check's pending look and its close under production_check_hours 0.25, the linger close at 0.5) are not yet observed: the run at 2dce61d9 was stopped on hygiene's leftover durable, and the next run is at this head; round 5 at 54ddc86a: a forward merge of main at a5b302e4 (#2063), its Stage 3 and README conflicts resolved keeping both the branch's rewrite and #2063's await_tree_suspended bound; bash -n on the four scripts, the tester's stage4b-consumers test and the lib suite (minus its two Docker tests) green on the merged head",
+      "headSha": "54ddc86a374327a8c169d8c52090af6b3fae0fa1",
       "negativeControl": "the round-3 script's delete_consumers, run against the same stubbed nats_stream, leaves legion-go-LEGSMOKE-dispatch-server undeleted (the red test's failure line); in the stage itself a leftover durable under legion-go-<project>- fails hygiene and refuses the next run at prerequisites"
     }
   ],
@@ -75,15 +75,16 @@
     "DaemonAPIVersion is 33 and the migration 0049: main released pi-legion v10.8.3 (30, #1986), v10.9.0 (31, #2005) and v10.10.0 (32, #2009) and landed migrations 0047/0048 before this branch merged; two forward merges in round 2 (bf53039b, 2dce61d9) with their fingerprint comment on the PR",
     "round 2: this branch's copy of the Stage 4b github-credential negative-control fix (a595f7f4) yields to main's sjawhar/legion#2062 (LEGION-805) in the merge, per the architect",
     "round 3: one test-only line (migrate_delivery_deployed_event_test.go:70) and the handoff, nothing else, so the Stage 4b run at 2dce61d9 stands for this head per the architect; main left where it is",
-    "round 4: scripts/e2e/stage4b-sandbox-tree.sh's delete_consumers and its comment, plus the handoff, nothing else (no forward merge, no runtime code), so the 2dce61d9 worker image stands for the stage run at this head; scripts/e2e/README.md:1059's 'two durable consumers' wording is the PR body's Fast-follow"
+    "round 4: scripts/e2e/stage4b-sandbox-tree.sh's delete_consumers and its comment, plus the handoff, nothing else (no forward merge, no runtime code), so the 2dce61d9 worker image stands for the stage run at this head; scripts/e2e/README.md:1059's 'two durable consumers' wording is the PR body's Fast-follow",
+    "round 5: the forward merge of main at a5b302e4 (#2063, e2e scripts only) and the handoff, nothing else; fingerprint db81dd90 → d21fbe60 (changed by #2063's lines alone), the comment on #2059"
   ],
   "openQuestions": [
-    "Stage 4b's run at ed8d1947 by the devbox holder (with the 2dce61d9 image): its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for"
+    "Stage 4b's run at 54ddc86a by the devbox holder (with the 2dce61d9 image): its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for"
   ],
   "discoveredComplexity": [
     "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 4
+  "round": 5
 }
