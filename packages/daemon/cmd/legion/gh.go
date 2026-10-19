@@ -91,9 +91,9 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 // ghWrapperScript is the `gh` wrapper both runtimes install first on PATH: a script whose one
 // command execs `legion gh` with its arguments (packages/daemon/docker/gh, workerbin.Install),
-// the legion path a bare word, or quoted as a shell reads it, in single quotes (shellprefix.Literal)
-// or in double quotes with no expansion.
-var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('(?:[^']|'\\'')*'|"[^"$` + "`" + `\\]*"|[^\s'"\\$` + "`" + `]+) gh "\$@"\n?$`)
+// the legion path a bare word of the characters a shell reads literally (shellprefix's safe set),
+// or quoted, in single quotes (shellprefix.Literal) or in double quotes with no expansion.
+var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('(?:[^']|'\\'')*'|"[^"$` + "`" + `\\]*"|[A-Za-z0-9_./:-]+) gh "\$@"\n?$`)
 
 // ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute
 // path: gh names its git credential helper after it (GH_PATH). It is refused when PATH's first gh

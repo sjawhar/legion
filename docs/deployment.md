@@ -125,19 +125,20 @@ from the pane's directory. `legion gh` runs the real gh with `GH_CONFIG_DIR` at 
 owner the command targets, read as gh reads it, with pflag's rules, from the real gh's own help of
 each command down to its leaf (`-R`/`--repo` before or after the command, a repository or owner
 argument, before `--` or as a clone's or fork's first after it, a `github.com` URL argument — for a
-`pr` command only a pull request's, since gh reads any other as a branch of the command's own
-repository — every one of a slot gh's usage takes several of, `agent-task view`'s `OWNER/REPO#N`,
-a `repos/<owner>/…` endpoint of `gh api` or a search endpoint's `q`, a search query's plain
-`repo:`/`owner:`, the options naming a repository, an owner, a team or an issue by URL). The
-command's own repository counts too whenever gh resolves it, because no argument names it, and
-for `repo set-default`, which reads every remote's network, whatever names it: `GH_REPO` for a
-command that reads it (`gh api`'s `{owner}` and `:owner` placeholders among them), and otherwise
-every `github.com` remote and `gh-resolved` setting of the working directory, read with gh's own
-URL parser, whatever the scheme. A command naming no owner, in a directory whose remotes name
-none, runs at the issue owner's. A command whose last `--help` is true, and `gh --version` alone,
-only print. It fails closed: a command it cannot read for certain (an option the leaf's help does
-not list or names a repository with in a way it does not know, a subcommand gh does not know, a
-first word gh's own help does not list, anything before the command but `-R` and `--help`, an
+`pr` command or `agent-task view` only a pull request's, since gh reads any other as a branch of
+the command's own repository — every one of a slot gh's usage takes several of, `agent-task view`'s
+`OWNER/REPO#N`, a `repos/<owner>/…` endpoint of `gh api` or a search endpoint's `q`, a search
+query's plain `repo:`/`owner:`, the options naming a repository, an owner, a team or an issue by
+URL). The command's own repository counts too whenever gh resolves it, because no argument names
+it, and for `repo set-default`, which reads every remote's network, whatever names it: `GH_REPO`
+for a command that reads it (`gh api`'s `{owner}` and `:owner` placeholders among them), and
+otherwise every `github.com` remote and `gh-resolved` setting of the working directory, read with
+gh's own URL parser, whatever the scheme. A command naming no owner, in a directory whose remotes
+name none, runs at the issue owner's. A command whose last `--help` is true, and `gh --version`
+alone, only print. It fails closed: a command it cannot read for certain (an option the leaf's
+help does not list or names a repository with in a way it does not know, a subcommand gh does not
+know, a first word gh's own help does not list, anything before the command but `-R` and
+`--help`, an
 argument the leaf's usage has no place for or names in a way it does not know, a search qualifier
 gh or GitHub could read otherwise, a gh alias or an extension, run or named as `gh help`'s target,
 whose help it never reads since reading it runs them, `gh copilot` and `gh extension exec`), one
