@@ -12,7 +12,7 @@ tags:
   - argv
   - OMP_PROFILE
 date: 2026-09-13
-status: superseded — the rig it describes (`setup.sh` with `RIG_LEGION_BUILD`, a daemon run from a bun export of a checkout) is gone with the TypeScript daemon; two versions of a skill are compared on real agents with `packages/pi-legion/scripts/skill-scenarios/rig.sh` (`rig.sh profile <label> <checkout>` per version, then `rig.sh batch <scenario> <n> head base`), and `scripts/e2e/stage2-tmux-supervision.sh` and `stage3-devbox-workflow.sh` run real panes on a checkout's built-in role prompts and packed plugin but check no prompt's text, so a prompt criterion adds its own check to each leg; the two-leg rule (the released build first as the negative control, then the branch's) still stands
+status: superseded — the rig it describes (`setup.sh` with `RIG_LEGION_BUILD`, a daemon run from a bun export of a checkout) is gone with the TypeScript daemon; two versions of a skill are compared on real agents with `packages/pi-legion/scripts/skill-scenarios/rig.sh` (`rig.sh profile <label> <checkout>` per version, then `rig.sh batch <scenario> <n> head base`), and `scripts/e2e/stage2-tmux-supervision.sh` and `stage3-devbox-workflow.sh` run real panes on a checkout's built-in role prompts and packed plugin but check no prompt's text, so a prompt criterion adds its own check to each leg; the two-leg rule (the released plugin with `main`'s daemon first, as the negative control, then the branch's) still stands
 module: pi-envoy
 applies_when:
   - A pull request changes `packages/daemon/internal/prompts/roles/*.md`, `skills/*/SKILL.md`, or anything else a pane receives through `--append-system-prompt` or resolves through `skill://`

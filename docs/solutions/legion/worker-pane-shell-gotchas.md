@@ -410,7 +410,7 @@ package's job in `.github/workflows/release.yaml` (`.github/scripts/release-push
 locally) — the merger recomputes it at READY, and a drift that appears after
 approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
 branch's commit subjects, so only the PR title's conventional-commit type classifies the bump, except that a change
-under one of the package's `--patch-path` directories (its own skills among them) bumps at least the patch version
+under one of the package's `--patch-path` paths (its own skills among them) bumps at least the patch version
 whatever that type.
 
 **"Diff against `main`" is not the branch's diff once `main` has moved.** A fresh-eyes review of this branch reported
