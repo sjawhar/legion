@@ -429,8 +429,9 @@ Report completion to the architect: call the `legion` tool with `op: "handoff_co
 (`handoff_complete`; `read_record`, your issue's record, which is what "re-read your issue
 record" means; and `request_backward_move`), and nothing of yours runs `legion` from bash. The
 tool call is what the extension's phase stall records, and a turn that ends with the phase still
-open gets one reminder; do not complete again on that reminder when your first completion was
-accepted — it stands, and a second is refused because the issue has already left your phase.
+open gets one reminder (two when the first is answered with the tool call written as text again);
+do not complete again on a reminder when your first completion was accepted — it stands, and a
+second is refused because the issue has already left your phase.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
