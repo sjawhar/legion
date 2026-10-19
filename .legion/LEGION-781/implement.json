@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-19T15:10:00Z",
+  "completed": "2026-10-19T15:24:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "2dce61d9cb6e3e7e993b63950a864f31537840ed",
+  "head": "3b433bd9eb4705fa85cb2af4cf1000a10a5acab8",
   "proof": [
     {
       "criterion": "Done-when 2 (the upgrade, plan D11) and 3 (legion state --json and read_record list each open check; LegionStateResponse carries the field): the daemon's first boot on this release moves an issue left in production_check to awaiting_merge, the phase constraints admit accepting and refuse production_check, and the state shows an open check",
@@ -25,10 +25,10 @@
     {
       "criterion": "Done-when 7 (Dispatch writes issue.deployed once per shipped pull request by intake or by the reconcile, and migration 0114 stamps the pull requests already shipped when the marker arrives so the first pass writes no event for them; server.started at a stamped start; the contracts carry both shapes)",
       "surface": "Dispatch's delivery package on a scratch Postgres on the pod (every migration but 0072's pgvector, so storetest's template cannot use it; deliveryTestPool migrates in place), the contracts' bun tests, and CI's Legion Envoy and Contracts job for the pgvector-backed and NATS-backed tests (started_test.go on testnats)",
-      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54329/dispatch_scratch?sslmode=disable go test -count=1 ./internal/dispatch/delivery/ -run 'Deployed|TheWaitingSQL' and the whole package minus its NATS tests; bun test packages/contracts; bun run check:go; the migration's `update` statement run verbatim (sed from 0114_delivery_deployed_event.up.sql) on the scratch database seeded with a settings row and five pull requests (shipped by a later successful run; merged after the run was created; followed only by a run whose production job failed; not merged; another repository); round 2: the migration test's four seed statements (one per Exec, the instant cast to timestamptz) run through pgx against the scratch database, then the migration's update and the five reads",
-      "observed": "TestDeployedEventWaitsForAShippingRun, TestDeployedEventIsWrittenOncePerPullRequest, TestReconcileWritesTheDeployedEvent, TestIntakeWritesTheDeployedEvent PASS (payload {repo, number, run_id, completed_at}, actor system/delivery-timeline, the marker set, a second pass writes none); every non-NATS delivery test ok (122 PASS); contracts 206 pass; the Go contract generation check clean; the stamp set deployed_event_at on the shipped pull request alone (1 true, 2-5 false), the seed removed afterwards; round 2: every seed statement accepted by pgx (CI's envoy-go jobs had refused the one multi-statement Exec), the stamp set deployed_event_at on #1 alone",
-      "headSha": "2dce61d9cb6e3e7e993b63950a864f31537840ed",
-      "negativeControl": "a merged pull request with no shipping run, one whose run was created before the merge or failed, and one outside the deploy repository each write no event; an unstamped Dispatch build publishes no server.started (started_test.go, CI); the stamp leaves a pull request merged after the only successful run was created, one whose later run's production job failed, one not merged and one outside the deploy repository at null"
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54329/dispatch_scratch?sslmode=disable go test -count=1 ./internal/dispatch/delivery/ -run 'Deployed|TheWaitingSQL' and the whole package minus its NATS tests; bun test packages/contracts; bun run check:go; the migration's `update` statement run verbatim (sed from 0114_delivery_deployed_event.up.sql) on the scratch database seeded with a settings row and five pull requests (shipped by a later successful run; merged after the run was created; followed only by a run whose production job failed; not merged; another repository); round 2: the migration test's four seed statements (one per Exec, the instant cast to timestamptz) run through pgx against the scratch database, then the migration's update and the five reads; round 3: the test's four seeds, the migration's update and its read query (`where repo = $1 and number = $2`, copied from the fixed file) run through pgx in one rolled-back transaction on the scratch database (/tmp/seedcheck)",
+      "observed": "TestDeployedEventWaitsForAShippingRun, TestDeployedEventIsWrittenOncePerPullRequest, TestReconcileWritesTheDeployedEvent, TestIntakeWritesTheDeployedEvent PASS (payload {repo, number, run_id, completed_at}, actor system/delivery-timeline, the marker set, a second pass writes none); every non-NATS delivery test ok (122 PASS); contracts 206 pass; the Go contract generation check clean; the stamp set deployed_event_at on the shipped pull request alone (1 true, 2-5 false), the seed removed afterwards; round 2: every seed statement accepted by pgx (CI's envoy-go jobs had refused the one multi-statement Exec), the stamp set deployed_event_at on #1 alone; round 3 at 3b433bd9: the read query accepted with the repository string and number, #1 stamped true and #2-#5 false exactly as the test's table expects (the round-2 file had `repo = $1::timestamptz`, which Postgres refused at plan time)",
+      "headSha": "3b433bd9eb4705fa85cb2af4cf1000a10a5acab8",
+      "negativeControl": "a merged pull request with no shipping run, one whose run was created before the merge or failed, and one outside the deploy repository each write no event; an unstamped Dispatch build publishes no server.started (started_test.go, CI); the stamp leaves a pull request merged after the only successful run was created, one whose later run's production job failed, one not merged and one outside the deploy repository at null; the round-2 read query run the same way fails `operator does not exist: text = timestamp with time zone` (the tester's measurement)"
     },
     {
       "criterion": "Done-when 5 (Stage 4b drives the new order on the Sandbox runtime: the acceptance before the merge, the close at the merge with the pod gone and the Sandbox Suspended, the check open after the first look's pending, the bound's last look)",
@@ -73,15 +73,16 @@
     "Dispatch's migration 0114 stamps deployed_event_at for every delivery pull request whose shipping run is already known at migration time (the architect's ruling), so the first pass writes no issue.deployed for the already-shipped population; a merged pull request with no shipping run yet keeps null",
     "round 2: the tester's two failures fixed (the check instance in every check event id and as a fence; the migration test's seed); the PR body and legion-api.ts now say contract 31",
     "DaemonAPIVersion is 33 and the migration 0049: main released pi-legion v10.8.3 (30, #1986), v10.9.0 (31, #2005) and v10.10.0 (32, #2009) and landed migrations 0047/0048 before this branch merged; two forward merges in round 2 (bf53039b, 2dce61d9) with their fingerprint comment on the PR",
-    "round 2: this branch's copy of the Stage 4b github-credential negative-control fix (a595f7f4) yields to main's sjawhar/legion#2062 (LEGION-805) in the merge, per the architect"
+    "round 2: this branch's copy of the Stage 4b github-credential negative-control fix (a595f7f4) yields to main's sjawhar/legion#2062 (LEGION-805) in the merge, per the architect",
+    "round 3: one test-only line (migrate_delivery_deployed_event_test.go:70) and the handoff, nothing else, so the Stage 4b run at 2dce61d9 stands for this head per the architect; main left where it is"
   ],
   "openQuestions": [
-    "Stage 4b's run at head 2dce61d9 by the devbox holder: its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for"
+    "Stage 4b's run at 2dce61d9 (standing for 3b433bd9, which changes one test line) by the devbox holder: its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for"
   ],
   "discoveredComplexity": [
     "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 2
+  "round": 3
 }
