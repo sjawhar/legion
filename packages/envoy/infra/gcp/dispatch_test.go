@@ -216,14 +216,25 @@ func countRegistrations(m *pulumitest.Mocks, typ string) int {
 	return n
 }
 
-// With existingNamespace, the component registers no Namespace: another program owns it.
+// With existingNamespace, the component registers no Namespace, another program owning it, and
+// every other registration is the default's.
 func TestDispatchExistingNamespaceRegistersNoNamespace(t *testing.T) {
+	defaults, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
 	args := dispatchArgs()
 	yes := true
 	args.ExistingNamespace = &yes
 	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 	require.Zero(t, countRegistrations(m, "kubernetes:core/v1:Namespace"))
+
+	var want []string
+	for _, typ := range defaults.Types() {
+		if typ != "kubernetes:core/v1:Namespace" {
+			want = append(want, typ)
+		}
+	}
+	require.ElementsMatch(t, want, m.Types())
 }
 
 func TestDispatchCreatesItsNamespaceByDefault(t *testing.T) {
