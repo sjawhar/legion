@@ -181,4 +181,17 @@ describe("the dispatch command surface", () => {
   test("an unknown command is refused with the list of commands", () => {
     expect(parseCommand(["isue"], noFiles)).toMatchObject({ kind: "refused" });
   });
+
+  test("a bare issue key is refused with the --issue form of the same command", () => {
+    expect(parseCommand(["read", "INFRA-26"], noFiles)).toEqual({
+      kind: "refused",
+      tool: "dispatch_read",
+      problems: [
+        "unexpected argument INFRA-26: use --issue <KEY>, as in: dispatch read --issue INFRA-26",
+      ],
+    });
+    expect(parseCommand(["read", "hello"], noFiles)).toMatchObject({
+      problems: ["unexpected argument hello: every value follows its flag"],
+    });
+  });
 });
