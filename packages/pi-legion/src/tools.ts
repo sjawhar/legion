@@ -54,7 +54,7 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
 const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   register_gate: ["issue", "artifactId", "version"],
   release_children: ["issues"],
-  request_backward_move: ["to", "reason"],
+  request_backward_move: ["to", "reason", "issue"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
   close_root: ["issue", "reason"],
@@ -101,7 +101,12 @@ function toolSchema(pi: PiApi): unknown {
     reason: z.string().optional(),
     decision: z.enum(["retry", "escalate"]).optional(),
     summary: z.string().optional(),
-    verdict: z.enum(["pass", "fail"]).optional(),
+    verdict: z
+      .enum(["pass", "pending", "fail"])
+      .describe(
+        "handoff_complete's verdict: pass|fail for a tester's completion; pass|pending|fail for the implementer's report on its closed issue's production check"
+      )
+      .optional(),
     ready: z.boolean().optional(),
     status: z.enum(ISSUE_STATUSES).optional(),
   });
@@ -138,8 +143,9 @@ function recordFrom(state: LegionState, issue: string): LegionIssue {
  * that writes mints its own grant in-process and posts it with the request; nothing is written
  * to the pane. `handoff_complete` belongs to every session but the root architect's (a phase
  * worker, and a sub-architect: an architect whose issue is not its tree), and finds the commit it
- * reports in the pane first (`handoffCommit`, src/handoff-commit.ts); `read_state` and
- * `set_status` to the controller. */
+ * reports in the pane first (`handoffCommit`, src/handoff-commit.ts), unless it is the
+ * implementer's report on a look of its closed issue's production check, which carries no commit;
+ * `read_state` and `set_status` to the controller. */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionDaemonClient;
@@ -177,14 +183,21 @@ export function createLegionTool(deps: {
     label: "legion",
     description:
       "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
-      "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " +
-      "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail when your role's " +
-      "instructions require one, `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " +
-      "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " +
-      "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " +
-      "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
-      "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " +
-      "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
+      "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase, " +
+      "and the implementer's report on a look of its closed issue's production check) reports this phase complete: `summary` (two sentences for the " +
+      "architect, or the merger's READY packet), `verdict` pass|pending|fail when your role's instructions require one (pass|fail for the tester; " +
+      "pending is a production check's, when production does not carry the merge yet), `ready: true` for the merger's READY. A handoff is a committed " +
+      "file, `.legion/<issue>/<phase>.json`: the pushed commit carrying it is found here, with the pane's jj, and reported, so write it, commit it and " +
+      "push the branch (`jj git push`) before calling; this call refuses, posting nothing, a handoff still in the working copy, missing, not committed " +
+      "on this branch, carried by another pane's commit, or not yet on `legion/<issue>@origin`, each naming the remedy. A production check report " +
+      "(the task whose first line is `Production check of <KEY>`, handed to the implementer once the merge closed its issue) needs no handoff and no " +
+      "commit: it carries its verdict and summary alone, and the daemon refuses it when no check is open (CHECK_NOT_OPEN). The daemon refuses " +
+      "HANDOFF_NOT_NEW (the commit is the one you reported for your previous phase: write and commit this phase's handoff) and, for READY, each " +
+      "refusal the merger's role names; a refused completion changed nothing, so fix what it names and complete again. An accepted READY whose `note` " +
+      "begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. request_backward_move returns an issue to an earlier phase (`to`, `reason`): " +
+      "a phase worker moves its own issue; the tree's architect moves an issue in accepting, named by `issue`, back to implementing or testing, which " +
+      "counts a review round. sign_off is the architect's acceptance of an issue in accepting, moving it to retro; the daemon refuses it in every " +
+      "other phase (SIGNOFF_OUTSIDE_ACCEPTING). " +
       "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
       "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.",
     defaultInactive: true,
@@ -223,16 +236,58 @@ export function createLegionTool(deps: {
             }
             const summary = requiredString(parameters, operation, "summary");
             const { verdict, ready } = parameters;
-            if (verdict !== undefined && verdict !== "pass" && verdict !== "fail") {
-              throw new Error("handoff_complete's verdict is pass or fail");
+            if (
+              verdict !== undefined &&
+              verdict !== "pass" &&
+              verdict !== "pending" &&
+              verdict !== "fail"
+            ) {
+              throw new Error("handoff_complete's verdict is pass, pending or fail");
             }
             if (ready !== undefined && typeof ready !== "boolean") {
               throw new Error("handoff_complete's ready is true or false");
             }
-            // The commit is found before the grant is minted: a refusal here posts nothing and
-            // mints nothing. The phase is the issue record's, the role the session's.
-            const { phase } = recordFrom(await client.state(), active.issue);
-            const commit = await handoffCommit(phase, active.role);
+            // The record is read before anything is minted: it says whether this is a phase
+            // completion or the implementer's report on a look of its closed issue's production
+            // check, told apart as the daemon tells them (`api.handoffComplete`): the implementer's
+            // call on an issue no role works (`done`) whose check is open. A refusal here posts
+            // nothing and mints nothing.
+            const record = recordFrom(await client.state(), active.issue);
+            if (
+              active.role === "implementer" &&
+              record.phase === "done" &&
+              record.check !== undefined
+            ) {
+              // A check report names its verdict and nothing else: no handoff was written, nothing
+              // was pushed, so no commit is found in the pane and none is sent.
+              if (verdict === undefined) {
+                throw new Error(
+                  "handoff_complete on a production check names a verdict of pass, pending or fail"
+                );
+              }
+              if (ready === true) {
+                throw new Error(
+                  "handoff_complete on a production check is no READY: leave ready out"
+                );
+              }
+              const grantId = await grantFor(client, active);
+              const answer = await client.handoffComplete({
+                grantId,
+                summary,
+                verdict,
+                ready: false,
+              });
+              onPhaseCompleted(context);
+              return jsonSuccess(answer);
+            }
+            if (verdict === "pending") {
+              throw new Error(
+                "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's"
+              );
+            }
+            // The commit is found before the grant is minted. The phase is the issue record's, the
+            // role the session's.
+            const commit = await handoffCommit(record.phase, active.role);
             const grantId = await grantFor(client, active);
             const answer = await client.handoffComplete({
               grantId,
@@ -281,16 +336,29 @@ export function createLegionTool(deps: {
             return jsonSuccess(await client.waveRelease({ grantId, issues }));
           }
           case "request_backward_move": {
+            const to = requiredString(
+              parameters,
+              operation,
+              "to"
+            ) as (typeof LEGION_PHASE_BACKWARD_TARGETS)[number];
+            const reason = requiredString(parameters, operation, "reason");
+            // An architect's grant serves its whole tree, so its move names the issue it returns
+            // from accepting. A phase worker's grant names its own issue, the only one it may
+            // move, so its request leaves `issue` out; one naming another issue is refused here,
+            // as the daemon would (ISSUE_NOT_GRANTS).
+            if (active.kind === "architect") {
+              const issue = requiredString(parameters, operation, "issue");
+              const grantId = await grantFor(client, active);
+              await client.phaseBackward({ grantId, to, reason, issue });
+              return jsonSuccess({});
+            }
+            if (parameters.issue !== undefined && parameters.issue !== active.issue) {
+              throw new Error(
+                `a phase worker moves only its own issue ${active.issue}, not ${String(parameters.issue)}`
+              );
+            }
             const grantId = await grantFor(client, active);
-            await client.phaseBackward({
-              grantId,
-              to: requiredString(
-                parameters,
-                operation,
-                "to"
-              ) as (typeof LEGION_PHASE_BACKWARD_TARGETS)[number],
-              reason: requiredString(parameters, operation, "reason"),
-            });
+            await client.phaseBackward({ grantId, to, reason });
             return jsonSuccess({});
           }
           case "retry_or_escalate": {

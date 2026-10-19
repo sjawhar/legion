@@ -19,9 +19,10 @@ import { staleGitLockNote } from "./git-lock";
  * of an issue shares the workspace, so a handoff written into the previous role's commit would
  * otherwise be reported as this role's), and that commit must already be on
  * `legion/<issue>@origin`, which the pane's own `jj git push` moves. Each refusal is an error
- * naming the remedy. Every other completion — retro, the merger's READY, the production check, a
- * role reporting a phase it does not run (which the daemon refuses naming whose phase it is) —
- * reports the commit the workspace stands on, `@-`.
+ * naming the remedy. Every other completion — retro, the merger's READY, a role reporting a phase
+ * it does not run (which the daemon refuses naming whose phase it is) — reports the commit the
+ * workspace stands on, `@-`. The implementer's report on its closed issue's production check
+ * resolves no commit at all: `tools.ts` never asks this module for one.
  */
 
 /** Runs the pane's jj with `args` against the workspace at `cwd` and answers its trimmed stdout;

@@ -164,10 +164,68 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
     }).success
   ).toBeFalse();
 
+  // A phase worker's move is of its own issue, which its grant names, so the request carries no
+  // issue; one naming another issue is refused before any mint. The architect's grant serves its
+  // whole tree, so its move names the issue it returns from accepting, and is refused without one.
   await expect(
     run(worker, { op: "request_backward_move", to: "implementing", reason: "test failed" })
   ).resolves.toMatchObject({ details: {} });
-
+  expect(calls.at(-1)).toEqual([
+    "phaseBackward",
+    { grantId: "grant-208", to: "implementing", reason: "test failed" },
+  ]);
+  await expect(
+    run(worker, {
+      op: "request_backward_move",
+      to: "implementing",
+      reason: "test failed",
+      issue: "LEGION-208",
+    })
+  ).resolves.toMatchObject({ details: {} });
+  expect(calls.at(-1)).toEqual([
+    "phaseBackward",
+    { grantId: "grant-208", to: "implementing", reason: "test failed" },
+  ]);
+  const beforeRefusedMove = calls.length;
+  await expect(
+    run(worker, {
+      op: "request_backward_move",
+      to: "implementing",
+      reason: "test failed",
+      issue: "LEGION-209",
+    })
+  ).resolves.toMatchObject({
+    isError: true,
+    content: [
+      {
+        type: "text",
+        text: expect.stringContaining(
+          "a phase worker moves only its own issue LEGION-208, not LEGION-209"
+        ),
+      },
+    ],
+  });
+  await expect(
+    run(architect, { op: "request_backward_move", to: "testing", reason: "the proof is thin" })
+  ).resolves.toMatchObject({
+    isError: true,
+    content: [
+      { type: "text", text: expect.stringContaining("request_backward_move requires issue") },
+    ],
+  });
+  expect(calls).toHaveLength(beforeRefusedMove);
+  await expect(
+    run(architect, {
+      op: "request_backward_move",
+      to: "testing",
+      reason: "the proof is thin",
+      issue: "LEGION-209",
+    })
+  ).resolves.toMatchObject({ details: {} });
+  expect(calls.at(-1)).toEqual([
+    "phaseBackward",
+    { grantId: "grant-208", to: "testing", reason: "the proof is thin", issue: "LEGION-209" },
+  ]);
   await expect(
     run(architect, { op: "release_children", issues: ["LEGION-209"] })
   ).resolves.toMatchObject({ details: {} });
@@ -227,9 +285,12 @@ test("the legion tool exposes only the workflow operations each role owns", asyn
 test("a workflow refusal tells the agent both its code and message", async () => {
   const refusal = Object.assign(
     new Error(
-      "POST /legion/v1/signoff failed with 409 SIGNOFF_EARLY: production check is incomplete"
+      "POST /legion/v1/signoff failed with 409 SIGNOFF_OUTSIDE_ACCEPTING: LEGION-208 is in phase reviewing, not accepting; this sign-off changed nothing"
     ),
-    { code: "SIGNOFF_EARLY", detail: "production check is incomplete" }
+    {
+      code: "SIGNOFF_OUTSIDE_ACCEPTING",
+      detail: "LEGION-208 is in phase reviewing, not accepting; this sign-off changed nothing",
+    }
   );
   const tool = createLegionTool({
     pi,
@@ -247,7 +308,7 @@ test("a workflow refusal tells the agent both its code and message", async () =>
   await expect(
     tool.execute("", { op: "sign_off", issue: "LEGION-208" }, undefined, undefined, context())
   ).resolves.toMatchObject({
-    content: [{ type: "text", text: expect.stringContaining("SIGNOFF_EARLY") }],
+    content: [{ type: "text", text: expect.stringContaining("SIGNOFF_OUTSIDE_ACCEPTING") }],
     isError: true,
     details: {},
   });
@@ -445,7 +506,11 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
   const refusals = [
     [claimSession("architect"), { summary: "Done." }, "root architect session"],
     [claimSession("implementer"), {}, "handoff_complete requires summary"],
-    [claimSession("tester"), { summary: "x", verdict: "maybe" }, "verdict is pass or fail"],
+    [
+      claimSession("tester"),
+      { summary: "x", verdict: "maybe" },
+      "verdict is pass, pending or fail",
+    ],
     [claimSession("merger"), { summary: "x", ready: "yes" }, "ready is true or false"],
     [claimSession("planner"), { summary: "x", phase: "plan" }, 'does not accept field "phase"'],
   ] as const;
@@ -455,6 +520,23 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
     expect(result.content).toEqual([{ type: "text", text: expect.stringContaining(message) }]);
   }
   expect(calls).toHaveLength(before);
+  expect(completed).toHaveLength(4);
+
+  // `pending` is a production check's verdict: on a phase completion it is refused once the record
+  // says the completion is a phase's, with nothing minted or posted.
+  const pendingOnPhase = await run(claimSession("tester"), {
+    op: "handoff_complete",
+    summary: "Waiting on the deploy.",
+    verdict: "pending",
+  });
+  expect(pendingOnPhase.isError).toBe(true);
+  expect(pendingOnPhase.content).toEqual([
+    {
+      type: "text",
+      text: "handoff_complete's verdict is pass or fail on a phase completion; pending is a production check's",
+    },
+  ]);
+  expect(calls.at(-1)).toEqual(["state", undefined]);
   expect(completed).toHaveLength(4);
 
   // Each lookup refusal is the tool's error, naming the remedy: the state is read, and then
@@ -492,6 +574,124 @@ test("handoff_complete finds the pushed commit carrying the handoff, posts it wi
     expect(calls.at(-1)).toEqual(["state", undefined]);
   }
   expect(completed).toHaveLength(4);
+});
+
+/** LEGION-208 closed by its merge, with its production check open on its second look. */
+const openCheck = {
+  repo: "acme/widgets",
+  pullRequest: 1239,
+  mergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
+  openedAt: "2026-09-22T08:40:12Z",
+  looks: 2,
+  lookOpen: true,
+  lastWake: {
+    kind: "issue.deployed",
+    detail: "run 38230245571 completed 2026-09-22T09:10:44Z",
+    at: "2026-09-22T09:10:51Z",
+  },
+  nextWakeAt: "2026-10-06T08:40:12Z",
+  last: false,
+};
+
+test("the implementer's report on its closed issue's production check carries a verdict and no commit", async () => {
+  const completed: string[] = [];
+  const { calls, daemon } = recordingDaemon({
+    state: {
+      issues: {
+        "LEGION-208": { key: "LEGION-208", phase: "done", check: openCheck },
+      },
+    },
+  });
+  const run = (session: LegionToolSession, parameters: Record<string, unknown>) =>
+    createLegionTool({
+      pi,
+      daemon,
+      controllerGrant: noControllerGrant,
+      onPhaseCompleted: (ctx) => completed.push(ctx.sessionManager.getSessionId()),
+      // A check report resolves no commit: the lookup is never asked.
+      handoffCommit: noHandoffCommit,
+      resolveDocument: noDocumentLookup,
+      session: () => session,
+    }).execute("", parameters, undefined, undefined, context());
+
+  // Each of the three verdicts is posted with a fresh grant, the summary and no commit, and the
+  // check task's turn is closed as a phase's would be.
+  for (const verdict of ["pending", "pass", "fail"]) {
+    await expect(
+      run(claimSession("implementer"), {
+        op: "handoff_complete",
+        summary: `Look 2: ${verdict}.`,
+        verdict,
+      })
+    ).resolves.toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
+    expect(calls.slice(-3)).toEqual([
+      ["state", undefined],
+      [
+        "grant",
+        { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-208" },
+      ],
+      [
+        "handoffComplete",
+        { grantId: "grant-208", summary: `Look 2: ${verdict}.`, verdict, ready: false },
+      ],
+    ]);
+  }
+  expect(completed).toEqual(["ses_208", "ses_208", "ses_208"]);
+
+  // Refused after the record is read, with nothing minted or posted: a report with no verdict,
+  // and one sent as READY.
+  const refusals = [
+    [
+      { summary: "Looked." },
+      "handoff_complete on a production check names a verdict of pass, pending or fail",
+    ],
+    [
+      { summary: "Looked.", verdict: "pass", ready: true },
+      "handoff_complete on a production check is no READY: leave ready out",
+    ],
+  ] as const;
+  for (const [parameters, message] of refusals) {
+    const result = await run(claimSession("implementer"), {
+      op: "handoff_complete",
+      ...parameters,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([{ type: "text", text: message }]);
+    expect(calls.at(-1)).toEqual(["state", undefined]);
+  }
+  expect(completed).toHaveLength(3);
+
+  // Only the implementer reports on the check: any other role's completion on the closed issue is
+  // a phase completion, which looks its commit up (and the daemon then refuses it naming whose
+  // phase it is), as is the implementer's once the check closed or when none opened.
+  const phasePaths = [
+    [claimSession("tester"), { check: openCheck }, "the tester at done"],
+    [claimSession("implementer"), {}, "the implementer at done"],
+  ] as const;
+  for (const [session, record, lookup] of phasePaths) {
+    const { daemon: closedDaemon } = recordingDaemon({
+      state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done", ...record } } },
+    });
+    const result = await createLegionTool({
+      pi,
+      daemon: closedDaemon,
+      controllerGrant: noControllerGrant,
+      onPhaseCompleted: () => undefined,
+      handoffCommit: noHandoffCommit,
+      resolveDocument: noDocumentLookup,
+      session: () => session,
+    }).execute(
+      "",
+      { op: "handoff_complete", summary: "Looked.", verdict: "pass" },
+      undefined,
+      undefined,
+      context()
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toEqual([
+      { type: "text", text: `no handoff-commit lookup expected for ${lookup}` },
+    ]);
+  }
 });
 
 test("a refused completion surfaces the daemon's code and leaves the phase open", async () => {

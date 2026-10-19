@@ -3,6 +3,9 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
+  LEGION_PHASE_BACKWARD_TARGETS,
+  LEGION_PHASES,
+  LEGION_WORKFLOW_PHASES,
   LegionChildRequest,
   LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
@@ -140,6 +143,113 @@ test("a backward move rejects future read-only phases", () => {
       reason: "test failed",
     }).success
   ).toBeFalse();
+});
+
+// Contract 30: the architect accepts before the merge, in `accepting`, between `reviewing` and
+// `retro`; the merge closes the issue (`done`), and the production check after the close is no
+// phase, so no phase follows `awaiting_merge` and `integrating` but the close itself.
+test("the phase lists are the daemon's, with accepting between reviewing and retro", () => {
+  expect(LEGION_WORKFLOW_PHASES).toEqual([
+    "admitted",
+    "planning",
+    "implementing",
+    "testing",
+    "reviewing",
+    "accepting",
+    "retro",
+    "merging",
+    "awaiting_merge",
+    "integrating",
+    "done",
+    "held",
+  ]);
+  expect(LEGION_PHASE_BACKWARD_TARGETS).toEqual([
+    "admitted",
+    "planning",
+    "implementing",
+    "testing",
+    "reviewing",
+    "accepting",
+    "retro",
+    "merging",
+    "awaiting_merge",
+    "done",
+    "held",
+  ]);
+  expect(LEGION_PHASES).toEqual([...LEGION_WORKFLOW_PHASES, "unrecorded"]);
+  expect(
+    LegionPhaseBackwardRequest.safeParse({
+      grantId: "grant-208",
+      to: "accepting",
+      reason: "retro reopened the review",
+    }).success
+  ).toBeTrue();
+});
+
+// The state golden carries LEGION-207, closed by its merge, with its production check open: the
+// repository, pull request and merge commit the check looks for, its looks, the wake that started
+// the latest and the bound. The check is present only while open, so an issue without one parses,
+// and the strict shape refuses a field the Go view does not carry and a wake with no kind.
+test("the state golden carries a done issue's open production check", () => {
+  const state = fixture("state.json") as {
+    issues: Record<string, { phase: string; check?: Record<string, unknown> }>;
+  };
+  const closed = state.issues["LEGION-207"];
+  if (closed === undefined || closed.check === undefined) {
+    throw new Error("state fixture lacks LEGION-207 or its check");
+  }
+  expect(closed.phase).toBe("done");
+  expect(closed.check).toEqual({
+    repo: "acme/widgets",
+    pullRequest: 1239,
+    mergeCommit: "3e9c0a7b5d2f4e8a1c6b9d0f2a4e7c5b8d1f3a60",
+    openedAt: "2026-09-22T08:40:12Z",
+    looks: 2,
+    lookOpen: true,
+    lastWake: {
+      kind: "issue.deployed",
+      detail: "run 38230245571 completed 2026-09-22T09:10:44Z",
+      at: "2026-09-22T09:10:51Z",
+    },
+    nextWakeAt: "2026-10-06T08:40:12Z",
+    last: false,
+  });
+
+  // Before the first look wakes there is no wake, and a merge commit the daemon never recorded is
+  // empty until the first build compare fills it.
+  const { lastWake: _, ...unwoken } = closed.check;
+  closed.check = { ...unwoken, mergeCommit: "", looks: 0, lookOpen: false };
+  expect(LegionStateResponse.safeParse(state).error?.issues ?? []).toEqual([]);
+
+  closed.check = undefined;
+  expect(LegionStateResponse.safeParse(state).error?.issues ?? []).toEqual([]);
+
+  closed.check = { ...unwoken, lastWake: { kind: "", detail: "", at: "2026-09-22T09:10:51Z" } };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+
+  closed.check = { ...unwoken, closedAt: "2026-09-22T09:10:51Z" };
+  expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+});
+
+// The implementer's check report carries no commit (the look pushed nothing) and a verdict the
+// daemon holds to pass, pending or fail; a phase completion keeps its commit.
+test("a check report is a completion without a commit", () => {
+  const report = { grantId: "grant-207", summary: "Driven in production.", ready: false };
+  for (const verdict of ["pass", "pending", "fail"]) {
+    expect(LegionHandoffCompleteRequest.safeParse({ ...report, verdict }).success).toBeTrue();
+  }
+  expect(
+    LegionHandoffCompleteRequest.safeParse({ ...report, verdict: "pass", commit: "" }).success
+  ).toBeFalse();
+});
+
+// An architect's backward move names the issue it moves from accepting; a phase worker's may
+// leave it out, since its grant names its own.
+test("a backward move may name its issue", () => {
+  const move = { grantId: "grant-208", to: "testing", reason: "the proof is thin" };
+  expect(LegionPhaseBackwardRequest.safeParse(move).success).toBeTrue();
+  expect(LegionPhaseBackwardRequest.safeParse({ ...move, issue: "LEGION-209" }).success).toBeTrue();
+  expect(LegionPhaseBackwardRequest.safeParse({ ...move, issue: "" }).success).toBeFalse();
 });
 
 test("every workflow request has a strict schema", () => {
