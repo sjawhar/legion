@@ -38,6 +38,7 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.closed": true,
   "issue.claimed": true,
   "issue.released": true,
+  "issue.deployed": true,
   "artifact.created": true,
   "artifact.version": true,
   "artifact.approved": true,
@@ -536,10 +537,15 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     keys.push(["issue"], projectsQuery().queryKey);
     return keys;
   }
-  if (event.type === "issue.claimed" || event.type === "issue.released") {
+  if (
+    event.type === "issue.claimed" ||
+    event.type === "issue.released" ||
+    event.type === "issue.deployed"
+  ) {
     // A claim changes only who holds the issue: its detail, its log, and the lists that render
     // the claim — `["issues"]` above covers every project list by prefix. No rollup, ask count
-    // or component attachment moves with it.
+    // or component attachment moves with it. A deploy is a line in the issue's log and nothing
+    // the lists or rollups read.
     return keys;
   }
   // The branches above name every `issue.*` type there is, so a type added later falls to the

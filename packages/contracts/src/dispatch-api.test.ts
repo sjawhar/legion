@@ -19,12 +19,15 @@ import {
   type CreateProjectInput,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
+  DISPATCH_SERVER_STARTED_SUBJECT,
   type DispatchEvent,
   DispatchEventSchema,
+  DispatchServerStartedPayloadSchema,
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
   type InboxThread,
+  IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
@@ -93,6 +96,58 @@ test("preserves labels on an issue update event payload", () => {
 test("preserves a coarse priority on an issue update event payload", () => {
   expect(IssueEventPayloadSchema.parse({ priority: 0 })).toEqual({ priority: 0 });
   expect(IssueEventPayloadSchema.parse({ priority: null })).toEqual({ priority: null });
+});
+
+test("models the deployed event exactly as the delivery timeline writes it", () => {
+  const payload = {
+    completed_at: "2024-01-01T02:10:00Z",
+    number: 501,
+    repo: "acme/widgets",
+    run_id: 900,
+  };
+  expect(IssueDeployedEventPayloadSchema.parse(payload)).toEqual(payload);
+  const event: DispatchEvent = {
+    actor: { id: "delivery-timeline", kind: "system" },
+    created_at: "2024-01-01T03:00:00Z",
+    id: 91,
+    issue_key: "DEPL-1",
+    notify: false,
+    payload,
+    seq: 4,
+    type: "issue.deployed",
+  };
+  expect(event.type).toBe("issue.deployed");
+  // Strict: a field the Go writer does not emit, a missing one, or a time that is not RFC 3339
+  // is refused rather than passed through.
+  expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, extra: true }).success).toBe(
+    false
+  );
+  expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, run_id: undefined }).success).toBe(
+    false
+  );
+  expect(
+    IssueDeployedEventPayloadSchema.safeParse({ ...payload, completed_at: "yesterday" }).success
+  ).toBe(false);
+  expect(IssueDeployedEventPayloadSchema.safeParse({ ...payload, number: 0 }).success).toBe(false);
+});
+
+test("models Dispatch's own start and the subject it is published on", () => {
+  expect(DISPATCH_SERVER_STARTED_SUBJECT).toBe("notifications.dispatch.server.started");
+  const payload = {
+    commit: "0123456789abcdef0123456789abcdef01234567",
+    started_at: "2026-10-19T12:00:00Z",
+  };
+  expect(DispatchServerStartedPayloadSchema.parse(payload)).toEqual(payload);
+  // A start names a commit: an unstamped Dispatch publishes none, so an empty commit is no start.
+  expect(DispatchServerStartedPayloadSchema.safeParse({ ...payload, commit: "" }).success).toBe(
+    false
+  );
+  expect(DispatchServerStartedPayloadSchema.safeParse({ ...payload, extra: true }).success).toBe(
+    false
+  );
+  expect(
+    DispatchServerStartedPayloadSchema.safeParse({ ...payload, started_at: "noon" }).success
+  ).toBe(false);
 });
 
 test("models every supported typed-block content rule", () => {

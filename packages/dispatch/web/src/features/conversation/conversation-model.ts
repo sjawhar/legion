@@ -232,6 +232,8 @@ export function activityDescription(
         ? "released the claim"
         : `released ${actorLabel(released, titles)}'s claim`;
     }
+    case "issue.deployed":
+      return `deployed ${event.payload.repo}#${event.payload.number} to production (run ${event.payload.run_id})`;
     case "artifact.created":
       return `added ${event.payload.artifact.name}`;
     case "artifact.version":
