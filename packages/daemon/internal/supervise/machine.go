@@ -737,6 +737,14 @@ func (m *Machine) Wait() {
 // about, the generation of a hello or a prompt outcome or a request, the session a request comes
 // from, the delivery a turn or a refusal or a timer names, and the arming a timer came from. It
 // reports whether the event goes on to the table.
+//
+// A hello and a registration are the two events that move a launch on (helloed, register), and a
+// live claim past launching records its process. So neither reaches the table while the claim is
+// a launch that records none (launchRecordsNoProcess): a hello is dropped, and a registration is
+// refused. The process that sent it is not the claim's: its launch was cut short by the daemon's
+// stop, which the next boot launches again once its orphan reconciliation has reaped every process
+// no claim records, or it is the retired process whose relaunch waits (relaunchRefused), which the
+// relaunch waits out.
 func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	pending := m.claim.Pending
 	switch ev := ev.(type) {
@@ -752,6 +760,10 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	case StreamHello:
 		if ev.Generation != m.claim.Generation {
 			m.dropStale("StreamHello", "generation", fmt.Sprint(ev.Generation), fmt.Sprint(m.claim.Generation))
+			return false, nil
+		}
+		if m.launchRecordsNoProcess() {
+			m.dropStale("StreamHello", "process", fmt.Sprint(ev.Generation), "none")
 			return false, nil
 		}
 	case StreamTurnStart:
@@ -783,7 +795,15 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		}
 		delete(m.timers, ev.Kind)
 	case RequestRegister:
-		return m.fenceRequest("register", ev.Generation, ev.Session)
+		if pass, err := m.fenceRequest("register", ev.Generation, ev.Session); !pass {
+			return false, err
+		}
+		if m.launchRecordsNoProcess() {
+			m.log.Warn("supervise: refused a registration: the launch at its generation records no process",
+				"generation", ev.Generation, "session", ev.Session)
+			return false, &RefusedError{State: m.claim.State, Request: "register", Reason: "the launch records no process"}
+		}
+		return true, nil
 	case RequestReady:
 		return m.fenceRequest("ready", ev.Generation, ev.Session)
 	case RequestExit:
@@ -827,6 +847,13 @@ func (m *Machine) fenceRequest(request string, generation uint64, session string
 			request, m.claim.Token, session, m.claim.Session, claim.SameAgentRefusal)
 	}
 	return true, nil
+}
+
+// launchRecordsNoProcess is whether the claim is launching with no process recorded: a launch
+// written launching before it starts (launchAfter) and cut short, or a retired process's relaunch
+// waiting on its lifecycle check (relaunchRefused). Every other live state records its process.
+func (m *Machine) launchRecordsNoProcess() bool {
+	return m.claim.State == StateLaunching && m.claim.Locator == nil
 }
 
 // dropStale logs a stale event the first time it is seen. The sweep observes every thirty seconds
