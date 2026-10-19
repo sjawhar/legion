@@ -575,8 +575,11 @@ type plan struct {
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
 // listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
-// workflow's App tokens (nil without a workflow), and st the store the runtime reads.
-type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error)
+// workflow's App tokens and repository the workflow's repository of an issue (issueRepository;
+// both nil without a workflow), and st the store the runtime reads. openSupervision hands it the
+// plan the workflow completed, so no factory reads a field the workflow sets after prepare.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens,
+	repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -696,11 +699,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		// The workflow sets p.repository after the runtime's factory is made and before it runs.
-		repository := func(ctx context.Context, issue string) (ghrepo.Repository, string, error) {
-			return p.repository(ctx, issue)
-		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, repository, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
 	}
 	return nil
 }
@@ -711,12 +710,12 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), one directory
 // for each of owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools),
 // the one each pane's `legion gh` runs, and the owner of the repository each claim's issue works
-// (claimRepositoryOwner over repository), which a pane adopted after a restart holds its write
-// token for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh files.
-// The private server's environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, owners func() []string,
-	repository func(context.Context, string) (ghrepo.Repository, string, error), log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
+// (claimRepositoryOwner over the workflow's repository), which a pane adopted after a restart holds
+// its write token for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh
+// files. The private server's environment is scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens,
+		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
@@ -938,7 +937,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, st)
+	rt, err := p.newRuntime(supervising, listener, dial, apps, p.repository, st)
 	if err != nil {
 		cancel()
 		endDrain()
