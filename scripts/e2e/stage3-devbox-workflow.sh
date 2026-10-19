@@ -260,9 +260,10 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    # Every pane's gh is the daemon's PATH's (the pane inherits it), so the real gh's directory goes
-    # first, ahead of this box's gh wrapper (prerequisites).
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    # Every pane's gh and jj are the daemon's PATH's (the pane inherits it, environment.go's
+    # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
+    # shims for both (prerequisites, real_bin_path).
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
@@ -570,11 +571,14 @@ nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[
 [[ "$upstream_nats" =~ $nats_url ]] ||
   fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
 development=${from:+from $from}${until:+until $until}
-# A pane's gh is whatever the daemon's PATH gives, since every pane inherits it. This box's PATH
-# heads with a gh wrapper (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to
-# `knives gh`), so the proof starts the daemon with mise's gh first on its PATH (start_daemon), the
-# precondition an operator meets on such a box (docs/deployment.md).
+# Every pane's gh and jj are whatever the daemon's PATH gives, since every pane inherits it
+# (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go, includes PATH). This
+# box's own gh and jj resolve through the dotfiles+mise shim chain, which a pane's own relocated
+# HOME breaks (real_bin_path, lib/rig.sh); the proof starts the daemon with both tools' real
+# binaries first on its PATH (start_daemon) instead. real_gh is also this check's own assertion
+# target below (pane-credentials).
 real_gh=$(mise which gh) || fail "mise has no gh"
+realbin=$(real_bin_path "$work/realbin" gh jj)
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"

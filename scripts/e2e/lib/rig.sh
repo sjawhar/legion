@@ -28,6 +28,30 @@
 # newest" is a sibling's as soon as two trees act within the same minute. A deliberately run-wide
 # read — every pod's shape, the admission cap, a negative over the whole log — says so in its comment.
 
+# real_bin_path DEST NAME... symlinks DEST/NAME to the real NAME binary mise resolves for the
+# caller's own environment, for every NAME given, and prints DEST. The daemon and every pane it
+# launches run with HOME relocated to the run's own isolated home (make_omp_home,
+# lib/omp-home.sh), which hides mise's global config from the dotfiles gh and jj shims: both
+# shims search PATH for mise's own shim first and, under a HOME mise has no pin for, get handed
+# the call straight back (jj) or refused by mise's own recursion guard (gh) — gh and jj
+# themselves are unusable inside a pane until this is worked around, which cost a live Stage 3
+# reviewer several minutes of its own turn finding the same fix. A caller prepends this
+# directory to the daemon's own PATH before launching it, so the daemon and every pane it spawns
+# use it: `PATH="$(real_bin_path "$work/realbin" gh jj):$PATH"`. The role's own GH_CONFIG_DIR
+# (lib/workflow.sh, set per pane by the daemon itself) gives the real, unshimmed gh the same
+# App identity its shim would otherwise have selected, so nothing about which account a pane
+# acts as changes.
+real_bin_path() {
+  local dest=$1 name target
+  shift
+  mkdir -p "$dest"
+  for name in "$@"; do
+    target=$(mise which "$name" 2>/dev/null) || fail "real_bin_path: mise which $name failed; is $name pinned in mise.toml?"
+    ln -sfn "$target" "$dest/$name"
+  done
+  printf '%s\n' "$dest"
+}
+
 # until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
 # polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run
 # included, and says what it waits for on entry and every 60 s while it does (polls and seconds),
