@@ -1000,6 +1000,10 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
 		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, token_file: /var/run/legion/agent-secrets-token/token}\n", ""},
 		{"secrets decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n", ""},
+		{"a role requesting less memory than its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 8Gi}}\n",
+			secretsGap + "resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed\n"},
+		{"the controller requesting less cpu than its limit", "    resources: {controller: {cpu: 2, cpu_request: 500m}}\ncontroller: daemon\n",
+			secretsGap + "resources: Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -1009,6 +1013,29 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 
 			if want := "Config OK: project=DEMO\n" + tc.want + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+			}
+		})
+	}
+}
+
+// --check-config refuses a cpu or memory request above its limit and a request that is no
+// quantity, naming the key, with exit 1 and no Config OK.
+func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
+	legionState(t)
+	for _, tc := range []struct{ name, extra, want string }{
+		{"a memory request past its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 40Gi}}\n",
+			"legion start: runtime.kubernetes.resources.implementer.memory_request 40Gi exceeds memory 32Gi\n"},
+		{"a cpu request past the default limit", "    resources: {tester: {cpu_request: 2}}\n",
+			"legion start: runtime.kubernetes.resources.tester.cpu_request 2 exceeds cpu 750m\n"},
+		{"a request that is no quantity", "    resources: {implementer: {memory_request: lots}}\n",
+			"legion start: runtime.kubernetes.resources.implementer.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := kubernetesCheckConfig(t, tc.extra)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+			if code != 1 || out.Len() != 0 || errb.String() != tc.want {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1, nothing, and %q", code, out.String(), errb.String(), tc.want)
 			}
 		})
 	}

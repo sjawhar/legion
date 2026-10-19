@@ -381,7 +381,13 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 		{"a decided fallback gap", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff, Decided: decided}, ModelFallback, StatusDecided, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
 
 		{"tmux sets no limits", Deployment{Runtime: "tmux"}, ResourceLimits, StatusOpen, "the tmux runtime sets no requests or limits on a pane"},
-		{"every role reserved", satisfied, ResourceLimits, StatusPresent, "every role has CPU and memory requests and limits under runtime.kubernetes.resources"},
+		{"every role reserved", satisfied, ResourceLimits, StatusPresent, "every role has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"},
+		{"a workflow role burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleImplementer, claim.RoleTester}}, ResourceLimits, StatusPresent,
+			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): implementer, tester, so every issue pod is Burstable; every other pod is Guaranteed"},
+		{"the controller burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleController}}, ResourceLimits, StatusPresent,
+			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed"},
+		{"both pod kinds burstable", Deployment{Runtime: "kubernetes", BurstableRoles: []claim.Role{claim.RoleImplementer, claim.RoleController}}, ResourceLimits, StatusPresent,
+			"every role has CPU and memory requests and limits under runtime.kubernetes.resources; Burstable roles (a request below the limit): implementer, controller, so every issue pod and the controller's pod are Burstable; every other pod is Guaranteed"},
 		{"roles without a reservation", Deployment{Runtime: "kubernetes", RolesWithoutResources: []claim.Role{claim.RoleTester, claim.RoleController}}, ResourceLimits, StatusOpen, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester, controller"},
 		{"a decided limits gap", Deployment{Runtime: "tmux", Decided: decided}, ResourceLimits, StatusDecided, "the tmux runtime sets no requests or limits on a pane"},
 

@@ -34,6 +34,12 @@ type Deployment struct {
 	// and memory requests and limits under runtime.kubernetes.resources, among claim.Roles and,
 	// under controller: daemon, claim.RoleController.
 	RolesWithoutResources []claim.Role
+	// BurstableRoles are the roles among the same set whose cpu or memory request is below its
+	// limit (config.RoleResources.Burstable): each makes the pods holding its container Burstable —
+	// a workflow role every issue pod, since every issue pod holds all six, and the controller its
+	// own pod. Every other role requests its limit, and the image probe its own fixed reservation,
+	// so a deployment that names none runs Guaranteed pods alone.
+	BurstableRoles []claim.Role
 	// ModelFallback is whether the pod's Oh My Pi falls back to another model,
 	// bootprobe.ModelFallbackOn or bootprobe.ModelFallbackOff as the probe's OK line reports it
 	// (bootprobe.ImageReport) or the plugin gate read it under tmux, bootprobe.ModelFallbackUnread
@@ -306,14 +312,12 @@ func (d Deployment) measure(name Name) (bool, Source, string) {
 		switch {
 		case tmux:
 			return false, SourceConfiguration, "the tmux runtime sets no requests or limits on a pane"
-		case len(d.RolesWithoutResources) == 0:
-			return true, SourceConfiguration, "every role has CPU and memory requests and limits under runtime.kubernetes.resources"
+		case len(d.RolesWithoutResources) > 0:
+			return false, SourceConfiguration, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: " + joinRoles(d.RolesWithoutResources)
+		case len(d.BurstableRoles) == 0:
+			return true, SourceConfiguration, "every role has CPU and memory requests and limits under runtime.kubernetes.resources, each request equal to its limit, so every pod is Guaranteed"
 		default:
-			roles := make([]string, len(d.RolesWithoutResources))
-			for i, role := range d.RolesWithoutResources {
-				roles[i] = string(role)
-			}
-			return false, SourceConfiguration, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: " + strings.Join(roles, ", ")
+			return true, SourceConfiguration, "every role has CPU and memory requests and limits under runtime.kubernetes.resources; " + d.BurstableLine()
 		}
 	case PoolCapacity:
 		switch {
@@ -328,4 +332,39 @@ func (d Deployment) measure(name Name) (bool, Source, string) {
 	}
 	// Table names no other deployment row; TestEveryDeploymentRowIsMeasured holds it to this switch.
 	return false, "", "no measurement"
+}
+
+// BurstableLine names the Burstable roles and the pods they make Burstable — every issue pod for a
+// workflow role, since each holds all six, and the controller's pod for the controller — and says
+// every other pod is Guaranteed; "" when no role requests less than its limit. The resource-limits
+// row's detail carries it, and `legion start --check-config` prints it after Config OK.
+func (d Deployment) BurstableLine() string {
+	if len(d.BurstableRoles) == 0 {
+		return ""
+	}
+	issue, controller := false, false
+	for _, role := range d.BurstableRoles {
+		if role == claim.RoleController {
+			controller = true
+		} else {
+			issue = true
+		}
+	}
+	pods := "every issue pod is Burstable"
+	switch {
+	case issue && controller:
+		pods = "every issue pod and the controller's pod are Burstable"
+	case controller:
+		pods = "the controller's pod is Burstable"
+	}
+	return "Burstable roles (a request below the limit): " + joinRoles(d.BurstableRoles) + ", so " + pods + "; every other pod is Guaranteed"
+}
+
+// joinRoles is roles as a comma-separated list, in their order.
+func joinRoles(roles []claim.Role) string {
+	names := make([]string, len(roles))
+	for i, role := range roles {
+		names[i] = string(role)
+	}
+	return strings.Join(names, ", ")
 }

@@ -840,6 +840,21 @@ one in the second answers `200` with `lost: true` (`null` when no verdict was re
 That path stamps no block ids, because `EnsureBlockIDs` would also repair a repeat the live
 document carries, which is settlement's to repair and a write's to leave as it found it.
 
+A block's new text is written as one span of its old text replaced, the characters between the two
+texts' shared prefix and suffix (`pmdoc.simpleDiff`), with its index and length counted in the UTF-16
+units Yjs counts in (`units16`). The span is of whole characters, so an emoji that shares one half
+of its UTF-16 pair with the one it replaces (U+1F4CA and U+1F4CB share a high surrogate) is replaced
+whole; a span placed by comparing units would begin or end inside a pair, and ygo would store each
+half as U+FFFD. Every writer that rewrites a block's text goes through it: an edit (`POST
+/api/v1/artifacts/{id}/edits`), an uploaded new version of a live document (`docs.ReplaceText`), an
+accepted or rejected suggestion (`applySuggestion`) and an ask edit (`SetAskBlockText`). Since
+`BlocksGainingText` reads the same span, a replacement whose old and new characters shared a
+surrogate now counts as writing text (its span inserts the new character), where a span cut inside
+the pair could insert nothing, so the lost-edit check above covers it. A splice cuts a text node only
+where a range's edge falls between characters: `slice16` answers an edge inside a pair with an error
+of the package's own (a `500`, never the `ErrSchema` verdict on the write), and a quote's ambiguity
+context rounds outward to whole characters (`context16`).
+
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
 fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a

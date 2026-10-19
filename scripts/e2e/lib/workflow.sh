@@ -346,30 +346,23 @@ require_proof_human() {
 pull_request_product_files() {
   gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
 }
-# request_changes_as_reviewer ISSUE ROUND BODY has the reviewer pane post a round's
+# request_changes_as_reviewer ISSUE ROUND BODY [NOTE] has the reviewer pane post a round's
 # changes-requested review and complete its phase. A review ends when its reviewer completes it —
 # the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
-# as the final approval is, rather than posted from the proof's own gh.
-#
-# The dispatched body must still end with the reviewer's own Legion footer
-# (`<!-- legion: {"session":"<id>","phase":"review"} -->`, prompts/roles/reviewer.md): once a
-# session is already recorded for the reviewer claim, intake.PullRequestReview.LegionSession
-# (packages/daemon/internal/intake/facts.go) must find it in the body and match the daemon's own
-# recorded session, or the review decides nothing (workflow/review.go's DecidesRound) — the very
-# first review from a fresh reviewer claim is the one exception, since the daemon has no recorded
-# session yet to compare against. Confirmed live, 2026-10-19: round 1's review (the fresh claim)
-# was accepted with no footer at all; round 2's review, posted with the smoke text as the whole
-# body and nothing else, was not — "a review decides nothing: the review App submitted it from a
-# session that is not the reviewer's" — and the round never left reviewing. 600s, not 300: a
-# reviewer's first gh or jj call on a devbox whose mise has no pin for the pane's own relocated
-# home can cost several minutes finding a working one (real_bin_path, lib/rig.sh, is this
-# harness's own fix for the daemon's launch and boot probes; a pane still resolves its own calls
-# through the box's ordinary shims).
+# as the final approval is, rather than posted from the proof's own gh. BODY is the review's text;
+# the reviewer ends it with the Legion footer naming its own session, as its role ends every review,
+# since the daemon sets aside a review-App review whose footer does not name the session recorded on
+# the reviewer's claim (workflow.Engine.DecidesRound). NOTE, when given, is a further step for the
+# reviewer this round, never part of the review. The wait is for the round's review from the
+# reviewer's own session, so a review the daemon would set aside fails here, naming the session.
 request_changes_as_reviewer() {
-  local issue=$1 round=$2 body=$3 app
+  local issue=$1 round=$2 body=$3 note=${4:-} app session
   app=$(role_app reviewer) || return 1
-  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with this exact body text, followed by your own Legion footer exactly as your role's reviewer template always ends a review body (the smoke text replaces only the summary and findings, never the footer): $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review, the footer excepted."
-  until_true 600 "$app's round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
+  session=$(issue_worker_session "$issue" reviewer) && [ -n "$session" ] ||
+    fail "the daemon's state names no session for $issue's reviewer"
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app. The review's body is this quoted text, then the Legion footer naming your own session that your role appends to every review: \"$body\"${note:+ $note} Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
+  until_true 300 "$app's round $round changes-requested review on pull request #$pr_number, its Legion footer naming the reviewer's session $session" \
+    reviewer_requested_changes_from "$round" "$session"
 }
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
 # reviews on the proof's pull request.
@@ -378,6 +371,22 @@ reviewer_requested_changes() {
   # --paginate applies --jq to each page, so one line per matching review, counted after.
   reviews=$(review_app_reviews '.state == "CHANGES_REQUESTED"' id) || return 1
   [ "$(grep -c . <<<"$reviews")" -ge "$1" ]
+}
+# reviewer_requested_changes_from ROUND SESSION: the review App has posted at least ROUND
+# changes-requested reviews on the proof's pull request, and the newest one's Legion footer names
+# SESSION. The footer is read as the daemon reads it (intake.PullRequestReview.LegionSession): the
+# `session` of the JSON object between the body's last `<!-- legion:` and the first `-->` after it,
+# none when either marker is missing, the JSON does not parse, or its session is not a string.
+reviewer_requested_changes_from() {
+  local app reviews
+  app=$(role_app reviewer) || return 1
+  reviews=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" --jq '.[]') || return 1
+  jq -es --arg app "$app" --argjson round "$1" --arg session "$2" '
+    def legion_session:
+      (split("<!-- legion:") | if length < 2 then "" else last | split("-->") | if length < 2 then "" else .[0] end end)
+      | (try (fromjson | .session) catch null) | if type == "string" then . else "" end;
+    [.[] | select(.user.login == $app and .state == "CHANGES_REQUESTED")]
+    | length >= $round and ((last.body // "") | legion_session) == $session' <<<"$reviews" >/dev/null
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.
@@ -422,13 +431,12 @@ reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].w
 # approve_as_reviewer asks the reviewer for the round's last review and waits for it to approve the
 # head on its own: the Go reviewer prompt says to approve a clean head that carries .legion/<issue>/,
 # which retro's last commit then removes. The merge carries the run's retro learnings onto the
-# smoke main, and clean_smoke_main removes them. 600s, not 300, for the same reason
-# request_changes_as_reviewer's own wait is.
+# smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
   local issue=$1 app
   app=$(role_app reviewer) || return 1
   send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo as your role says, taking the round's steps in the order it gives, and complete the reviewer handoff. This is the round's last review."
-  until_true 600 "$app approval of pull request #$pr_number at its head" reviewer_approved_head
+  until_true 300 "$app approval of pull request #$pr_number at its head" reviewer_approved_head
 }
 # The smoke repository's main is shared by every proof on this box, and a proof merge leaves what it
 # carries there until clean_smoke_main removes it. Another run's merge in that window

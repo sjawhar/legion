@@ -147,7 +147,7 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	for _, match := range matches {
 		candidates = append(candidates, Candidate{
 			Range:   match.Range,
-			Context: slice16(text.value, max(0, match.textFrom-40), min(len16(text.value), match.textTo+40)),
+			Context: context16(text.value, max(0, match.textFrom-40), min(len16(text.value), match.textTo+40)),
 		})
 	}
 	return Range{}, &ErrTargetAmbiguous{Target: quote, Candidates: candidates}

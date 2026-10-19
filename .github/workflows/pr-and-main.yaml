@@ -269,6 +269,13 @@ jobs:
       - name: Test the Dispatch census script
         run: bun test scripts/dispatch
 
+      - name: Lint the GitHub App registration script
+        run: bunx biome check --error-on-warnings scripts/github-apps
+
+      # scripts/github-apps is no workspace either; the root package pins its TypeScript and Bun types.
+      - name: Typecheck the GitHub App registration script
+        run: bunx tsc --noEmit -p scripts/github-apps
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
