@@ -299,6 +299,21 @@ no `provider_keys` (the Google provider answered long workflow turns with empty 
 agents are not Gemini-backed). No YubiKey touch is required, and no key value enters the script's
 shell, a pane, an argv, or the transcript.
 
+The proof human's `gh` has to stay authenticated for the whole run. A full run takes about 70
+minutes, longer than the one hour a GitHub App installation token lives. The devbox shim keeps it
+authenticated, because it asks for a current token on every call. A `GH_TOKEN` exported once does
+not: it expires partway through, and every later `gh` call, the review-round waits and the
+teardown's pull request close included, fails with `HTTP 401: Bad credentials`. A run started
+outside the shim exports no `GH_TOKEN` (it outranks any config file) and instead points
+`GH_CONFIG_DIR` at a private 0700 directory holding gh's `config.yml` (`version: "1"`) and a 0600
+`hosts.yml` (`github.com:` with `oauth_token: <token>`, `user: x-access-token` and
+`git_protocol: https`). A background loop rewrites `hosts.yml` from a newly minted
+`sjawhar-agent` installation token at least every 4 minutes, since a cached mint can hand out a
+token with as little as 5 minutes left. It writes a temporary file in the same directory and
+renames it over the old one, so no `gh` reads a half-written file, and it stops when the run
+exits. `require_proof_human` still checks that this `gh` acts as `sjawhar-agent[bot]` before the
+run's first write.
+
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
 checkout's two plugins in an isolated OMP profile and runs the Go daemon with a separate state
@@ -2013,6 +2028,17 @@ retro, and planning, whose planner runs its gap analyst and up to three plan-rev
 its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
 line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
 that quotes it.
+
+`request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
+tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
+the Legion footer naming its own session, as its role ends every review. The daemon sets aside a
+review-App review whose footer does not name the session recorded on the reviewer's claim, and that
+session is recorded at the reviewer's first completion, so a round from the second on that told the
+reviewer to post a body verbatim, footer-less, would decide nothing and leave the issue in
+`reviewing`. `NOTE` is a further step the round asks of the reviewer, never part of the review. The
+round waits for `reviewer_requested_changes_from ROUND SESSION`: the review App's ROUND-th
+changes-requested review whose last footer names the session the daemon's state gives the reviewer,
+read as the daemon reads it. `lib/reviewer-footer.test.ts` drives both against a fake `gh`.
 
 The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's
