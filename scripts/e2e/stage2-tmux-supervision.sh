@@ -274,6 +274,10 @@ key-file)
     fail "the agents' model route through the key file could not be installed (the reason is above)"
   ;;
 esac
+# The call record (.log/.calls) always sits under $work/model-gateway, beside $key_command itself
+# for the gateway route; the key-file route's own $key_command lives under its own --key-dir
+# instead, which the run's cleanup removes unconditionally, so the record is addressed separately.
+key_record="$work/model-gateway/$(basename "$key_command")"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 
@@ -500,10 +504,10 @@ replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
   | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
 jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
   <<<"$replies" >/dev/null || fail "claim $c2's replies did not all come from $pinned through the route: $replies"
-calls=$(grep -c ' invoked by pid ' "$key_command.log")
+calls=$(grep -c ' invoked by pid ' "$key_record.log")
 [ "$calls" -ge 2 ] || fail "the key command $key_command ran $calls time(s), the preflight's alone"
 note "claim $c2's replies, from its session file: $replies"
-note "the key command $key_command ran $calls times and served $(grep -c $'\tserved\t' "$key_command.calls") ($key_command.log, $key_command.calls)"
+note "the key command $key_command ran $calls times and served $(grep -c $'\tserved\t' "$key_record.calls") ($key_record.log, $key_record.calls)"
 pass
 
 begin retried-frame-starts-no-second-turn

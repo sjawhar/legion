@@ -604,6 +604,11 @@ key-file)
     fail "the agents' model route through the key file could not be installed (the reason is above)"
   ;;
 esac
+# The call record (.log/.calls) always sits under $evidence/model-gateway, beside $key_command
+# itself for the gateway route; the key-file route's own $key_command lives under its own
+# --key-dir instead, under $work, which cleanup removes unconditionally, so the record is
+# addressed separately.
+key_record="$evidence/model-gateway/$(basename "$key_command")"
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
 note "the agents' model route: $pinned through $model_route, keyed by $key_command"
@@ -1259,7 +1264,7 @@ begin model-turns-through-the-route
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the configured route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$key_command.log" || true) times and served $(grep -c $'\tserved\t' "$key_command.calls" || true) ($key_command.log, $key_command.calls)"
+note "the key command ran $(grep -c ' invoked by pid ' "$key_record.log" || true) times and served $(grep -c $'\tserved\t' "$key_record.calls" || true) ($key_record.log, $key_record.calls)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts
