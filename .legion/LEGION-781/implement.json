@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-19T12:36:00Z",
+  "completed": "2026-10-19T13:12:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "e4d28dc28dcee5f68a9212c687a19b3dd2e7635a",
+  "head": "eb6aedf8109ccc5254958e5e05b82cb3b6716164",
   "proof": [
     {
       "criterion": "Done-when 2 (the upgrade, plan D11) and 3 (legion state --json and read_record list each open check; LegionStateResponse carries the field): the daemon's first boot on this release moves an issue left in production_check to awaiting_merge, the phase constraints admit accepting and refuse production_check, and the state shows an open check",
@@ -23,12 +23,20 @@
       "negativeControl": "SIGNOFF_OUTSIDE_ACCEPTING in reviewing and awaiting_merge, ACCEPTANCE_IS_SIGN_OFF for the architect's handoff_complete, BACKWARD_REFUSED for a planner's move from accepting, CHECK_NOT_OPEN / CHECK_LOOK_NOT_OPEN / CHECK_VERDICT_REQUIRED, a check_compare answered `behind` or 404 waking nothing, a second issue.deployed changing nothing, and a phase completion without a commit still refused MISSING_FIELD — each asserted in the harness"
     },
     {
-      "criterion": "Done-when 7 (Dispatch writes issue.deployed once per shipped pull request by intake or by the reconcile; server.started at a stamped start; the contracts carry both shapes)",
+      "criterion": "Done-when 7 (Dispatch writes issue.deployed once per shipped pull request by intake or by the reconcile, and migration 0114 stamps the pull requests already shipped when the marker arrives so the first pass writes no event for them; server.started at a stamped start; the contracts carry both shapes)",
       "surface": "Dispatch's delivery package on a scratch Postgres on the pod (every migration but 0072's pgvector, so storetest's template cannot use it; deliveryTestPool migrates in place), the contracts' bun tests, and CI's Legion Envoy and Contracts job for the pgvector-backed and NATS-backed tests (started_test.go on testnats)",
-      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54329/dispatch_scratch?sslmode=disable go test -count=1 ./internal/dispatch/delivery/ -run 'Deployed|TheWaitingSQL' and the whole package minus its NATS tests; bun test packages/contracts; bun run check:go",
-      "observed": "TestDeployedEventWaitsForAShippingRun, TestDeployedEventIsWrittenOncePerPullRequest, TestReconcileWritesTheDeployedEvent, TestIntakeWritesTheDeployedEvent PASS (payload {repo, number, run_id, completed_at}, actor system/delivery-timeline, the marker set, a second pass writes none); every non-NATS delivery test ok (122 PASS); contracts 206 pass; the Go contract generation check clean",
-      "headSha": "e4d28dc28dcee5f68a9212c687a19b3dd2e7635a",
-      "negativeControl": "a merged pull request with no shipping run, one whose run was created before the merge or failed, and one outside the deploy repository each write no event; an unstamped Dispatch build publishes no server.started (started_test.go, CI)"
+      "command": "DISPATCH_TEST_DATABASE_URL=postgres://postgres@127.0.0.1:54329/dispatch_scratch?sslmode=disable go test -count=1 ./internal/dispatch/delivery/ -run 'Deployed|TheWaitingSQL' and the whole package minus its NATS tests; bun test packages/contracts; bun run check:go; the migration's `update` statement run verbatim (sed from 0114_delivery_deployed_event.up.sql) on the scratch database seeded with a settings row and five pull requests (shipped by a later successful run; merged after the run was created; followed only by a run whose production job failed; not merged; another repository)",
+      "observed": "TestDeployedEventWaitsForAShippingRun, TestDeployedEventIsWrittenOncePerPullRequest, TestReconcileWritesTheDeployedEvent, TestIntakeWritesTheDeployedEvent PASS (payload {repo, number, run_id, completed_at}, actor system/delivery-timeline, the marker set, a second pass writes none); every non-NATS delivery test ok (122 PASS); contracts 206 pass; the Go contract generation check clean; the stamp set deployed_event_at on the shipped pull request alone (1 true, 2-5 false), the seed removed afterwards",
+      "headSha": "eb6aedf8109ccc5254958e5e05b82cb3b6716164",
+      "negativeControl": "a merged pull request with no shipping run, one whose run was created before the merge or failed, and one outside the deploy repository each write no event; an unstamped Dispatch build publishes no server.started (started_test.go, CI); the stamp leaves a pull request merged after the only successful run was created, one whose later run's production job failed, one not merged and one outside the deploy repository at null"
+    },
+    {
+      "criterion": "Done-when 5 (Stage 4b drives the new order on the Sandbox runtime: the acceptance before the merge, the close at the merge with the pod gone and the Sandbox Suspended, the check open after the first look's pending, the bound's last look)",
+      "surface": "scripts/e2e/stage4b-sandbox-tree.sh on the devbox against the production cluster (namespace legion), the surface the spec names; a pod cannot run it",
+      "command": "pending: run by the devbox holder (Envoy role backlog-order, at the architect's request) at head eb6aedf8109ccc5254958e5e05b82cb3b6716164: LEGION_E2E_RUNTIME_CONTEXT=... LEGION_E2E_IMAGE=... bash scripts/e2e/stage4b-sandbox-tree.sh, the log tarball attached to LEGION-781 as a Dispatch artifact with a comment on sjawhar/legion#2059",
+      "observed": "not yet observed: the architect ruled (2026-10-19T12:37Z) that the tester holds its phase for this evidence and the reviewer approves only with it; the scripts are syntax-checked (bash -n) and dry-read with a timing table in the T12 report; Stage 3 is no proof (it fails on the devbox at main today)",
+      "headSha": "eb6aedf8109ccc5254958e5e05b82cb3b6716164",
+      "negativeControl": "the script's own: a sign_off sent while the issue stands in reviewing is refused SIGNOFF_OUTSIDE_ACCEPTING and moves nothing; the pod and Sandbox are read before the merge (six live claims, a running pod) and after the pending report (no pod, Suspended)"
     }
   ],
   "filesChanged": [
@@ -41,7 +49,8 @@
     "packages/contracts/src/legion-api.ts, dispatch-api.ts; packages/pi-legion/package.json, src/tools.ts, src/handoff-commit.ts",
     "packages/envoy/internal/dispatch/store/migrations/0114_delivery_deployed_event.{up,census}.sql; internal/dispatch/delivery/deployed.go (new), store.go, intake.go, intakes.go, reconcile.go; internal/dispatch/startup/started.go (new); cmd/dispatch/main.go; packages/dispatch/web (event-type enumerations)",
     "skills/legion-worker (SKILL.md, references/merge-gate.md, references/pr-body.md), skills/legion-architect, skills/legion-retro, skills/legion-controller, skills/AGENTS.md; packages/daemon/internal/prompts/{go,roles}; AGENTS.md, README.md; docs/site content and media; packages/{envoy,contracts,pi-legion}/AGENTS.md",
-    "scripts/e2e/lib/workflow.sh, stage3-devbox-workflow.sh, stage4b-sandbox-tree.sh, stage3-4b13b-acceptance.sh, README.md"
+    "scripts/e2e/lib/workflow.sh, stage3-devbox-workflow.sh, stage4b-sandbox-tree.sh, stage3-4b13b-acceptance.sh, README.md",
+    "packages/envoy/internal/dispatch/store/migrations/0114 (the stamp) + migrate_delivery_deployed_event_test.go; packages/claude-envoy/dist (rebuilt bundle)"
   ],
   "trickyParts": [
     "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
@@ -57,13 +66,12 @@
     "daemon.Run takes a daemon.Build{Revision, Repository} parameter (no daemon.Options existed); workflow.Config gained BuiltFrom; DaemonBooted gained Revision and DispatchBuild",
     "DaemonAPIVersion is 31, not the plan's 30: main released pi-legion v10.8.3 declaring 30 for sjawhar/legion#1986 before this branch merged",
     "The rigs set production_check_hours 0.25 (not 0.1) and Stage 4b linger_hours 0.5 (was 0.3); Stage 4b's child-4 hold starts before the merger's READY; the bound's last look is its own checkpoint `production-check-bound` in both scripts",
-    "Dispatch's first pass after the deploy writes issue.deployed once for every already-shipped pull request with an issue_key and no marker (the 28-day population); the daemon ignores one with no open check",
     "api/handoff.go decides a check report by issue.Phase == done rather than workflow.RoleFor == \"\" (an import cycle in tests); the two agree for every done issue",
-    "The live proofs (Stage 3 on the devbox, Stage 4b on the cluster) were rewritten and syntax-checked but not run: a pod has no tmux, model gateway, smoke-repo App or NATS; reported to the architect"
+    "The live proofs were rewritten and syntax-checked but not run from the pod; per the architect, Stage 4b at the head is the proof surface and is run by the devbox holder, Stage 3 is no proof, the tester holds for the Stage 4b evidence; a later push that changes runtime code needs the stage again",
+    "Dispatch's migration 0114 stamps deployed_event_at for every delivery pull request whose shipping run is already known at migration time (the architect's ruling), so the first pass writes no issue.deployed for the already-shipped population; a merged pull request with no shipping run yet keeps null"
   ],
   "openQuestions": [
-    "Whether a person runs Stage 3 (and Stage 4b through done) on the devbox at this head before the architect accepts, or the pod's real-binary proof plus CI and the harness stand and this issue's own production check (Done-when 6) observes the live wake — sent to the architect",
-    "Whether Dispatch's migration 0114 should stamp the already-shipped population so the first pass writes no backfill of issue.deployed events"
+    "Stage 4b's run at head eb6aedf8 by the devbox holder: its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for"
   ],
   "discoveredComplexity": [
     "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
