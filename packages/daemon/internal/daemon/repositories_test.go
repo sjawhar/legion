@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -195,4 +196,24 @@ func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
 	}))
 	t.Cleanup(server.Close)
 	return &namedGitHub{url: server.URL}
+}
+
+// An issue the workflow does not record, such as an operator's claim, works the project's default
+// repository, as Dispatch resolves an issue that names none, at its default branch as GitHub names
+// it: a pod provisions its workspace from it, and the claim's commit identity is minted for its
+// owner. A project serving no default repository refuses the launch, naming the fix.
+func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1", "zeta/tools": "zeta/tools@main"})
+	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION"),
+		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)
+	if repo, branch, err := w.issueRepository(ctx, "LEGION-9"); err != nil || repo.String() != "Acme/Widgets" || branch != "release/v7.1" {
+		t.Fatalf("an unrecorded issue works %s@%s, %v; want the default Acme/Widgets@release/v7.1", repo, branch, err)
+	}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, []refusedRepository{{Repo: "acme/widgets", Reason: "the review App is not installed on acme/widgets"}})
+	want := "LEGION-9 is not recorded, so it works the project's default repository, and project LEGION serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on"
+	if repo, _, err := w.issueRepository(ctx, "LEGION-9"); err == nil || err.Error() != want {
+		t.Fatalf("an unrecorded issue with no default served works %s, %v; want %q", repo, err, want)
+	}
 }

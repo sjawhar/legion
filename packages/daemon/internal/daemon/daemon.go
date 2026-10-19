@@ -1571,8 +1571,8 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 }
 
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
-// over identity, minted for the owner of the repository the claim's issue's record names
-// (repository): an issue the workflow does not record works no repository and adopts nothing. nil
+// over identity, minted for the owner of the repository the claim's issue works (repository): its
+// record's, or the project's default repository for an issue the workflow does not record. nil
 // without a workflow.
 func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Role, string) (runtime.GitIdentity, bool, error) {
 	if identity == nil || repository == nil {

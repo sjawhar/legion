@@ -464,11 +464,27 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 // issueRepository is the repository issue's record names and its recorded default branch: what
 // every launch of the issue's claims works (specs.repository) and the owner its commit identity is
 // minted for (adoptIdentity). An issue the workflow does not record, such as an operator's claim,
-// works no repository: the zero repository and no error.
+// works the project's default repository, as Dispatch resolves an issue that names none, at its
+// default branch as GitHub names it (defaultBranches): a pod provisions its workspace from one, so
+// a launch on none would be refused. A project that serves no default repository refuses that
+// launch, naming the fix.
 func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghrepo.Repository, string, error) {
 	issue, err := w.recordOf(ctx, key)
-	if err != nil || issue == nil {
+	if err != nil {
 		return ghrepo.Repository{}, "", err
+	}
+	if issue == nil {
+		for _, mapped := range w.repositories.Mapped() {
+			if mapped.Default {
+				read, err := w.defaultBranches.Named(ctx, mapped.Repo)
+				if err != nil {
+					return ghrepo.Repository{}, "", fmt.Errorf("the default repository of project %s, which %s works since it is not recorded: %w", w.dispatchProject, key, err)
+				}
+				return read.Name, read.DefaultBranch, nil
+			}
+		}
+		return ghrepo.Repository{}, "", fmt.Errorf("%s is not recorded, so it works the project's default repository, and project %s serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on",
+			key, w.dispatchProject)
 	}
 	repo, err := ghrepo.Parse("the repository of "+key, issue.Repo)
 	if err != nil {
