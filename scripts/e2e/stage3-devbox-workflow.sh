@@ -494,6 +494,25 @@ assert_ready_gate_closed() {
     .issues[$issue].phase == "merging" and .issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion
   ' "$file" >/dev/null
 }
+# await_tree_suspended ISSUE WHAT waits for ISSUE's tree architect to be suspended once its tree
+# lingers. The daemon holds that suspension for the architect's turn and names it no deadline
+# (packages/daemon/internal/supervise/suspend.go, holdSuspension), so the wait's bound is the
+# proof's turn budget, phase_seconds. A timeout prints the claim as `legion claims list` shows it:
+# working with its suspension held is a turn still running; idle and held, a stop the runtime keeps
+# refusing; neither suspended nor held, no suspension held for it (a start dropped the hold, or a
+# daemon restart forgot it before the outbox asked again).
+suspension_issue=
+await_tree_suspended() {
+  suspension_issue=$1
+  timeout_hook=report_architect_suspension
+  until_true "$phase_seconds" "$2" tree_suspended "$1"
+  timeout_hook=
+}
+report_architect_suspension() {
+  note "the architect of $suspension_issue in legion claims list: $("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
+    jq -c --arg issue "$suspension_issue" '[.claims[] | select(.issue == $issue and .role == "architect")
+      | {state, suspensionHeld: (.suspensionHeld // false), suspendedBy: (.suspendedBy // null), pending: (.pending.id // null)}]')"
+}
 # The design gate in the daemon's state: closed while the spec's current version is past the one a
 # human approved, open while the approved version is the current one; design_gate_version ISSUE
 # prints the spec version the gate currently names.
@@ -960,7 +979,7 @@ primary_issue() {
   check_opened_on "$root_issue" "$merge_when_clean_commit" ||
     fail "$root_issue's production check reads $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
   state_file check-opened
-  until_true 120 "the lingering tree's architect to be suspended" tree_suspended "$root_issue"
+  await_tree_suspended "$root_issue" "the lingering tree's architect to be suspended"
   # The implementer is live at its first look, the five other claims suspended; an implementer that
   # reported the look before this read is suspended again already, which the next wait judges.
   first_look_handed() { claim_states_are "$root_issue" "ready working idle" suspended || check_look_reported "$root_issue" 1; }
@@ -1071,7 +1090,7 @@ else
   begin "development-run-from-$from"
   # The proof human closes the first root, which frees its admission slot as the merge's close would.
   set_status "$root_issue" "done"
-  until_true 120 "the closed tree's architect to be suspended" tree_suspended "$root_issue"
+  await_tree_suspended "$root_issue" "the closed tree's architect to be suspended"
   pr_number=${STAGE3_PR:-$(gh -R "$repo" pr list --state all --limit 1 --json number --jq '.[0].number')}
   [ -n "$pr_number" ] || fail "no smoke pull request for the credential check; set STAGE3_PR"
   note "STAGE3_FROM=$from is a development run, never the proof: $root_issue closed by the proof human, credential check against $repo#$pr_number"
@@ -1105,7 +1124,7 @@ no_change_close() {
     fail "a status write on $nochange_issue was not the daemon's; see $evidence/nochange-events.json"
   session_contains "$nochange_issue" architect '"close_root"' || fail "the architect of $nochange_issue did not call close_root"
   token=$(claim_token "$nochange_issue" architect)
-  until_true 60 "the no-change tree's architect to be suspended" tree_suspended "$nochange_issue"
+  await_tree_suspended "$nochange_issue" "the no-change tree's architect to be suspended"
   # daemon.log carries the daemon's stderr too, so each line is parsed on its own, as every other
   # reader of it does: one line that is not JSON must not end the run.
   jq -R -c --arg issue "$nochange_issue" --arg token "$token" 'fromjson? | select(
