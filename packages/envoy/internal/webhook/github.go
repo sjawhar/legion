@@ -75,14 +75,17 @@ const githubBodyBudget = 64 << 20
 
 // githubBodyDeadline bounds how long, from the handler's start, the route reads a delivery's body,
 // and githubHandleDeadline how long after that the handler has to verify, record, publish and
-// answer. The listener's server gives every route 10 s from the request's start for all of that,
-// which a body of several megabytes sent through a proxy can need more than: the read then fails,
-// its refusal cannot be written, and the delivery is lost. A proxy that buffers the body first and
-// gives its upstream 60 s (nginx's proxy timeouts) still waits for an answer inside these bounds.
+// answer. The listener's server gives every route 10 s from the request's start to read it, and
+// 10 s from the end of its header to answer it, which a body of several megabytes sent through a
+// proxy can need more than: the read fails, its refusal cannot be written, and the delivery is
+// lost. At these bounds a body read in 60 s is kept: 10 MB at about 170 KB/s, the whole 25 MB cap
+// at about 440 KB/s.
 //
 // The bounds are absolute, so they also cap what a sender that stalls can hold: its one connection
-// and at most twice the bytes it has sent (bodyBudget) for githubBodyDeadline, and, when it holds
-// the budget's right to go past the limit, the other deliveries waiting for room for that long.
+// for up to about 70 s (the server's 10 s for the header, then githubBodyDeadline), at most twice
+// the bytes it has sent (bodyBudget) for githubBodyDeadline, and, when it holds the budget's right
+// to go past the limit, the other deliveries waiting for room for that long. A delivery whose own
+// deadline passes while it waits for room fails its read, as one did at the server's 10 s.
 const (
 	githubBodyDeadline   = 60 * time.Second
 	githubHandleDeadline = 15 * time.Second

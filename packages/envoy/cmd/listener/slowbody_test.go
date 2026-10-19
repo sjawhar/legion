@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
@@ -37,23 +38,35 @@ type noCI struct{}
 func (noCI) Record(contracts.CIObservation) error      { return nil }
 func (noCI) RecordSuite(contracts.CIObservation) error { return nil }
 
-// serveSlowly serves handler at path on the listener's own HTTP server (newHTTPServer) and sends
-// one POST whose body takes over: its bytes go out in 20 pieces spread across that time, as a
-// proxy sends a large delivery over a slow link. It returns the status the server answered, or 0
-// when the connection closed without an answer.
-func serveSlowly(t *testing.T, path string, handler http.Handler, headers map[string]string, body []byte, over time.Duration) int {
+// serveWebhook serves handler at path the way main does: the outer mux sends the path to an open
+// webhook startingGate, whose mux holds the handler, all on the listener's own HTTP server
+// (newHTTPServer). It returns the server's address.
+func serveWebhook(t *testing.T, path string, handler http.Handler) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	gate := newStartingGate("webhook", logging.NewWithWriter("test", io.Discard))
+	routes := http.NewServeMux()
+	routes.Handle(path, handler)
+	gate.open(routes)
 	mux := http.NewServeMux()
-	mux.Handle(path, handler)
+	mux.Handle(path, gate)
 	server := newHTTPServer(mux)
 	go func() { _ = server.Serve(ln) }()
 	t.Cleanup(func() { _ = server.Close() })
+	return ln.Addr().String()
+}
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
+// serveSlowly serves handler at path (serveWebhook) and sends one POST whose body takes over: its
+// bytes go out in 20 pieces spread across that time, as a proxy sends a large delivery over a slow
+// link. It returns the status the server answered, or 0 when the connection closed without an
+// answer.
+func serveSlowly(t *testing.T, path string, handler http.Handler, headers map[string]string, body []byte, over time.Duration) int {
+	t.Helper()
+	addr := serveWebhook(t, path, handler)
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,23 +123,15 @@ func TestAGitHubDeliveryWhoseBodyArrivesOverMoreThanTenSecondsIsPublished(t *tes
 	}
 }
 
-// A GitHub body that stalls past the route's own deadline fails, and the failure is logged with
-// what the delivery was and how far its body got.
+// A GitHub sender that goes away partway through its body fails the read, and the failure is
+// logged with what the delivery was and how far its body got.
 func TestAGitHubBodyReadFailureIsLogged(t *testing.T) {
 	logged := &lockedBuffer{}
 	previous := log.Writer()
 	log.SetOutput(logged)
 	t.Cleanup(func() { log.SetOutput(previous) })
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	mux := http.NewServeMux()
-	mux.Handle("/webhook/github", webhook.GitHubHandler("s", "@legion", "", &slowBodyPublisher{}, noCI{}))
-	server := newHTTPServer(mux)
-	go func() { _ = server.Serve(ln) }()
-	t.Cleanup(func() { _ = server.Close() })
-	conn, err := net.Dial("tcp", ln.Addr().String())
+	addr := serveWebhook(t, "/webhook/github", webhook.GitHubHandler("s", "@legion", "", &slowBodyPublisher{}, noCI{}))
+	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,8 +158,12 @@ func TestASlackBodyStillHasTheServersReadTimeout(t *testing.T) {
 	pub := &slowBodyPublisher{}
 	start := time.Now()
 	status := serveSlowly(t, "/webhook/slack", webhook.SlackHandler("s", pub), nil, []byte(`{"type":"url_verification","challenge":"`+strings.Repeat("c", 4000)+`"}`), 12*time.Second)
+	elapsed := time.Since(start)
 	if status == http.StatusOK {
-		t.Fatalf("status = 200 after %s; want the server's 10 s read timeout to cut the body off", time.Since(start).Round(time.Millisecond))
+		t.Fatalf("status = 200 after %s; want the server's 10 s read timeout to cut the body off", elapsed.Round(time.Millisecond))
+	}
+	if elapsed < 10*time.Second || elapsed > 11500*time.Millisecond {
+		t.Fatalf("the Slack request ended after %s with status %d; want it cut off at the server's 10 s, before its body's 12 s", elapsed.Round(time.Millisecond), status)
 	}
 }
 

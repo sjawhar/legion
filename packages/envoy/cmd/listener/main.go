@@ -405,10 +405,11 @@ func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	return routes
 }
 
-// newHTTPServer is the listener's HTTP server over handler. Every route's header read, body read
-// and handler run inside ReadTimeout and WriteTimeout, 10 s from the request's start. The GitHub
-// webhook route alone extends its own connection's deadlines (webhook.GitHubHandler), since a large
-// delivery's body can take longer than that to arrive; every other route keeps these.
+// newHTTPServer is the listener's HTTP server over handler. Every route reads its header and body
+// within ReadTimeout, 10 s from the request's start, and writes its answer within WriteTimeout,
+// 10 s from the end of the header. The GitHub webhook route alone moves its own connection's
+// deadlines (webhook.GitHubHandler), since a large delivery's body can take longer than that to
+// arrive; every other route keeps these.
 func newHTTPServer(handler http.Handler) *http.Server {
 	return &http.Server{
 		Handler:      handler,
