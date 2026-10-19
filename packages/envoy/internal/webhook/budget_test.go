@@ -349,6 +349,45 @@ func TestGitHubHandlerServesADeliveryBehindASenderThatTookTheRightAtABufferBound
 	}
 }
 
+// A delivery waiting for room behind a sender that holds the budget past its limit and stalls
+// ends its wait at its own body deadline, and is answered 400 there. Nothing reads its connection
+// while it waits, so only the read's own deadline can end the wait before the holder lets go.
+func TestAGitHubDeliveryWaitingForRoomEndsAtItsOwnDeadline(t *testing.T) {
+	previous := githubBodyDeadline
+	githubBodyDeadline = 300 * time.Millisecond
+	t.Cleanup(func() { githubBodyDeadline = previous })
+	const budget = 64 << 10
+	bodies := newBodyBudget(budget)
+	handler := githubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{}, bodies)
+	holder := bodies.begin()
+	defer holder.release()
+	if err := holder.charge(context.Background(), budget+1); err != nil {
+		t.Fatalf("the holder's charge: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", &testBody{remaining: 4 << 10, stallAfter: -1})
+	req.ContentLength = 4 << 10
+	req.Header.Set("X-GitHub-Delivery", "delivery-waiting")
+	req.Header.Set("X-GitHub-Event", "push")
+	rr := httptest.NewRecorder()
+	start := time.Now()
+	answered := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rr, req)
+		close(answered)
+	}()
+	select {
+	case <-answered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting delivery was not answered within 5 s; its wait outlasted its own deadline")
+	}
+	if elapsed := time.Since(start); elapsed < githubBodyDeadline {
+		t.Fatalf("answered after %s, before its deadline of %s", elapsed.Round(time.Millisecond), githubBodyDeadline)
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
+	}
+}
+
 // awaitBudget waits until bodies holds held bytes with the right to go past its limit taken, or
 // free, as taken says, and fails the test if that takes longer than 5 s.
 func awaitBudget(t *testing.T, bodies *bodyBudget, held int64, taken bool) {

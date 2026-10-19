@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -84,9 +85,10 @@ const githubBodyBudget = 64 << 20
 // The bounds are absolute, so they also cap what a sender that stalls can hold: its one connection
 // for up to about 70 s (the server's 10 s for the header, then githubBodyDeadline), at most twice
 // the bytes it has sent (bodyBudget) for githubBodyDeadline, and, when it holds the budget's right
-// to go past the limit, the other deliveries waiting for room for that long. A delivery whose own
-// deadline passes while it waits for room fails its read, as one did at the server's 10 s.
-const (
+// to go past the limit, the other deliveries waiting for room for that long. A delivery waiting for
+// room reads its body under the same deadline, so its wait ends there too and it answers 400.
+// They are variables so a test can shorten them.
+var (
 	githubBodyDeadline   = 60 * time.Second
 	githubHandleDeadline = 15 * time.Second
 )
@@ -108,7 +110,11 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		read := bodies.begin()
 		defer read.release()
 		counted := &countingReader{r: r.Body}
-		body, err := read.readAll(r.Context(), counted, r.ContentLength, githubMaxBody)
+		// The connection's read deadline ends a read that is waiting on the sender, and this one a
+		// wait for room in the budget, which reads nothing from the connection.
+		ctx, cancel := context.WithDeadline(r.Context(), start.Add(githubBodyDeadline))
+		defer cancel()
+		body, err := read.readAll(ctx, counted, r.ContentLength, githubMaxBody)
 		if err != nil {
 			log.Printf("github body read failed delivery=%s event=%s content_length=%d read=%d elapsed=%s: %v",
 				r.Header.Get("X-GitHub-Delivery"), r.Header.Get("X-GitHub-Event"), r.ContentLength,
