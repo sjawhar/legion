@@ -31,6 +31,16 @@ import (
 // pane's bundle, and the issue's own panes keep that owner as their default (appauth's
 // GitHubCredential mints for a role's own owner whether or not the set holds it).
 func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
+	t.Run("GitHub answering at once", func(t *testing.T) { mappingChangeAtRuntime(t, 5*time.Second, 0) })
+	// A refresh reads Dispatch and GitHub, which can take longer than the event's acknowledgement
+	// window (AckWait): a GitHub answering every read later than that window still has the change
+	// applied, rather than its event redelivered with a refresh that never finishes.
+	t.Run("every GitHub read outlasting the acknowledgement window", func(t *testing.T) {
+		mappingChangeAtRuntime(t, 300*time.Millisecond, 400*time.Millisecond)
+	})
+}
+
+func mappingChangeAtRuntime(t *testing.T, ackWait, delay time.Duration) {
 	pool := isolatedOutboxPool(t)
 	url := workflowNATS(t)
 	conn, err := nats.Connect(url, nats.Timeout(time.Second))
@@ -64,8 +74,8 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	installs := &installations{missing: map[string]bool{}}
-	w := &workflowRuntime{
+	installs := &installations{missing: map[string]bool{}, delay: delay}
+	w := &workflowRuntime{mappingChanged: make(chan struct{}, 1),
 		pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", installs: installs,
 		repositories: newRepositories("CAPTURE"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now),
 		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -81,16 +91,17 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.consumers, err = intake.OpenConsumers(context.Background(), js, intake.ConsumerSpec{
-		Project: "CAPTURE", Repositories: heard, AckWait: 5 * time.Second, NakDelay: 10 * time.Millisecond, Logger: w.log,
-		RepositoryMapping: w.refreshMapping,
+		Project: "CAPTURE", Repositories: heard, AckWait: ackWait, NakDelay: 10 * time.Millisecond, Logger: w.log,
+		RepositoryMapping: w.mappingChange,
 	})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
+	done, refreshed := make(chan error, 1), make(chan struct{})
 	go func() { done <- w.consumers.Run(ctx, pool) }()
-	t.Cleanup(func() { cancel(); <-done })
+	go func() { w.refreshOnMappingChange(ctx); close(refreshed) }()
+	t.Cleanup(func() { cancel(); <-done; <-refreshed })
 
 	// orbit/gadgets moves to another project; zeta/tools is mapped; acme/thing is mapped with no
 	// review App installed on it.

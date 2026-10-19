@@ -18,15 +18,24 @@ import (
 )
 
 // installations answers each App's installation on each repository, by "<role> <owner/name>";
-// a repository it does not name is installed for both Apps, and fail answers an error.
+// a repository it does not name is installed for both Apps, and fail answers an error. delay is
+// how long each read takes, as a GitHub that answers slowly; reads wait it out side by side.
 type installations struct {
 	mu      sync.Mutex
 	missing map[string]bool
 	fail    error
 	asked   []string
+	delay   time.Duration
 }
 
-func (i *installations) InstalledOn(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
+func (i *installations) InstalledOn(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
+	if i.delay > 0 {
+		select {
+		case <-time.After(i.delay):
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	key := string(role) + " " + repo.String()
