@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -351,11 +353,13 @@ func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 }
 
 // A merge is the one fact GitHub never sends again, and a child whose READY was posted can be
-// merged after its root closed. The lingering tree starts no worker, and the merge's row moves the
-// child's phase to done, as the merge closes an issue of a running tree; re-admission, which starts
-// a role only for a phase one works, starts nobody for it. (The production check the merge opens
-// after the close is later work on this branch.)
-func TestAMergeWhileTheTreeLingersMovesTheChildToDoneAndStartsNobody(t *testing.T) {
+// merged after its root closed. The lingering tree starts no phase worker, and the merge closes
+// the child: done, with its production check open, whose first look is the one start a member of
+// a lingering tree takes — the implementer's, fenced on the check's look (CheckLook 1), a wake of
+// the claim the linger suspended. Re-admission, which clears the tree's generation (merged pull
+// requests, gates, handoffs) and starts a role only for a phase one works, leaves the open check as
+// it is and starts nobody for the done child.
+func TestAMergeWhileTheTreeLingersClosesTheChildAndWakesItsCheck(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
@@ -371,26 +375,66 @@ func TestAMergeWhileTheTreeLingersMovesTheChildToDoneAndStartsNobody(t *testing.
 			t.Fatalf("seed pull request: %v", err)
 		}
 	})
-	childStarts := func() int {
+	childStarts := func() []string {
 		t.Helper()
-		var starts int
-		if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
-			and payload->>'op' = 'start'`).Scan(&starts); err != nil {
-			t.Fatalf("count the child's starts: %v", err)
+		rows, err := pool.Query(context.Background(), `select payload->>'role' || ':' || coalesce(payload->>'phase', '') || ':' || coalesce(payload->>'checkLook', '0')
+			from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start' order by id`)
+		if err != nil {
+			t.Fatalf("read the child's starts: %v", err)
+		}
+		defer rows.Close()
+		var starts []string
+		for rows.Next() {
+			var start string
+			if err := rows.Scan(&start); err != nil {
+				t.Fatalf("scan a start: %v", err)
+			}
+			starts = append(starts, start)
 		}
 		return starts
+	}
+	check := func() *record.ProductionCheck {
+		t.Helper()
+		var got *record.ProductionCheck
+		inTx(t, pool, func(tx pgx.Tx) {
+			var err error
+			if got, err = record.NewStore().ProductionCheck(context.Background(), tx, "LEGION-209"); err != nil {
+				t.Fatalf("read the child's production check: %v", err)
+			}
+		})
+		return got
 	}
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
 		t.Fatalf("ApplyFact merge: %v", err)
 	}
-	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || starts != 0 {
-		t.Fatalf("the merged child while its tree lingers = %s with %d starts, want done with none", got.Phase, starts)
+	wantStarts := []string{"implementer::1"}
+	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || got.Status != "done" || !slices.Equal(starts, wantStarts) {
+		t.Fatalf("the merged child while its tree lingers = %s/%s with starts %v, want done/done with the check's look alone %v", got.Phase, got.Status, starts, wantStarts)
+	}
+	if got := check(); got == nil || !got.Open() || got.Looks != 1 || !got.LookOpen || got.MergeSHA != "merge" || got.Repo != "sjawhar/legion" || got.Number != 42 {
+		t.Fatalf("the merged child's production check = %+v, want it open at look 1 on merge commit merge of sjawhar/legion#42", got)
+	}
+	if got := superviseOps(t, pool, "LEGION-209", "issue_close"); got != 0 {
+		t.Fatalf("issue_close rows of the lingering member = %d, want none: the tree's close retires its claims", got)
 	}
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
-	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || starts != 0 {
-		t.Fatalf("the merged child after re-admission = %s with %d starts, want done with nobody started", got.Phase, starts)
+	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || !slices.Equal(starts, wantStarts) {
+		t.Fatalf("the merged child after re-admission = %s with starts %v, want done with nobody more started", got.Phase, starts)
 	}
+	if got := check(); got == nil || !got.Open() || got.Looks != 1 || !got.LookOpen || got.MergeSHA != "merge" {
+		t.Fatalf("the production check after re-admission = %+v, want it left open at look 1 as it was", got)
+	}
+}
+
+// superviseOps counts the supervise rows of op queued for issue.
+func superviseOps(t *testing.T, pool *pgxpool.Pool, issue, op string) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = $2`, issue, op).Scan(&count); err != nil {
+		t.Fatalf("count %s rows of %s: %v", op, issue, err)
+	}
+	return count
 }
 
 // A re-admitted root that waits for a slot no longer lingers, so a fact in that window can move a

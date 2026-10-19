@@ -602,21 +602,19 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 // decided, backward move, retry of a held phase or failed claim moves a member, counts a review
 // round, posts or notifies, or starts a worker, whose start would resume a suspended claim inside
 // a tree that has left the workflow. A worker's own request is refused, so it is told nothing
-// moved. A merge is the one fact GitHub never sends again: it moves the child's phase on to done,
-// as the merge's row says, and still starts nobody.
+// moved. The one fact that moves a lingering member is its merge, which GitHub never sends again:
+// it closes the member and opens its production check (merge_close_test.go).
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 	hold := record.Hold{From: phase.Testing}
 	for _, tc := range []struct {
 		name     string
-		at, want phase.Phase
+		at       phase.Phase
 		hold     *record.Hold
 		pr       record.PullRequest
 		decision *record.ReviewDecision
 		fact     intake.Fact
 		refusal  string
 	}{
-		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge, want: phase.Done,
-			fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}},
 		{name: "an approval of a green head", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}},
 		{name: "green checks on an approved head", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "head"},
@@ -670,18 +668,14 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			if code := refusalCode(result); code != tc.refusal {
 				t.Fatalf("refusal = %q, want %q", code, tc.refusal)
 			}
-			want := tc.want
-			if want == "" {
-				want = tc.at
-			}
 			var got phase.Phase
 			var starts, rounds, told int
 			if err := pool.QueryRow(t.Context(), `select phase,
 				(select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise' and payload->>'op' = 'start'),
 				(select rounds from phases where issue = 'LEGION-209' and role = 'implementer'),
 				(select count(*) from outbox where issue = 'LEGION-209' and kind in ('dispatch_message', 'notice', 'controller_notice'))
-				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != want || starts != 0 || rounds != 2 || told != 0 {
-				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices (the controller's included), %v; want %s, none, 2, none", got, starts, rounds, told, err, want)
+				from issues where key = 'LEGION-209'`).Scan(&got, &starts, &rounds, &told); err != nil || got != tc.at || starts != 0 || rounds != 2 || told != 0 {
+				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices (the controller's included), %v; want %s, none, 2, none", got, starts, rounds, told, err, tc.at)
 			}
 		})
 	}

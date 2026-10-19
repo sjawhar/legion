@@ -21,9 +21,11 @@ import (
 // of the workflow. The child leaves the table: its phase is parked in done, so no transition or status
 // write follows. The root keeps its phase, its linger stays unarmed, none of its claims is stopped,
 // and the architect is told which child left and how. What the child's claims get is the
-// status's: a child closed as done has every claim closed (issue_close) and its Sandbox released
-// with its volume (a releasing IssueSuspend), while one parked in backlog, icebox or triage has
-// every claim suspended and its Sandbox kept (a keeping IssueSuspend).
+// status's: a child closed as done by a human has every claim closed (issue_close) and its Sandbox
+// released with its volume (a releasing IssueSuspend); one closed at its merge has five claims
+// closed and its implementer kept for the production check the merge opens, whose close writes the
+// release (merge_close_test.go); and one parked in backlog, icebox or triage has every claim
+// suspended and its Sandbox kept (a keeping IssueSuspend).
 func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -31,8 +33,10 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 		notice  record.NoticeKind
 		op      string
 		release bool
+		// check is the merge's: the implementer is left out of the stops and owes the check.
+		check bool
 	}{
-		{name: "merged", fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, notice: "child-closed", op: "issue_close", release: true},
+		{name: "merged", fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, notice: "child-closed", op: "issue_close", check: true},
 		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", op: "issue_close", release: true},
 		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 		{name: "moved to icebox", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "icebox", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
@@ -71,8 +75,12 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 			assertOutboxCount(t, pool, "linger_close", 0)
 			stopped := superviseRequests(t, pool, tc.op)
 			for _, role := range claim.Roles {
-				if stopped["LEGION-209/"+string(role)] != 1 || stopped["LEGION-208/"+string(role)] != 0 {
-					t.Fatalf("%s rows %v, want one for every one of the child's claims and none of the root's", tc.op, stopped)
+				want := 1
+				if tc.check && role == claim.RoleImplementer {
+					want = 0
+				}
+				if stopped["LEGION-209/"+string(role)] != want || stopped["LEGION-208/"+string(role)] != 0 {
+					t.Fatalf("%s rows %v, want one for every one of the child's claims but a merge's implementer, and none of the root's", tc.op, stopped)
 				}
 			}
 			for _, other := range []string{"suspend", "issue_close", "tree_close"} {
@@ -80,7 +88,18 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 					t.Fatalf("the child's leave as %s queued %s rows %v, want %s rows alone", tc.notice, other, superviseRequests(t, pool, other), tc.op)
 				}
 			}
-			if got := issueSuspensions(t, pool, "LEGION-209"); len(got) != 1 || got[0].Release != tc.release || got[0].Tree != "LEGION-208" || got[0].Generation != 7 || got[0].TreeGeneration != 7 {
+			wantStarts := 0
+			if tc.check {
+				wantStarts = 1
+			}
+			if started := superviseRequests(t, pool, "start"); len(started) != wantStarts || started["LEGION-209/implementer"] != wantStarts {
+				t.Fatalf("starts = %v, want the implementer's check look alone for a merge and none otherwise", started)
+			}
+			got := issueSuspensions(t, pool, "LEGION-209")
+			if tc.check && len(got) != 0 {
+				t.Fatalf("issue suspensions of the merged child = %+v, want none until its check closes", got)
+			}
+			if !tc.check && (len(got) != 1 || got[0].Release != tc.release || got[0].Tree != "LEGION-208" || got[0].Generation != 7 || got[0].TreeGeneration != 7) {
 				t.Fatalf("issue suspensions of the child = %+v, want one of its tree at both generations 7 with release %t", got, tc.release)
 			}
 			if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 0 {

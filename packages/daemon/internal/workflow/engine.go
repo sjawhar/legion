@@ -34,8 +34,13 @@ type Config struct {
 	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
 	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
 	ProductionCheckBound time.Duration
-	MergeQueueRole       string
-	Clock                func() time.Time
+	// BuiltFrom is the repository the daemon's binary is built from (`sjawhar/legion` in a release
+	// build): a build the daemon boots on, or Dispatch starts on, is compared only against the
+	// open production checks of that repository, since no other repository's merge can be in it.
+	// Empty, no build is compared.
+	BuiltFrom      string
+	MergeQueueRole string
+	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -132,6 +137,18 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.lingerExpired(ctx, tx, fact)
 	case intake.DaemonBooted:
 		return e.booted(ctx, tx, fact)
+	case intake.CheckReport:
+		return e.checkReported(ctx, tx, fact)
+	case intake.IssueDeployed:
+		return e.issueDeployed(ctx, tx, fact)
+	case intake.ServerStarted:
+		return e.serverStarted(ctx, tx, fact)
+	case intake.CheckWake:
+		return e.checkWake(ctx, tx, fact)
+	case intake.CheckLookEnded:
+		return e.checkLookEnded(ctx, tx, fact)
+	case intake.CheckBound:
+		return e.checkBound(ctx, tx, fact)
 	default:
 		return intake.Result{}, nil
 	}
@@ -303,6 +320,11 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 // its own. fact carries the values the new generation takes — a live todo event's for a reopened
 // child, or the child's own already-recorded ones for admission's promotion of a stranded child no
 // live event ever reopened, so the run is exported for that caller too: one re-entry, not two.
+//
+// A done child's open production check closes as not run before the new run starts (the record
+// alone: markCheckClosed), since the rerun reuses the implementer's claim and the pod, and a look
+// would otherwise collide with the new run's task. A look open at the re-entry is interrupted as
+// the phase worker's run is: the implementer is suspended under the new generation's stamp.
 func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
 	root, err := e.store.Issue(ctx, tx, child.Tree)
 	if err != nil || root == nil {
@@ -324,6 +346,23 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 		interrupted.Generation = next
 		if err := e.suspend(ctx, tx, interrupted, role, fmt.Sprintf("%s was set back to todo", child.Key)); err != nil {
 			return err
+		}
+	}
+	check, err := e.store.ProductionCheck(ctx, tx, child.Key)
+	if err != nil {
+		return err
+	}
+	if check != nil && check.Open() {
+		lookOpen := check.LookOpen
+		if err := e.markCheckClosed(ctx, tx, check, record.CheckNotRun); err != nil {
+			return err
+		}
+		if lookOpen {
+			interrupted := child
+			interrupted.Generation = next
+			if err := e.suspend(ctx, tx, interrupted, claim.RoleImplementer, fmt.Sprintf("%s was set back to todo in a look of its production check", child.Key)); err != nil {
+				return err
+			}
 		}
 	}
 	// The child's open pull request outlives the run, and may still be armed for the READY of the
@@ -488,6 +527,10 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // session (the outbox executor's retry of a failed claim). An issue that left the workflow (done)
 // suspended every claim it held, and a lingering tree holds its members where they stood, so
 // neither tells anyone.
+//
+// The implementer of a closed issue failing inside a look of its production check ends that look
+// as a report of pending would (endLook): a done issue has no phase to hold, and the look's next
+// wake starts the claim again.
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -498,6 +541,15 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	}
 	if fact.Role == claim.RoleArchitect {
 		return intake.Result{}, nil
+	}
+	if fact.Role == claim.RoleImplementer {
+		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		if check != nil && check.Open() && check.LookOpen {
+			return intake.Result{}, e.endLook(ctx, tx, check, "claim failed")
+		}
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers || issue.Phase == phase.Done {
 		return intake.Result{}, err
@@ -802,12 +854,17 @@ func (e *Engine) gateOpened(ctx context.Context, tx pgx.Tx, issue record.Issue) 
 	return e.transition(ctx, tx, issue, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 }
 
-// everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the
-// tree's architect started, and each phase worker, whether or not it ever reported a handoff. The
-// phase rows record only handoffs, so they cannot list the claims; the executor treats a request
-// for a claim that does not exist as done.
-func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, reason string) error {
+// everyClaim enqueues op for every claim an issue can hold but except's: its architect, which
+// admission or the tree's architect started, and each phase worker, whether or not it ever
+// reported a handoff. The phase rows record only handoffs, so they cannot list the claims; the
+// executor treats a request for a claim that does not exist as done. except is the one role left
+// out, "" for none: a merged child's close leaves its implementer out, whose claim its production
+// check closes (closeCheck).
+func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, reason string, except claim.Role) error {
 	for _, role := range claim.Roles {
+		if role == except {
+			continue
+		}
 		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: issue.Tree, Role: role, Generation: issue.Generation, Reason: reason}); err != nil {
 			return err
 		}

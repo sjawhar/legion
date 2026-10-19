@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -11,13 +12,28 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// booted is the daemon's boot (intake.DaemonBooted): every claim of this project that owns its
-// issue's current phase and that the daemon or its own exit suspended (supervise's ByRule) is
-// started again. Nothing else would start it: the phase's start ran before the restart, a
-// re-admission's starts are queued only when a tree is re-admitted, and the next start is the next
-// phase's. This is the one trigger main did not have, so it acts on no other source: an operator's
-// suspension holds until the operator resumes the claim, and a suspension recorded before the
-// source existed (unknown) may be a drain made before the upgrade, so both are left as they are.
+// booted is the daemon's boot (intake.DaemonBooted). It does three things, in this order.
+//
+// First, the upgrade's sweep (sweepMerged): an issue of this project that awaits its merge on a
+// pull request already merged is one the migration moved out of production_check, and the merge
+// that would have closed it will never come again, so the boot closes it as the merge would have
+// (closeMerged) — unless it is a root with a child still in the workflow, which stays where it is
+// and closes when its last child leaves (leave's closeAwaitingRoot), so the deploy suspends no
+// running child under a mass of lingers. The check such a close opens has no merge commit, which
+// its first compare fills from GitHub.
+//
+// Second, a release build's boot compares its own build, and the build Dispatch reported to it,
+// against the open checks of the repository the daemon is built from (compareBuilds): one
+// check_compare row per check, whose GitHub read wakes the check when the build carries its
+// merge. A boot with no revision — every non-release build — compares nothing.
+//
+// Third, the resume by rule: every claim of this project that owns its issue's current phase and
+// that the daemon or its own exit suspended (supervise's ByRule) is started again. Nothing else
+// would start it: the phase's start ran before the restart, a re-admission's starts are queued
+// only when a tree is re-admitted, and the next start is the next phase's. This is the one trigger
+// main did not have, so it acts on no other source: an operator's suspension holds until the
+// operator resumes the claim, and a suspension recorded before the source existed (unknown) may be
+// a drain made before the upgrade, so both are left as they are.
 //
 // The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
 // whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
@@ -27,8 +43,19 @@ import (
 // like every other start: its claim resumed by rule, and the task that carries its phase on
 // (ResumePhaseTask, the merger's with the head its round approved), which the outbox does not
 // deliver to a claim still holding its phase's task. A role a start already covers (StartFor) gets
-// no second.
-func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (intake.Result, error) {
+// no second. The sweep runs first so the resume reads the trees it closed as lingering.
+func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted) (intake.Result, error) {
+	if err := e.sweepMerged(ctx, tx); err != nil {
+		return intake.Result{}, err
+	}
+	if fact.Revision != "" {
+		if err := e.compareBuilds(ctx, tx, "daemon boot", fact.Revision); err != nil {
+			return intake.Result{}, err
+		}
+		if err := e.compareBuilds(ctx, tx, "dispatch build", fact.DispatchBuild); err != nil {
+			return intake.Result{}, err
+		}
+	}
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
 		return intake.Result{}, err
@@ -83,4 +110,50 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 			"phase", issue.Phase, "suspendedBy", held.SuspendedBy)
 	}
 	return intake.Result{}, nil
+}
+
+// sweepMerged closes every issue of the project that awaits a merge GitHub already reported
+// (booted). Each is re-read before its close: a child's close may have closed its root
+// (closeAwaitingRoot), and a root's close lingers the tree its children then close under.
+func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
+	issues, err := e.store.Issues(ctx, tx)
+	if err != nil {
+		return err
+	}
+	for _, listed := range issues {
+		if listed.Project != e.cfg.Project || !awaitsMerge(listed) {
+			continue
+		}
+		pr, err := e.store.PullRequest(ctx, tx, listed.Key)
+		if err != nil || pr == nil || pr.State != record.PullRequestMerged {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		issue, err := e.store.Issue(ctx, tx, listed.Key)
+		if err != nil || issue == nil || !awaitsMerge(*issue) {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		if claim.IsTreeRoot(issue.Key, issue.Tree) {
+			members, err := e.treeMembers(ctx, tx, *issue)
+			if err != nil {
+				return err
+			}
+			if running := slices.IndexFunc(members, func(m record.Issue) bool { return m.Key != issue.Key && inWorkflow(m) }); running >= 0 {
+				e.logOnCommit(ctx, "workflow: the boot leaves a merged root awaiting its merge while a child runs", "issue", issue.Key,
+					"pullRequest", pr.Number, "child", members[running].Key)
+				continue
+			}
+		}
+		e.logOnCommit(ctx, "workflow: the boot closes an issue whose pull request merged before the upgrade", "issue", issue.Key,
+			"tree", issue.Tree, "pullRequest", pr.Number, "phase", issue.Phase)
+		if err := e.closeMerged(ctx, tx, *issue, pr); err != nil {
+			return err
+		}
+	}
+	return nil
 }

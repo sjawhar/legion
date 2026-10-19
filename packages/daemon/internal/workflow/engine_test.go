@@ -470,7 +470,9 @@ func TestAPhaseFinishedNoticeCarriesTheWorkersSummaryAndItsVerdict(t *testing.T)
 // expiry stops, every claim the tree holds — the root architect admission started and a worker that
 // never reported a handoff included, neither of which has a phase row. A redelivered merge changes
 // nothing. Every expiry row names the root generation whose linger it expires, a child's too, which
-// keeps the earlier generation of the run that admitted it.
+// keeps the earlier generation of the run that admitted it. The close opens the root's production
+// check, whose first look the implementer reports here before the linger ends, since the tree's
+// close waits for an open check (check_test.go).
 func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -512,7 +514,9 @@ func TestTheMergeLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testin
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
 	assertOutboxCount(t, pool, "dispatch_status", 1)
-
+	if result, err := intake.ApplyFact(ctx, pool, "api", "check:LEGION-208:1:pass", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass", Summary: "driven"}, engine, admissionStub{}); err != nil || result.Refusal != nil {
+		t.Fatalf("ApplyFact the check's pass = %+v, %v", result.Refusal, err)
+	}
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-current", intake.LingerExpired{Issue: "LEGION-208", Generation: 7}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact current linger expiry: %v", err)
 	}

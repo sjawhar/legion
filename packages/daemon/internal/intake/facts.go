@@ -441,12 +441,89 @@ func (LingerExpired) isFact() {}
 
 // DaemonBooted records a boot of the daemon: every stored claim has its machine again, and the
 // boot replayed what its claims' terminal states owe the workflow. Boot is the boot's record id
-// (daemon_boot), which makes each boot's fact its own.
+// (daemon_boot), which makes each boot's fact its own. Revision is the daemon's own build commit,
+// stamped into a release build and empty outside one, where the boot wakes no production check;
+// DispatchBuild is the build commit Dispatch's /healthz reported to the boot, empty when it
+// reported none. The workflow compares each against the open checks of the repository the daemon
+// is built from (workflow.Config.BuiltFrom), one check_compare row per check.
 type DaemonBooted struct {
-	Boot int64
+	Boot          int64
+	Revision      string
+	DispatchBuild string
 }
 
 func (DaemonBooted) isFact() {}
+
+// CheckReport is the implementer's report on one look of its closed issue's production check: the
+// `legion` tool's `handoff_complete` on an issue whose check is open (api/handoff.go), carrying no
+// commit. Verdict is pass, pending or fail; Summary is what the implementer saw. Look is the look
+// the route read as the check's current one, so a report of a look its bound or a hold already
+// ended is refused rather than recorded against the look after it.
+type CheckReport struct {
+	Issue   string
+	Claim   claim.Token
+	Look    int
+	Verdict string
+	Summary string
+}
+
+func (CheckReport) isFact() {}
+
+// IssueDeployed is Dispatch's `issue.deployed`: its delivery timeline first knew the production
+// run that shipped the pull request Repo#Number of issue Issue, RunID, which completed at
+// CompletedAt. It wakes the issue's open production check once.
+type IssueDeployed struct {
+	Issue       string
+	Repo        string
+	Number      int
+	RunID       int64
+	CompletedAt time.Time
+}
+
+func (IssueDeployed) isFact() {}
+
+// ServerStarted is Dispatch's `server.started`: Dispatch started on the build Commit names. The
+// workflow compares the build against the open checks of the repository the daemon is built from,
+// as it compares the daemon's own revision at boot; an event with no commit is decoded to none.
+type ServerStarted struct {
+	Commit string
+}
+
+func (ServerStarted) isFact() {}
+
+// CheckWake is a build compare that found the merge of issue Issue's production check in the
+// build (the check_compare outbox row's GitHub read): Look is the look the compare was queued for,
+// Cause what asked for it (`daemon boot`, `dispatch start` or `dispatch build`) and Detail the
+// build's commit. The workflow wakes the check by the one wake rule, or keeps the cause for the
+// next look while one is open.
+type CheckWake struct {
+	Issue  string
+	Look   int
+	Cause  string
+	Detail string
+}
+
+func (CheckWake) isFact() {}
+
+// CheckLookEnded is a look of issue Issue's production check ending with no report: Cause is
+// `look bound` (the check_look row due at the look's bound), `operator hold` (a check start the
+// outbox met an operator's suspension on) or `claim failed` (the implementer's claim failed in
+// the look). Look names the look, so a row of a look already ended changes nothing.
+type CheckLookEnded struct {
+	Issue string
+	Look  int
+	Cause string
+}
+
+func (CheckLookEnded) isFact() {}
+
+// CheckBound is the whole production check's bound of issue Issue coming due (the check_bound
+// row at its bound_at): the check's last look starts, or the bound defers while a look is open.
+type CheckBound struct {
+	Issue string
+}
+
+func (CheckBound) isFact() {}
 
 // Handler changes the workflow record inside the caller-owned transaction.
 type Handler interface {

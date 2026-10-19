@@ -135,7 +135,13 @@ func StartFor(run record.RoleRun, root record.Issue, generation uint64, current 
 }
 
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
-	row, err := record.NewOutboxRow(issue, payload, e.now())
+	return e.enqueueAt(ctx, tx, issue, payload, e.now())
+}
+
+// enqueueAt enqueues payload for issue due at at: a deadline row (a linger's close, a production
+// check's bounds), where enqueue's rows are due now.
+func (e *Engine) enqueueAt(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload, at time.Time) error {
+	row, err := record.NewOutboxRow(issue, payload, at)
 	if err != nil {
 		return err
 	}

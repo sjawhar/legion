@@ -49,7 +49,9 @@ const (
 // withdrawing a READY would lose completed work. A child that is still admitted, finished or
 // parked stays with the tree. The hand-over remains pending during the linger, so a root that comes
 // back in it resumes its children where they stood and hands none over. A root a person parked and
-// then closed settles the same way.
+// then closed settles the same way. A merged root's close opens its production check, whose first
+// look its implementer reports here, since the tree's close waits for an open check (the workflow's
+// check tests).
 func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -58,6 +60,9 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 		{name: "merged", close: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
 			if result, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 1, MergeSHA: "merge-1"}, engine, admission); err != nil || result.Refusal != nil {
 				t.Fatalf("merge %s = %+v, %v", finishedRoot, result.Refusal, err)
+			}
+			if result, err := intake.ApplyFact(context.Background(), pool, "api", "check-pass", intake.CheckReport{Issue: finishedRoot, Look: 1, Verdict: "pass", Summary: "driven"}, engine, admission); err != nil || result.Refusal != nil {
+				t.Fatalf("report %s's production check = %+v, %v", finishedRoot, result.Refusal, err)
 			}
 		}},
 		{name: "parked, then closed by a person", close: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
