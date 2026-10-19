@@ -99,8 +99,8 @@ type Options struct {
 	Pool     *pgxpool.Pool
 	Handlers []intake.Handler
 	// PrepareRepository readies what the workflow reads in memory of a Dispatch issue's repository
-	// before an observation the API applies records it (the daemon's prepareRepository). Nil
-	// prepares nothing.
+	// before release_children applies its view of a child (the daemon's prepareObserved, handed the
+	// child as Dispatch's detail shows it, intake.ObservedIssue). Nil prepares nothing.
 	PrepareRepository func(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error)
 	Record            record.Store
 	Dispatch          dispatch.Client
