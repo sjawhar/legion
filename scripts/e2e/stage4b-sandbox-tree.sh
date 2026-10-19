@@ -2465,12 +2465,15 @@ cut_at_completion_call() {
 
 # ---- teardown ------------------------------------------------------------------------------------
 
-# The daemon's two durable consumers are named by the Dispatch project key (intake's
-# dispatchConsumerName and githubConsumerName): legion-go-LEGSMOKE-dispatch and -github.
+# The daemon's durable consumers are named by the Dispatch project key (intake's
+# dispatchConsumerName, githubConsumerName and dispatchServerConsumerName): legion-go-LEGSMOKE-dispatch,
+# -github and -dispatch-server. delete_consumers lists every consumer under that prefix and deletes
+# each, so a durable the daemon gains reaches the teardown without being named here: one left
+# behind fails hygiene and refuses the next run at prerequisites.
 consumers_prefix="legion-go-$project-"
 delete_consumers() {
   local name
-  for name in "${consumers_prefix}dispatch" "${consumers_prefix}github"; do
+  for name in $(nats_stream consumers "$nats_url" "$stream" "$consumers_prefix" | jq -r .name); do
     case "$(nats_stream delete "$nats_url" "$stream" "$name" 2>&1)" in
       deleted) note "deleted the run's durable consumer $name from production NATS" ;;
       absent) ;;
