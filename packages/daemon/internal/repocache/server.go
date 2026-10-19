@@ -319,43 +319,40 @@ func (c *cache) authorized(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// serveTar streams the clone under the read lock. Before the first clone is there it answers 503
-// at once, without waiting on the lock the clone holds. A failure once the stream has begun aborts
-// the connection, so the reader sees a broken transfer rather than a tar that merely ends early.
+// serveTar streams the clone as it stood when the request came: its refs and packs taken under the
+// read lock (snapshot), then sent with no lock held, so a slow or stalled reader holds nothing a
+// refresh waits on. Before the first clone is there it answers 503 at once, without waiting on the
+// lock the clone holds. A failure once the stream has begun aborts the connection, so the reader
+// sees a broken transfer rather than a tar that merely ends early.
 func (c *cache) serveTar(w http.ResponseWriter, r *http.Request) {
 	if !c.health.Load().Ready {
 		http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
 		return
 	}
-	c.lock.RLock()
-	defer c.lock.RUnlock()
+	entries, err := c.snapshot()
+	if err != nil {
+		c.opts.Log("take the clone's tar for " + r.RemoteAddr + ": " + oneLine(err))
+		http.Error(w, "the repository cache cannot read its clone", http.StatusInternalServerError)
+		return
+	}
+	defer closeEntries(entries)
 	w.Header().Set("Content-Type", "application/x-tar")
 	archive := tar.NewWriter(w)
-	err := c.walk(func(name string, entry fs.DirEntry, info fs.FileInfo) error {
-		header, err := tar.FileInfoHeader(info, "")
+	for _, entry := range entries {
+		if err = archive.WriteHeader(entry.header); err != nil {
+			break
+		}
+		switch {
+		case entry.file != nil:
+			_, err = io.CopyN(archive, entry.file, entry.header.Size)
+		case entry.body != nil:
+			_, err = archive.Write(entry.body)
+		}
 		if err != nil {
-			return err
+			err = fmt.Errorf("stream %s: %w", entry.header.Name, err)
+			break
 		}
-		header.Name, header.Uid, header.Gid, header.Uname, header.Gname = name, 0, 0, "", ""
-		if entry.IsDir() {
-			header.Name += "/"
-		}
-		if err := archive.WriteHeader(header); err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		file, err := os.Open(filepath.Join(c.dir, filepath.FromSlash(name)))
-		if err != nil {
-			return err
-		}
-		defer file.Close()
-		if _, err := io.CopyN(archive, file, header.Size); err != nil {
-			return fmt.Errorf("stream %s: %w", name, err)
-		}
-		return nil
-	})
+	}
 	if err == nil {
 		err = archive.Close()
 	}
@@ -364,6 +361,62 @@ func (c *cache) serveTar(w http.ResponseWriter, r *http.Request) {
 			c.opts.Log("tar stream to " + r.RemoteAddr + " failed: " + oneLine(err))
 		}
 		panic(http.ErrAbortHandler)
+	}
+}
+
+// tarEntry is one entry of a snapshot of the clone: its tar header, and for a file either its bytes
+// (HEAD, packed-refs and the refs) or, for a pack, the pack opened.
+type tarEntry struct {
+	header *tar.Header
+	body   []byte
+	file   *os.File
+}
+
+// snapshot takes, under the read lock, everything one tar stream sends (walk): each entry's header,
+// the refs' bytes, and each pack opened. No fetch or repack runs while it holds the lock, so the
+// refs it read name only objects in the packs it opened; a pack never changes once written, and an
+// open pack stays readable after a repack removes it, so the stream needs no lock.
+func (c *cache) snapshot() ([]tarEntry, error) {
+	c.lock.RLock()
+	defer c.lock.RUnlock()
+	var entries []tarEntry
+	err := c.walk(func(name string, entry fs.DirEntry, info fs.FileInfo) error {
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name, header.Uid, header.Gid, header.Uname, header.Gname = name, 0, 0, "", ""
+		taken := tarEntry{header: header}
+		path := filepath.Join(c.dir, filepath.FromSlash(name))
+		switch {
+		case entry.IsDir():
+			header.Name += "/"
+		case strings.HasPrefix(name, "objects/pack/"):
+			if taken.file, err = os.Open(path); err != nil {
+				return err
+			}
+		default:
+			if taken.body, err = os.ReadFile(path); err != nil {
+				return err
+			}
+			header.Size = int64(len(taken.body))
+		}
+		entries = append(entries, taken)
+		return nil
+	})
+	if err != nil {
+		closeEntries(entries)
+		return nil, err
+	}
+	return entries, nil
+}
+
+// closeEntries closes every pack a snapshot opened.
+func closeEntries(entries []tarEntry) {
+	for _, entry := range entries {
+		if entry.file != nil {
+			_ = entry.file.Close()
+		}
 	}
 }
 

@@ -1604,12 +1604,24 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    clone is the one full download of the repository ([The repository cache](#the-repository-cache)).
    A relaunch, whose volume already holds the feed, fetches the delta into it alone (`the feed
    holds <owner>/<repo> already: …`), after removing every git lock file a fetch killed mid-update
-   left in the feed, each logged with its age. Once the fetch may start — at once, or once the
-   cache is ready — the cache's stream, its verification and the delta from GitHub share one
-   30-minute bound (`workspace.FetchTimeout`), each given what remains of it, so the whole fetch
-   ends within 70 minutes (`workspace.FetchBudget`) however long it waited; a step with nothing
-   left fails the fetch, naming the bound. Each transfer from GitHub is tried again up to four
-   times after a transient failure, within that bound.
+   left in the feed, each logged with its age. It takes an existing feed only in the shape the
+   fetch writes: no symlink anywhere, its owner directory included; no gitfile; no hook but git's
+   samples; a configuration holding only the keys git's bare init and clone and the fetch write;
+   nothing in `info/` but git's `exclude`; and no alternates. Before this release any role could
+   write the issue volume's `/legion/feed`, so a volume carried over may hold a repository there
+   that would run a hook or follow a setting in the token-holding fetch: such a feed is removed,
+   logged (`the feed's <owner>/<repo> is not one this fetch wrote (<why>): removed; the feed is
+   filled afresh`), and filled from the repository cache. Every fetch from GitHub then points the
+   feed's `HEAD` at the branch GitHub names as the default now (`git ls-remote --symref`, under the
+   same credential and bound), since a fetch never moves `HEAD` and prunes the branch a rename
+   left behind; a move is logged (`the default branch of <owner>/<repo> is now <name> (HEAD named
+   <ref>)`). Once the fetch may start — at once, or once the cache is ready — the cache's stream,
+   its verification and the delta from GitHub share one 30-minute bound
+   (`workspace.FetchTimeout`), each given what remains of it, so the fetch's waits, transfers and
+   checks end within 70 minutes (`workspace.FetchBudget`) however long it waited, and the few local
+   git commands around them take moments; a step with nothing left fails the fetch, naming the
+   bound. Each transfer from GitHub is tried again up to four times after a transient failure,
+   within that bound.
    It is the only process that holds the provisioning token
    ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the issue's clone and its jj workspace on the issue's own volume from
@@ -1858,9 +1870,11 @@ before it fetches again. It serves, on port 8418:
 
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
 401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
-on every answer. A fetch that fails is logged and tried at the next tick, and the cache
-stays ready on what it last fetched; a restarted cache whose volume holds its clone fetches into
-it, and serves it as it is when GitHub cannot be reached; a first clone that fails ends the
+on every answer. Each fetch also points the clone's `HEAD` at the branch GitHub names as the
+default now, so a default branch renamed on GitHub is the one the cache publishes and its tar's
+`HEAD` names from the next tick. A fetch that fails is logged and tried at the next tick, and the
+cache stays ready on what it last fetched; a restarted cache whose volume holds its clone fetches
+into it, and serves it as it is when GitHub cannot be reached; a first clone that fails ends the
 process, and the kubelet restarts it.
 
 An issue pod's `workspace-fetch` fills a fresh feed from its repository's cache alone
@@ -2515,14 +2529,18 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   and the fetch fails (`FeedEntry`, `internal/workspace/clone.go`), as it does when a pack does
   not index or the history is not whole. A feed is filled beside its final path and renamed into
   place once whole, with git's automatic garbage collection off and every fetch's objects kept as
-  a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's volume and no
-  config home. Every other provisioning command is
+  a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's
+  volume and no config home, and it takes an existing feed repository only in the shape it writes
+  (no symlink, gitfile, hook, alternates or configuration key of anyone else's; see "Anatomy of a
+  Sandbox pod"), so nothing an earlier release's agents wrote at `/legion/feed` runs in it. Every
+  other provisioning command is
   bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: once the fetch may
   start — at once, or once the repository cache is ready, after a wait of at most 40 minutes — the
-  cache's stream, its verification and every attempt of the transfer from GitHub run under one
-  `workspace.FetchTimeout` (30 minutes) instead, each given what remains of it, so the fetch ends
-  within `workspace.FetchBudget` (70 minutes). A transfer
+  cache's stream, its verification, every attempt of the transfer from GitHub and its read of
+  GitHub's `HEAD` run under one `workspace.FetchTimeout` (30 minutes) instead, each given what
+  remains of it, so the fetch's waits, transfers and checks end within `workspace.FetchBudget` (70
+  minutes). A transfer
   that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
   5xx, or a connection that could not be made or broke (connect, DNS, reset, timeout, empty reply,

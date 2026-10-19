@@ -91,8 +91,9 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	if commandWith(actual.Argv, "git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets") {
 		actual.Argv[4] = r.remote
 	}
-	// The fetch into a feed that already holds the repository names GitHub in its argv, too.
-	if len(actual.Argv) > 2 && actual.Argv[0] == "git" && actual.Argv[2] == "fetch" {
+	// The fetch into a feed that already holds the repository, and its read of GitHub's HEAD, name
+	// GitHub in their argv, too.
+	if len(actual.Argv) > 2 && actual.Argv[0] == "git" && (actual.Argv[2] == "fetch" || actual.Argv[2] == "ls-remote") {
 		for i, arg := range actual.Argv {
 			if arg == "https://github.com/acme/widgets" {
 				actual.Argv[i] = r.remote
