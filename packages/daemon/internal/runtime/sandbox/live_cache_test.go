@@ -11,6 +11,7 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -139,9 +140,10 @@ func (r *liveRig) checkCacheSecondPod() error {
 	return nil
 }
 
-// cache-lost-volume: with the cache warm, the harness pushes legion/S4A-9 onto the repository as a
-// commit of its own — a file only that commit adds, on top of the default branch's head — and
-// checks inside the cache's pod that its clone lacks that commit (deleted when the harness ends).
+// cache-lost-volume: with the cache warm, the harness pushes cache-b's branch, legion/<issue> for
+// its run's own issue (cacheRunIssue), onto the repository as a commit of its own — a file only
+// that commit adds, on top of the default branch's head — and checks inside the cache's pod that
+// its clone lacks that commit (deleted when the harness ends).
 // cache-b's Sandbox and volume are then deleted while no runtime runs. Relaunched with the branch as
 // its recovery source, the new pod fills its new feed from the cache again, and, while the cache
 // still lacks the commit, GitHub's delta brings it (more than no bytes); the workspace is
@@ -170,6 +172,9 @@ func (r *liveRig) checkCacheLostVolume() error {
 	cached := health.Head
 	if cached == "" {
 		return fmt.Errorf("the cache %s's /healthz names no head: %+v", status.Sandbox, health)
+	}
+	if err := r.sweepStaleRunBranches(); err != nil {
+		return err
 	}
 	marker, content := ".legion-e2e/"+c.issue+".txt", fmt.Sprintf("the commit only %s holds, pushed at %s\n", dir.Bookmark, time.Now().UTC().Format(time.RFC3339Nano))
 	branchHead, err := r.pushRunCommit(dir.Bookmark, base, marker, content)
@@ -280,7 +285,8 @@ func (r *liveRig) cacheHolds(name, id string) (bool, error) {
 
 // pushRunCommit puts branch on the run's repository at a new commit on parent that adds path
 // holding content — built with GitHub's git data API, so nothing reaches the default branch — and
-// deletes the branch when the run ends, whatever happens in between. It returns the commit.
+// deletes it when the run ends, whatever happens in between, while it still names that commit: a
+// branch at another commit is not the run's own, and is left as it is. It returns the commit.
 func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, error) {
 	github, err := r.github()
 	if err != nil {
@@ -304,12 +310,12 @@ func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, e
 		return "", fmt.Errorf("write the tree adding %s: %w", path, err)
 	}
 	if err := github.Post(r.ctx, "/git/commits", map[string]any{
-		"message": "Stage 4a: " + branch + "'s own commit", "tree": tree.SHA, "parents": []string{parent},
+		"message": runCommitMessage(branch), "tree": tree.SHA, "parents": []string{parent},
 	}, &created); err != nil {
 		return "", fmt.Errorf("write the commit adding %s: %w", path, err)
 	}
 	r.t.Cleanup(func() {
-		if err := r.deleteBranch(branch); err != nil {
+		if err := r.deleteBranchAt(branch, created.SHA); err != nil {
 			fmt.Printf("teardown: could not delete branch %s of %s: %v\n", branch, r.env.repo, err)
 		}
 	})
@@ -317,6 +323,75 @@ func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, e
 		return "", fmt.Errorf("create refs/heads/%s at %s: %w", branch, created.SHA, err)
 	}
 	return created.SHA, nil
+}
+
+// sweepStaleRunBranches deletes the cache-b branches killed runs left on the run's repository
+// (staleRunBranches), each only while it still names the commit read here, and notes each.
+func (r *liveRig) sweepStaleRunBranches() error {
+	github, err := r.github()
+	if err != nil {
+		return err
+	}
+	var refs []struct {
+		Ref    string `json:"ref"`
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := github.Get(r.ctx, "/git/matching-refs/heads/legion/S4A-", &refs); err != nil {
+		return fmt.Errorf("list the legion/S4A- branches of %s: %w", r.env.repo, err)
+	}
+	var branches []runBranch
+	heads := map[string]string{}
+	for _, ref := range refs {
+		var commit struct {
+			Message   string `json:"message"`
+			Committer struct {
+				Date time.Time `json:"date"`
+			} `json:"committer"`
+		}
+		if err := github.Get(r.ctx, "/git/commits/"+ref.Object.SHA, &commit); err != nil {
+			return fmt.Errorf("read the commit %s of %s: %w", ref.Object.SHA, ref.Ref, err)
+		}
+		name := strings.TrimPrefix(ref.Ref, "refs/heads/")
+		branches = append(branches, runBranch{name: name, message: commit.Message, committed: commit.Committer.Date})
+		heads[name] = ref.Object.SHA
+	}
+	for _, name := range staleRunBranches(branches, time.Now()) {
+		if err := r.deleteBranchAt(name, heads[name]); err != nil {
+			return err
+		}
+		note("operator", "deleted %s on %s, a killed run's cache-b branch at %s, older than %s", name, r.env.repo, heads[name], staleRunBranchAge)
+	}
+	return nil
+}
+
+// deleteBranchAt deletes branch of the run's repository while it names sha: one gone already, or
+// at another commit, is left as it is.
+func (r *liveRig) deleteBranchAt(branch, sha string) error {
+	github, err := r.github()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	var ref struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := github.Get(ctx, "/git/ref/heads/"+branchPath(branch), &ref); err != nil {
+		var answer *githubrest.Answer
+		if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
+			return nil
+		}
+		return fmt.Errorf("read refs/heads/%s: %w", branch, err)
+	}
+	if ref.Object.SHA != sha {
+		fmt.Printf("teardown: left branch %s of %s, now at %s, not the run's %s\n", branch, r.env.repo, ref.Object.SHA, sha)
+		return nil
+	}
+	return r.deleteBranch(branch)
 }
 
 // assertCacheFed is cache-stream's evidence for c's pod: its workspace-fetch log's last line names

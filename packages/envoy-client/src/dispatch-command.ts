@@ -354,6 +354,14 @@ export function parseCommand(
   for (let index = 0; index < rest.length; index++) {
     const token = rest[index] as string;
     if (!token.startsWith("--")) {
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
+        const corrected = [command, ...rest.slice(0, index), "--issue", token];
+        corrected.push(...rest.slice(index + 1));
+        problems.push(
+          `unexpected argument ${token}: use --issue <KEY>, as in: dispatch ${corrected.map(quoteWord).join(" ")}`
+        );
+        continue;
+      }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
       continue;
     }
@@ -454,6 +462,9 @@ function appendedItem(
   const parsed = number(flag, value);
   return parsed === undefined ? undefined : { value: parsed };
 }
+
+/** A Dispatch issue key, `PROJECT-N`. */
+const ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 
 /** A shell word: bare when it needs no quoting, otherwise POSIX single-quoted. */
 function quoteWord(value: string): string {

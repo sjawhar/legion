@@ -71,7 +71,7 @@ not share this session's vocabulary, and is often on a phone. Write for that per
 - Before posting, test it: could the human, reading only this text on their phone, know what they are being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options.
-- When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started.
+- When an ask, comment or message states a root cause or a blocker, include the command, error output or record that shows it, with its time, in that same text. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started.
 
 ## Writing a spec
 
@@ -157,7 +157,7 @@ Labels are optional: Dispatch trims them, preserves their case, and removes case
 the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 
-When the work needs a project that does not exist yet, create it yourself with `dispatch project --key <KEY> --name '<name>'`; nobody has to make it by hand. Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first with `dispatch projects`. A key that already exists is refused with `PROJECT_EXISTS`.
+Work goes in a project that exists: `dispatch projects` lists them, and work that spans projects goes in the one that owns most of it. Create a project only when the human asks for one, with `dispatch project --key <KEY> --name '<name>'`. Projects cannot be renamed or deleted, so a mistyped key stays for good. A key that already exists is refused with `PROJECT_EXISTS`.
 
 ## Search first
 
@@ -272,7 +272,7 @@ instead of pointing at another message in prose (below), is the asking session's
 Open a standalone ask with `dispatch ask` (`dispatch ask --help` lists its flags), one `--option` per choice:
 ```bash
 dispatch ask --issue <KEY> --question-file - --option 'Label: what it costs' --option 'Other: what it costs' <<'EOF'
-<the problem, what constrains the answer, and your recommendation with its reason>
+<the problem, what constrains the answer (each answer of his you rely on, linked), and your recommendation with its reason>
 EOF
 ```
 It prints the ask's id; you follow the ask you opened (see [Following](#following)).

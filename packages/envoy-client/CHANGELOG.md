@@ -8,6 +8,9 @@
   `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
   command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
   code 0.
+- A `dispatch` command that takes `--issue`, given a bare issue key in its place
+  (`dispatch read ACME-12`), names the fix in its refusal: `use --issue <KEY>, as in: dispatch
+  read --issue ACME-12`. The command still refuses a positional value.
 
 ### Changed
 
