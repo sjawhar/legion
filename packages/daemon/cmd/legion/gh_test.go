@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 )
 
 // ghHelpDir holds the real gh's help of each command the resolver's tests read, saved from gh
@@ -383,8 +385,30 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"issue", "create", "--title", "t", "--body", "b", "--blocking", "https://github.com/acme/widgets/issues/5"}, remotes: remotes(acmeClone), owner: "acme"},
 		{argv: []string{"project", "link", "1"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, remotes: remotes(acmeClone), owner: "sjawhar"},
 		{argv: []string{"project", "link", "1", "--owner", "acme"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, err: "more than one owner"},
-		{argv: []string{"project", "unlink", "1", "--team", "sjawhar/core"}, env: acme, err: "more than one owner"},
+		{argv: []string{"project", "unlink", "1", "--owner", "acme", "--team", "sjawhar/core"}, err: "more than one owner"},
 		{argv: []string{"project", "link", "1", "--team", "core", "-R", "acme/widgets"}, err: `"core" names no owner`},
+		// Round 5's: gh takes a passthrough leaf's repository from the first argument even after
+		// `--` (deep 1); `repo set-default` reads every remote's network whatever its argument
+		// names (deep 2, quality 1); project link and unlink read no repository of their own
+		// with --team (quality 2); a pr command reads OWNER/REPO#N and a URL other than a pull
+		// request's as a branch of its own repository, and only agent-task view reads OWNER/REPO#N
+		// (final F1).
+		{argv: []string{"repo", "fork", "--", "sjawhar/legion"}, remotes: remotes(acmeClone), owner: "sjawhar"},
+		{argv: []string{"repo", "fork", "--org", "acme", "--", "sjawhar/legion"}, err: "more than one owner"},
+		{argv: []string{"repo", "fork", "--", "sjawhar/legion", "--depth=1"}, owner: "sjawhar"},
+		{argv: []string{"repo", "clone", "--", "sjawhar/legion"}, remotes: remotes(acmeClone), owner: "sjawhar"},
+		{argv: []string{"repo", "clone", "--", "sjawhar/legion", "--depth=1", "-R", "acme/w"}, owner: "sjawhar"},
+		{argv: []string{"repo", "set-default", "sjawhar/legion"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"repo", "set-default", "sjawhar/legion"}, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"project", "link", "1", "--team", "sjawhar/core"}, remotes: remotes(acmeClone), owner: "sjawhar"},
+		{argv: []string{"project", "unlink", "1", "--team", "sjawhar/core"}, env: acme, owner: "sjawhar"},
+		{argv: []string{"pr", "comment", "sjawhar/legion#2", "--body", "hi"}, remotes: remotes(ghRemote{name: "origin", url: "https://github.com/octocat/hello"}), owner: "octocat"},
+		{argv: []string{"pr", "view", "sjawhar/legion#2"}, remotes: remotes(acmeClone), owner: "acme"},
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/issues/5"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion"}, remotes: remotes(acmeClone), err: "more than one owner"},
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/tree/x"}, remotes: remotes(sjawharClone), owner: "sjawhar"},
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/pull/2/files"}, remotes: remotes(acmeClone), owner: "sjawhar"},
+		{argv: []string{"issue", "edit", "https://github.com/sjawhar/legion/issues/5", "--title", "x"}, remotes: remotes(acmeClone), owner: "sjawhar"},
 		// --version is gh's alone; before anything, gh reads the next word as a command, an
 		// alias's or an extension's among them.
 		{argv: []string{"--version"}},
@@ -413,9 +437,9 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"api", "repos/:owner/:repo/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
 		{argv: []string{"api", "graphql", "-f", "o=:owner", "-f", "query=q"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}},
 		{argv: []string{"api", "repos/{owner}/{repo}/commits/{branch}"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
-		// A number argument written OWNER/REPO#N names that repository.
+		// agent-task view reads OWNER/REPO#N as that repository; a pr command reads it as a branch.
 		{argv: []string{"agent-task", "view", "sjawhar/legion#1"}, owner: "sjawhar"},
-		{argv: []string{"pr", "view", "sjawhar/legion#1", "-R", "acme/widgets"}, err: "more than one owner"},
+		{argv: []string{"pr", "view", "sjawhar/legion#1", "-R", "acme/widgets"}, owner: "acme"},
 		// The first re-review's reproductions.
 		{argv: []string{"-R", "sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
 		{argv: []string{"--repo=sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
@@ -649,7 +673,7 @@ func legionGh(t *testing.T, env map[string]string, args ...string) (code int, st
 func ghWrapperDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\n"+testMainEnv+"=1 exec '"+os.Args[0]+"' gh \"$@\"\n"), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte("#!/bin/sh\nexec '"+os.Args[0]+"' gh \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return dir
@@ -757,8 +781,18 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 	// With the real gh first on PATH, gh's own git would answer with GH_CONFIG_DIR's token.
 	unwrapped := map[string]string{"PATH": filepath.Dir(stub) + ":" + os.Getenv("PATH")}
 	maps.Copy(unwrapped, map[string]string{"LEGION_GH_PATH": stub, "GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root})
-	if code, stdout, stderr := legionGh(t, unwrapped, "pr", "list"); code != 2 || stdout != "" || !strings.Contains(stderr, "the first gh on PATH is the real gh") {
+	if code, stdout, stderr := legionGh(t, unwrapped, "pr", "list"); code != 2 || stdout != "" || !strings.Contains(stderr, "is not the wrapper that runs `legion gh`") {
 		t.Errorf("legion gh with the real gh first on PATH = exit %d, stdout %q, stderr %q; want exit 2 naming it", code, stdout, stderr)
+	}
+	// Nor may another wrapper of the machine's own lead PATH: gh would make it its git helper.
+	shims := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/sh\nGH_TOKEN=$(cat ~/.token) exec '"+stub+"' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	shimmed := map[string]string{"PATH": shims + ":" + wrappers + ":" + os.Getenv("PATH")}
+	maps.Copy(shimmed, map[string]string{"LEGION_GH_PATH": stub, "GH_CONFIG_DIR": defaultDir, "LEGION_GH_OWNERS_DIR": root})
+	if code, stdout, stderr := legionGh(t, shimmed, "pr", "list"); code != 2 || stdout != "" || !strings.Contains(stderr, "is not the wrapper that runs `legion gh`") {
+		t.Errorf("legion gh with another gh wrapper first on PATH = exit %d, stdout %q, stderr %q; want exit 2 naming it", code, stdout, stderr)
 	}
 
 	// In a clone of sjawhar's repository, a command naming none acts on sjawhar's repository.
@@ -795,6 +829,34 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 	code, _, stderr := legionGh(t, map[string]string{}, "--help")
 	if code != 0 || !usageOf(stderr, "gh") {
 		t.Errorf("legion gh --help with no LEGION_GH_PATH = exit %d, stderr %q; want exit 0 and its usage", code, stderr)
+	}
+}
+
+// The `gh` each runtime puts first on PATH, the image's packages/daemon/docker/gh and the script a
+// tmux pane's launcher directory holds (workerbin), is one `legion gh` accepts as its wrapper
+// (ghWrapperScript), so the git gh runs names it as its helper; a machine's own wrapper is not.
+func TestTheRuntimesGhWrappersAreOnesLegionGhAccepts(t *testing.T) {
+	image, err := os.ReadFile(filepath.Join("..", "..", "docker", "gh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := workerbin.Install(root, "/opt/legion state/legion"); err != nil {
+		t.Fatal(err)
+	}
+	pane, err := os.ReadFile(filepath.Join(workerbin.LauncherDir(root), "gh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, script := range map[string][]byte{"the image's": image, "a tmux pane's": pane} {
+		if !ghWrapperScript.Match(script) {
+			t.Errorf("%s gh wrapper %q is not one legion gh accepts", name, script)
+		}
+	}
+	for _, script := range []string{"#!/bin/sh\nGH_TOKEN=x exec /usr/bin/gh \"$@\"\n", "#!/bin/sh\nexec /usr/bin/gh \"$@\"\n", "\x7fELF"} {
+		if ghWrapperScript.MatchString(script) {
+			t.Errorf("legion gh accepts %q as its wrapper", script)
+		}
 	}
 }
 
