@@ -405,6 +405,19 @@ func webhookRoutes(cfg *webhook.WebhookConfig) []webhookRoute {
 	return routes
 }
 
+// newHTTPServer is the listener's HTTP server over handler. Every route's header read, body read
+// and handler run inside ReadTimeout and WriteTimeout, 10 s from the request's start. The GitHub
+// webhook route alone extends its own connection's deadlines (webhook.GitHubHandler), since a large
+// delivery's body can take longer than that to arrive; every other route keeps these.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:      handler,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+}
+
 // startingGate answers 503 "service starting" until open hands it the mux to serve, and logs each
 // request it refuses: that line is the listener's only record of a caller it turned away while it
 // started. main builds each gate's mux only once every dependency of its handlers is open, so a
@@ -557,12 +570,7 @@ func main() {
 	mux.Handle("/v1/", v1Handler)
 
 	// Phase 4: Start HTTP server (port already bound via net.Listen).
-	server := &http.Server{
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	server := newHTTPServer(mux)
 	fatal := make(chan error, 1)
 	go func() {
 		if err := server.Serve(ln); err != http.ErrServerClosed {

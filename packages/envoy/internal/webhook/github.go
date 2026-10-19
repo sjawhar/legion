@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/id"
@@ -71,6 +73,21 @@ const githubMaxBody = 25 << 20
 // GitHub sends fits.
 const githubBodyBudget = 64 << 20
 
+// githubBodyDeadline bounds how long, from the handler's start, the route reads a delivery's body,
+// and githubHandleDeadline how long after that the handler has to verify, record, publish and
+// answer. The listener's server gives every route 10 s from the request's start for all of that,
+// which a body of several megabytes sent through a proxy can need more than: the read then fails,
+// its refusal cannot be written, and the delivery is lost. A proxy that buffers the body first and
+// gives its upstream 60 s (nginx's proxy timeouts) still waits for an answer inside these bounds.
+//
+// The bounds are absolute, so they also cap what a sender that stalls can hold: its one connection
+// and at most twice the bytes it has sent (bodyBudget) for githubBodyDeadline, and, when it holds
+// the budget's right to go past the limit, the other deliveries waiting for room for that long.
+const (
+	githubBodyDeadline   = 60 * time.Second
+	githubHandleDeadline = 15 * time.Second
+)
+
 // GitHubHandler returns the HTTP handler for GitHub webhook events.
 func GitHubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publisher, ci CIRecorder) http.HandlerFunc {
 	return githubHandler(secret, mentionTrigger, reviewerAppID, publisher, ci, newBodyBudget(githubBodyBudget))
@@ -83,10 +100,16 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 			w.WriteHeader(http.StatusOK)
 			return
 		}
+		start := time.Now()
+		extendDeadlines(w, start)
 		read := bodies.begin()
 		defer read.release()
-		body, err := read.readAll(r.Context(), r.Body, r.ContentLength, githubMaxBody)
+		counted := &countingReader{r: r.Body}
+		body, err := read.readAll(r.Context(), counted, r.ContentLength, githubMaxBody)
 		if err != nil {
+			log.Printf("github body read failed delivery=%s event=%s content_length=%d read=%d elapsed=%s: %v",
+				r.Header.Get("X-GitHub-Delivery"), r.Header.Get("X-GitHub-Event"), r.ContentLength,
+				counted.n, time.Since(start).Round(time.Millisecond), err)
 			var maxBytesErr *http.MaxBytesError
 			if errors.As(err, &maxBytesErr) {
 				http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
@@ -181,4 +204,34 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	}
+}
+
+// extendDeadlines moves this request's connection deadlines from the server's to the route's own,
+// counted from start. A ResponseWriter that has no connection (a test's recorder) has none to move.
+func extendDeadlines(w http.ResponseWriter, start time.Time) {
+	rc := http.NewResponseController(w)
+	for _, set := range []struct {
+		name string
+		fn   func(time.Time) error
+		at   time.Time
+	}{
+		{"read", rc.SetReadDeadline, start.Add(githubBodyDeadline)},
+		{"write", rc.SetWriteDeadline, start.Add(githubBodyDeadline + githubHandleDeadline)},
+	} {
+		if err := set.fn(set.at); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			log.Printf("WARN github %s deadline not extended: %v", set.name, err)
+		}
+	}
+}
+
+// countingReader counts the bytes read through it, so a failed body read can say how far it got.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }

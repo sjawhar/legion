@@ -2124,6 +2124,17 @@ the synchronous listener call records the sent or failed attempt instead of blin
   checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
   is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
   than being published again every tick.
+- The listener's HTTP server gives every route 10 s from the request's start for the header read,
+  the body read, the handler and the response (`newHTTPServer`, `cmd/listener/main.go`). The GitHub
+  webhook route alone moves its own connection's deadlines (`extendDeadlines`): 60 s from the
+  handler's start to read the body (`githubBodyDeadline`) and 15 s more to answer
+  (`githubHandleDeadline`). A body of several megabytes sent through a proxy can take longer than
+  10 s to arrive, and a read the server cut off could not be answered, so the delivery was lost.
+  Inside a proxy's 60 s wait for its upstream, the route now reads it whole and publishes it. The
+  bounds are absolute, so a sender that stalls holds its connection, and at most twice the bytes
+  it has sent (`bodyBudget`), for 60 s. A body read that fails is logged
+  `github body read failed` with the delivery id, event, declared length, bytes read and elapsed
+  time, and answered 400 (413 past GitHub's 25 MB cap).
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
   `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order
