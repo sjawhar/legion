@@ -36,10 +36,18 @@ Extends docs/solutions/daemon/launch-hold-serve-state-spawn-nothing-until-proven
   close to retire. Any other error is a store that did not answer and ends nothing: a daemon
   suspension ends the claim's phase (`settle` retires its task), so the claim instead waits
   `launching` with no process, its task kept, and `TimerRelaunch` tries the same relaunch again at
-  the probe interval (`TestARetirementWhoseRelaunchTheStoreDoesNotCheckKeepsItsTaskAndRelaunchesAtTheProbeInterval`).
+  the probe interval (`relaunchLater`;
+  `TestARetirementWhoseRelaunchTheStoreDoesNotCheckKeepsItsTaskAndRelaunchesAtTheProbeInterval`).
+  A launch whose own `launching` write fails after `letGo` has the same shape and waits the same
+  way (`TestARetirementWhoseRelaunchTheStoreDoesNotWriteKeepsItsTaskAndRelaunchesAtTheProbeInterval`):
+  any step that has let the process go and then fails must leave a timer that relaunches, or nothing
+  does before a restart. `letGo` drops the waiting relaunch with its timer.
 - `launching` with no locator is the only live state that records no process, and the fence keeps
   it so: a hello is dropped and a registration refused there, since neither came from a process
-  the claim records (`TestAHelloOrRegistrationAtALaunchThatRecordsNoProcessPromotesNothing`).
+  the claim records (`TestAHelloOrRegistrationAtALaunchThatRecordsNoProcessPromotesNothing`). A
+  row an earlier daemon wrote live with no locator is repaired at boot: `restore` puts every such
+  claim back to `launch_uncertain` and relaunches it
+  (`TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunched`).
 - A trigger posted once at boot needs a periodic re-post, or a refusal (a tree cleanup reserved,
   a moved epoch, a transient store error) strands the claim in the state the trigger meant to
   leave: ride `reconcileOrphans`, the one periodic pass that already reads every claim, and let
