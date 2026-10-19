@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,7 +33,7 @@ import (
 func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T) {
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
@@ -40,7 +42,7 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 	}).Handler
 	root, child := "LEGION-208", "LEGION-209"
 	approved := 1
-	h.recordIssue(record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		if err := records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)}); err != nil {
 			return err
@@ -50,8 +52,8 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 		t.Fatalf("seed the live tree: %v", err)
 	}
 	statuses.issues = map[string]dispatch.Issue{
-		root:  {Key: root, Status: "in_progress"},
-		child: {Key: child, Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
+		root:  {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		child: {Key: child, ResolvedRepo: "acme/widgets", Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
 	}
 	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 	release := func() {
@@ -80,6 +82,64 @@ func TestWaveReleaseRecordsAndStartsAChildDispatchAlreadyShowsTodo(t *testing.T)
 	}
 }
 
+// A todo child whose repository cannot be read before it is recorded (the daemon's preparation
+// reads Dispatch's issue detail, the repository's Apps and its default branch from GitHub) is not
+// released: the answer names the read that failed, whatever answered it, and records nothing, so
+// the architect's retry of release_children records it. A child held back for a read of the
+// repository mapping (intake.RetryLater) is answered the release's backoff, naming the wait.
+func TestWaveReleaseNamesTheRepositoryReadThatFailed(t *testing.T) {
+	for _, tc := range []struct {
+		name, code, want string
+		status           int
+		failure          error
+	}{
+		{"a read that failed", "REPOSITORY_READ_FAILED",
+			"could not read the repository of LEGION-209: read the repository Dispatch resolves for LEGION-209: Dispatch is down; retry release_children",
+			http.StatusBadGateway, errors.New("read the repository Dispatch resolves for LEGION-209: Dispatch is down")},
+		{"a child held for a read of the mapping", "CHILD_RELEASE_BACKOFF",
+			"LEGION-209: LEGION-209 resolves to zeta/tools, which the repository mapping did not serve when last read; retry after 1s",
+			http.StatusConflict, &intake.RetryLater{After: time.Second, Err: errors.New("LEGION-209 resolves to zeta/tools, which the repository mapping did not serve when last read")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			records := record.NewStore()
+			engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateOff}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			statuses := &statusRecorder{}
+			h.handler = NewServer("127.0.0.1", 8437, Options{
+				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+				Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+				Handlers: []intake.Handler{engine}, Dispatch: statuses,
+				PrepareRepository: func(_ context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
+					return issue, tc.failure
+				},
+			}).Handler
+			root, child := "LEGION-208", "LEGION-209"
+			h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+			if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+				return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
+			}); err != nil {
+				t.Fatalf("seed the live tree: %v", err)
+			}
+			statuses.issues = map[string]dispatch.Issue{
+				root:  {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+				child: {Key: child, ResolvedRepo: "acme/widgets", Title: "the child", Status: "todo", Parent: &root, LastSeq: 7},
+			}
+			architect := newLiveClaim(t, h, root, claim.RoleArchitect)
+			recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil)
+			var failure struct{ Code, Error string }
+			if err := json.Unmarshal(recorder.Body.Bytes(), &failure); err != nil {
+				t.Fatalf("wave release = %d %q, not a failure body: %v", recorder.Code, recorder.Body, err)
+			}
+			if recorder.Code != tc.status || failure.Code != tc.code || failure.Error != tc.want {
+				t.Fatalf("wave release = %d %s %q, want %d %s %q", recorder.Code, failure.Code, failure.Error, tc.status, tc.code, tc.want)
+			}
+			if recorded := recordedChild(t, h, child); recorded != nil {
+				t.Fatalf("the child's record = %#v after a failed preparation, want none", recorded)
+			}
+		})
+	}
+}
+
 func recordedChild(t *testing.T, h *harness, key string) *record.Issue {
 	t.Helper()
 	var got *record.Issue
@@ -101,7 +161,7 @@ func recordedChild(t *testing.T, h *harness, key string) *record.Issue {
 func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) {
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories, DesignGate: config.DesignGateRootIssues}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
@@ -109,16 +169,16 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 		Handlers: []intake.Handler{engine}, Dispatch: statuses,
 	}).Handler
 	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
-	h.recordIssue(record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)})
 	}); err != nil {
 		t.Fatalf("seed the live tree: %v", err)
 	}
 	statuses.issues = map[string]dispatch.Issue{
-		root:   {Key: root, Status: "in_progress"},
-		parent: {Key: parent, Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
-		child:  {Key: child, Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
+		root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "triage", Parent: &root, LastSeq: 2},
+		child:  {Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
 	}
 	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 	release := func() *httptest.ResponseRecorder {
@@ -131,9 +191,9 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 		t.Fatalf("the child before its parent is recorded = %#v, want none", got)
 	}
 	// The parent's todo event, from the release's write, reaches the daemon.
-	statuses.issues[parent] = dispatch.Issue{Key: parent, Title: parent, Status: "todo", Parent: &root, LastSeq: 3}
+	statuses.issues[parent] = dispatch.Issue{Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "todo", Parent: &root, LastSeq: 3}
 	if _, err := intake.ApplyFact(context.Background(), h.store.Pool(), "dispatch", "parent-todo", intake.DispatchIssue{
-		Key: parent, Seq: 3, Type: "issue.updated", Status: "todo", Title: parent, Parent: root,
+		Key: parent, ResolvedRepo: "acme/widgets", Seq: 3, Type: "issue.updated", Status: "todo", Title: parent, Parent: root,
 	}, engine); err != nil {
 		t.Fatalf("apply the parent's todo event: %v", err)
 	}
@@ -155,7 +215,7 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testing.T) {
 	h := newHarness(t)
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{Project: testProject}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(records, workflow.Config{Project: testProject, Repositories: testRepositories}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	statuses := &statusRecorder{}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
@@ -163,7 +223,7 @@ func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testi
 		Handlers: []intake.Handler{engine}, Dispatch: statuses,
 	}).Handler
 	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
-	h.recordIssue(record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	h.recordIssue(record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		for _, put := range []error{
 			records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Now()}),
@@ -178,9 +238,9 @@ func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testi
 		t.Fatalf("seed retry: %v", err)
 	}
 	statuses.issues = map[string]dispatch.Issue{
-		root:   {Key: root, Status: "in_progress"},
-		parent: {Key: parent, Title: parent, Status: "todo", Parent: &root, LastSeq: 3},
-		child:  {Key: child, Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
+		root:   {Key: root, ResolvedRepo: "acme/widgets", Status: "in_progress"},
+		parent: {Key: parent, ResolvedRepo: "acme/widgets", Title: parent, Status: "todo", Parent: &root, LastSeq: 3},
+		child:  {Key: child, ResolvedRepo: "acme/widgets", Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
 	}
 	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil), http.StatusConflict, "CHILD_RELEASE_STALLED")

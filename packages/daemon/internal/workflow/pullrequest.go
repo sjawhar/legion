@@ -26,7 +26,7 @@ import (
 // counted attempt. A new generation deletes a pull request that is not open, and all of them with
 // it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
-	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
+	issue, err := e.issueForBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
@@ -106,7 +106,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 // implementing a head that arrives once the implementer has completed is the pull request its
 // completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
-	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
+	pr, err := e.pullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
@@ -148,7 +148,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 }
 
 func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.Result, error) {
-	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
+	pr, err := e.pullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil {
 		return intake.Result{}, err
 	}

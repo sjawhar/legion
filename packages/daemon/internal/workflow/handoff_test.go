@@ -21,7 +21,7 @@ import (
 func TestReworkRoundAdvancesOnlyOnThatRoundsHandoff(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-1", CheckedHead: "head-1", Failing: []string{}, Required: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "round-0"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
@@ -79,7 +79,7 @@ func TestIgnoredCompletionsAreRefused(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: tc.current, Generation: 1, Status: fixtureStatus(tc.current), Rank: "U"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: tc.current, Generation: 1, Status: fixtureStatus(tc.current), Rank: "U"})
 			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact", LatestVersion: 1, ApprovedVersion: new(1)})
 			result, err := intake.ApplyFact(t.Context(), pool, "api", tc.name, tc.fact, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
 			if err != nil {
@@ -118,7 +118,7 @@ func assertPhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
 func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Required: []string{"ci"}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
 	engine := testEngine(config.DesignGateRootIssues, nil)
@@ -139,7 +139,7 @@ func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 func TestAnExhaustedCountPublishesPRBlockedOnlyOnARedSettlement(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FixAttempts: 3, HeadCounted: "head", Required: []string{"ci"}})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	settle := func(eventID string, generation int64, failing []string) {
@@ -167,7 +167,7 @@ func TestAnExhaustedCountPublishesPRBlockedOnlyOnARedSettlement(t *testing.T) {
 func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 	complete := func(eventID string, fact intake.HandoffComplete) *intake.Refusal {

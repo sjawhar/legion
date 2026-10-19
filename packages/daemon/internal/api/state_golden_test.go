@@ -46,10 +46,12 @@ func populatedState() State {
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {
-				Key:        "LEGION-208",
-				Generation: 3,
-				Phase:      phase.Implementing,
-				Status:     "in_progress",
+				Key:           "LEGION-208",
+				Generation:    3,
+				Phase:         phase.Implementing,
+				Status:        "in_progress",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
 					State:   "ready",
@@ -105,6 +107,7 @@ func populatedState() State {
 					},
 				},
 				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
 					ChecksVerdict:  "pending",
@@ -122,11 +125,13 @@ func populatedState() State {
 				},
 			},
 			"LEGION-210": {
-				Key:        "LEGION-210",
-				Generation: 1,
-				Phase:      phase.Held,
-				Status:     "in_progress",
-				HoldReason: "escalated",
+				Key:           "LEGION-210",
+				Generation:    1,
+				Phase:         phase.Held,
+				Status:        "in_progress",
+				Repo:          "zeta/tools",
+				DefaultBranch: "release/v7.1",
+				HoldReason:    "escalated",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
 				},
@@ -134,14 +139,17 @@ func populatedState() State {
 			// LEGION-207 merged and closed; its production check is open at its second look, woken by
 			// Dispatch's issue.deployed, its implementer working that look in the kept pod.
 			"LEGION-207": {
-				Key:        "LEGION-207",
-				Generation: 2,
-				Phase:      phase.Done,
-				Status:     "done",
+				Key:           "LEGION-207",
+				Generation:    2,
+				Phase:         phase.Done,
+				Status:        "done",
+				Repo:          "acme/widgets",
+				DefaultBranch: "main",
 				Workers: map[claim.Role]PhaseView{
 					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_207", State: "working"}, HandoffCommit: "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40", Rounds: 1},
 				},
 				PullRequest: &PullRequestView{
+					Repo:           "acme/widgets",
 					Number:         1239,
 					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
 					ReviewDecision: "approved",
@@ -181,6 +189,13 @@ func populatedState() State {
 			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
 			RolesWithoutResources: []claim.Role{claim.RoleTester},
 		}.Report()),
+		// The project maps three repositories of two owners; the review App is not installed on one,
+		// which the daemon leaves out.
+		Repositories: RepositoriesView{
+			Owners:  []string{"acme", "zeta"},
+			Mapped:  []MappedRepositoryView{{Repo: "acme/widgets", Default: true}, {Repo: "zeta/tools"}},
+			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+		},
 	}
 }
 
@@ -200,11 +215,13 @@ func TestStateStage3Golden(t *testing.T) {
 		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
 		Issues: map[string]Issue{
 			"LEGION-208": {
-				Key:        "LEGION-208",
-				Generation: 4,
-				Phase:      phase.Reviewing,
-				Status:     "needs_review",
-				Workers:    map[claim.Role]PhaseView{},
+				Key:           "LEGION-208",
+				Generation:    4,
+				Phase:         phase.Reviewing,
+				Status:        "needs_review",
+				Repo:          "sjawhar/legion-smoke",
+				DefaultBranch: "main",
+				Workers:       map[claim.Role]PhaseView{},
 			},
 		},
 		PendingStatusWrites: []PendingStatusWrite{{

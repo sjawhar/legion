@@ -514,7 +514,7 @@ dispatch_url: https://dispatch.test
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://127.0.0.1:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: %q }
   review: { app_id: "2", private_key_command: %q }
@@ -906,7 +906,7 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: %q }
   review: { app_id: "2", private_key_command: %q }
@@ -958,7 +958,7 @@ dispatch_url: https://dispatch.internal.example
 dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }

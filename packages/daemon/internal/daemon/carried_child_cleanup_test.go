@@ -18,7 +18,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -46,7 +45,7 @@ func TestAnOldTreesCleanupBeforeTheNewTreesStartHandsTheCarriedChildsSandboxOver
 	// a pod, which suspends the Sandbox again; what it wrote is what the assertions read.
 	clock := time.Now()
 	runner := &outbox{pool: f.pool, records: f.records, project: "legion", dispatchProject: "LEGION", supervisor: f.sup, trees: st, tokens: outboxTokens{},
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), githubAPI: newBranchGitHub(t, nil, branchExists).url, defaultBranch: mainBranch,
+		stateDir: t.TempDir(), githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo"}}, notices: &outboxPublisher{},
 		log: f.logger, now: func() time.Time { return clock },
 	}
@@ -144,9 +143,9 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	records := record.NewStore()
 	expired := time.Now().Add(-time.Minute)
 	parent := rootKey
-	root := record.Issue{Key: rootKey, Project: "LEGION", Tree: rootKey, Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A",
+	root := record.Issue{Key: rootKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: rootKey, Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A",
 		LingerUntil: &expired, LastDispatchSeq: 1}
-	child := record.Issue{Key: childKey, Project: "LEGION", Tree: childKey, Parent: &parent, Title: "child", Phase: phase.Implementing, Generation: 2,
+	child := record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: childKey, Parent: &parent, Title: "child", Phase: phase.Implementing, Generation: 2,
 		Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "B", LastDispatchSeq: 2}
 	for _, issue := range []record.Issue{root, child} {
 		putOutboxIssue(t, pool, records, issue)

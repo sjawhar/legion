@@ -145,7 +145,7 @@ func TestAnApprovalEndsTheRoundWhateverCISays(t *testing.T) {
 // reports (classify.Missing), so classify.HeadVerdict is neither red nor green.
 func seedReviewUndecided(t *testing.T, pool *pgxpool.Pool, head string) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, CheckedHead: head, Failing: []string{},
@@ -171,7 +171,7 @@ func seedReviewOf(t *testing.T, pool *pgxpool.Pool, head, verdict string) {
 // own settlement, when verdict names one, ran each of them, and in a red one each failed.
 func seedReviewRequiring(t *testing.T, pool *pgxpool.Pool, head, verdict string, required ...string) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	pr := record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Required: required}
@@ -722,7 +722,7 @@ func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
 		t.Run(string(tc.from), func(t *testing.T) {
 			pool := migratedPool(t)
 			role := RoleFor(tc.from)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c0ffee", Required: []string{"lint"}})

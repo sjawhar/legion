@@ -28,7 +28,7 @@ import (
 // look runs in, where a phase start would finish without acting.
 func checkRoot() record.Issue {
 	until := time.Now().Add(time.Hour)
-	return record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
+	return record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
 }
 
 // openCheck is issue's production check on acme/widgets#42 at merge, opened an hour ago with look 1

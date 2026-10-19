@@ -72,7 +72,7 @@ func TestOnlyARedTheBaseBranchRequiresSendsTheWorkBack(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: tc.required})
@@ -140,7 +140,7 @@ func TestARequiredCheckCancelledOrMissingLeavesTheHeadUndecided(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			engine := testEngine(config.DesignGateRootIssues, nil)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{requiredGate}})
@@ -186,7 +186,7 @@ func TestARequiredCheckCancelledOrMissingLeavesTheHeadUndecided(t *testing.T) {
 // the pull request's recorded required set, nil for a row recorded before the daemon read one.
 func seedRoundOnRedsBesideTheGate(t *testing.T, pool *pgxpool.Pool, required []string) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42,
 		Branch: "legion/LEGION-208", HeadSHA: "handoff", CheckedHead: "code", Failing: redsBesideTheGate, CheckRuns: runsBesideTheGate,
@@ -272,7 +272,7 @@ func TestAnUnreadRequiredSetLeavesTheHeadUndecided(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
 			engine := testEngine(config.DesignGateRootIssues, nil)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
@@ -305,7 +305,7 @@ func TestAnUnreadRequiredSetLeavesTheHeadUndecided(t *testing.T) {
 func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 	const workflow = ".github/workflows/claude-pr-review.yml"
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion",
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), Failing: []string{},
@@ -332,7 +332,7 @@ func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 // (standingRed) does not act there, so the READY stands, nobody is told, and nothing is started.
 func TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root",
 		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 	// The head has moved to the READY head, the red settlement stands recorded at the code head it
 	// replaced, and the push between the two is not yet known: no verdict stands.

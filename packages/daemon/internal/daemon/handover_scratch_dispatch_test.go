@@ -55,10 +55,10 @@ func TestAHandOverReachesScratchDispatchAsOneEventCarryingTheTodoAndTheLabel(t *
 	until := time.Now().UTC()
 	parent := root
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}); err != nil {
 			return err
 		}
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: issue, Tree: root, Project: "LEGION", Title: issue, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}); err != nil {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: issue, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}); err != nil {
 			return err
 		}
 		return records.PutHandover(context.Background(), tx, record.Handover{Issue: issue, Tree: root, Generation: 2})

@@ -1067,7 +1067,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
-		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},
+		{"projects", file.Projects == nil, "every pod's workspace is a repository Dispatch maps to the daemon's project"},
 	} {
 		if rule.absent {
 			return fmt.Errorf("%s is required when runtime is kubernetes: %s", rule.key, rule.why)

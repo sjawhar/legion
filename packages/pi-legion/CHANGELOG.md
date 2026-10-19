@@ -59,6 +59,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 31 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
+  `legion state --json` carry each recorded issue's `repo` and `defaultBranch`, its pull request's
+  `repo`, and the state's `repositories` (the project's mapping as the daemon serves it: `owners`,
+  `mapped`, and `refused` with each left-out repository's `reason`). The strict reader refuses a
+  state without `repositories`. Install this release with a `legion` built from the same commit.
 - Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
   tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
   issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`

@@ -206,15 +206,16 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 
 // Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
 // itself, the one address the runtime hands every pod's shim, and the runtime is given the
-// workflow's App tokens. The host's own agent machinery never runs: no pane launcher is
-// installed, no Dispatch token file is written, and the workflow's boot has no worker-bin stage.
+// workflow's App tokens and its repository of an issue, already set when the runtime is built. The
+// host's own agent machinery never runs: no pane launcher is installed, no Dispatch token file is
+// written, and the workflow's boot has no worker-bin stage.
 func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
 	tokens := &workflowTokenRecorder{}
 	record := &built{}
 	o := fakeRuntime(fake.NewRuntime(), record)
-	o.workflowTokens = tokens
+	o.workflowTokens, o.githubAPI = tokens, repositoriesGitHub(t)
 	var logged syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	ctx, cancel := context.WithCancel(context.Background())
@@ -229,7 +230,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	awaitHealthz(t, cfg, done)
 
 	record.mu.Lock()
-	address, apps := record.address, record.apps
+	address, apps, repository := record.address, record.apps, record.repository
 	record.mu.Unlock()
 	prefix := "tcp://" + cfg.Bind + ":"
 	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
@@ -250,6 +251,12 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	}
 	if apps != tokens {
 		t.Errorf("the runtime was handed App tokens %v, want the workflow's", apps)
+	}
+	if repository == nil {
+		t.Fatal("the runtime was handed no repository rule, want the workflow's")
+	}
+	if repo, branch, err := repository(ctx, "LEGSMOKE-9"); err != nil || repo.String() != "acme/widgets" || branch != "main" {
+		t.Errorf("the runtime's repository of an unrecorded issue = %s@%s, %v; want the project's default acme/widgets@main", repo, branch, err)
 	}
 	for _, path := range []string{filepath.Join(cfg.StateDir, "bin"), filepath.Join(cfg.StateDir, "secrets", "dispatch-token")} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
@@ -351,7 +358,7 @@ func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) 
 	cfg.DaemonURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
 	record := &built{}
 	o := fakeRuntime(fake.NewRuntime(), record)
-	o.workflowTokens = &workflowTokenRecorder{}
+	o.workflowTokens, o.githubAPI = &workflowTokenRecorder{}, repositoriesGitHub(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- run(ctx, cfg, Build{}, quietLogger(), o) }()
@@ -505,7 +512,7 @@ dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 controller: daemon
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }

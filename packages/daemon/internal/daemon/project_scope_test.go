@@ -51,7 +51,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	// any the shared database already holds.
 	var base int
 	root := func(key, status, rank string) record.Issue {
-		return record.Issue{Key: key, Tree: key, Project: other, Title: "Another project's root", Phase: phase.Admitted, Generation: 1, Status: status, Rank: rank}
+		return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: other, Title: "Another project's root", Phase: phase.Admitted, Generation: 1, Status: status, Rank: rank}
 	}
 	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
 		taken, err := records.Slots(ctx, tx)
@@ -92,6 +92,9 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	ownRun := make(chan struct{})
 	var ownOnce sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if servedMapping(t, w, r, own[:strings.Index(own, "-")]) {
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/issues/"+own) {
 			ownOnce.Do(func() { close(ownRun) })
 		}
@@ -104,7 +107,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode([]map[string]any{{"key": own, "title": "This project's root", "status": "todo", "parent": nil, "rank": "m", "labels": []string{dispatch.LegionLabel}}}); err != nil {
+		if err := json.NewEncoder(w).Encode([]map[string]any{{"key": own, "title": "This project's root", "status": "todo", "parent": nil, "rank": "m", "labels": []string{dispatch.LegionLabel}, "resolved_repo": "acme/widgets"}}); err != nil {
 			t.Errorf("write Dispatch issues: %v", err)
 		}
 	}))

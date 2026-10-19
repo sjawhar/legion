@@ -81,6 +81,8 @@ func appTokens(t *testing.T, discover func(w http.ResponseWriter, r *http.Reques
 			n := standIn.discoveries[app]
 			standIn.mu.Unlock()
 			discover(w, r, app, n)
+		case strings.HasSuffix(r.URL.Path, "/installation"):
+			fmt.Fprint(w, `{"id":77}`)
 		case strings.HasSuffix(r.URL.Path, "/access_tokens"):
 			fmt.Fprintf(w, `{"token":"installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
 		case r.URL.Path == "/app":
@@ -127,6 +129,7 @@ func bootsOrExitsLogging(t *testing.T, cfg config.Config, tokens appauth.Tokens,
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
 			workflowTokens: tokens,
+			githubAPI:      repositoriesGitHub(t),
 		})
 	}()
 	stopped := false

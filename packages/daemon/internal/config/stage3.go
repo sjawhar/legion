@@ -13,7 +13,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -37,10 +36,11 @@ type Gates struct {
 	Design DesignGate
 }
 
-// Project maps a Dispatch project prefix to its repository, parsed at load, its optional
-// merge-queue role, merge rules, and the Slack channels whose @-mentions reach its controller.
+// Project is a Dispatch project prefix's configuration: its optional merge-queue role, merge rules,
+// and the Slack channels whose @-mentions reach its controller. Its repositories are Dispatch's
+// mapping (Settings → Repositories → Projects), which the daemon reads at boot and when it
+// changes, never this file.
 type Project struct {
-	Repo           ghrepo.Repository
 	MergeQueueRole string
 	Merge          MergeRules
 	// SlackChannels are `slack_channels`, the Slack channel ids whose app mentions the project's
@@ -143,11 +143,14 @@ func readProjects(value *yaml.Node, key string) (map[string]Project, error) {
 
 func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
-		return Project{}, fmt.Errorf("%s must be a mapping with repo", key)
+		return Project{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "repo", "merge", "merge_queue_role", "mergeQueueRole", "slack_channels")
+	fields, err := members(value, key, "merge", "merge_queue_role", "mergeQueueRole", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
+		if unknown.name == "repo" {
+			return Project{}, fmt.Errorf(`Unknown key %q: the project's repositories are Dispatch's mapping (Settings → Repositories → Projects)`, key+".repo")
+		}
 		// The shipped loader's own words (validateProjectEntry, config.ts).
 		return Project{}, fmt.Errorf(`Unknown key %q`, key+"."+unknown.name)
 	}
@@ -155,21 +158,11 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 		return Project{}, err
 	}
 	var project Project
-	repo, err := stringOf(fields["repo"], key+".repo")
-	if err != nil {
-		return Project{}, err
-	}
 	role := fields["merge_queue_role"]
 	if role == nil {
 		role = fields["mergeQueueRole"]
 	}
 	if project.MergeQueueRole, err = stringOf(role, key+".merge_queue_role"); err != nil {
-		return Project{}, err
-	}
-	if repo == "" {
-		return Project{}, fmt.Errorf(`%s.repo must be "owner/name" (got "undefined")`, key)
-	}
-	if project.Repo, err = ghrepo.Parse(key+".repo", repo); err != nil {
 		return Project{}, err
 	}
 	if project.MergeQueueRole != "" && !roleNamePattern.MatchString(project.MergeQueueRole) {
@@ -558,8 +551,8 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.GitHubApps != nil {
 		cfg.GitHubApps = *file.GitHubApps
 	}
-	// A workflow boot needs its Dispatch bearer, its intake, and its own project's repository; each
-	// is refused here, so `legion start --check-config` never passes a file `legion start` refuses.
+	// A workflow boot needs its Dispatch bearer, its intake, and its own project; each is refused
+	// here, so `legion start --check-config` never passes a file `legion start` refuses.
 	if file.DispatchURL != nil {
 		switch _, ok := cfg.Projects[cfg.Project]; {
 		case cfg.DispatchTokenFile == "":

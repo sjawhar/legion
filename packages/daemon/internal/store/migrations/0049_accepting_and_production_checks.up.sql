@@ -1,4 +1,4 @@
--- 0047_accepting_and_production_checks.up.sql — the architect accepts before the merge, the merge
+-- 0049_accepting_and_production_checks.up.sql — the architect accepts before the merge, the merge
 -- closes the issue, and the production check becomes work after the close (LEGION-781).
 --
 -- Phases. `accepting` sits between `reviewing` and `retro`; `production_check` is no phase. An

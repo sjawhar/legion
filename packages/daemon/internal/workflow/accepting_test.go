@@ -21,7 +21,7 @@ const acceptingRequired = "ci"
 // and approved at head.
 func seedAccepting(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Accepting, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Accepting, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
 		CheckedHead: "head", Required: []string{acceptingRequired}, CheckRuns: []record.AttemptRun{{Name: acceptingRequired, ID: 1}}, Failing: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "implement-1"})
@@ -35,7 +35,7 @@ func seedAccepting(t *testing.T, pool *pgxpool.Pool) {
 // the architect's cue to accept.
 func TestAnApprovalMovesTheIssueToAcceptingAndStartsNobody(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1", Summary: "looks right"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
 
@@ -63,7 +63,7 @@ func TestSignOffIsRefusedOutsideAccepting(t *testing.T) {
 	for _, at := range []phase.Phase{phase.Reviewing, phase.AwaitingMerge} {
 		t.Run(string(at), func(t *testing.T) {
 			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: at, Generation: 1, Status: fixtureStatus(at), Rank: "U"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: at, Generation: 1, Status: fixtureStatus(at), Rank: "U"})
 			result, err := intake.ApplyFact(context.Background(), pool, "api", "signoff", intake.SignOff{Issue: "LEGION-208"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
 			if err != nil || result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Code != "SIGNOFF_OUTSIDE_ACCEPTING" {
 				t.Fatalf("sign-off in %s = %+v, %v; want 409 SIGNOFF_OUTSIDE_ACCEPTING", at, result.Refusal, err)
@@ -210,7 +210,7 @@ func TestABackwardMoveOntoAcceptingWritesNeedsReview(t *testing.T) {
 		t.Run(string(from), func(t *testing.T) {
 			pool := migratedPool(t)
 			role := RoleFor(from)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: from, Generation: 1, Status: "retro", Rank: "U"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: from, Generation: 1, Status: "retro", Rank: "U"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
 			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil),
 				intake.BackwardMove{Issue: "LEGION-208", Requester: role, To: phase.Accepting, Reason: "the architect should look again"})

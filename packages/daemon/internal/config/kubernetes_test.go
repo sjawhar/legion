@@ -32,7 +32,7 @@ operator_token_file: /var/run/legion/OPERATOR_TOKEN
 dispatch_url: https://dispatch.internal.example
 dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
-  LEGSMOKE: { repo: sjawhar/legion-smoke }
+  LEGSMOKE: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }
@@ -744,8 +744,8 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "projects absent",
-			body: kubernetesWith("projects:\n  LEGSMOKE: { repo: sjawhar/legion-smoke }\n", ""),
-			want: "projects is required when runtime is kubernetes: every pod's workspace is its project's repository",
+			body: kubernetesWith("projects:\n  LEGSMOKE: {}\n", ""),
+			want: "projects is required when runtime is kubernetes: every pod's workspace is a repository Dispatch maps to the daemon's project",
 		},
 		{
 			name: "omp_invocation set",
@@ -1009,7 +1009,7 @@ nats_urls:
 dispatch_url: https://dispatch.internal.example
 dispatch_token_file: /tmp/stage4b/dispatch-token
 projects:
-  LEGSMOKE: { repo: sjawhar/legion-smoke }
+  LEGSMOKE: {}
 gates:
   design: off
 admission_cap: 2

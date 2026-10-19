@@ -52,7 +52,7 @@ func newCheckRig(t *testing.T, builtFrom string) checkRig {
 func childCheckRig(t *testing.T, builtFrom string) checkRig {
 	t.Helper()
 	rig := newCheckRig(t, builtFrom)
-	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	rig.apply("merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"})
 	return rig
 }
@@ -63,9 +63,9 @@ func childCheckRig(t *testing.T, builtFrom string) checkRig {
 func rootCheckRig(t *testing.T) checkRig {
 	t.Helper()
 	rig := newCheckRig(t, "")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U", LastDispatchSeq: 1})
 	parent := "LEGION-208"
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	rig.apply("merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"})
 	return rig
@@ -89,7 +89,7 @@ func TestACheckReportWhileTheRootLingersIsRecorded(t *testing.T) {
 // its look closed.
 func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
 	rig := childCheckRig(t, "")
-	starts := outboxOf(t, rig.pool, "LEGION-209", "supervise")
+	starts := issueOutboxOf(t, rig.pool, "LEGION-209", "supervise")
 	start := starts[len(starts)-1]
 	if decodeSupervise(t, start).CheckLook != 1 {
 		t.Fatalf("the newest supervise row before the report = %s, want the check's look 1 start", start.payload)
@@ -108,7 +108,7 @@ func TestAPendingReportSuspendsTheImplementerAfterTheLooksStart(t *testing.T) {
 		t.Fatalf("issue suspensions = %+v, want one keeping row", suspensions)
 	}
 	for _, kind := range []string{"supervise", "issue_suspend"} {
-		rows := outboxOf(t, rig.pool, "LEGION-209", kind)
+		rows := issueOutboxOf(t, rig.pool, "LEGION-209", kind)
 		if rows[len(rows)-1].id <= start.id {
 			t.Fatalf("the newest %s row %d is not newer than the look's start %d", kind, rows[len(rows)-1].id, start.id)
 		}
@@ -209,7 +209,7 @@ func TestIssueDeployedWakesTheCheckOnce(t *testing.T) {
 	if len(starts) != 2 || starts[1].CheckLook != 2 || !strings.Contains(starts[1].Task, "Look 2, woken by Dispatch's issue.deployed: run 77 completed 2026-10-19T06:00:00Z.") {
 		t.Fatalf("start rows = %+v, want look 2's naming its wake", starts)
 	}
-	if looks := outboxOf(t, rig.pool, "LEGION-209", "check_look"); len(looks) != 2 || decodeLook(t, looks[1]) != 2 || !looks[1].nextAt.Equal(rig.clock.now.Add(CheckLookBound)) {
+	if looks := issueOutboxOf(t, rig.pool, "LEGION-209", "check_look"); len(looks) != 2 || decodeLook(t, looks[1]) != 2 || !looks[1].nextAt.Equal(rig.clock.now.Add(CheckLookBound)) {
 		t.Fatalf("check_look rows = %+v, want look 2's due two hours after its wake", looks)
 	}
 	deployed.RunID = 78
@@ -258,7 +258,7 @@ func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
 // repository configured.
 func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-300", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-300", HeadSHA: "w", Failing: []string{}})
 	rig.apply("widgets-merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 7, MergeSHA: "merge-w"})
 
@@ -365,7 +365,7 @@ func TestCheckLookEndedEndsASilentLook(t *testing.T) {
 // cause, where the same facts naming the second check end the look and start the next.
 func TestAFactOfAReplacedCheckChangesNothingOfItsSuccessor(t *testing.T) {
 	rig := newCheckRig(t, "sjawhar/legion")
-	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	firstOpened := checkOpened.Add(-24 * time.Hour)
 	firstClosed := firstOpened.Add(2 * time.Hour)
 	seedRecord(t, rig.pool, func(tx pgx.Tx) error {
@@ -450,7 +450,7 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			rig := childCheckRig(t, "sjawhar/legion")
 			rig.apply("early-bound", intake.CheckBound{Issue: "LEGION-209"})
-			if bounds := outboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 2 || !bounds[1].nextAt.Equal(checkOpened.Add(checkBound)) {
+			if bounds := issueOutboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 2 || !bounds[1].nextAt.Equal(checkOpened.Add(checkBound)) {
 				t.Fatalf("check_bound rows after an early bound = %+v, want a second deferred to the check's bound", bounds)
 			}
 			rig.clock.now = checkOpened.Add(checkBound)
@@ -459,7 +459,7 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 			if check.Looks != 1 || !check.LookOpen || check.Last {
 				t.Fatalf("the check after a bound during look 1 = %+v, want look 1 still open and not last", check)
 			}
-			if bounds := outboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 3 || !bounds[2].nextAt.Equal(rig.clock.now.Add(CheckLookBound)) {
+			if bounds := issueOutboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 3 || !bounds[2].nextAt.Equal(rig.clock.now.Add(CheckLookBound)) {
 				t.Fatalf("check_bound rows after a bound during a look = %+v, want a third deferred two hours", bounds)
 			}
 			rig.apply("pending", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pending"})
@@ -494,7 +494,7 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 				t.Fatalf("issue suspensions = %+v, want look 1's keeping row and the close's releasing one", got)
 			}
 			rig.apply("bound-after-close", intake.CheckBound{Issue: "LEGION-209"})
-			if bounds := outboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 3 {
+			if bounds := issueOutboxOf(t, rig.pool, "LEGION-209", "check_bound"); len(bounds) != 3 {
 				t.Fatalf("check_bound rows after the close = %d, want no more", len(bounds))
 			}
 		})
@@ -525,7 +525,7 @@ func TestTheTreesCloseWaitsForAnOpenCheckAndRunsOnceItCloses(t *testing.T) {
 	assertOutboxCount(t, rig.pool, "linger_close", 1)
 
 	rig.apply("pass", intake.CheckReport{Issue: "LEGION-208", Look: 1, Verdict: "pass"})
-	closes := outboxOf(t, rig.pool, "LEGION-208", "linger_close")
+	closes := issueOutboxOf(t, rig.pool, "LEGION-208", "linger_close")
 	if len(closes) != 2 || !closes[1].nextAt.Equal(rig.clock.now) {
 		t.Fatalf("linger_close rows after the check's close = %+v, want a second due now", closes)
 	}
@@ -578,17 +578,17 @@ func TestReenterChildClosesItsOpenCheckAsNotRun(t *testing.T) {
 // and another project's, stay as they are.
 func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t *testing.T) {
 	rig := newCheckRig(t, "")
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-301", Tree: "LEGION-301", Project: "LEGION", Title: "alone", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "A"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-301", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-301", Project: "LEGION", Title: "alone", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "A"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-301", Repo: "sjawhar/legion", Number: 1, Branch: "legion/LEGION-301", HeadSHA: "h1", Failing: []string{}})
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-302", Tree: "LEGION-302", Project: "LEGION", Title: "parent", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-302", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-302", Project: "LEGION", Title: "parent", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-302", Repo: "sjawhar/legion", Number: 2, Branch: "legion/LEGION-302", HeadSHA: "h2", MergeSHA: "m2", Failing: []string{}})
 	parent := "LEGION-302"
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-303", Tree: "LEGION-302", Project: "LEGION", Title: "running child", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "C", LastDispatchSeq: 1})
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-304", Tree: "LEGION-304", Project: "LEGION", Title: "held", Phase: phase.Held, Hold: &record.Hold{From: phase.AwaitingMerge}, Generation: 1, Status: "retro", Rank: "D"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-303", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-302", Project: "LEGION", Title: "running child", Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "C", LastDispatchSeq: 1})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-304", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-304", Project: "LEGION", Title: "held", Phase: phase.Held, Hold: &record.Hold{From: phase.AwaitingMerge}, Generation: 1, Status: "retro", Rank: "D"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "LEGION-304", Repo: "sjawhar/legion", Number: 4, Branch: "legion/LEGION-304", HeadSHA: "h4", Failing: []string{}})
-	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-305", Tree: "LEGION-305", Project: "LEGION", Title: "open", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "E"})
+	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-305", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-305", Project: "LEGION", Title: "open", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "E"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-305", Repo: "sjawhar/legion", Number: 5, Branch: "legion/LEGION-305", HeadSHA: "h5", Failing: []string{}})
-	seedIssue(t, rig.pool, record.Issue{Key: "OTHER-1", Tree: "OTHER-1", Project: "OTHER", Title: "elsewhere", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "F"})
+	seedIssue(t, rig.pool, record.Issue{Key: "OTHER-1", Repo: "acme/other", DefaultBranch: "main", GitHubRepo: "acme/other", Tree: "OTHER-1", Project: "OTHER", Title: "elsewhere", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "F"})
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestMerged, Issue: "OTHER-1", Repo: "acme/other", Number: 6, Branch: "legion/OTHER-1", HeadSHA: "h6", Failing: []string{}})
 
 	rig.apply("boot", intake.DaemonBooted{Boot: 1})
@@ -651,7 +651,7 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 func checkCompares(t *testing.T, pool *pgxpool.Pool, issue string) []record.CheckCompare {
 	t.Helper()
 	var compares []record.CheckCompare
-	for _, row := range outboxOf(t, pool, issue, "check_compare") {
+	for _, row := range issueOutboxOf(t, pool, issue, "check_compare") {
 		var compare record.CheckCompare
 		if err := json.Unmarshal(row.payload, &compare); err != nil {
 			t.Fatalf("decode check_compare row %d: %v", row.id, err)

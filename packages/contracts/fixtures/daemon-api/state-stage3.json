@@ -21,6 +21,8 @@
       "generation": 4,
       "phase": "reviewing",
       "status": "needs_review",
+      "repo": "sjawhar/legion-smoke",
+      "defaultBranch": "main",
       "workers": {}
     }
   },
@@ -37,5 +39,10 @@
   ],
   "heldOutboxRows": [],
   "strandedClaims": [],
-  "capabilities": []
+  "capabilities": [],
+  "repositories": {
+    "owners": [],
+    "mapped": [],
+    "refused": []
+  }
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -182,7 +183,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, projectOwners(cfg))
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, p.repositories.Owners)
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -452,7 +453,8 @@ func requirements(key string, reservation config.RoleResources) (corev1.Resource
 // is installed and no Sandbox of a layout before this one — per-claim pods, or issue pods on one
 // tree volume — remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
+		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}

@@ -83,7 +83,7 @@ func reviewsStandInWith(t *testing.T, reviews func() string, reads *atomic.Int64
 // reviewReadRuntime is a workflow runtime over pool whose GitHub reads go to api, with the review
 // App's login set on the engine and the runtime as a boot sets both.
 func reviewReadRuntime(pool *pgxpool.Pool, api string) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", Repositories: testRepositories, ReviewRoundCap: 10, ReviewAppLogin: reviewReadApp}, quietLogger())
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: quietLogger(), githubAPI: api, reviewAppLogin: reviewReadApp,
@@ -485,7 +485,7 @@ func TestARateLimitOnTheReviewsReadEndsThePass(t *testing.T) {
 	seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
 			Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "V"}); err != nil {
 			return err
 		}

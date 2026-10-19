@@ -19,7 +19,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -97,7 +96,7 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Merging,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Merging,
 		Generation: 1, Status: "retro", Rank: "U"})
 	var mu sync.Mutex
 	disables := 0
@@ -1005,8 +1004,8 @@ func TestARateLimitDefersOnlyTheRowsThatSpendItsBudget(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
-			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
-			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-210", Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
 			issueOf := func(payload record.OutboxPayload) string {
 				switch payload.(type) {
 				case record.ReadyMerge:
@@ -1055,8 +1054,8 @@ func TestARateLimitedBatchRemembersEveryBudgetItExhausted(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-210", Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.IssueBranch{Generation: 1}, now))
@@ -1084,7 +1083,7 @@ func TestARateLimitStandsUntilTheLatestDeadlineOfTheBudgetsARowSpends(t *testing
 		pool := isolatedOutboxPool(t)
 		records := record.NewStore()
 		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
-		putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
+		putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
 		start := time.Now().UTC().Truncate(time.Microsecond)
 		clock := start
 		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
@@ -1122,7 +1121,7 @@ func TestARateLimitStandsUntilTheLatestDeadlineOfTheBudgetsARowSpends(t *testing
 		records := record.NewStore()
 		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
 		for _, key := range []string{"LEGION-210", "LEGION-211"} {
-			putOutboxIssue(t, pool, records, record.Issue{Key: key, Project: "LEGION", Tree: key, Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
+			putOutboxIssue(t, pool, records, record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: key, Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
 		}
 		now := time.Now().UTC().Truncate(time.Microsecond)
 		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.IssueBranch{Generation: 1}, now))
@@ -1318,10 +1317,10 @@ func (s readyMergeSeed) with(change func(*readyMergeSeed)) readyMergeSeed {
 // seedReadyMerge records issue as seed has it.
 func seedReadyMerge(t *testing.T, pool *pgxpool.Pool, records record.Store, issue string, seed readyMergeSeed) {
 	t.Helper()
-	child := record.Issue{Key: issue, Project: "LEGION", Tree: issue, Title: "Workflow", Phase: seed.at, Generation: 1, Status: "retro", Rank: "U"}
+	child := record.Issue{Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: issue, Title: "Workflow", Phase: seed.at, Generation: 1, Status: "retro", Rank: "U"}
 	if seed.lingers {
 		until, parent := time.Now().Add(time.Hour), "LEGION-207"
-		putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
+		putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
 			Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
 		child.Tree, child.Parent = "LEGION-207", &parent
 	}
@@ -1341,12 +1340,12 @@ func readyPullRequest(issue string, state record.PullRequestState) record.PullRe
 	return record.PullRequest{State: state, Issue: issue, Repo: "acme/widgets", Number: 42, Branch: "legion/" + issue, HeadSHA: "ready-head", Failing: []string{}}
 }
 
-// mergeRunner is the outbox the merge tests drive: as the implement App (roleTokens), for
-// acme/widgets, whose default branch is main (mainBranch), against GitHub at api, logging to log,
-// on the clock now.
+// mergeRunner is the outbox the merge tests drive: as the implement App (roleTokens), for the
+// repository each issue's record names (acme/widgets), against GitHub at api, logging to log, on
+// the clock now.
 func mergeRunner(pool *pgxpool.Pool, records record.Store, api string, log *slog.Logger, now func() time.Time) *outbox {
 	return &outbox{log: log, pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: api, defaultBranch: mainBranch, now: now}
+		githubAPI: api, now: now}
 }
 
 // leaseStealer is a record store whose ClaimRow lets another worker take every row it hands out, as

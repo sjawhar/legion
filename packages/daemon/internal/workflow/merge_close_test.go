@@ -27,7 +27,7 @@ import (
 func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 	pool := migratedPool(t)
 	now := time.Date(2026, 10, 19, 4, 0, 0, 0, time.UTC)
-	seedMergingChild(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	seedMergingChild(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, ProductionCheckBound: 48 * time.Hour, Clock: func() time.Time { return now }}, nil)
 
 	if result, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, engine, admissionStub{}); err != nil || result.Refusal != nil {
@@ -87,10 +87,10 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 		check.Looks != 1 || !check.LookOpen || !check.OpenedAt.Equal(now) || !check.BoundAt.Equal(now.Add(48*time.Hour)) || check.LastWakeKind != "merge" || check.Last {
 		t.Fatalf("the production check = %+v, want it open on sjawhar/legion#43 at merge-43, look 1 open, woken by the merge, bound 48h out", check)
 	}
-	if look := outboxOf(t, pool, "LEGION-209", "check_look"); len(look) != 1 || !look[0].nextAt.Equal(now.Add(CheckLookBound)) || decodeLook(t, look[0]) != 1 {
+	if look := issueOutboxOf(t, pool, "LEGION-209", "check_look"); len(look) != 1 || !look[0].nextAt.Equal(now.Add(CheckLookBound)) || decodeLook(t, look[0]) != 1 {
 		t.Fatalf("check_look rows = %+v, want one for look 1 due two hours out", look)
 	}
-	if bound := outboxOf(t, pool, "LEGION-209", "check_bound"); len(bound) != 1 || !bound[0].nextAt.Equal(now.Add(48*time.Hour)) {
+	if bound := issueOutboxOf(t, pool, "LEGION-209", "check_bound"); len(bound) != 1 || !bound[0].nextAt.Equal(now.Add(48*time.Hour)) {
 		t.Fatalf("check_bound rows = %+v, want one due at the bound", bound)
 	}
 	if got := issueSuspensions(t, pool, "LEGION-208"); len(got) != 0 || superviseRequests(t, pool, "suspend")["LEGION-208/implementer"] != 0 {
@@ -106,9 +106,9 @@ func TestAChildsMergeClosesItAndHandsItsImplementerTheFirstLook(t *testing.T) {
 func TestARootsMergeLingersItsTreeAndOpensItsCheckBehindTheLingersRows(t *testing.T) {
 	pool := migratedPool(t)
 	now := time.Date(2026, 10, 19, 4, 0, 0, 0, time.UTC)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 3, Status: "in_progress", Rank: "V"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 
@@ -129,7 +129,7 @@ func TestARootsMergeLingersItsTreeAndOpensItsCheckBehindTheLingersRows(t *testin
 		t.Fatalf("issue_close rows at a root's close = %v, want none: the tree's close retires its claims", got)
 	}
 	var start outboxRow
-	for _, row := range outboxOf(t, pool, "LEGION-208", "supervise") {
+	for _, row := range issueOutboxOf(t, pool, "LEGION-208", "supervise") {
 		if request := decodeSupervise(t, row); request.Op == "start" && request.CheckLook == 1 {
 			start = row
 		}
@@ -139,14 +139,14 @@ func TestARootsMergeLingersItsTreeAndOpensItsCheckBehindTheLingersRows(t *testin
 	}
 	for _, kind := range []string{"issue_suspend", "linger_close"} {
 		for _, issue := range []string{"LEGION-208", "LEGION-209"} {
-			for _, row := range outboxOf(t, pool, issue, kind) {
+			for _, row := range issueOutboxOf(t, pool, issue, kind) {
 				if row.id > start.id {
 					t.Fatalf("%s row %d of %s is newer than the check's start row %d; the start must follow the linger's rows", kind, row.id, issue, start.id)
 				}
 			}
 		}
 	}
-	for _, row := range outboxOf(t, pool, "LEGION-208", "supervise") {
+	for _, row := range issueOutboxOf(t, pool, "LEGION-208", "supervise") {
 		if row.id > start.id {
 			t.Fatalf("supervise row %d of the root is newer than the check's start row %d: %s", row.id, start.id, row.payload)
 		}
@@ -168,7 +168,7 @@ func TestALingeringMembersMergeClosesItAndWakesItsCheck(t *testing.T) {
 	pool := migratedPool(t)
 	now := time.Date(2026, 10, 19, 4, 0, 0, 0, time.UTC)
 	until := now.Add(time.Hour)
-	seedMergingChild(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 7, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 1})
+	seedMergingChild(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 7, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 1})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, engine, admissionStub{}); err != nil {
@@ -211,9 +211,9 @@ func TestALingeringMembersMergeClosesItAndWakesItsCheck(t *testing.T) {
 // with its volume, and no check, no look and no bound.
 func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 	parent := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
 	engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return time.Date(2026, 10, 19, 4, 0, 0, 0, time.UTC) }}, nil)
 
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "child-done", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, engine, admissionStub{}); err != nil {
@@ -245,7 +245,7 @@ func seedMergingChild(t *testing.T, pool *pgxpool.Pool, root record.Issue) {
 	t.Helper()
 	seedIssue(t, pool, root)
 	parent := root.Key
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: root.Key, Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: root.Key, Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "child-merger", HandoffCommit: "head-43"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 }
@@ -270,8 +270,9 @@ type outboxRow struct {
 	payload []byte
 }
 
-// outboxOf is issue's outbox rows of kind, oldest first.
-func outboxOf(t *testing.T, pool *pgxpool.Pool, issue, kind string) []outboxRow {
+// issueOutboxOf is issue's outbox rows of kind, oldest first (outboxOf, repository_test.go, is
+// every issue's of a kind).
+func issueOutboxOf(t *testing.T, pool *pgxpool.Pool, issue, kind string) []outboxRow {
 	t.Helper()
 	rows, err := pool.Query(t.Context(), "select id, next_at, payload from outbox where issue = $1 and kind = $2 order by id", issue, kind)
 	if err != nil {
@@ -296,7 +297,7 @@ func outboxOf(t *testing.T, pool *pgxpool.Pool, issue, kind string) []outboxRow 
 func superviseRowsOf(t *testing.T, pool *pgxpool.Pool, issue, op string) []record.SuperviseRequest {
 	t.Helper()
 	var requests []record.SuperviseRequest
-	for _, row := range outboxOf(t, pool, issue, "supervise") {
+	for _, row := range issueOutboxOf(t, pool, issue, "supervise") {
 		if request := decodeSupervise(t, row); string(request.Op) == op {
 			requests = append(requests, request)
 		}

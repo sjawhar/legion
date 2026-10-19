@@ -17,7 +17,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -175,6 +174,9 @@ func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, 
 	return dispatch.Approval{}, nil
 }
 func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *postingDispatch) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
 
 // postsTo is how many messages were posted on issue.
 func (d *postingDispatch) postsTo(issue string) int {
@@ -223,6 +225,9 @@ func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error)
 	return dispatch.Approval{}, nil
 }
 func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
+func (d *laneBoard) ListRepoProjects(context.Context) ([]dispatch.RepoProject, error) {
+	return nil, nil
+}
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {
@@ -348,7 +353,7 @@ type laneTree struct {
 func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 	t.Helper()
 	tree := &laneTree{pool: isolatedOutboxPool(t), clock: microClock()}
-	tree.root = record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
+	tree.root = record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
 	putOutboxIssue(t, tree.pool, record.NewStore(), tree.root)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	tree.rt = rt
@@ -361,7 +366,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 	}
 	tree.runner = &outbox{
 		pool: tree.pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, tokens: outboxTokens{}, project: "legion",
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch, dispatch: tree.client, notices: tree.publisher, log: log,
+		stateDir: t.TempDir(), dispatch: tree.client, notices: tree.publisher, log: log,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil

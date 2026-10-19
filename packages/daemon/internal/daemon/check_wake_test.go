@@ -18,7 +18,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -89,14 +88,17 @@ func (g *checkWakeGitHub) compares() []string {
 	return append([]string(nil), g.compared...)
 }
 
-// checkWakeDispatch is a Dispatch that lists no issues and reports no build commit on /healthz, so
-// the boot compares only the daemon's own build; every other call is unavailable, as a Dispatch
-// whose dependencies are down answers, and is not what these tests are about.
-func checkWakeDispatch(t *testing.T) string {
+// checkWakeDispatch is a Dispatch that maps sjawhar/legion to project as its default, lists no
+// issues and reports no build commit on /healthz, so the boot compares only the daemon's own build;
+// every other call is unavailable, as a Dispatch whose dependencies are down answers, and is not
+// what these tests are about.
+func checkWakeDispatch(t *testing.T, project string) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/settings/repo-projects":
+			_, _ = io.WriteString(w, `[{"repo":"sjawhar/legion","project":"`+project+`","default":true}]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
 			_, _ = io.WriteString(w, `[]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/healthz":
@@ -131,8 +133,7 @@ func newCheckWakeRig(t *testing.T) *checkWakeRig {
 	natsURL := workflowNATS(t)
 	cfg := workflowConfig(t, natsURL)
 	cfg.PostgresDSN = pool.Config().ConnString()
-	cfg.DispatchURL = checkWakeDispatch(t)
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.MustParse("sjawhar/legion")}}
+	cfg.DispatchURL = checkWakeDispatch(t, cfg.Project)
 	project, err := claim.ProjectToken(cfg.Project)
 	if err != nil {
 		t.Fatal(err)
@@ -154,7 +155,7 @@ func newCheckWakeRig(t *testing.T) *checkWakeRig {
 	}
 	defer st.Close()
 	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
-		if err := rig.records.PutIssue(ctx, tx, record.Issue{Key: root, Project: cfg.Project, Tree: root, Title: "Closed root", Phase: phase.Done,
+		if err := rig.records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Project: cfg.Project, Tree: root, Title: "Closed root", Phase: phase.Done,
 			Generation: 1, Status: "done", HandedOver: true, Rank: "U", LingerUntil: &until}); err != nil {
 			return err
 		}

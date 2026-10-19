@@ -15,7 +15,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -85,7 +84,7 @@ func resumesOf(rt *fake.Runtime, token claim.Token) []fake.Call {
 func TestABootRuleResumeThatSpendsTheLaunchBudgetFinishes(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	tester := launchedClaim(t, sup, issue.Tree, issue.Key, claim.RoleTester)
@@ -125,7 +124,7 @@ func TestTheLingersSuspensionWaitsForTheArchitectsTurnToEnd(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	until := time.Now().Add(time.Hour)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, root)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	// Real timers, so the held suspension's stop timeout runs as it does in a daemon.
@@ -177,7 +176,7 @@ func operatorSuspend(t *testing.T, sup *supervisor, token claim.Token) {
 func TestAStartWaitsForTheOperatorToResumeAClaimItSuspended(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	tester := launchedClaim(t, sup, issue.Tree, issue.Key, claim.RoleTester)
@@ -241,7 +240,7 @@ func suspendedBefore0038(t *testing.T, sup *supervisor, tree, issue string, role
 func TestAStartResumesAClaimSuspendedBeforeItsSourceWasRecorded(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	tester := suspendedBefore0038(t, sup, issue.Tree, issue.Key, claim.RoleTester)
@@ -305,23 +304,23 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 	records := record.NewStore()
 	ctx := context.Background()
 	until := time.Now().Add(time.Hour)
-	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U",
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U",
 		LingerUntil: &until, LastDispatchSeq: 5, HandedOver: true}
 	putOutboxIssue(t, pool, records, root)
 	parent := root.Key
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "Child",
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "Child",
 		Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
 	sup, rt = newOutboxSupervisor(t, "legion", t.TempDir())
 	architect = launchedClaim(t, sup, root.Key, root.Key, claim.RoleArchitect)
 	implementer = launchedClaim(t, sup, root.Key, "LEGION-209", claim.RoleImplementer)
 	suspend(sup, architect)
 	suspend(sup, implementer)
-	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	var clock time.Time
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
 		githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch:  &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: quietLogger(),
@@ -343,7 +342,7 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 	}
 	readmit = func() {
 		t.Helper()
-		if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo",
+		if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, ResolvedRepo: "acme/widgets", Seq: 6, Type: "issue.updated", Status: "todo",
 			Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
 			t.Fatalf("apply the todo: %v", err)
 		}
@@ -450,7 +449,7 @@ func TestABootResumesASuspendedClaimThatOwnsItsIssuesPhase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	seedWorkflowTree(t, cfg.PostgresDSN, project, record.Issue{Key: root, Project: cfg.Project, Tree: root, Title: "Workflow",
+	seedWorkflowTree(t, cfg.PostgresDSN, project, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: cfg.Project, Tree: root, Title: "Workflow",
 		Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
 		supervise.Claim{Token: implementer, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer, Generation: 1,
 			State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByDaemon, Session: "ses_implementer", SessionFile: filepath.Join(cfg.StateDir, "implementer.jsonl")})

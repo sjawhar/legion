@@ -8,12 +8,12 @@ import (
 
 // The architect accepts before the merge and the merge closes the issue, so production_check is no
 // phase. An issue the old daemon left there, or held from there, has its pull request merged and
-// stands at awaiting_merge after 0047, where the new daemon's boot closes it; the phase constraints
+// stands at awaiting_merge after 0049, where the new daemon's boot closes it; the phase constraints
 // then admit accepting and refuse production_check.
 func TestTheOldPostMergePhaseMigratesToAwaitingMergeAndTheConstraintsSwap(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 46)
+	migrateThrough(t, store, 48)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, held_from)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'checking root', 'production_check', 1, 'retro', 'A', 1, null),
@@ -39,7 +39,7 @@ func TestTheOldPostMergePhaseMigratesToAwaitingMergeAndTheConstraintsSwap(t *tes
 			got = *heldFrom
 		}
 		if phase != want.phase || got != want.heldFrom {
-			t.Fatalf("%s after 0047 = phase %q held_from %q, want %q and %q", want.key, phase, got, want.phase, want.heldFrom)
+			t.Fatalf("%s after 0049 = phase %q held_from %q, want %q and %q", want.key, phase, got, want.phase, want.heldFrom)
 		}
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
@@ -56,18 +56,18 @@ func TestTheOldPostMergePhaseMigratesToAwaitingMergeAndTheConstraintsSwap(t *tes
 	} {
 		_, err := store.Pool().Exec(ctx, refused)
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {
-			t.Fatalf("production_check after 0047 = %v, want the check constraint to refuse it", err)
+			t.Fatalf("production_check after 0049 = %v, want the check constraint to refuse it", err)
 		}
 	}
 }
 
-// 0047 also gives the pull request its merge commit, empty for one merged before the column
+// 0049 also gives the pull request its merge commit, empty for one merged before the column
 // existed, and the production check its table: a row per closed issue the constraint admits with
 // a known outcome and refuses with any other, and the outbox admits the check's three kinds.
-func TestTheMergeCommitAndTheProductionCheckArriveWith0047(t *testing.T) {
+func TestTheMergeCommitAndTheProductionCheckArriveWith0049(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
-	migrateThrough(t, store, 46)
+	migrateThrough(t, store, 48)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
 		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
 		values ('LEGION-208', 'LEGION-208', 'LEGION', 'merged root', 'awaiting_merge', 1, 'retro', 'A', 1)`); err != nil {
@@ -89,7 +89,7 @@ func TestTheMergeCommitAndTheProductionCheckArriveWith0047(t *testing.T) {
 		t.Fatalf("read merge_sha: %v", err)
 	}
 	if mergeSHA != "" {
-		t.Fatalf("merge_sha of a pull request merged before 0047 = %q, want empty", mergeSHA)
+		t.Fatalf("merge_sha of a pull request merged before 0049 = %q, want empty", mergeSHA)
 	}
 	if _, err := store.Pool().Exec(ctx, `insert into production_checks (issue, project, tree, repo, pr_number, merge_sha, opened_at, bound_at)
 		values ('LEGION-208', 'LEGION', 'LEGION-208', 'sjawhar/legion', 1208, 'd4e5f6', now(), now() + interval '336 hours')`); err != nil {
@@ -113,7 +113,7 @@ func TestTheMergeCommitAndTheProductionCheckArriveWith0047(t *testing.T) {
 	}
 	for _, kind := range []string{"check_compare", "check_look", "check_bound"} {
 		if _, err := store.Pool().Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')`, kind); err != nil {
-			t.Fatalf("enqueue a %s row after 0047: %v", kind, err)
+			t.Fatalf("enqueue a %s row after 0049: %v", kind, err)
 		}
 	}
 }

@@ -83,7 +83,7 @@ func TestACatchUpMarksAHandedOverRootInEveryPhase(t *testing.T) {
 		for _, gateCarried := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s, gate carried %t", at, gateCarried), func(t *testing.T) {
 				pool := migratedPool(t)
-				root := record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: at, Generation: 2, Status: "in_progress", Rank: "U"}
+				root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: at, Generation: 2, Status: "in_progress", Rank: "U"}
 				seedIssue(t, pool, root)
 				if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 					return record.NewStore().PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: root.Key, Generation: 2, GateCarried: gateCarried})
@@ -160,11 +160,11 @@ func TestOnlyALiveTreesRootArchitectIsToldItsTree(t *testing.T) {
 // child, and returns the root.
 func seedAdmittedTree(t *testing.T, pool *pgxpool.Pool, generation uint64) record.Issue {
 	t.Helper()
-	root := record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
+	root := record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
 		Generation: generation, Status: "in_progress", Rank: "U"}
 	parent := root.Key
 	seedIssue(t, pool, root)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-2", Tree: "LEGION-1", Project: "LEGION", Title: "Child", Parent: &parent,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Child", Parent: &parent,
 		Phase: phase.Admitted, Generation: generation, Status: "todo", Rank: "V"})
 	return root
 }

@@ -223,7 +223,16 @@ package api
 // pi-legion v10.5.0 declaring it without these shapes, so this branch takes the number above it,
 // as the collision note says.)
 //
-// 31: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
+// 31: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
+// targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
+// when the daemon first records it: `GET /legion/v1/state` and `read_record` answer `repo` and
+// `defaultBranch` on every issue and `repo` on its pull request, and the state answers
+// `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
+// repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
+// plugin at 30 reads the state with a strict schema that knows none of these fields, so it
+// refuses the state.
+//
+// 32: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
 // production check is work after the close. The phase enum gains `accepting` (between `reviewing`
 // and `retro`, the architect's `sign_off` phase, a backward target too) and loses
 // `production_check`; the issue record on GET /legion/v1/state gains `check` (api.CheckView), the
@@ -232,10 +241,11 @@ package api
 // implementer's report on a look of that check (`handoff_complete` on a done issue whose check is
 // open) pushes nothing, and its `verdict` gains `pending` beside `pass` and `fail`;
 // `PhaseBackwardRequest` gains an optional `issue`, which the architect's grant, serving its whole
-// tree, names the issue it returns from `accepting` with. A 30 plugin's strict reader refuses a
+// tree, names the issue it returns from `accepting` with. A 31 plugin's strict reader refuses a
 // state carrying `check` or the phase `accepting`, and its `handoff_complete` requires a commit the
 // check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair. (This
-// branch took 30; main then landed sjawhar/legion#1986 at 30 and released pi-legion v10.8.3
+// branch took 30, then 31 when main landed sjawhar/legion#1986 at 30 and released pi-legion
+// v10.8.3 declaring it; main then landed sjawhar/legion#2005 at 31 and released pi-legion v10.9.0
 // declaring it without these shapes, so this branch takes the number above it, as the collision
 // note says.)
-const DaemonAPIVersion = 31
+const DaemonAPIVersion = 32
