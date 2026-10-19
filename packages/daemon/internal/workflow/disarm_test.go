@@ -164,7 +164,7 @@ func TestLeavingTheWorkflowDisarmsTheOpenPullRequests(t *testing.T) {
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"})
-			seedIssue(t, pool, record.Issue{Key: "LEGION-210", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "merged", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "W"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-210", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "merged", Phase: phase.Done, Generation: 1, Status: "done", Rank: "W"})
 			for key, pr := range map[string]record.PullRequest{
 				"LEGION-208": {State: record.PullRequestOpen, Number: 42, HeadSHA: "head-42"},
 				"LEGION-209": {State: record.PullRequestOpen, Number: 43, HeadSHA: "head-43"},

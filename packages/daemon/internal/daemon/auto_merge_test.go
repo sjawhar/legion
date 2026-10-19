@@ -703,7 +703,7 @@ func TestAREADYMergeRowWaitingOnAnArmEndsOnceTheMergeMovesTheRecord(t *testing.T
 		t.Fatalf("first RunOnce: %v", err)
 	}
 	assertMergeRows(t, pool, 1, "merge-refused", 0)
-	if _, err := pool.Exec(context.Background(), "update issues set phase = 'production_check' where key = 'LEGION-208'"); err != nil {
+	if _, err := pool.Exec(context.Background(), "update issues set phase = 'done', status = 'done' where key = 'LEGION-208'"); err != nil {
 		t.Fatalf("apply the merge to the record: %v", err)
 	}
 	clock = clock.Add(time.Minute)

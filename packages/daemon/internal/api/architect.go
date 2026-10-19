@@ -45,11 +45,15 @@ type WaveReleaseResponse struct {
 	Released []string `json:"released"`
 }
 
-// PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase.
+// PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase, or the
+// tree's architect to return an issue it owns from accepting. An architect's grant serves its
+// whole tree, so it names the issue; a phase worker's names its own, so issue may be left out and,
+// when given, must be the grant's.
 type PhaseBackwardRequest struct {
 	GrantID string      `json:"grantId"`
 	To      phase.Phase `json:"to"`
 	Reason  string      `json:"reason"`
+	Issue   string      `json:"issue,omitempty"`
 }
 
 // PhaseBackwardResponse confirms the phase-backward fact committed.
@@ -65,7 +69,7 @@ type PhaseRetryRequest struct {
 // PhaseRetryResponse confirms the retry-or-escalate fact committed.
 type PhaseRetryResponse struct{}
 
-// SignOffRequest records the owning architect's post-production-check sign-off.
+// SignOffRequest records the owning architect's acceptance of an issue in accepting.
 type SignOffRequest struct {
 	GrantID string `json:"grantId"`
 	Issue   string `json:"issue"`
@@ -498,6 +502,9 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, WaveReleaseResponse{Released: req.Issues})
 }
 
+// phaseBackward applies a backward move: a phase worker's on its own issue (the grant's), or the
+// tree architect's on an issue it owns (architectOwns, as sign_off), named by the request, from
+// accepting. The workflow decides whether the requester runs the phase (BACKWARD_REFUSED).
 func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 	var req PhaseBackwardRequest
 	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w,
@@ -511,8 +518,32 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_PHASE", "to is not a phase")
 		return
 	}
-	grant, ok := s.phaseWorkerGrant(w, r, req.GrantID)
+	if req.Issue != "" && !claim.IsIssueKey(req.Issue) {
+		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue is not an issue key")
+		return
+	}
+	grant, ok := s.redeem(w, r, req.GrantID)
 	if !ok {
+		return
+	}
+	if !grant.Controller && grant.Role == claim.RoleArchitect {
+		if !requireFailureFields(w, field{"issue", req.Issue}) {
+			return
+		}
+		grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+		if !ok || !s.architectOwns(w, r, grant, recorded, "request_backward_move") {
+			return
+		}
+		s.applyFact(w, r, requestFactID("phase/backward"),
+			intake.BackwardMove{Issue: req.Issue, Requester: claim.RoleArchitect, To: req.To, Reason: req.Reason}, PhaseBackwardResponse{})
+		return
+	}
+	grant, ok = s.phaseWorkerGrant(w, r, req.GrantID)
+	if !ok {
+		return
+	}
+	if req.Issue != "" && req.Issue != grant.Issue {
+		writeFailure(w, http.StatusBadRequest, "ISSUE_NOT_GRANTS", fmt.Sprintf("a phase worker moves only its own issue %s, not %s", grant.Issue, req.Issue))
 		return
 	}
 	s.applyFact(w, r, requestFactID("phase/backward"),
@@ -641,9 +672,9 @@ func (s *server) architectOwns(w http.ResponseWriter, r *http.Request, grant cre
 // recorded or recorded in another tree, a cycle) ends at the tree root, whose architect owns the
 // issue: a human's re-parent in Dispatch leaves an issue's tree as it was (admit's
 // recordObservation), and the notice router ends the same walk at the same place
-// (owningArchitect, internal/daemon/notice_routing.go), so the architect a production_check notice
-// reaches is the one that may sign the issue off. The walk reads every parent in one read-only
-// transaction, opened only when it has a parent to read.
+// (owningArchitect, internal/daemon/notice_routing.go), so the architect the reviewer's
+// phase-finished notice reaches is the one that may accept the issue. The walk reads every parent
+// in one read-only transaction, opened only when it has a parent to read.
 func (s *server) owns(ctx context.Context, grant credential.Grant, recorded record.Issue) (bool, error) {
 	var tx pgx.Tx
 	defer func() {

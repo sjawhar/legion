@@ -231,10 +231,11 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 // A tree that closed retired every member's claim, so a re-admitted root's children sit mid-phase
 // with nothing running: the architect cannot release a child already in the workflow, and only a
 // worker's own handoff moves it. Admission starts each mid-phase child's role with its architect,
-// whichever mid-phase that is — the production check included, whose role is the implementer's
-// (workflow.RoleFor), the path a drain's re-admission restarts production-check children through —
-// and tells it to carry that phase on: the run whose handoff began the phase is over, and a start
-// with no task leaves the resumed agent holding its old transcript with nothing asked of it.
+// whichever mid-phase that is — retro included, whose role is the implementer's (workflow.RoleFor)
+// — and tells it to carry that phase on: the run whose handoff began the phase is over, and a start
+// with no task leaves the resumed agent holding its old transcript with nothing asked of it. A
+// child in accepting waits on the tree's architect, which the promotion starts: nothing is queued
+// for it.
 func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -246,8 +247,10 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		Phase: phase.Testing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
 	putIssue(t, pool, record.Issue{Key: "LEGION-210", Project: "LEGION", Title: "finished child", Tree: root.Key, Parent: &parentKey,
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
-	putIssue(t, pool, record.Issue{Key: "LEGION-211", Project: "LEGION", Title: "production-check child", Tree: root.Key, Parent: &parentKey,
-		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "D", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-211", Project: "LEGION", Title: "retro child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "D", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: "LEGION-212", Project: "LEGION", Title: "accepting child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.Accepting, Generation: 1, Status: "needs_review", Rank: "E", LastDispatchSeq: 1})
 
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
 
@@ -259,8 +262,8 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work.", ResumeTask: true}},
 		{kind: record.OutboxKindIssueBranch, issue: "LEGION-211", payload: record.IssueBranch{Generation: 1}},
-		{kind: record.OutboxKindSupervise, issue: "LEGION-211", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleImplementer, Generation: 1, Phase: phase.ProductionCheck,
-			Task: "Continue production-check child. Issue: LEGION-211. Phase: production_check. Resume the existing phase work.", ResumeTask: true}},
+		{kind: record.OutboxKindSupervise, issue: "LEGION-211", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleImplementer, Generation: 1, Phase: phase.Retro,
+			Task: "Continue retro child. Issue: LEGION-211. Phase: retro. Resume the existing phase work.", ResumeTask: true}},
 	})
 }
 
@@ -348,10 +351,11 @@ func TestReadmissionSendsAnAwaitingChildWithNoREADYBackToMerging(t *testing.T) {
 }
 
 // A merge is the one fact GitHub never sends again, and a child whose READY was posted can be
-// merged after its root closed. The lingering tree starts no worker, but the child moves on to its
-// production check, so re-admission, which keeps no merged pull request, starts its implementer
-// there instead of leaving it in awaiting_merge, where no role could move it.
-func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain(t *testing.T) {
+// merged after its root closed. The lingering tree starts no worker, and the merge's row moves the
+// child's phase to done, as the merge closes an issue of a running tree; re-admission, which starts
+// a role only for a phase one works, starts nobody for it. (The production check the merge opens
+// after the close is later work on this branch.)
+func TestAMergeWhileTheTreeLingersMovesTheChildToDoneAndStartsNobody(t *testing.T) {
 	pool := migratedPool(t)
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
@@ -367,11 +371,11 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 			t.Fatalf("seed pull request: %v", err)
 		}
 	})
-	implementerStarts := func() int {
+	childStarts := func() int {
 		t.Helper()
 		var starts int
 		if err := pool.QueryRow(context.Background(), `select count(*) from outbox where issue = 'LEGION-209' and kind = 'supervise'
-			and payload->>'op' = 'start' and payload->>'role' = 'implementer' and payload->>'phase' = 'production_check'`).Scan(&starts); err != nil {
+			and payload->>'op' = 'start'`).Scan(&starts); err != nil {
 			t.Fatalf("count the child's starts: %v", err)
 		}
 		return starts
@@ -380,12 +384,12 @@ func TestAMergeWhileTheTreeLingersIsTheChildsProductionCheckOnceTheTreeRunsAgain
 	if _, err := intake.ApplyFact(context.Background(), pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admission); err != nil {
 		t.Fatalf("ApplyFact merge: %v", err)
 	}
-	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 0 {
-		t.Fatalf("the merged child while its tree lingers = %s with %d implementer starts, want production_check with none", got.Phase, starts)
+	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || starts != 0 {
+		t.Fatalf("the merged child while its tree lingers = %s with %d starts, want done with none", got.Phase, starts)
 	}
 	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
-	if got, starts := issue(t, pool, "LEGION-209"), implementerStarts(); got.Phase != phase.ProductionCheck || starts != 1 {
-		t.Fatalf("the merged child after re-admission = %s with %d implementer starts, want production_check with its implementer started", got.Phase, starts)
+	if got, starts := issue(t, pool, "LEGION-209"), childStarts(); got.Phase != phase.Done || starts != 0 {
+		t.Fatalf("the merged child after re-admission = %s with %d starts, want done with nobody started", got.Phase, starts)
 	}
 }
 

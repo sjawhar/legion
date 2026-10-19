@@ -18,7 +18,9 @@ import (
 // RoleFor is the role that works a phase: the one a transition starts, and the one whose handoff
 // the `legion` tool's `handoff_complete` resolves the carrying commit of for a file-backed phase
 // (packages/pi-legion/src/handoff-commit.ts). A phase no role works — awaiting_merge, done, held —
-// has none.
+// has none. Accepting is the tree architect's, a claim per tree that no row starts: every site
+// that starts, resumes or reports a phase's worker skips it (start, admit's startMidPhaseMembers,
+// booted, Stranded).
 //
 // It is exported for admission too, which starts the mid-phase children of a tree it re-admits
 // and needs each child's own phase's role to start it on.
@@ -26,12 +28,14 @@ func RoleFor(p phase.Phase) claim.Role {
 	switch p {
 	case phase.Planning:
 		return claim.RolePlanner
-	case phase.Implementing, phase.Retro, phase.ProductionCheck:
+	case phase.Implementing, phase.Retro:
 		return claim.RoleImplementer
 	case phase.Testing:
 		return claim.RoleTester
 	case phase.Reviewing:
 		return claim.RoleReviewer
+	case phase.Accepting:
+		return claim.RoleArchitect
 	case phase.Merging:
 		return claim.RoleMerger
 	default:
@@ -145,7 +149,12 @@ func (e *Engine) status(ctx context.Context, tx pgx.Tx, issue record.Issue, stat
 	return e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: status, ObservedStatus: issue.Status})
 }
 
+// notice tells the architect that owns the issue; a notice of no kind (noticeFor's, for a move
+// that tells it nothing) enqueues nothing.
 func (e *Engine) notice(ctx context.Context, tx pgx.Tx, issue string, notice record.Notice) error {
+	if notice.Kind == "" {
+		return nil
+	}
 	return e.enqueue(ctx, tx, issue, notice)
 }
 
@@ -188,11 +197,10 @@ func refusedLingering(issue record.Issue, request string) intake.Result {
 // summary and by-hand note, and the review round's decision, which ends with the round — keeping
 // its claim and the review rounds, when a transition starts it on a new phase. A role's recorded
 // handoff is then always its current phase's: the implementer's round-1 commit cannot advance
-// round 2, the production check is recorded only by the production check's own completion, a
-// merger sent back to verify again has no READY packet until its next one, and no round inherits
-// an earlier decision.
+// round 2, a merger sent back to verify again has no READY packet until its next one, and no round
+// inherits an earlier decision. The architect reports no handoff and has no row to clear.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
-	if role == "" {
+	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, role)
@@ -220,9 +228,10 @@ const approvedHeadLabel = "Approved head"
 // start that takes the phase over from a role still at work in it names that role, quiesce, so it
 // waits for that role's turn to end (record.SuperviseRequest's Quiesce); every other start names
 // none. A merger is told the head the review round approved (withApprovedHead), the one head its
-// READY may name, so it never chooses among the pull request's reviews itself.
+// READY may name, so it never chooses among the pull request's reviews itself. A phase with no
+// worker, and accepting, whose architect admission started with the tree, start nobody.
 func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string, quiesce claim.Role) error {
-	if role == "" {
+	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
 	task, err := withApprovedHead(ctx, e.store, tx, issue.Key, role, task)
@@ -257,8 +266,8 @@ func withApprovedHead(ctx context.Context, store record.Store, tx pgx.Tx, issue 
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
-// record already holds: one role runs several phases (the implementer runs implementing, retro,
-// and production_check), and a resumed session cannot otherwise tell a new phase from its last.
+// record already holds: one role runs several phases (the implementer runs implementing and
+// retro), and a resumed session cannot otherwise tell a new phase from its last.
 func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, reason string) string {
 	text := continueLine(issue)
 	if handoff.HandoffCommit != "" {

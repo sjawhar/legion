@@ -184,6 +184,7 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 	}{
 		{from: phase.Testing, status: "testing", quiesce: claim.RoleTester},
 		{from: phase.Reviewing, status: "needs_review", quiesce: claim.RoleReviewer},
+		{from: phase.Accepting, status: "needs_review"},
 		{from: phase.Retro, status: "retro"},
 		{from: phase.Merging, status: "retro", quiesce: claim.RoleMerger},
 	} {
@@ -235,7 +236,7 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 // (classify.AdvancePullRequestHead, keptPushes), and the synchronize that moves the head onto it
 // lets the code head's red stand for the new head (carriedBack) - the same carry the push completes
 // in the other order. So the arrival applies the CI rule in whatever phase the issue is, before
-// reviewing's re-ask: the work goes back from testing, reviewing, retro and merging, the
+// reviewing's re-ask: the work goes back from testing, reviewing, accepting, retro and merging, the
 // implementer's start waiting on the role the red took the phase from, and the architect told the
 // phase the red stopped. In awaiting_merge the READY head arriving over its handoff push withdraws
 // nothing, as the late push does not (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing):
@@ -249,6 +250,7 @@ func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackF
 	}{
 		{from: phase.Testing, status: "testing", quiesce: claim.RoleTester},
 		{from: phase.Reviewing, status: "needs_review", quiesce: claim.RoleReviewer},
+		{from: phase.Accepting, status: "needs_review"},
 		{from: phase.Retro, status: "retro"},
 		{from: phase.Merging, status: "retro", quiesce: claim.RoleMerger},
 		{from: phase.AwaitingMerge, status: "retro"},
@@ -899,7 +901,7 @@ func TestAReopenedPullRequestJudgesItsNewHeadAsASynchronizeWould(t *testing.T) {
 // In awaiting_merge no implementer loops for the fix-attempt cap to bound, and GitHub will not merge
 // a red head, so a red there withdraws the READY and sends the work back whatever the count: never
 // held, never left standing. That holds for a count told in testing before the work went green and
-// moved on through review, retro and READY, and for a READY head that is itself the head the count
+// moved on through review, acceptance, retro and READY, and for a READY head that is itself the head the count
 // last counted. The withdrawal is told by its checks-red; a count already reported is not reported
 // again.
 func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
@@ -907,6 +909,7 @@ func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
 	tester := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Commit: "test-1", Summary: "passed", Verdict: "pass"}
 	approval := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "h3", HeadSHA: "h3", Author: testReviewApp, Body: "approved"}
 	reviewer := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
+	accepted := intake.SignOff{Issue: "LEGION-208"}
 	retro := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "retro-1", Summary: "retro"}
 	ready := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Ready: true, Summary: readyPacket, Commit: "h4"}
 	for _, tc := range []struct {
@@ -919,7 +922,7 @@ func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
 		}
 		red intake.Fact
 	}{
-		{"a count told in testing, then green, review, retro and READY", phase.Testing, []struct {
+		{"a count told in testing, then green, review, acceptance, retro and READY", phase.Testing, []struct {
 			fact  intake.Fact
 			phase phase.Phase
 		}{
@@ -927,7 +930,8 @@ func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
 			{settledAt("h3", required, 2), phase.Testing},
 			{tester, phase.Reviewing},
 			{approval, phase.Reviewing},
-			{reviewer, phase.Retro},
+			{reviewer, phase.Accepting},
+			{accepted, phase.Retro},
 			{syncedTo("h4"), phase.Retro},
 			{pushedFromTo("h3", "h4", "docs/solutions/legion/widget.md", implementer), phase.Retro},
 			{settledAt("h4", required, 1), phase.Retro},

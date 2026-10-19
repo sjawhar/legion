@@ -583,8 +583,8 @@ func startedRun(issue record.Issue) bool {
 // is the same work moving from a finished root to a root of its own, so its phase, phase rows, gate
 // and pull request (with its observed head) carry into the new generation, and its promotion starts
 // both its architect and the role of that carried phase. A merged pull request is never observed as
-// merged again, and a review, READY or production check would otherwise rerun work already decided
-// or landed.
+// merged again, and a review, acceptance or READY would otherwise rerun work already decided or
+// landed.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
@@ -953,8 +953,9 @@ func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root re
 				return fmt.Errorf("resume %s in %s: %w", member.Key, resume, err)
 			}
 		}
+		// Accepting's role is the tree's architect, which promotion already started: nothing to resume.
 		role := workflow.RoleFor(member.Phase)
-		if role == "" {
+		if role == "" || role == claim.RoleArchitect {
 			continue
 		}
 		token, err := claim.NewToken(project, member.Key, role)

@@ -199,13 +199,12 @@ func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	return err
 }
 
-// merged records the pull request merged, whatever the issue's phase, and advances an issue that
-// awaited the merge. A merge before awaiting_merge is the architect's to act on, as the shipped
-// daemon routes it: it is told, and the issue moves on to the production check once it reaches
-// awaiting_merge (transition). A redelivered merge changes nothing. A merge is the one fact GitHub
-// never sends again, so one that lands while the tree lingers still moves the issue on to its
-// production check, and starts nobody: re-admission starts its implementer there
-// (admit's startMidPhaseChildren), as it does for every mid-phase child.
+// merged records the pull request merged, whatever the issue's phase, and closes an issue that
+// awaited the merge (transition's row to done, which leaves). A merge before awaiting_merge is the
+// architect's to act on, as the shipped daemon routes it: it is told, and the merge closes the
+// issue once it reaches awaiting_merge (transition). A redelivered merge changes nothing. A merge
+// is the one fact GitHub never sends again, so one that lands while the tree lingers still moves
+// the issue's phase on by the same row, and starts nobody.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil || pr.State == record.PullRequestMerged {

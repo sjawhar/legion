@@ -413,28 +413,23 @@ func TestHandoffCompleteEnforcesRoleSpecificFieldsAndDeduplicatesTheCommit(t *te
 	}
 }
 
-// The implementer runs retro and then, after the merge, the production check, and it may report
-// both from the one commit the workspace stands on: neither phase writes a handoff. Each is its own
-// phase's completion.
-func TestHandoffCompleteRecordsRetroThenProductionCheckAtOneCommit(t *testing.T) {
+// The implementer's retro writes no handoff, so it reports the commit the workspace stands on, the
+// one its implementing round already reported: the completion is retro's own, not a repeat.
+func TestHandoffCompleteRecordsRetroAtTheCommitItStandsOn(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
-	for _, at := range []phase.Phase{phase.Retro, phase.ProductionCheck} {
-		seedIssueAt(t, h, "LEGION-208", at)
-		recorder := h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: string(at) + " done", Commit: "c0ffee"})
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("%s handoff = %d: %s", at, recorder.Code, recorder.Body)
-		}
+	seedIssueAt(t, h, "LEGION-208", phase.Retro)
+	recorder := h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "retro done", Commit: "c0ffee"})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retro handoff = %d: %s", recorder.Code, recorder.Body)
 	}
 	got := facts.recorded()
-	if len(got) != 2 {
-		t.Fatalf("handoff facts = %#v, want the retro and the production-check completions", got)
+	if len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want the retro completion", got)
 	}
-	for i, summary := range []string{"retro done", "production_check done"} {
-		if fact, ok := got[i].(intake.HandoffComplete); !ok || fact.Summary != summary || fact.Commit != "c0ffee" {
-			t.Fatalf("handoff fact %d = %#v, want summary %q at c0ffee", i, got[i], summary)
-		}
+	if fact, ok := got[0].(intake.HandoffComplete); !ok || fact.Summary != "retro done" || fact.Commit != "c0ffee" {
+		t.Fatalf("handoff fact = %#v, want summary %q at c0ffee", got[0], "retro done")
 	}
 	if reads := github.reads(); len(reads) != 0 {
 		t.Fatalf("contents reads = %v, want none for phases that write no file", reads)

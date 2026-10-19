@@ -35,9 +35,9 @@ const (
 // Who wrote a lifecycle status on a running root decides whether it takes the tree out of the
 // workflow. A person's move does: a user actor, and the daemon's own write, which decode passes with
 // no session (TestDecodeDispatchIssueNamesASessionActor). A session holding a claim in the tree is an
-// agent, never a human move, since a phase ends only by its completion and a tree only by its
-// architect's sign-off; here the implementer closes its own issue during the production check
-// instead of completing the phase. The workflow does not react (no linger, the slot kept, the phase
+// agent, never a human move, since a phase ends only by its completion and an issue only by its
+// merge; here the implementer closes its own issue while it awaits its merge instead of leaving
+// that to the merge. The workflow does not react (no linger, the slot kept, the phase
 // unchanged) and the daemon re-asserts its own status through the outbox. Any other session —
 // another tree's agent, or one outside Legion that took the issue for its own — cannot end or park
 // the tree either: the daemon re-asserts its status, and the tree's architect is told who wrote what.
@@ -69,7 +69,7 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read root: %v", err)
 				}
-				root.Phase, root.Status, root.LastDispatchSeq = phase.ProductionCheck, "retro", 1
+				root.Phase, root.Status, root.LastDispatchSeq = phase.AwaitingMerge, "retro", 1
 				if err := records.PutIssue(ctx, tx, *root); err != nil {
 					t.Fatalf("put root: %v", err)
 				}
@@ -104,8 +104,8 @@ func TestWhoseStatusWriteTakesARunningRootOutOfTheWorkflow(t *testing.T) {
 				}
 				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
 			case setBack, setBackAndTold:
-				if got.Phase != phase.ProductionCheck || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
-					t.Fatalf("root after %s = %#v with %d re-asserted status writes, want production_check, not lingering, status retro kept, seq 2, and retro re-asserted over %s once", tc.name, got, reasserted, tc.status)
+				if got.Phase != phase.AwaitingMerge || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
+					t.Fatalf("root after %s = %#v with %d re-asserted status writes, want awaiting_merge, not lingering, status retro kept, seq 2, and retro re-asserted over %s once", tc.name, got, reasserted, tc.status)
 				}
 				assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}, {Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
 				wantTold := 0

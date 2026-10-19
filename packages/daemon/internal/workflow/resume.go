@@ -21,11 +21,13 @@ import (
 //
 // The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
 // whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
-// stay suspended until re-admission runs the tree again. Each owner is given the start admission
-// gives a re-admitted tree's mid-phase child, through the outbox's start like every other start:
-// its claim resumed by rule, and the task that carries its phase on (ResumePhaseTask, the merger's
-// with the head its round approved), which the outbox does not deliver to a claim still holding its
-// phase's task. A role a start already covers (StartFor) gets no second.
+// stay suspended until re-admission runs the tree again. Accepting's owner is the tree's
+// architect, which admission starts with the tree, so no issue there is given one. Each owner is
+// given the start admission gives a re-admitted tree's mid-phase child, through the outbox's start
+// like every other start: its claim resumed by rule, and the task that carries its phase on
+// (ResumePhaseTask, the merger's with the head its round approved), which the outbox does not
+// deliver to a claim still holding its phase's task. A role a start already covers (StartFor) gets
+// no second.
 func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (intake.Result, error) {
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
@@ -45,7 +47,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 	}
 	for _, issue := range issues {
 		role := RoleFor(issue.Phase)
-		if issue.Project != e.cfg.Project || role == "" || record.OutOfWorkflow(issue.Status) {
+		if issue.Project != e.cfg.Project || role == "" || role == claim.RoleArchitect || record.OutOfWorkflow(issue.Status) {
 			continue
 		}
 		root, ok := byKey[issue.Tree]

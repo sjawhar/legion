@@ -363,6 +363,11 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return refused("HANDOFF_STALE_GENERATION", fmt.Sprintf("%s is on generation %d and this completion is generation %d's; the run it reports is over",
 			issue.Key, issue.Generation, fact.Generation)), nil
 	}
+	// RoleFor(accepting) is the architect, which accepts with sign_off: no completion of its own
+	// moves an issue, so an architect's is refused before the phase gate would pass it.
+	if fact.Role == claim.RoleArchitect {
+		return refused("ACCEPTANCE_IS_SIGN_OFF", fmt.Sprintf("the architect accepts %s with sign_off, not handoff_complete; this completion changed nothing", issue.Key)), nil
+	}
 	if RoleFor(issue.Phase) != fact.Role {
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
@@ -425,10 +430,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
-	case phase.ProductionCheck:
-		// The architect's sign-off, not this completion, moves the issue to done; the completion is
-		// what tells the architect the check was recorded.
-		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: fact.Role, Phase: issue.Phase, Summary: fact.Summary})
 	case phase.Merging:
 		gate, err := e.gateForIssue(ctx, tx, *issue)
 		if err != nil {
@@ -610,25 +611,26 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, pr, fact.Reason)
 }
 
-// signOff closes the issue once the implementer's production check was recorded: the merge started
-// the production check with the implementer's handoff cleared, so a recorded handoff is the check's
-// own completion.
+// signOff is the architect's acceptance of a reviewed head: it moves the issue from accepting to
+// retro and starts the implementer there, told the review's handoff and the pull request as the
+// approval told it before acceptance existed. Outside accepting it changes nothing and says so.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if issue.Phase != phase.ProductionCheck {
-		return refused("SIGNOFF_OUTSIDE_PRODUCTION_CHECK", fmt.Sprintf("%s is in phase %s, not production_check; this sign-off changed nothing", issue.Key, issue.Phase)), nil
+	if issue.Phase != phase.Accepting {
+		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
 	}
-	check, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
+	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if check.HandoffCommit == "" {
-		return refused("PRODUCTION_CHECK_NOT_RECORDED", fmt.Sprintf("the implementer has not recorded the production check of %s; sign off after its phase-finished notice", issue.Key)), nil
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return intake.Result{}, err
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerSignOff, "", record.PhaseRow{}, nil, "")
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerSignOff, "", review, pr, "")
 }
 
 func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, trigger TriggerKind, target phase.Phase, handoff record.PhaseRow, pr *record.PullRequest, reason string) error {
@@ -700,7 +702,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if row.To == phase.AwaitingMerge {
 		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
-		// the issue moves on to the production check at once, and no READY asks a human to merge it.
+		// the merge closes the issue at once, and no READY asks a human to merge it.
 		if pr != nil && pr.State == record.PullRequestMerged {
 			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 		}
@@ -714,10 +716,16 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 
 // noticeFor is what a transition on trigger out of from tells the architect: that from finished,
 // with its worker's handoff, or, when CI stopped the phase, the head started conflicting with its
-// base, or the merge queue failed its merge (TriggerChecksRed), why.
+// base, or the merge queue failed its merge (TriggerChecksRed), why. Two moves tell it nothing (a
+// notice of no kind, which notice drops): its own sign-off, whose only recipient would be the
+// architect that just acted, and the merge that closes the issue, whose close tells a child's
+// architect child-closed itself (leave) and suspends a root's with the rest of its tree.
 func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, reason string) record.Notice {
-	if trigger == TriggerChecksRed {
+	switch trigger {
+	case TriggerChecksRed:
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}
+	case TriggerSignOff, TriggerPullRequestMerged:
+		return record.Notice{}
 	}
 	return record.Notice{Kind: "phase-finished", Role: RoleFor(from), Phase: from, Summary: handoff.Summary, Verdict: handoff.Verdict}
 }
@@ -730,13 +738,15 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 // already completed, and takes over from nobody. Nor does a move between two phases of one role -
 // retro back to implementing, where starting, the role the transition starts, is the one leaving -
 // take the phase from anyone: the implementer keeps its turn and is handed the new phase's task
-// once it ends, and a start may not wait on its own role (record.SuperviseRequest's Quiesce).
+// once it ends, and a start may not wait on its own role (record.SuperviseRequest's Quiesce). The
+// architect, whose phase accepting is, holds no workspace turn either: CI red there starts the
+// implementer waiting on nobody.
 func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from phase.Phase, starting claim.Role) (claim.Role, error) {
 	if trigger != TriggerChecksRed {
 		return "", nil
 	}
 	leaving := RoleFor(from)
-	if leaving == "" || leaving == starting {
+	if leaving == "" || leaving == claim.RoleArchitect || leaving == starting {
 		return "", nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, leaving)
@@ -841,7 +851,7 @@ func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue
 }
 
 func phaseIndex(value phase.Phase) int {
-	for index, candidate := range []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.AwaitingMerge, phase.ProductionCheck} {
+	for index, candidate := range []phase.Phase{phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing, phase.Accepting, phase.Retro, phase.Merging, phase.AwaitingMerge} {
 		if candidate == value {
 			return index
 		}

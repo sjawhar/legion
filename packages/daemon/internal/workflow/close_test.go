@@ -17,8 +17,8 @@ import (
 
 // A child leaving the workflow ends only the child: the shipped daemon lingers the closed issue's
 // own tree and wakes the tree's architect for a child (reducers.ts reduceIssueClosed). Here the
-// root is mid-implementation when its child is signed off, or a human moves the child out of the
-// workflow. The child leaves the table: its phase is parked in done, so no transition or status
+// root is mid-implementation when its child's pull request merges, or a human moves the child out
+// of the workflow. The child leaves the table: its phase is parked in done, so no transition or status
 // write follows. The root keeps its phase, its linger stays unarmed, none of its claims is stopped,
 // and the architect is told which child left and how. What the child's claims get is the
 // status's: a child closed as done has every claim closed (issue_close) and its Sandbox released
@@ -32,7 +32,7 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 		op      string
 		release bool
 	}{
-		{name: "signed off", fact: intake.SignOff{Issue: "LEGION-209"}, notice: "child-closed", op: "issue_close", release: true},
+		{name: "merged", fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"}, notice: "child-closed", op: "issue_close", release: true},
 		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", op: "issue_close", release: true},
 		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
 		{name: "moved to icebox", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "icebox", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", op: "suspend"},
@@ -43,9 +43,10 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 			now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
 			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
 			parent := "LEGION-208"
-			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.AwaitingMerge, Generation: 7, Status: "retro", Rank: "V", LastDispatchSeq: 1})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer", HandoffCommit: "production-check", LastHandoff: "production-check"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "child-merger", HandoffCommit: "head-43"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "sjawhar/legion", Number: 43, Branch: "legion/LEGION-209", HeadSHA: "head-43", Failing: []string{}})
 			engine := New(record.NewStore(), Config{Project: "LEGION", Linger: time.Hour, Clock: func() time.Time { return now }}, nil)
 
 			result, err := intake.ApplyFact(context.Background(), pool, "api", "child-leaves", tc.fact, engine, admissionStub{})
@@ -211,7 +212,7 @@ func TestTheRecordKeepsWhetherItsPullRequestMergedOrClosed(t *testing.T) {
 		want  record.PullRequestState
 		phase phase.Phase
 	}{
-		{name: "merged when awaited", at: phase.AwaitingMerge, fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, want: record.PullRequestMerged, phase: phase.ProductionCheck},
+		{name: "merged when awaited", at: phase.AwaitingMerge, fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, want: record.PullRequestMerged, phase: phase.Done},
 		{name: "merged early", at: phase.Reviewing, fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, want: record.PullRequestMerged, phase: phase.Reviewing},
 		{name: "closed unmerged", at: phase.Reviewing, fact: intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42}, want: record.PullRequestClosed, phase: phase.Reviewing},
 	} {

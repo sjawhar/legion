@@ -602,8 +602,8 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 // decided, backward move, retry of a held phase or failed claim moves a member, counts a review
 // round, posts or notifies, or starts a worker, whose start would resume a suspended claim inside
 // a tree that has left the workflow. A worker's own request is refused, so it is told nothing
-// moved. A merge is the one fact GitHub never sends again: it moves the child on to its production
-// check, and still starts nobody.
+// moved. A merge is the one fact GitHub never sends again: it moves the child's phase on to done,
+// as the merge's row says, and still starts nobody.
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 	hold := record.Hold{From: phase.Testing}
 	for _, tc := range []struct {
@@ -615,7 +615,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 		fact     intake.Fact
 		refusal  string
 	}{
-		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge, want: phase.ProductionCheck,
+		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge, want: phase.Done,
 			fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}},
 		{name: "an approval of a green head", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}},
