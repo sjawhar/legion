@@ -199,7 +199,10 @@ func planGrants(ns, grant string) bool {
 			legion = append(legion, verb+" agents.x-k8s.io/sandboxes")
 		}
 		for _, verb := range []string{"get", "list", "watch"} {
-			legion = append(legion, verb+" /pods", verb+" /services")
+			legion = append(legion, verb+" /pods")
+		}
+		for _, verb := range []string{"list", "watch"} {
+			legion = append(legion, verb+" /services")
 		}
 		for _, verb := range []string{"create", "get", "update", "delete"} {
 			legion = append(legion, verb+" /secrets")
