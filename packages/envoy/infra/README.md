@@ -131,7 +131,7 @@ Service and Dispatch and the listener bind loopback addresses.
 | --- | --- |
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
-| Autopilot cluster | Enables the Secret Manager add-on and Workload Identity. |
+| Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (a new Secret Manager version reaches its synced Kubernetes Secret without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
 | Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
@@ -143,7 +143,9 @@ digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
-`deletionProtection` to `true`.
+`deletionProtection` to `true`. `existingNamespace`, `false` by default, makes the component use
+the namespace as it exists in the cluster rather than create it, for a deployment where another
+program owns the namespace.
 
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
 names, tags, image references, sign-in domains, namespaces, missing inputs, and nkey seeds in

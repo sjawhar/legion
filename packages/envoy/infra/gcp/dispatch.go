@@ -54,6 +54,9 @@ type DispatchArgs struct {
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
 	Namespace          *string `pulumi:"namespace,optional"`
+	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
+	// (another program owns the namespace).
+	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
 
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster namespace;
@@ -119,7 +122,7 @@ type dispatchSettings struct {
 	images                                      struct{ envoy, tailscale, proxy string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
-	deletionProtection                          bool
+	deletionProtection, existingNamespace       bool
 	serveConfig                                 string
 }
 
@@ -204,6 +207,7 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.DeletionProtection != nil {
 		s.deletionProtection = *args.DeletionProtection
 	}
+	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !namespaceRule.MatchString(*args.Namespace) {
 			return dispatchSettings{}, fmt.Errorf("namespace %q must be a DNS label", *args.Namespace)

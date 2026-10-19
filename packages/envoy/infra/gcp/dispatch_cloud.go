@@ -87,10 +87,14 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}
 	cluster, err := container.NewCluster(ctx, s.hostname, &container.ClusterArgs{
 		Name: pulumi.String(s.hostname), Location: pulumi.String(s.region), EnableAutopilot: pulumi.Bool(true), Network: network.ID(), Subnetwork: subnetwork.ID(),
-		IpAllocationPolicy:     &container.ClusterIpAllocationPolicyArgs{},
-		PrivateClusterConfig:   &container.ClusterPrivateClusterConfigArgs{EnablePrivateNodes: pulumi.Bool(true), EnablePrivateEndpoint: pulumi.Bool(false)},
-		ReleaseChannel:         &container.ClusterReleaseChannelArgs{Channel: pulumi.String("REGULAR")},
-		SecretManagerConfig:    &container.ClusterSecretManagerConfigArgs{Enabled: pulumi.Bool(true)},
+		IpAllocationPolicy:   &container.ClusterIpAllocationPolicyArgs{},
+		PrivateClusterConfig: &container.ClusterPrivateClusterConfigArgs{EnablePrivateNodes: pulumi.Bool(true), EnablePrivateEndpoint: pulumi.Bool(false)},
+		ReleaseChannel:       &container.ClusterReleaseChannelArgs{Channel: pulumi.String("REGULAR")},
+		SecretManagerConfig:  &container.ClusterSecretManagerConfigArgs{Enabled: pulumi.Bool(true)},
+		SecretSyncConfig: &container.ClusterSecretSyncConfigArgs{
+			Enabled:        pulumi.Bool(true),
+			RotationConfig: &container.ClusterSecretSyncConfigRotationConfigArgs{Enabled: pulumi.Bool(true)},
+		},
 		WorkloadIdentityConfig: &container.ClusterWorkloadIdentityConfigArgs{WorkloadPool: pool},
 		DeletionProtection:     pulumi.Bool(s.deletionProtection),
 	}, child)

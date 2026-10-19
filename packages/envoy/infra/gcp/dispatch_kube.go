@@ -85,8 +85,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	metadata := func(name string) *metav1.ObjectMetaArgs {
 		return &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(s.namespace)}
 	}
-	if _, err := corev1.NewNamespace(ctx, s.namespace, &corev1.NamespaceArgs{Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.namespace)}}, child...); err != nil {
-		return nil, err
+	if !s.existingNamespace {
+		if _, err := corev1.NewNamespace(ctx, s.namespace, &corev1.NamespaceArgs{Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.namespace)}}, child...); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := corev1.NewServiceAccount(ctx, s.hostname, &corev1.ServiceAccountArgs{Metadata: metadata(s.hostname)}, child...); err != nil {
 		return nil, err

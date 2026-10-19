@@ -195,6 +195,43 @@ func TestDispatchClusterUsesTheProjectsWorkloadPool(t *testing.T) {
 	require.Equal(t, "example-project.svc.id.goog", config["workloadPool"])
 }
 
+// The dispatch cluster syncs Secret Manager secrets into Kubernetes Secrets (Secret Sync), with
+// rotation on so a new secret version reaches the synced Secret without an apply.
+func TestDispatchClusterEnablesSecretSync(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	sync := m.One(t, "gcp:container/cluster:Cluster").Inputs.Mappable()["secretSyncConfig"].(map[string]any)
+	require.Equal(t, true, sync["enabled"])
+	require.Equal(t, true, sync["rotationConfig"].(map[string]any)["enabled"])
+}
+
+func countRegistrations(m *pulumitest.Mocks, typ string) int {
+	var n int
+	for _, registration := range m.Registrations() {
+		if registration.Type == typ {
+			n++
+		}
+	}
+	return n
+}
+
+// With existingNamespace, the component registers no Namespace: another program owns it.
+func TestDispatchExistingNamespaceRegistersNoNamespace(t *testing.T) {
+	args := dispatchArgs()
+	yes := true
+	args.ExistingNamespace = &yes
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+	require.Zero(t, countRegistrations(m, "kubernetes:core/v1:Namespace"))
+}
+
+func TestDispatchCreatesItsNamespaceByDefault(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	require.Equal(t, 1, countRegistrations(m, "kubernetes:core/v1:Namespace"))
+}
+
 func TestDispatchRegistersKubernetesResources(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
