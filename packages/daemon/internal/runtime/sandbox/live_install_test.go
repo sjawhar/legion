@@ -546,8 +546,14 @@ func (r *liveRig) checkImageProbeMissingVolumeRefusal() error {
 		return fmt.Errorf("the probe pod %s as last read (phase %s) carries no PodScheduled=True condition, so the refusal's bound from its scheduling is unproven", probe, pod.Status.Phase)
 	}
 	sinceScheduled := refusedAt.Sub(scheduledAt)
-	if limit := 30 * time.Second; sinceScheduled > limit {
-		return fmt.Errorf("the refusal came %s after the probe pod was scheduled, past the %s one event read every %s, the poll's tick and the kubelet's first volume sync allow", sinceScheduled.Round(time.Second), limit, mountRecheck)
+	// The reads after scheduling fall at the first poll, then every mountRecheck; a kubelet whose
+	// first mount attempt lands after the first recheck is found on the second, so the bound allows
+	// two rechecks, with 15 s of slack for the poll's tick, the API server's second-truncated
+	// transition time and the kubelet's first volume sync. The refusal's own claim is "within one
+	// read of the kubelet's first FailedMount", which the noted durations show; this bound only says
+	// the attempt was not waited out.
+	if limit := 2*mountRecheck + 15*time.Second; sinceScheduled > limit {
+		return fmt.Errorf("the refusal came %s after the probe pod was scheduled, past the %s two event reads every %s, the poll's tick and the kubelet's first volume sync allow", sinceScheduled.Round(time.Second), limit, mountRecheck)
 	}
 	note("runtime", "refused %s after ProbeImage was called, %s after the pod was scheduled: %s", refusedAt.Sub(started).Round(time.Second), sinceScheduled.Round(time.Second), lineContaining(refusal.Error(), "cannot mount volume"))
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
