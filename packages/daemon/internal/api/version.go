@@ -243,7 +243,5 @@ package api
 // which holds the image's pi-legion to this number, refuses such an image at boot instead. The
 // state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
 // its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
-// `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither. (This change
-// took 30, then 31, while the per-owner credentials and issue's-repository changes were open; they
-// took 30 and 31, so this one takes the number above them, as the collision note says.)
+// `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither.
 const DaemonAPIVersion = 32
