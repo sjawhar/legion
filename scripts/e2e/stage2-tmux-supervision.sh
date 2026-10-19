@@ -14,12 +14,18 @@
 # work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. LEGION_E2E_MODEL_GATEWAY_URL (required): the agents' model is Anthropic
-# through the Hawk model gateway at that URL on the operator's own hawk login
-# (lib/install-model-gateway.sh), so the operator's keyring must be unlocked; no Anthropic key
-# reaches a pane. The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store
-# (agent tier: no YubiKey touch), which the daemon itself resolves at boot and hands every pane's
-# shim as a daemon-held file (`provider_keys`); the run never reads it.
+# postgres:16 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway` or `key-file`) picks how the
+# agents reach Anthropic, independently of which devbox this runs on:
+#   - `gateway`: the operator's own hawk login, through the Hawk model gateway at
+#     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh); the
+#     operator's keyring must be unlocked, and no Anthropic key reaches a pane.
+#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE (required in this mode), a 0600 file holding a
+#     plaintext Anthropic key, read fresh by lib/install-key-file-model-route.sh's key command on
+#     every call; for a devbox with no Hawk gateway at all. No Anthropic key reaches a pane here
+#     either — only the key command, baked in at install time, ever reads the file.
+# The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store (agent tier: no
+# YubiKey touch), which the daemon itself resolves at boot and hands every pane's shim as a
+# daemon-held file (`provider_keys`); the run never reads it.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -130,7 +136,7 @@ cleanup() {
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
-    echo "the run's workspace is $work (transcript: $work/transcript.log; daemon log: $daemon_log; model key command log: $work/model-gateway/hawk-token.log)"
+    echo "the run's workspace is $work (transcript: $work/transcript.log; daemon log: $daemon_log; model key command log: $(shopt -s nullglob; set -- "$work"/model-gateway/*.log; echo "${1:-none yet}"))"
     # A diagnostic: it never sets the run's status (errexit is on here). A hangup, an interrupt or
     # a termination (129, 130, 143, as trapped below) stopped the run and gets none; a child a signal
     # killed, which is a failure, still does.
@@ -240,16 +246,34 @@ expect_refusal() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 
-for tool in go docker jq curl ss tmux bun mise socat secrets hawk-token; do
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+for tool in go docker jq curl ss tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 make_omp_home "$omp_home"
-# The model route, installed while this shell still holds the operator's HOME and XDG directories,
-# which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring
-# stops the run here, by name.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+# The model route, installed while this shell still holds the operator's HOME and XDG directories
+# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
+# it, but is installed the same way, here, for one setup step regardless of route). The gateway
+# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
+# route's own preflight read stops the run here just as loudly if the file cannot be read.
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --key-file "$key_file") ||
+    fail "the agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 
@@ -465,21 +489,21 @@ turns=$(user_turns "$session_file2" "$marker1")
 note "idle, no pending delivery; the agent's session file holds the task $turns time"
 pass
 
-begin model-turn-through-the-gateway
-# The task's reply came through the gateway: every assistant turn in the session file ran as the
-# profile's pinned model on the anthropic provider, the one provider the profile routes (to
-# middleman) and leaves enabled, and none ended in an error; the key command minted for more than
-# the preflight.
+begin model-turn-through-the-route
+# The task's reply came through the configured route: every assistant turn in the session file ran
+# as the profile's pinned model on the anthropic provider, the one provider the profile routes and
+# leaves enabled, and none ended in an error; the key command served more calls than the preflight,
+# which records none.
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
 replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
   | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
 jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
-  <<<"$replies" >/dev/null || fail "claim $c2's replies did not all come from $pinned through the gateway: $replies"
-calls=$(grep -c ' invoked by pid ' "$work/model-gateway/hawk-token.log")
+  <<<"$replies" >/dev/null || fail "claim $c2's replies did not all come from $pinned through the route: $replies"
+calls=$(grep -c ' invoked by pid ' "$key_command.log")
 [ "$calls" -ge 2 ] || fail "the key command $key_command ran $calls time(s), the preflight's alone"
 note "claim $c2's replies, from its session file: $replies"
-note "the key command $key_command ran $calls times and minted $(grep -c ' minted a key for pid ' "$work/model-gateway/hawk-token.log") ($work/model-gateway/hawk-token.log)"
+note "the key command $key_command ran $calls times and served $(grep -c $'\tserved\t' "$key_command.calls") ($key_command.log, $key_command.calls)"
 pass
 
 begin retried-frame-starts-no-second-turn
@@ -799,12 +823,12 @@ note "a second close, naming the retired worker $c2, was refused: $close_refusal
 note "the operator's close of S2-1, with its worker $c2 still live in pane $worker_pane, retired the root and the worker, and the pane is gone; the daemon stopped with exit 0"
 pass
 
-begin every-turn-through-the-gateway
+begin every-turn-through-the-route
 # Every agent turn the run recorded, in every session of the isolated profile, each subagent's
-# included, was served by the anthropic provider, the gateway's; and the same check refuses a copy
+# included, was served by the anthropic provider, the route's; and the same check refuses a copy
 # of one captured session with a turn rewritten as Bedrock's.
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
-  --control "$work/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+  --control "$work/model-route-control") || fail "an agent turn left the configured route, or the check proved nothing (the reason is above)"
 note "$route"
 pass
 

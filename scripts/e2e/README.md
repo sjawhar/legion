@@ -12,7 +12,7 @@ through `scripts/e2e/.shellcheckrc`.
 | script | proves |
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state` with the 20-row capability report on it (`resource-limits` open under tmux, carrying the `capabilities.decided` line to write; `pool-capacity` present, since tmux runs no probe pod), registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
-| `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's two plugins in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a profile without the Envoy plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
+| `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's two plugins in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a profile without the Envoy plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the configured route, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live claim |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; every container of its pod reserves its role's cpu and memory with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are the summed reservation; a second role joins the root's issue pod; suspend, resume, a same-agent refusal, a pod killed in place, and a relaunch before registration each hold; a new tree's root and child spawned at once each provision an issue pod and a volume of their own, neither able to read the other's workspace; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace and takes the swept issue's volume with its Sandbox; releasing one role leaves the issue's Sandbox and volume; a launch that replaces an issue pod another role still runs in names the replaced pod on its Sandbox, and the running role is observed displaced and resumes into the new pod; and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
@@ -142,20 +142,29 @@ docker of its own there.
 ## stage2-tmux-supervision.sh
 
 ```sh
-LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh           # the same, for a devbox with no Hawk gateway
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
 `jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
-the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the gateway's Anthropic
-endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on
-`PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
-`unlock-keyring` skill). CI runs the unit and integration tests, not this script; what only this
+`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how the agents reach
+Anthropic, independently of which devbox this runs on:
+- `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
+  gateway's Anthropic endpoint (required in this mode;
+  [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on `PATH`, their
+  `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
+  `unlock-keyring` skill).
+- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
+  plaintext Anthropic key, for a devbox with no Hawk gateway at all
+  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+
+CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
 `--append-system-prompt`, the plugin's strict parse of the Go daemon's answers, the plugin gate
-against an installed manifest, the provider-key path, a pane's model turn through the gateway, and
-the Envoy role claim.
+against an installed manifest, the provider-key path, a pane's model turn through the configured
+route, and the Envoy role claim.
 
 What it stands up, all of it the run's own:
 
@@ -180,12 +189,17 @@ What it stands up, all of it the run's own:
   `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
   `/proc/<pid>/exe`, and every command in the pane's first-child chain. That proves the wrapper
   cannot replace the configured build while mise still supplies the tool's activation.
-- **The model route**: Anthropic through the Hawk model gateway, installed into the profile by
-  [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) at setup, while the script's shell
-  still holds the operator's HOME and XDG directories. Its preflight mint refuses a locked keyring by name.
-  Every model role of every pane is `anthropic/claude-opus-4-8`, and `anthropic` is the one
-  provider a pane may use, keyed by the operator's hawk login through
-  `<work>/model-gateway/hawk-token`, whose log records each mint; no Anthropic key reaches a pane.
+- **The model route**: Anthropic through the configured route, installed into the profile by
+  [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
+  [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) at
+  setup, while the script's shell still holds the operator's HOME and XDG directories. Either
+  route's preflight refuses loudly before any pane exists: a locked keyring by name under
+  `gateway`, an unreadable or empty key file under `key-file`. Every model role of every pane is
+  `anthropic/claude-opus-4-8`, and `anthropic` is the one provider a pane may use, keyed through
+  `<work>/model-gateway/hawk-token` (`gateway`) or `<work>/model-gateway/anthropic-key`
+  (`key-file`), whose log records each call; no Anthropic key reaches a pane either way — only the
+  key command, and only under `gateway` through the operator's hawk login or under `key-file` by
+  reading the file once per call.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`, which proves the
   provider-key path; no pane's model uses it, and the profile disables the Google provider. The
   daemon resolves the secret at boot and writes it as a daemon-held 0600 file; every pane's shim
@@ -213,7 +227,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `envoy-role-held` | `GET /v1/roles/<claim token>` on the listener names the claim's session as holder |
 | `ready-in-state` | `legion state --json` shows the issue's architect `ready`, with that session and a tmux locator |
 | `task-queued-before-ready-runs-once` | a second claim spawned with a task: the spawn's answer holds the delivery unsent while the claim is launching; it ends `idle` with nothing pending, and OMP's session file holds the task once |
-| `model-turn-through-the-gateway` | every assistant turn in that claim's session file ran on the `anthropic` provider as the profile's pinned model (`anthropic/claude-opus-4-8`), none ending in an error, and the key command minted more than its preflight |
+| `model-turn-through-the-route` | every assistant turn in that claim's session file ran on the `anthropic` provider as the profile's pinned model (`anthropic/claude-opus-4-8`), none ending in an error, and the key command served more calls than its preflight, which records none |
 | `retried-frame-starts-no-second-turn` | stops the claim's shim (SIGSTOP) and delivers a task: every send goes unanswered, and the daemon sends the same delivery id again at the next sweep (`the prompt was lost to the transport` twice in its log); resumed, the shim hands OMP the first frame and answers the repeat from its record — the session file holds the task once, and no prompt failure is charged |
 | `kill-pane-resumes-the-same-session` | `tmux kill-pane` on the architect: the next generation is ready in a new pane with the same session, its OMP started with `--resume=<session file>`, and the Envoy role still held |
 | `suspend-keeps-the-session` | `legion claims suspend`: `suspended`, no locator, the pane gone, the session and its file kept |
@@ -224,7 +238,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH; the pane's shell and that OMP carry all four XDG base directories under `<state_dir>/home` and no `DBUS_SESSION_BUS_ADDRESS` (LEGION-206 P1, with the gateway route in place); OMP carries `GEMINI_API_KEY` (length only) that its shim does not, and no `ANTHROPIC_API_KEY`, `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
 | `stray-pane-reaped-after-the-grace` | opens a window marked as the daemon's (`@legion_owner`) holding no recorded pane, and an unmarked one beside it: the periodic orphan sweep (every 60 s, 120 s grace) reaps the marked one no sooner than 120 s after it opened, and keeps the unmarked window and both claims' panes |
 | `stop` | `legion claims stop` of the root architect is refused — 409, "the tree's root claim ends only when its tree closes; suspend it to stop its process; no workflow issue backs its tree, so legion claims close ends it" — and moves nothing: its state, generation, and pane are what they were; `legion claims suspend` suspends the root; `legion claims stop` of a second worker, S2-3's tester, retires it and its pane is gone; no workflow issue backs S2-1, so `legion claims close` of its root closes the tree while its first worker is still live: the root and the worker are both retired and the worker's pane is gone; `legion stop` ends the daemon with exit 0 |
-| `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
+| `every-turn-through-the-route` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the route's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
 `FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. A failed
@@ -234,7 +248,7 @@ want of a model key, and still exits 1. The
 kills both private tmux servers, stops the listener, SIGKILLs any process still naming the work
 directory in its command line or working directory, removes both containers and the OMP profile,
 and removes the work directory when the run passed (keeping it, with `transcript.log` (the whole
-run), `daemon.log`, `deadline.log`, `listener.log`, `model-gateway/hawk-token.log` and each
+run), `daemon.log`, `deadline.log`, `listener.log`, the model key command's log and each
 refusal's log, when it did not). The trap still runs when whoever reads the run's output goes
 first, for example a supervised launcher's own `tee` stopped with the run, and a stop follows: the
 run's output goes through [`lib/transcript.sh`](#libtranscriptsh)'s `tee`, which outlives the
@@ -252,8 +266,10 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
-LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 \
+  bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
@@ -262,15 +278,23 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI, and the operator's model gateway access: `LEGION_E2E_MODEL_GATEWAY_URL` naming the
-gateway's Anthropic endpoint (required; [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)),
-`hawk-token` on `PATH`, their `hawk login`, and the GNOME keyring holding it unlocked (every reboot
-locks it; the `unlock-keyring` skill). `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
+`secrets` CLI, and `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
+the agents reach Anthropic, independently of which devbox this runs on:
+- `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
+  gateway's Anthropic endpoint (required in this mode;
+  [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on `PATH`, their
+  `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
+  `unlock-keyring` skill).
+- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
+  plaintext Anthropic key, for a devbox with no Hawk gateway at all
+  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+
+`SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet
 (`nats://envoy-nats.<tailnet>.ts.net:4222`), never a bare alias, which only a resolver's search
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
-`prerequisites` refuses a run without
-either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
+`prerequisites` refuses a run without it, and refuses a value that is not one NATS URL naming a
+host with a dot. The script prints
 neither value. The bridge connects to that upstream as the nkey user a command run from the
 operator's shell resolves for it (`lib/operator-nats-seed.ts`, `envoySettings` with
 `ENVOY_NATS_URL` set to that upstream): `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the
@@ -291,12 +315,15 @@ unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier, and
 [`read_app_logins`](#libworkflowsh) runs the same two commands once, in `lib/app-logins.ts`, to
 read each App's bot login from GitHub, the login every check that names an App compares with. The agents'
-model is Anthropic through the Hawk model gateway, the route every devbox agent session uses:
-[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes the isolated profile there in
-`prerequisites`, where its preflight mint refuses a locked keyring by name, and the daemon is given
+model is Anthropic through the configured route:
+[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) routes the
+isolated profile there in `prerequisites`, where either route's preflight refuses loudly before any
+pane exists (a locked keyring by name under `gateway`, an unreadable or empty key file under
+`key-file`), and the daemon is given
 no `provider_keys` (the Google provider answered long workflow turns with empty responses, so the
-agents are not Gemini-backed). No YubiKey touch is required, and no key value enters the script's
-shell, a pane, an argv, or the transcript.
+agents are not Gemini-backed). No YubiKey touch is required under `key-file`, and no key value
+enters the script's shell, a pane, an argv, or the transcript, under either route.
 
 The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
 subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
@@ -311,7 +338,7 @@ services, its production guards, and its checks.
 Production is off limits, and the proof checks that rather than assuming it. Every registered
 pane's OMP environment must carry `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_URL`, and
 `ENVOY_NATS_URL` for this rig's scratch servers, and no `ANTHROPIC_API_KEY`, which would take its
-turns off the gateway route. A watcher checks each pane the daemon launches —
+turns off the configured route. A watcher checks each pane the daemon launches —
 the ones it starts on its own included — as soon as its OMP process exists, before the plugin
 registers and so before any turn; a mismatch kills the private tmux server and aborts naming the
 pane, and the audit fails naming any launch the watcher never saw. At
@@ -427,10 +454,10 @@ opens with a live gate-state negative control for the carry: the human's whole-d
 closes the gate, no `artifact.approved` names its version and no review is pinned to it (a
 version that is nobody's answer to a decision block carries no approval), and only his own review
 reopens it, which releases nothing since no READY is held yet.
-Once every agent is gone, `model-turns-through-the-gateway` runs
+Once every agent is gone, `model-turns-through-the-route` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not
-the `anthropic` provider's, the gateway's, and its negative control (a copy of one captured session
+the `anthropic` provider's, the route's, and its negative control (a copy of one captured session
 with a turn rewritten as Bedrock's) is kept in the evidence as `model-route-control/`. It runs after
 `services-stopped` has stopped the watcher, the daemon and the private tmux server and found no
 proof process left, since an idle agent takes a turn on the next event the daemon delivers, and
@@ -453,10 +480,10 @@ never cited as the proof; only a full run is.
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
 `/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): `transcript.log` (the whole run), every agent
 transcript, the daemon, Dispatch, listener, and bridge logs, the model key command and its log of
-every mint (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks,
+every call (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks,
 and the production audit. A passing run's last three checks stop every process, kill the private
 tmux server and remove both containers (`services-stopped`), check the model route
-(`model-turns-through-the-gateway`), and close every pull request the run still has open on the
+(`model-turns-through-the-route`), and close every pull request the run still has open on the
 smoke repository — its own, by branch, the daemon's `legion/<project>-*`; the proof human's fixture
 pull request merged in `smoke-main-clean` — before removing the isolated OMP profile and the scratch
 work directory, the agents' workspaces with it (`cleanup-is-complete`); each shows what it removed
@@ -1792,9 +1819,46 @@ each agent its own file can judge one run from that run's directory alone.
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with its work directory and `<cache-dir>`.
 
+## lib/install-key-file-model-route.sh
+
+Routes a named OMP profile's model turns straight to Anthropic's own endpoint, keyed from a local
+file: the key-file alternative to [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s
+Hawk route, for a devbox that has no Hawk gateway at all. Mirrors the model-route pattern
+[`deploy/kubernetes/operator-route/models-key-file.yml`](../../deploy/kubernetes/operator-route/models-key-file.yml)
+gives Stage 4a's pods: an operator-supplied key, read fresh on every call, never minted and never
+written into the tree.
+
+```sh
+scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-file <file>
+# → <dir>/anthropic-key
+```
+
+`--key-file` names a file holding the plaintext Anthropic key alone (one line; a trailing newline
+is read past), refused unless it is a regular file only its owner can read (no group or other
+permission bit) — checked once, here, before any pane exists, never read beyond that check, so a
+key a caller rotates mid-run takes effect on the very next call with no restart.
+
+It writes `<dir>/anthropic-key`, the key command: reads `--key-file` fresh under the caller's HOME
+and XDG base directories, for that one command. Unlike `hawk-token` there is nothing to mint and no
+login to lose to a relocked keyring, so there is no cache and no budget: every call is a plain, fast
+file read, `served` or `failed` (there is no `timeout` or `killed` here, since nothing is minted or
+waited on). It appends one tab-separated line per call to `<dir>/anthropic-key.calls`, and to the
+caller's `MODEL_GATEWAY_CALLS_FILE` when its environment names one, in exactly the record shape
+[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads — the installer's preflight
+(`--preflight`) is no agent's and is left out, the same rule `hawk-token`'s own key command
+follows. The profile's `agent/models.yml` points the `anthropic` provider at
+`https://api.anthropic.com` with `apiKey` and `X-Api-Key` both `!exec <dir>/anthropic-key`, and its
+`agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every other
+provider a pane could reach without the key file, the same shape
+[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes.
+
+The script creates the profile's one file, `<dir>`, and removes none of it; the caller does, with
+its work directory.
+
 ## lib/model-gateway-unserved.sh
 
-Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) wrote
+Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) or
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) wrote
 left an agent without a key, and why. Oh My Pi answers every call that gets no key the same way
 (`No API key found for anthropic.`, exit 1, and for `omp -p` on 18.2.9 no session file at all),
 whatever the cause, so a run cannot say for itself that it never got a model turn.
@@ -1850,16 +1914,17 @@ included), and `--record` and `--notes` 1 on a record line they cannot read.
 
 ## lib/check-model-route.sh
 
-Proves a tmux stage proof's agents reached the model only through the gateway: every agent turn
-the isolated OMP profile recorded, each subagent's included, was served by the `anthropic`
-provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes to the
-gateway and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once every agent
-process has stopped and before it copies the transcripts, then again over the copies, which must
-hold the same turns, sessions and subagents.
+Proves a tmux stage proof's agents reached the model only through its configured route: every
+agent turn the isolated OMP profile recorded, each subagent's included, was served by the
+`anthropic` provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (the
+Hawk gateway) or [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (a
+local key file) routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
+every agent process has stopped and before it copies the transcripts, then again over the copies,
+which must hold the same turns, sessions and subagents.
 
 ```sh
 bash scripts/e2e/lib/check-model-route.sh --sessions "$work/omp-home/.omp/profiles/<profile>/agent/sessions" --control "$work/model-route-control"
-# → 74 assistant turns in 5 agent sessions (0 of them subagents'), every one on the anthropic provider (the gateway); negative control: … refused
+# → 74 assistant turns in 5 agent sessions (0 of them subagents'), every one on the anthropic provider; negative control: … refused
 ```
 
 Each session is a JSONL file under `--sessions`; a subagent's is the `<AgentName>.jsonl` in its
@@ -1867,10 +1932,10 @@ parent session's own directory. Every assistant turn must record `message.provid
 and every `model_change` a model under `anthropic/`; a line that does not parse is skipped, since
 a live agent may be mid-write. It exits 1 naming each session off the route with what it recorded,
 and when no session, or no assistant turn, exists. Run over the transcripts of a Stage 3 run from
-before the gateway route, it names the retro scout's Bedrock turn:
+before either model route, it names the retro scout's Bedrock turn:
 
 ```text
-check-model-route: agent sessions off the anthropic route (the gateway):
+check-model-route: agent sessions off the anthropic route:
 …/RetroFreshEyes.jsonl: model change to amazon-bedrock/openai.gpt-oss-120b
 …/RetroFreshEyes.jsonl: turn on amazon-bedrock/openai.gpt-oss-120b
 ```

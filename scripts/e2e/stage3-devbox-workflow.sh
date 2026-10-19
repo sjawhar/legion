@@ -5,16 +5,21 @@
 # shared lib/rig.sh and lib/workflow.sh; the small scratch-service rig below is this run's own, so
 # its lifecycle belongs to this run.
 #
-# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with two required inputs:
-# LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint, and SMOKE_UPSTREAM_NATS,
-# the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name. It needs
-# agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked: the
-# agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
-# route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
-# reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
-# App), never a Legion App, so run the script from the operator's own Oh My Pi session, not a Legion
-# pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses to start otherwise
-# (require_proof_human, lib/workflow.sh).
+# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with three required inputs:
+# LEGION_E2E_MODEL_ROUTE (`gateway` or `key-file`), SMOKE_UPSTREAM_NATS (the production Envoy NATS
+# the GitHub bridge subscribes on, by its fully-qualified name), and, depending on the route:
+#   - `gateway`: LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint. It needs
+#     agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked:
+#     the agents' model is Anthropic through the Hawk model gateway
+#     (lib/install-model-gateway.sh), and no Anthropic key reaches a pane.
+#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE, a 0600 file holding a plaintext Anthropic key, for
+#     a devbox with no Hawk gateway at all (lib/install-key-file-model-route.sh). No Anthropic key
+#     reaches a pane here either — only the key command, baked in at install time, ever reads the
+#     file.
+# The proof human's reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the
+# sjawhar-agent App), never a Legion App, so run the script from the operator's own Oh My Pi
+# session, not a Legion pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses
+# to start otherwise (require_proof_human, lib/workflow.sh).
 # The App private keys are resolved through private_key_command by the daemon, and by
 # lib/app-logins.ts once to read each App's bot login from GitHub (read_app_logins,
 # lib/workflow.sh); they never enter this shell, a pane, an argv, or this transcript.
@@ -52,8 +57,8 @@ state="$work/state"
 omp_home="$work/omp-home"
 profile_agent="$omp_home/.omp/profiles/$profile/agent"
 repo="sjawhar/legion-smoke"
-# Anthropic through the gateway: the Google provider answered long workflow turns with empty
-# responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
+# Anthropic through the configured route: the Google provider answered long workflow turns with
+# empty responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
 pg_container="legion-e2e3-pg-$$"
 nats_container="legion-e2e3-nats-$$"
 daemon_pid=
@@ -341,8 +346,8 @@ claim_pane_pid() {
 }
 pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
 # endpoint_mismatch OMP_PID prints the first rig endpoint the OMP process does not carry, or the
-# ANTHROPIC_API_KEY it must not carry: the agents' model is the gateway's, and a key in OMP's
-# environment would take the turn off that route.
+# ANTHROPIC_API_KEY it must not carry: the agents' model is the configured route's, and a key in
+# OMP's environment would take the turn off that route.
 endpoint_mismatch() {
   local omp=$1 name want got
   for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
@@ -525,7 +530,7 @@ approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.ki
 
 begin prerequisites
 refuse_leftovers legion-e2e3
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -545,6 +550,12 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
 # a bare alias a resolver's search domain would complete. The value is never printed.
 upstream_nats=${SMOKE_UPSTREAM_NATS:-}
@@ -569,14 +580,27 @@ gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh ca
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-# The model route, installed while this shell still holds the operator's HOME and XDG directories,
-# which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
-# run here, by name. The key command's log is evidence.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+# The model route, installed while this shell still holds the operator's HOME and XDG directories
+# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
+# it, but is installed the same way, here, for one setup step regardless of route). The gateway
+# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
+# route's own preflight read stops the run here just as loudly if the file cannot be read. The key
+# command's log is evidence either way.
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-file "$key_file") ||
+    fail "the agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
-note "the agents' model route: $pinned through the gateway, keyed by $key_command"
+note "the agents' model route: $pinned through $model_route, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -1202,15 +1226,15 @@ TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fai
 note "the watcher, daemon, Dispatch, listener, bridge, private tmux server and every proof process stopped; both containers removed"
 pass
 
-begin model-turns-through-the-gateway
+begin model-turns-through-the-route
 # Every agent turn of the run, in every session of the isolated profile, each subagent's included,
-# was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
+# was served by the anthropic provider, the route's; and the same check refuses a copy of one
 # captured session with a turn rewritten as Bedrock's, kept in the evidence. It reads the profile
 # only now, with every agent process gone, and before the profile is copied and removed.
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
-  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+  --control "$evidence/model-route-control") || fail "an agent turn left the configured route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log" || true) times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log" || true) ($evidence/model-gateway/hawk-token.log)"
+note "the key command ran $(grep -c ' invoked by pid ' "$key_command.log" || true) times and served $(grep -c $'\tserved\t' "$key_command.calls" || true) ($key_command.log, $key_command.calls)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

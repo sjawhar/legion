@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Says whether the model gateway key command lib/install-model-gateway.sh wrote left an agent
-# without a key, and why. Oh My Pi answers every call that gets no key the same way ("No API key
-# found for anthropic.", exit 1, and on 18.2.9 an `omp -p` run leaves no session file at all), so
-# the run itself cannot say it never got a model turn.
+# Says whether the model-route key command lib/install-model-gateway.sh or
+# lib/install-key-file-model-route.sh wrote left an agent without a key, and why. Oh My Pi answers
+# every call that gets no key the same way ("No API key found for anthropic.", exit 1, and on
+# 18.2.9 an `omp -p` run leaves no session file at all), so the run itself cannot say it never got
+# a model turn.
 #
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --record <file>
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --notes <dest> <since> <check>
 #   bash scripts/e2e/lib/model-gateway-unserved.sh --fresh <evidence-dir>
 #
 # The record. The key command appends one line per call an agent makes (the installer's preflight
-# is none), to <dest>/hawk-token.calls and, when the caller's environment names one, to its
-# MODEL_GATEWAY_CALLS_FILE. Six tab-separated fields, none empty:
+# is none), to <dest>/<key-command-name>.calls (the one such file a route's own --dest ever holds)
+# and, when the caller's environment names one, to its MODEL_GATEWAY_CALLS_FILE. Six tab-separated
+# fields, none empty:
 #   time     when the call ended, %FT%TZ, UTC
 #   pid      its parent: a helper Oh My Pi starts for each call, so it names no agent
 #   cwd      the directory Oh My Pi ran it in, physically; on the Go tmux runtime every agent of an
@@ -20,11 +22,15 @@
 #            `legion controller start` runs with LEGION_ROLE=controller: `controller`, unless it was
 #            started from a shell that already carried a LEGION_GENERATION); - when it sets no role
 #            (a harness's `omp -p`)
-#   outcome  served; timeout (the call's own deadline, its wait behind another call's mint, or
-#            hawk-token saying it spent its whole budget); killed (a signal ended the mint while it
-#            had time left); failed (anything else)
-#   detail   why: the kept key or the mint's time for served, hawk-token's last stderr line or the
-#            key command's own reason otherwise
+#   outcome  served; timeout (the Hawk route's own deadline, its wait behind another call's mint,
+#            or hawk-token saying it spent its whole budget — the key-file route never times out:
+#            every call is a plain file read); killed (a signal ended the Hawk route's mint while
+#            it had time left; the key-file route never forks a mint to kill); failed (anything
+#            else, the key-file route's only failure mode: the file could not be read, or was
+#            empty)
+#   detail   why: the kept key or the mint's time for served under the Hawk route, the path it read
+#            from under the key-file route; hawk-token's last stderr line, or the key command's own
+#            reason, otherwise
 # An agent is its cwd and agent field together.
 #
 # --record judges one agent run from its MODEL_GATEWAY_CALLS_FILE: a harness that runs one agent per
@@ -124,8 +130,16 @@ case "${1:-}" in
 --notes)
   [ $# = 4 ] || refuse "$usage"
   [[ $3 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || refuse "--notes <since> $3 is not a UTC time as %FT%TZ"
-  record=$2/hawk-token.calls
-  [ -e "$record" ] || exit 0
+  # <dest> holds one route's own key command and its *.calls beside it, whichever installer ran
+  # (lib/install-model-gateway.sh's hawk-token.calls, or lib/install-key-file-model-route.sh's
+  # anthropic-key.calls): a route that never reached its first call leaves none yet, read the same
+  # as an empty one below.
+  calls=("$2"/*.calls)
+  case "${#calls[@]}" in
+  0) exit 0 ;;
+  1) [ -e "${calls[0]}" ] && record=${calls[0]} || exit 0 ;;
+  *) refuse "--notes $2 holds more than one *.calls file (${calls[*]}); it is not one route's own --dest" ;;
+  esac
   lookback=$(date -u -d "$3 $retry_s seconds ago" +%FT%TZ)
   # Per agent: its last outcome, its last starve (time and line), and its first served call after
   # that starve.
