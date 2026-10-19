@@ -580,6 +580,8 @@ until_true_quiet() {
 begin prerequisites
 for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
+# The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
+[ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
 real_gh=$(mise which gh) || fail "mise has no gh"
 require_proof_human
 gh api "repos/$repo" --jq .name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
