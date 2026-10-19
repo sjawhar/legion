@@ -220,7 +220,7 @@ claim_states_are() {
   claims_list | jq -e --arg issue "$1" --arg implementer "$2" --arg others "$3" '
     ($implementer | split(" ")) as $i | ($others | split(" ")) as $o
     | [.claims[] | select(.issue == $issue)]
-    | length == 6 and all(.[]; .state | IN((if .role == "implementer" then $i else $o end)[]))' >/dev/null
+    | length == 6 and all(.[]; (if .role == "implementer" then $i else $o end) as $allowed | .state | IN($allowed[]))' >/dev/null
 }
 # phase_change_logged ISSUE FROM TO TRIGGER: the daemon log holds the workflow's `phase changed`
 # line moving ISSUE from FROM to TO on TRIGGER (sign_off, pull_request_merged, …). daemon.log
