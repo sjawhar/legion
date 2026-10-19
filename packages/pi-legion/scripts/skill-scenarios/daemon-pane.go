@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -168,20 +169,32 @@ func realGH(named, path string) (string, error) {
 	for _, dir := range filepath.SplitList(path) {
 		gh := filepath.Join(dir, "gh")
 		if info, err := os.Stat(gh); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
-			head := make([]byte, 2)
-			file, err := os.Open(gh)
+			head, err := firstBytes(gh, 2)
 			if err != nil {
-				return "", err
+				return "", fmt.Errorf("read %s, the first gh on the daemon's PATH: %w", gh, err)
 			}
-			n, _ := file.Read(head)
-			file.Close()
-			if string(head[:n]) == "#!" {
+			if string(head) == "#!" {
 				return "", fmt.Errorf("the first gh on the daemon's PATH, %s, is a script, not the real gh, which the daemon refuses to boot on", gh)
 			}
 			return gh, nil
 		}
 	}
 	return "", fmt.Errorf("no gh on the daemon's PATH %q: the daemon resolves the real gh every pane's `legion gh` runs at boot", path)
+}
+
+// firstBytes is up to n bytes from the start of path.
+func firstBytes(path string, n int) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	head := make([]byte, n)
+	read, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return head[:read], nil
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
