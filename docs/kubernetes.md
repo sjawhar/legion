@@ -1606,8 +1606,12 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    holds <owner>/<repo> already: …`), after removing every git lock file a fetch killed mid-update
    left in the feed, each logged with its age. It takes an existing feed only in the shape the
    fetch writes: no symlink anywhere, its owner directory included; no gitfile; no hook but git's
-   samples; a configuration holding only the keys git's bare init and clone and the fetch write;
-   nothing in `info/` but git's `exclude`; and no alternates. Before this release any role could
+   samples; a configuration holding only the keys git's bare init and clone and the fetch write,
+   each line in git's own form (a `[section]` header alone on its line, or a tab-indented `key =
+   value` with no quote, escape or comment), since git also reads a key written on its header's
+   line; nothing in `info/` but git's `exclude` and `refs`, and the temporary file
+   update-server-info writes `info/refs` or `objects/info/packs` through, which git never reads;
+   and no alternates. Before this release any role could
    write the issue volume's `/legion/feed`, so a volume carried over may hold a repository there
    that would run a hook or follow a setting in the token-holding fetch: such a feed is removed,
    logged (`the feed's <owner>/<repo> is not one this fetch wrote (<why>): removed; the feed is
@@ -1615,7 +1619,10 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    feed's `HEAD` at the branch GitHub names as the default now (`git ls-remote --symref`, under the
    same credential and bound), since a fetch never moves `HEAD` and prunes the branch a rename
    left behind; a move is logged (`the default branch of <owner>/<repo> is now <name> (HEAD named
-   <ref>)`). Once the fetch may start — at once, or once the cache is ready — the cache's stream,
+   <ref>)`). A branch GitHub renamed between the fetch and that read is not yet in the feed, so
+   `HEAD` stays until a fetch brings it, logged (`GitHub's default branch of <owner>/<repo> is now
+   <name>, which this fetch did not bring: HEAD stays at <ref> until a fetch brings it`). Once the
+   fetch may start — at once, or once the cache is ready — the cache's stream,
    its verification and the delta from GitHub share one 30-minute bound
    (`workspace.FetchTimeout`), each given what remains of it, so the fetch's waits, transfers and
    checks end within 70 minutes (`workspace.FetchBudget`) however long it waited, and the few local
@@ -1871,8 +1878,9 @@ before it fetches again. It serves, on port 8418:
 `/tar` answers only a request whose `Authorization: Bearer` is the cache's own token; any other is
 401 and names nothing. `/healthz` and `/tar` name their repository in a `Legion-Repository` header
 on every answer. Each fetch also points the clone's `HEAD` at the branch GitHub names as the
-default now, so a default branch renamed on GitHub is the one the cache publishes and its tar's
-`HEAD` names from the next tick. A fetch that fails is logged and tried at the next tick, and the
+default now, once the fetch has brought that branch, so a default branch renamed on GitHub is the
+one the cache publishes and its tar's `HEAD` names from the next tick. A fetch that fails is logged
+and tried at the next tick, and the
 cache stays ready on what it last fetched; a restarted cache whose volume holds its clone fetches
 into it, and serves it as it is when GitHub cannot be reached; a first clone that fails ends the
 process, and the kubelet restarts it.
@@ -2531,8 +2539,9 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   place once whole, with git's automatic garbage collection off and every fetch's objects kept as
   a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's
   volume and no config home, and it takes an existing feed repository only in the shape it writes
-  (no symlink, gitfile, hook, alternates or configuration key of anyone else's; see "Anatomy of a
-  Sandbox pod"), so nothing an earlier release's agents wrote at `/legion/feed` runs in it. Every
+  (no symlink, gitfile, hook, alternates, configuration key of anyone else's, or configuration line
+  outside git's own form; see "Anatomy of a Sandbox pod"), so nothing an earlier release's agents
+  wrote at `/legion/feed` runs in it. Every
   other provisioning command is
   bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: once the fetch may

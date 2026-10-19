@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -105,8 +106,13 @@ func foreignFeed(gitDir string) (string, error) {
 // packed-refs and FETCH_HEAD; under hooks only git's samples, which git never runs; under info only
 // exclude and refs (the cache's repack runs update-server-info, which writes it, and no fetch reads
 // it); under objects/info only what git writes of its own (no alternates, which would have the
-// repository read another's objects); anything else under objects, and under refs and branches.
+// repository read another's objects); anything else under objects, and under refs and branches; and
+// the temporary file update-server-info writes info/refs or objects/info/packs through, which a
+// repack killed before its rename leaves and git never reads (serverInfoLeftover).
 func feedEntryRefusal(name string, dir bool) string {
+	if !dir && serverInfoLeftover.MatchString(name) {
+		return ""
+	}
 	top, rest, nested := strings.Cut(name, "/")
 	switch top {
 	case "HEAD", "config", "description", "packed-refs", "FETCH_HEAD":
@@ -133,6 +139,11 @@ func feedEntryRefusal(name string, dir bool) string {
 	return "it holds " + name + ", which no fetch writes"
 }
 
+// serverInfoLeftover is the temporary file git's update-server-info writes info/refs or
+// objects/info/packs through, `<file>_` and six random characters (git's mks_tempfile), before it
+// renames the file into place.
+var serverInfoLeftover = regexp.MustCompile(`^(?:info/refs|objects/info/packs)_[A-Za-z0-9]{6}$`)
+
 // feedConfigKeys are the configuration a feed repository may hold, each key (section.key, or
 // section.subsection.key, with git's case rules: section and key lower-cased) with the values it may
 // take: what git's bare init and clone write, and feedConfiguration. remote.origin.url is the one key
@@ -149,37 +160,39 @@ var feedConfigKeys = map[string][]string{
 	"remote.origin.url":            nil,
 }
 
+// feedConfigHeader and feedConfigPair are the only lines git writes in a configuration file: a
+// section header alone on its line, `[section]` or `[section "subsection"]`, and `\tkey = value`
+// with a value git reads as written (no quote, escape or comment). git also reads a key on its
+// header's line (`[section]key=value`) and ends an unquoted value at `;` or `#`, so a line in any
+// other form could set what no line of these two forms shows.
+var (
+	feedConfigHeader = regexp.MustCompile(`^\[([A-Za-z0-9-]+)(?: "([^"\\]*)")?\]$`)
+	feedConfigPair   = regexp.MustCompile(`^\t([A-Za-z][A-Za-z0-9-]*) = ([^"\\;#]*)$`)
+)
+
 // feedConfigRefusal is why config, a feed repository's configuration file, is not one git and
-// feedConfiguration wrote, or "" when it is: only section headers and `\tkey = value` lines, git's
-// own form, each key one feedConfigKeys allows with a value it allows. Anything else (an include, a
-// comment, a quoted or escaped value, a key the list does not name) is refused, since git would read
-// it and the fetch would act on it.
+// feedConfiguration wrote, or "" when it is: only whole lines of git's own two forms
+// (feedConfigHeader, feedConfigPair), each key one feedConfigKeys allows with a value it allows.
+// Anything else (a key on its header's line, an include, a comment, a quoted or escaped value, a key
+// the list does not name) is refused, since git would read it and the fetch would act on it.
 func feedConfigRefusal(config string) string {
 	section := ""
 	for number, line := range strings.Split(strings.TrimSuffix(config, "\n"), "\n") {
 		if line == "" {
 			continue
 		}
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			name, sub, quoted := strings.Cut(strings.TrimSuffix(strings.TrimPrefix(line, "["), "]"), " ")
-			if !quoted {
-				section = strings.ToLower(name)
-				continue
+		if header := feedConfigHeader.FindStringSubmatchIndex(line); header != nil {
+			section = strings.ToLower(line[header[2]:header[3]])
+			if header[4] >= 0 {
+				section += "." + line[header[4]:header[5]]
 			}
-			inner, ok := strings.CutPrefix(sub, `"`)
-			inner, closed := strings.CutSuffix(inner, `"`)
-			if !ok || !closed || strings.ContainsAny(inner, `"\`) {
-				return fmt.Sprintf("its configuration's line %d, %q, is not one git writes", number+1, line)
-			}
-			section = strings.ToLower(name) + "." + inner
 			continue
 		}
-		pair, indented := strings.CutPrefix(line, "\t")
-		key, value, found := strings.Cut(pair, " = ")
-		if !indented || !found || section == "" || strings.ContainsAny(key, " \t=\"\\;#") || strings.ContainsAny(value, "\"\\;#") {
+		pair := feedConfigPair.FindStringSubmatch(line)
+		if pair == nil || section == "" {
 			return fmt.Sprintf("its configuration's line %d, %q, is not one git writes", number+1, line)
 		}
-		name := section + "." + strings.ToLower(key)
+		name, value := section+"."+strings.ToLower(pair[1]), pair[2]
 		allowed, known := feedConfigKeys[name]
 		if !known {
 			return fmt.Sprintf("its configuration sets %s, which no fetch writes", name)

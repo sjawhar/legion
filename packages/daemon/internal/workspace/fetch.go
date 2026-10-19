@@ -203,14 +203,14 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 	if _, err := transferWithRetries(ctx, run, request, transfer, held, deadline); err != nil {
 		return err
 	}
-	if transfer.verb == "fetch" {
-		if err := followHead(ctx, run, request, gitDir, held, deadline); err != nil {
-			return err
-		}
-	}
 	refsAfter, err := feedRefs(ctx, run, gitDir, true)
 	if err != nil {
 		return err
+	}
+	if transfer.verb == "fetch" {
+		if err := followHead(ctx, run, request, gitDir, refsAfter, held, deadline); err != nil {
+			return err
+		}
 	}
 	sizeAfter, err := objectsSize(gitDir)
 	if err != nil {
@@ -234,10 +234,12 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 // (`git ls-remote --symref`), under the fetch's credential, retries and deadline, and logs the
 // move when there is one. A fetch never moves HEAD and prunes the branches GitHub deleted, so a
 // repository whose default branch GitHub renamed would keep a HEAD naming a branch that is gone:
-// the cache could publish no head, and an issue's clone would check nothing out. A clone takes
-// GitHub's HEAD itself. A repository GitHub answers with no default branch (nothing pushed yet)
-// keeps its HEAD.
-func followHead(ctx context.Context, run Runner, request FetchRequest, gitDir string, held *fetchCredential, deadline time.Time) error {
+// the cache could publish no head, and an issue's clone would check nothing out. HEAD moves only to
+// a branch among fetched, the refs the fetch left: GitHub renaming its branch between the fetch and
+// this read names one the fetch did not bring, so HEAD stays, logged, until a fetch brings it. A
+// clone takes GitHub's HEAD itself. A repository GitHub answers with no default branch (nothing
+// pushed yet) keeps its HEAD.
+func followHead(ctx context.Context, run Runner, request FetchRequest, gitDir string, fetched map[string]string, held *fetchCredential, deadline time.Time) error {
 	read := feedTransfer{verb: "ls-remote", argv: []string{"git", "--git-dir=" + gitDir, "ls-remote", "--symref", GitHubURL(request.Repo), "HEAD"}}
 	result, err := transferWithRetries(ctx, run, request, read, held, deadline)
 	if err != nil {
@@ -259,12 +261,18 @@ func followHead(ctx context.Context, run Runner, request FetchRequest, gitDir st
 	if err != nil {
 		return err
 	}
-	if was := strings.TrimSpace(current.Stdout); was != target {
-		if _, err := FeedGit(ctx, run, gitDir, "symbolic-ref", "HEAD", target); err != nil {
-			return err
-		}
-		request.Log(fmt.Sprintf("the default branch of %s is now %s (HEAD named %s)", request.Repo, strings.TrimPrefix(target, "refs/heads/"), cmp.Or(was, "nothing")))
+	was := strings.TrimSpace(current.Stdout)
+	if was == target {
+		return nil
 	}
+	if _, ok := fetched[target]; !ok {
+		request.Log(fmt.Sprintf("GitHub's default branch of %s is now %s, which this fetch did not bring: HEAD stays at %s until a fetch brings it", request.Repo, strings.TrimPrefix(target, "refs/heads/"), cmp.Or(was, "nothing")))
+		return nil
+	}
+	if _, err := FeedGit(ctx, run, gitDir, "symbolic-ref", "HEAD", target); err != nil {
+		return err
+	}
+	request.Log(fmt.Sprintf("the default branch of %s is now %s (HEAD named %s)", request.Repo, strings.TrimPrefix(target, "refs/heads/"), cmp.Or(was, "nothing")))
 	return nil
 }
 
