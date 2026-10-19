@@ -108,6 +108,9 @@ func main() {
 	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
 	// Manager under Application Default Credentials.
 	var secretStore secrets.Store
+	// mintToken mints a minted secret's value: only the GCP store has one, and a minted secret
+	// served under any other store fails its release naming the store.
+	var mintToken func(context.Context, string, time.Duration) (string, error)
 	var credentials string
 	switch {
 	case fakeSecrets != "":
@@ -123,6 +126,8 @@ func main() {
 		fatal(err)
 		defer client.Close()
 		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
+		mintToken, err = secrets.NewGCPTokenMinter(ctx)
+		fatal(err)
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
@@ -172,6 +177,7 @@ func main() {
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
+	reqMachine.MintToken = mintToken
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,

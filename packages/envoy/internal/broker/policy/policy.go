@@ -36,6 +36,13 @@ const (
 	TagOwner = "owner"
 	// TagTier is TierAgent or TierHuman.
 	TagTier = "tier"
+	// TagMint names the service account a value-less secret mints a one-hour Google access token
+	// for: a secret carrying it has no value of its own, and each release of it mints a token
+	// (Secret.MintTarget).
+	TagMint = "mint-service-account"
+	// MintSourcePrefix opens the Source of a minted secret: "gcp-token:" then its service
+	// account's email, so the request's frozen source and the Version both carry the target.
+	MintSourcePrefix = "gcp-token:"
 	// OwnerShared is the owner value of a secret nobody owns alone.
 	OwnerShared = "shared"
 	// TierAgent is a secret its owner's agents use without asking.
@@ -74,13 +81,16 @@ type Secret struct {
 	// an underscore (<prefix>deel-api-key is DEEL_API_KEY).
 	Name string
 	// Source is what the secret's value is read by: its ARN in Secrets Manager, or its resource
-	// name in Secret Manager.
+	// name in Secret Manager; for a minted secret, MintSourcePrefix and its MintTarget.
 	Source string
 	// Owner is OwnerShared, a person's email, or a registered service.
 	Owner string
 	// Tier is TierAgent or TierHuman.
 	Tier string
-	kind ownerKind
+	// MintTarget is the service account a release mints a one-hour Google access token for; empty
+	// for a stored secret.
+	MintTarget string
+	kind       ownerKind
 }
 
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a

@@ -47,7 +47,15 @@ const (
 	// Checked after every other reason, which each name something its owner must fix before a
 	// value would make it servable.
 	ReasonNoCurrentValue = "no-current-value"
+	// ReasonMintTargetMalformed: the mint-service-account tag is not a service account's email
+	// (<name>@<project>.iam.gserviceaccount.com), so no token could be minted for it. A secret
+	// carrying a well-formed one is a minted kind, which has no value by design and is never
+	// refused ReasonNoCurrentValue.
+	ReasonMintTargetMalformed = "mint-target-malformed"
 )
+
+// mintTargetPattern is a mint-service-account tag: a service account's email.
+var mintTargetPattern = regexp.MustCompile(`^[a-z0-9-]{6,30}@[a-z0-9-]+\.iam\.gserviceaccount\.com$`)
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
 // name, with each underscore a hyphen.
@@ -200,6 +208,13 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 	}
 	if !onKey {
 		return Secret{}, ReasonNotOnAgentSecretsKey, nil
+	}
+	if target, minted := ls.Tags[TagMint]; minted {
+		if !mintTargetPattern.MatchString(target) {
+			return Secret{}, ReasonMintTargetMalformed, nil
+		}
+		s.MintTarget, s.Source = target, MintSourcePrefix+target
+		return s, "", nil
 	}
 	if !ls.HasCurrentValue {
 		return Secret{}, ReasonNoCurrentValue, nil

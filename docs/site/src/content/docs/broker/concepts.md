@@ -241,6 +241,13 @@ reason of at most 400 characters. The broker evaluates every name
   secret, asked for by anyone but that service, is denied.
 - Names that need approval must all need the same approver, else the request is refused
   `MIXED_APPROVERS`; request them separately.
+- A **minted** secret carries a `mint-service-account` tag naming a Google service account
+  (`<name>@<project>.iam.gserviceaccount.com`) and holds no value: each release mints a fresh
+  access token for that account, lasting the shorter of an hour and what is left of the grant, so a
+  request naming one must sign a lifetime of at most an hour (`--ttl 3600` or less), else it is
+  refused `MINT_REQUIRES_LIFETIME`. Only the GCP store mints, under the broker's own identity, which
+  needs Token Creator on that account. A tag naming no service account is refused
+  `mint-target-malformed`.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
   decide. A session has at most one pending request for each secret: an identical request from the

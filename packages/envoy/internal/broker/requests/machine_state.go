@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode"
@@ -51,6 +52,9 @@ var (
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
 	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
 	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
+	// ErrMintRequiresLifetime: a request names a minted secret (policy.MintSourcePrefix) without
+	// signing a lifetime_seconds of at most MaxMintLifetime. Its returned error names the secret.
+	ErrMintRequiresLifetime = errors.New("a minted secret must be requested with a lifetime of at most one hour")
 	// ErrRequestPending means this session already has a person deciding one of the requested
 	// names. Its returned error names that pending request.
 	ErrRequestPending = errors.New("a request for one or more of these secrets is already pending")
@@ -63,6 +67,10 @@ var (
 
 // maxSessionIDLength bounds the request body's session_id override; see ErrSessionIDInvalid.
 const maxSessionIDLength = 128
+
+// MaxMintLifetime is the longest a minted token lives, and so the longest grant of a minted
+// secret a request may sign: Google's default cap on a generated access token.
+const MaxMintLifetime = time.Hour
 
 // validSessionID reports whether sessionID is acceptable to store: empty (unset) or at most
 // maxSessionIDLength runes with no whitespace or control character.
@@ -145,6 +153,10 @@ type Machine struct {
 	// name, the subject a pod's projected token must have proved for its launcher's service to be
 	// its own (requester).
 	ServiceAccounts map[string]string
+	// MintToken mints a Google access token for serviceAccount lasting lifetime, the value Values
+	// releases for a minted secret. nil where the store mints nothing (AWS, the fake store), and
+	// then a release of a minted secret fails naming the store.
+	MintToken func(ctx context.Context, serviceAccount string, lifetime time.Duration) (string, error)
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
 	missRereadsOnce sync.Once
@@ -254,6 +266,9 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err != nil {
 		return Request{}, err
 	}
+	if err := requireMintLifetime(set, names, lifetime); err != nil {
+		return Request{}, err
+	}
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, lifetime, set); err != nil {
 		return Request{}, err
 	} else if ok {
@@ -353,6 +368,22 @@ func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names 
 		set = m.Policy.Get()
 	}
 	return set, nil
+}
+
+// requireMintLifetime refuses a request that names a minted secret without signing a lifetime of
+// at most MaxMintLifetime: the token it releases lasts an hour, so neither a grant that lasts until
+// its session ends nor a longer one could keep releasing what it promised. A name the set does not
+// serve is left to evaluate, which refuses it as unknown.
+func requireMintLifetime(set *policy.Set, names []string, lifetime *int) error {
+	for _, name := range names {
+		if !strings.HasPrefix(set.Secrets[name].Source, policy.MintSourcePrefix) {
+			continue
+		}
+		if lifetime == nil || time.Duration(*lifetime)*time.Second > MaxMintLifetime {
+			return fmt.Errorf("%w: %s is minted; sign lifetime_seconds of at most %d", ErrMintRequiresLifetime, name, int(MaxMintLifetime.Seconds()))
+		}
+	}
+	return nil
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs
