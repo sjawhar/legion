@@ -220,8 +220,9 @@ func launchBurstableLiveRoot(ctx context.Context, t *testing.T, cfg config.Confi
 	}()
 	opts.Conns, opts.StreamURL, opts.Store = listener, listener.Addr(), firstLaunchStore{}
 	opts.Tokens = publicCloneTokens{}
-	opts.GitHubCredential = func(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
-		return ghconfig.Render("ghs_placeholder", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour)), nil
+	opts.GitHubCredential = func(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		rendered := ghconfig.Render("ghs_placeholder", string(appauth.AppRoleFor(role)), time.Now().Add(time.Hour))
+		return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{owner: rendered}}, nil
 	}
 	opts.Agent = burstableLiveStub
 	rt, err := sandbox.New(ctx, rc, opts)
