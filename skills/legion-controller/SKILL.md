@@ -33,7 +33,8 @@ bash. Any pull-request comment or review the controller posts ends with
 `<!-- legion: {"session":"<session-id>","phase":"controller"} -->`, the footer every Legion role
 appends: the daemon reads the session to tell a controller's review from the reviewer's verdict. A
 review the controller submits without that footer still decides nothing for Legion's own workflow
-(the daemon sets it aside), but the footer is what makes that legible in the daemon's log.
+(the daemon sets it aside), but the footer is what makes that legible in the daemon's log. Your
+addressing line names the project's repositories, or that the daemon maps none and why.
 
 ## Backlog stewardship
 
@@ -369,11 +370,11 @@ and the highest-priority issues.
 
 ## Deployment instructions
 
-Deployment instructions, when present, are the operator's standing rules for this repository —
-required checks, deploy/smoke commands, code-owner expectations, and standing roles you may
-consult. They override this skill's defaults where they conflict, and may narrow which issues the
-walk takes, but never widen it past `todo` issues or change the order it takes them in: highest
-priority first, then board rank ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
+Deployment instructions, when present, are the operator's standing rules for this project's
+repositories — required checks, deploy/smoke commands, code-owner expectations, and standing roles
+you may consult. They override this skill's defaults where they conflict, and may narrow which
+issues the walk takes, but never widen it past `todo` issues or change the order it takes them in:
+highest priority first, then board rank ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
 
 ## Turn discipline
 

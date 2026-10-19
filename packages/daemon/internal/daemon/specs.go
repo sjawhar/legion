@@ -7,7 +7,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -49,18 +48,11 @@ type specs struct {
 	// (workflowRuntime.issueRepository), zero for an issue the workflow does not record; nil for a
 	// daemon with no workflow, whose launches work no repository.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
-	// repositories is the project's whole repository mapping, as the daemon serves it
-	// (repositories.Accepted), sorted by name: the list a worker's addressing names beside its own
-	// issue's repository, and the controller's beside its design gate policy. nil only in a test
-	// that does not exercise it; the daemon always sets it from plan.repositories, which it
-	// constructs at boot whether or not a workflow is configured.
-	repositories func() []ghrepo.Repository
-	// repositoriesRefused is the project's repositories the daemon leaves out, with why
-	// (repositories.Refused, formatted "<repo> (<reason>)"): read only when repositories() is
-	// empty, to tell a real fully-booted state with every candidate refused (an App not installed)
-	// apart from no configured workflow at all — the same distinction controllerRepositories draws
-	// for the operator-launched controller.
-	repositoriesRefused func() []string
+	// repositories is the project's repository mapping as the daemon serves it (repositories.view),
+	// in the daemon's own order: what a worker's addressing names beside its own issue's
+	// repository and the controller's names after its design gate policy (RepositoriesClause). The
+	// daemon sets it at boot whether or not a workflow is configured.
+	repositories func() api.RepositoriesView
 	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
 	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
 	runtimeName string
@@ -113,11 +105,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			return runtime.SpawnSpec{}, fmt.Errorf("the repository of %s: %w", c.Token, err)
 		}
 	}
-	var repositories []ghrepo.Repository
-	if s.repositories != nil {
-		repositories = s.repositories()
-	}
-	addressing, err := AddressingFragment(s.project, c, spec.Repository, spec.DefaultBranch, repositories)
+	addressing, err := AddressingFragment(s.project, c, spec.Repository, spec.DefaultBranch, s.repositories())
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
@@ -162,10 +150,11 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part, the project's design gate policy, the project's repositories (or the state of
-// its mapping, RepositoriesAddressing) and, when it names any, its Slack channels as its addressing,
-// the deployment instructions and the launch secrets. The operator's controller
-// is told the policy and the repositories, never channels (`legion controller start`), since only the daemon's may have channels
+// the headless part; as its addressing the project's design gate policy, then the project's
+// repositories as a sentence of their own (RepositoriesSentence, which also says when the daemon
+// maps none) and, when it names any, its Slack channels; then the deployment instructions and the
+// launch secrets. The operator's controller (`legion controller start`) is told the policy and
+// the repositories the same way, never channels, since only the daemon's may have channels
 // (config.checkSlackChannels). The channels reach its environment as LEGION_SLACK_CHANNELS from the
 // runtime (sandbox.Options.ControllerSlackChannels), which compares them with the list a running
 // controller was launched under and relaunches it when they change; a spec cannot set that variable.
@@ -179,15 +168,7 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
-	addressing := DesignGateFragment(s.designGate)
-	if s.repositories != nil {
-		repositories := s.repositories()
-		var refused []string
-		if s.repositoriesRefused != nil {
-			refused = s.repositoriesRefused()
-		}
-		addressing += " " + RepositoriesAddressing(repositories, refused)
-	}
+	addressing := DesignGateFragment(s.designGate) + " " + RepositoriesSentence(s.repositories())
 	if len(s.slackChannels) > 0 {
 		addressing += " " + SlackChannelsFragment(s.slackChannels)
 	}
@@ -224,12 +205,13 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 // AddressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
 // the model never hand-encodes one; then, when repo is not the zero repository, the issue's own
-// repository and default branch and the project's whole repository list (RepositoriesFragment) —
-// left off entirely for a claim whose issue the workflow does not record. The daemon posts every
-// READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready).
-// It is exported for the rigs under packages/pi-legion/scripts, which tell a worker what a pane is
-// told.
-func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repository, defaultBranch string, repositories []ghrepo.Repository) (string, error) {
+// repository and default branch and the project's repositories (RepositoriesClause) — left off
+// entirely for a claim whose issue the workflow does not record. The clause names the project's
+// mapping as it is now, which may hold none: a recorded issue keeps its repository after a refresh
+// unmaps or refuses it. The daemon posts every READY packet and publishes it to
+// `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready). It is exported for the rigs
+// under packages/pi-legion/scripts, which tell a worker what a pane is told.
+func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repository, defaultBranch string, repositories api.RepositoriesView) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
 		return "", fmt.Errorf("the addressing of %s: %w", c.Token, err)
@@ -241,47 +223,39 @@ func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repositor
 		return fragment, nil
 	}
 	return fragment + " " + fmt.Sprintf("your issue's repository is %s (default branch %s); %s",
-		repo.String(), defaultBranch, RepositoriesFragment(repositories)), nil
+		repo.String(), defaultBranch, RepositoriesClause(repositories)), nil
 }
 
-// RepositoriesFragment is "the project's repositories are a, b, c.", sorted by name whatever order
-// repositories gives them in: the clause AddressingFragment ends a worker's sentence with, and the
-// controller's own addressing gains on its own, after its design gate policy.
-func RepositoriesFragment(repositories []ghrepo.Repository) string {
-	names := make([]string, len(repositories))
-	for i, r := range repositories {
-		names[i] = r.String()
+// RepositoriesClause tells an agent which repositories the project maps, as a clause that ends in
+// a full stop and starts in lower case, to follow a worker's `; `: "the project's repositories are
+// a, b, c." in the order the daemon serves them (repositories.Mapped sorts them by name, whatever
+// the case), or, when the daemon maps none, "the daemon maps no repository to this project now."
+// with each repository it leaves out and why. An empty mapping is a state a running project
+// reaches (an App uninstalled, a refresh that unmapped every repository), never a refusal to
+// launch, so every launch path names it.
+func RepositoriesClause(view api.RepositoriesView) string {
+	if len(view.Mapped) > 0 {
+		names := make([]string, len(view.Mapped))
+		for i, mapped := range view.Mapped {
+			names[i] = mapped.Repo
+		}
+		return "the project's repositories are " + strings.Join(names, ", ") + "."
 	}
-	slices.Sort(names)
-	return fmt.Sprintf("the project's repositories are %s.", strings.Join(names, ", "))
-}
-
-// RepositoriesAddressing is the clause a controller's own addressing ends with on both launch
-// paths (controllerSpawnSpec here, cmd/legion/controller.go's controllerStart): RepositoriesFragment
-// when the project maps at least one repository (a worker's own addressing, AddressingFragment,
-// calls RepositoriesFragment directly instead, since a worker's issue always has a repository or
-// carries no repositories sentence at all). An empty mapping is never a refusal on either
-// controller path. A non-empty refused list is unambiguous: every mapped repository lacking an
-// App still boots fine (internal/daemon/repositories.go's own doc), so that shape is always a
-// live, fully booted workflow. An empty refused list too is not: this is the one shape this route
-// cannot tell "no workflow configured at all" apart from "a workflow whose mapping a later refresh
-// emptied" (repositories.go's own doc: a project with nothing mapped and nothing refused refuses
-// the daemon's own boot, so this exact shape is only ever reached live, never at boot, under a
-// workflow) — refusing on either reading would burn a launch for nothing and block the one
-// operator action that could still recover the project (AGENTS.md, "Handover"). Either way its
-// addressing names the state for what it is, and, when refused, names any candidate repository the
-// project's mapping holds that the daemon currently leaves out, with its reason, sorted the same
-// way the caller already sorted repositories.
-func RepositoriesAddressing(repositories []ghrepo.Repository, refused []string) string {
-	if len(repositories) > 0 {
-		return RepositoriesFragment(repositories)
-	}
-	if len(refused) == 0 {
+	if len(view.Refused) == 0 {
 		return "the daemon maps no repository to this project now."
 	}
-	sorted := slices.Clone(refused)
-	slices.Sort(sorted)
-	return "the daemon maps no repository to this project now: " + strings.Join(sorted, "; ") + "."
+	refused := make([]string, len(view.Refused))
+	for i, r := range view.Refused {
+		refused[i] = fmt.Sprintf("%s (%s)", r.Repo, r.Reason)
+	}
+	return "the daemon maps no repository to this project now: " + strings.Join(refused, "; ") + "."
+}
+
+// RepositoriesSentence is RepositoriesClause as a sentence of its own, for the controller's
+// addressing, which follows the design gate policy's sentence.
+func RepositoriesSentence(view api.RepositoriesView) string {
+	clause := RepositoriesClause(view)
+	return strings.ToUpper(clause[:1]) + clause[1:]
 }
 
 // DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the

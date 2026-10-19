@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The acceptance observer for LEGION-1986's Task 6.4, the operator's live multi-repository run.
+# The acceptance observer for LEGION-1986's live multi-repository run, the operator's.
 # It never starts a daemon, Dispatch, or any agent of its own, and it writes nothing remote: every
 # admission, push, pull request and Dispatch write in the spec's acceptance checklist is the
 # operator's and the agents' own.
@@ -10,9 +10,13 @@
 # API (`gh api ... --jq`), and `kubectl get`/`logs`/`exec` as the operator, with `exec` run as the
 # role itself (below), never as the bare pod shell. The one exception is a daemon message whose
 # exact format the daemon itself produces (quoted below with its file:line): those are matched as
-# the complete literal sentence, bound to the daemon's own actor identity, with the repository
-# names Dispatch itself resolved substituted in, never a loose substring over any author's
-# messages.
+# the complete literal sentence, with the repository names Dispatch itself resolved substituted in,
+# from a session actor named legion-daemon:<PROJECT> and carrying the daemon's outbox marker, never
+# a loose substring over any author's messages. Dispatch takes a bearer session's id from the
+# request body (packages/envoy/internal/dispatch/api/server.go, bearerSessionActor), so that actor
+# id is the message's claimed author: whoever holds the project's Dispatch bearer can post the same
+# text. The note shows what Dispatch holds, never who posted it; what shows the daemon declined an
+# issue is its own state read.
 #
 # Usage:
 #   bash scripts/e2e/multi-repo-acceptance.sh record-head <T>
@@ -61,6 +65,7 @@
 # MULTIREPO_PROC_ROOT in a live run cannot quietly redirect the scan and is never mistaken for a
 # real result.
 set -Eeuo pipefail
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 self=${0##*/}
 
@@ -113,6 +118,20 @@ validate_argv() {
       ;;
     *) usage ;;
   esac
+  # Every issue key goes into an evidence file name and an API path, so each is shaped like one
+  # (PROJECT-123) before anything else happens. A key is the last argument of every negative form.
+  local keys=() arg
+  case "$1" in
+    children | branch-base | second-owner | cache) keys=("$2") ;;
+    done) keys=("${@:2}") ;;
+    negative) keys=("${!#}") ;;
+  esac
+  for arg in "${keys[@]+"${keys[@]}"}"; do
+    [[ $arg =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]] || {
+      echo "usage: $(printf '%q' "$arg") is not an issue key (PROJECT-123)" >&2
+      exit 2
+    }
+  done
 }
 validate_argv "$@"
 
@@ -190,8 +209,8 @@ printf 'header = "Authorization: Bearer %s"\n' "$dispatch_token" >"$dispatch_cur
 
 # arm_signal_traps installs the script's standing INT/TERM handlers: clean up, then exit with the
 # shell's conventional 128+signal code, so an interrupted run both cleans up and actually stops —
-# a bare `cleanup` with no `exit` let an earlier round's run press on after a SIGTERM into the
-# next, unrelated read, which then failed for the wrong reason instead of the script stopping at
+# a bare `cleanup` with no `exit` would let the run press on after a SIGTERM into the
+# next, unrelated read, which would then fail for the wrong reason instead of the script stopping at
 # 143. raw_fetch below re-arms these once its own local traps are no longer needed.
 arm_signal_traps() {
   trap 'cleanup; exit 130' INT
@@ -206,13 +225,13 @@ arm_signal_traps
 
 # raw_fetch <evidence file> <label> <command...> runs command with its stdout redirected straight
 # to a fresh, uniquely-named temporary file (byte for byte, trailing bytes included — never through
-# $(...), which strips trailing newlines and is why an earlier round's pin evidence was two bytes
-# short), then renames it onto <evidence file> — a same-filesystem rename is atomic, so a second
+# $(...), which strips trailing newlines and would leave the pin evidence short of the file's bytes),
+# then renames it onto <evidence file> — a same-filesystem rename is atomic, so a second
 # invocation of this script against the same evidence directory at the same time never leaves a
 # reader mid-read of a truncated or interleaved file. A nonzero exit (the command's, or a failed
 # rename — checked explicitly, since errexit alone does not catch it inside every caller's own
 # $(...)) fails the whole observation, naming only <label> — never the command's own argv, which
-# for a Dispatch read would otherwise print the bearer `-H` carried in earlier rounds; curl's own
+# for a Dispatch read would otherwise print the bearer `-H` carries; curl's own
 # stderr (a URL and a status, no credential) still reaches the terminal. The caller then reads
 # <evidence file> itself, with jq's own filename argument, never a second `cat`/`$(...)` round trip.
 #
@@ -258,7 +277,7 @@ raw_fetch() {
 # state_raw <observation> refreshes $MULTIREPO_EVIDENCE_DIR/<observation>-state.raw from
 # GET /legion/v1/state (no bearer: the route is open, the same bytes `legion state --json` prints)
 # and prints its path. Named per observation (never a bare state.raw every observation shares), so
-# a later observation's read never overwrites an earlier one's evidence.
+# a later observation's read never overwrites another observation's evidence.
 state_raw() {
   local observation=$1
   local file="$MULTIREPO_EVIDENCE_DIR/$observation-state.raw"
@@ -320,6 +339,13 @@ check() {
 # below that claims to have a commit requires, so an empty or truncated value never passes as one.
 sha_re='^[0-9a-f]{40}$'
 
+# urlpath <value> percent-encodes value for a GitHub API path or query, keeping its slashes: a
+# branch name such as release/v7.1 is legal, and so are characters (? # % space) that would end or
+# change the request if they went in raw.
+urlpath() {
+  jq -rn --arg v "$1" '$v | @uri | gsub("%2F"; "/")'
+}
+
 # default_branch <owner/repo> is GitHub's own default branch name for it, required nonempty.
 default_branch() {
   local repo=$1 branch
@@ -334,7 +360,7 @@ record_head() {
   local repo=$1 default sha ok=1
   [ "$(lower "$repo")" = "$repo_t" ] || fail "record-head's repository argument $repo is not LEGION_E2E_REPO_T ($LEGION_E2E_REPO_T)"
   default=$(default_branch "$repo")
-  sha=$(gh api "repos/$repo/branches/$default" --jq .commit.sha) || fail "gh api repos/$repo/branches/$default failed"
+  sha=$(gh api "repos/$repo/branches/$(urlpath "$default")" --jq .commit.sha) || fail "gh api repos/$repo/branches/$default failed"
   [[ $sha =~ $sha_re ]] || { ok=0; sha=""; }
   summary record-head "repo: $repo
 default branch: $default
@@ -350,7 +376,7 @@ head: $sha
 # what the kept evidence holds — never a fresh read per child, which could judge an early child
 # against one state and a later child against another the daemon moved to meanwhile, while the
 # evidence (one state.raw file per observation) could only ever hold the last of those reads,
-# contradicting whichever earlier judgment it no longer matches.
+# contradicting the judgment of any child read before it.
 children() {
   local parent=$1 parent_file keys key child_file d_repo state_file s_repo saw_t=0 saw_c=0 mismatch=0 out=""
   parent_file=$(dispatch_issue_raw children "$parent")
@@ -381,7 +407,7 @@ branch_base() {
   stored_head=$(grep '^head: ' "$MULTIREPO_EVIDENCE_DIR/record-head.txt" | cut -d' ' -f2)
   [[ $stored_head =~ $sha_re ]] || fail "branch-base: the stored record-head is not a full commit id ($stored_head); record-head must have failed"
   default=$(default_branch "$LEGION_E2E_REPO_T")
-  first_commit=$(gh api "repos/$LEGION_E2E_REPO_T/compare/$default...legion/$child" --jq '.commits[0].sha') ||
+  first_commit=$(gh api "repos/$LEGION_E2E_REPO_T/compare/$(urlpath "$default")...legion/$child" --jq '.commits[0].sha') ||
     fail "gh api repos/$LEGION_E2E_REPO_T/compare/$default...legion/$child failed"
   [[ $first_commit =~ $sha_re ]] || fail "branch-base: legion/$child's first commit on top of $default is not a full commit id ($first_commit)"
   parent_sha=$(gh api "repos/$LEGION_E2E_REPO_T/commits/$first_commit" --jq '.parents[0].sha') ||
@@ -395,21 +421,24 @@ record-head: $stored_head
   check branch-base "$ok"
 }
 
-# pin <C> <T merge sha>: C's pin file, on C's default branch, names the merge sha exactly; both the
-# repository and the sha argument are validated before anything is fetched. The file's own bytes go
-# straight to evidence/pin.txt by redirection, never through a $(...) capture that would strip its
-# trailing bytes.
+# pin <C> <T merge sha>: C's pin file, on C's default branch, pins exactly the merge sha: the one
+# run of 40 or more hex digits it holds, compared whole, is the sha. A mention elsewhere (a comment,
+# a "previous" line) beside a pin that names another commit, or a longer hex string the sha is only
+# part of, never passes. Both arguments are validated before anything is fetched, and the file's own
+# bytes go straight to evidence/pin.txt by redirection, never through a $(...) capture that would
+# strip its trailing bytes.
 pin() {
-  local repo=$1 sha=$2 default content_file="$MULTIREPO_EVIDENCE_DIR/pin.txt" ok=0
+  local repo=$1 sha=$2 default content_file="$MULTIREPO_EVIDENCE_DIR/pin.txt" ok=0 pinned
   [ "$(lower "$repo")" = "$repo_c" ] || fail "pin's repository argument $repo is not LEGION_E2E_REPO_C ($LEGION_E2E_REPO_C)"
   [[ $sha =~ $sha_re ]] || fail "pin's merge-sha argument $(printf '%q' "$sha") is not a full 40-character commit id"
   default=$(default_branch "$repo")
-  raw_fetch "$content_file.b64" "GET repos/$repo/contents/$LEGION_E2E_PIN_FILE" gh api "repos/$repo/contents/$LEGION_E2E_PIN_FILE?ref=$default" --jq .content
+  raw_fetch "$content_file.b64" "GET repos/$repo/contents/$LEGION_E2E_PIN_FILE" gh api "repos/$repo/contents/$LEGION_E2E_PIN_FILE?ref=$(urlpath "$default")" --jq .content
   base64 -d <"$content_file.b64" >"$content_file" || fail "pin: $LEGION_E2E_PIN_FILE's content is not valid base64"
   rm -f "$content_file.b64"
   [ -s "$content_file" ] || fail "pin: $LEGION_E2E_PIN_FILE on $repo@$default is empty"
   cat "$content_file"
-  grep -qF "$sha" "$content_file" && ok=1
+  pinned=$(grep -oiE '[0-9a-f]{40,}' "$content_file" | tr 'A-F' 'a-f' | sort -u || true)
+  [ "$pinned" = "$sha" ] && ok=1
   check pin "$ok"
 }
 
@@ -450,185 +479,20 @@ require_pod_for_issue() {
   [ "$label" = "$issue" ] || fail "pod $pod's legion.dev/issue label is $(printf '%q' "$label"), not $issue: this is not that issue's pod"
 }
 
-# ---- running as the role, not the bare pod shell (N1), resolved once (R3) --------------------
+# ---- running as the role, not the bare pod shell -------------------------------------------------
 #
-# `kubectl exec` carries none of a role's own variables — only PATH, HOME and POD_UID, the three a
-# container spec sets on exec itself (packages/daemon/internal/runtime/sandbox/manifest.go,
-# podkind.go); LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH and LEGION_WORKSPACE are plain
-# variables the launcher's start command gave the role's own process, never exec's. `legion gh`
-# (found via a bare exec's PATH) refuses with exit 2 when LEGION_GH_PATH is unset
-# (cmd/legion/gh.go), so a read run as the bare pod can never pass. Stage 4a's own live proof reads
-# that environment from /proc/<pid>/environ and re-executes under exactly that environment with
-# `env -i` (internal/runtime/sandbox/live_lifecycle_test.go:1096-1105, asAgent).
-#
-# The agent is not simply "the one process whose parent's cmdline is worker-shim": a pod enrolled
-# with the secrets broker (runtime.kubernetes.agent_secrets) has the shim also parenting an
-# `agent-secrets renew` process for its whole life (internal/shim/agentsecrets.go), and briefly a
-# `codegraph` warm-up or a `jj metaedit` during an adoption — any of which a mere
-# parent-is-worker-shim test would also match, refusing by ambiguity every enrolled pod. The agent
-# is instead the one child of the shim whose own argv equals the shim's own argv after its first
-# `--` (legion worker-shim ... -- <omp argv>): the shim starts the agent with exactly that argv
-# (shim.go, launcher.go). A supported plugin-reinstall launch wraps that argv in the install
-# script (installArgv, internal/runtime/sandbox/plugins.go:120-131): the shim's own post-`--` argv
-# is then `/bin/sh -c <script> legion-plugins <agent argv...>`, and once the wrapper's own
-# `exec "$@"` (installScript, plugins.go:108) replaces it, the agent's real cmdline is the trailing
-# `<agent argv...>` again, which the shim's own recorded argv no longer equals directly — so a
-# match against either the shim's own post-`--` argv, or (when it has that four-element wrapper
-# shape) the argv after it, is required. The shim itself is the one process whose own cmdline
-# carries the element `worker-shim` and whose own parent is PID 1, never the first lexical match a
-# scan happens to find.
-#
-# Resolution and the agent's cmdline redaction (M3) both run as one `python3` script, reading
-# `/proc/<pid>/cmdline` as raw NUL-delimited bytes throughout: a shell pipeline through `xargs -0`
-# can invoke its command more than once when an argument list is long (every argument still
-# arrives whole, never split mid-argument, but the split between two whole arguments can fall
-# between a flag and its value), and state meant to carry across that split — "the previous
-# argument was --append-system-prompt" — does not survive the second invocation, so a value that
-# should never be printed was printed as an ordinary argument once a real prompt pushed the shim's
-# own argv past that limit. One Python process reads the whole file once and never restarts
-# mid-parse. It is a guaranteed pod dependency: every role container's own image is checked for it
-# at boot (internal/capabilities/image.go, the Dockerfile's own `python3 --version` build check).
-# Run with `-I` (isolated mode, implying `-E -s -P`): the role container's own working directory is
-# the issue's workspace, the repository the agent edits (manifest.go's WorkingDir), and its own
-# HOME is one the agent and the install wrapper both write to — without `-I`, Python puts the
-# current directory and the user site directory on sys.path before this script's own imports run,
-# so a `hashlib.py` planted at the workspace root (by the agent, or by a file simply committed at
-# the repository's root) or a `.pth` under the role's own user site both run before the resolver
-# does anything, and can forge the `@@@PID@@@` section this whole mechanism trusts, naming any pid
-# they like. `-I` puts neither the current directory nor the user site on sys.path and reads none
-# of PYTHON*, closing both.
-#
-# The agent's full cmdline never crosses back out of the pod: Python resolves the pid, then emits
-# only `argv0=<program> argc=<count> sha256=<of the whole /proc/<pid>/cmdline bytes>` — never an
-# argument's own value, since the agent runs with
-# `--append-system-prompt <the role prompts, the addressing, then the deployment's own
-# instructions>`, inlined, which may name the deployment's own private hosts, and a resumed
-# session may similarly carry its own session file argument; the digest is enough to tell one
-# invocation's identity from another without ever naming what it ran.
-# shellcheck disable=SC2016
-as_role_find_and_run='
-proc_root=$1
-script=$2
+# `kubectl exec` carries none of a role's own variables, so a probe run that way cannot be the
+# role's. lib/as-role.py resolves the role's agent process in the pod and runs the credential
+# probes under that process's own environment; its header says how the agent is told apart from the
+# shim's other children and why the probes are built as they are. It is streamed to `python3 -I -`
+# in the role's container over `kubectl exec -i` and prints one JSON object, which this script keeps
+# byte for byte as evidence and judges with jq. python3 is the pod's own: every role container's
+# image is checked for it at boot (internal/capabilities/image.go).
+as_role_script="$script_dir/lib/as-role.py"
 
-resolved=$(python3 -I - "$proc_root" <<"PYEOF"
-import hashlib
-import os
-import sys
-
-proc_root = sys.argv[1]
-
-
-def cmdline_bytes(pid):
-    with open(os.path.join(proc_root, pid, "cmdline"), "rb") as f:
-        return f.read()
-
-
-def fields_of(raw):
-    fields = raw.split(b"\x00")
-    if fields and fields[-1] == b"":
-        fields = fields[:-1]
-    return fields
-
-
-def ppid_of(pid):
-    with open(os.path.join(proc_root, pid, "status"), "rb") as f:
-        for line in f:
-            if line.startswith(b"PPid:"):
-                return line.split()[1].decode()
-    return None
-
-
-try:
-    pids = [d for d in os.listdir(proc_root) if d.isdigit()]
-except OSError as e:
-    sys.stderr.write("as_role: could not list %s: %s\n" % (proc_root, e))
-    sys.exit(1)
-
-shims = []
-for pid in pids:
-    try:
-        fields = fields_of(cmdline_bytes(pid))
-    except OSError:
-        continue
-    if b"worker-shim" not in fields:
-        continue
-    try:
-        ppid = ppid_of(pid)
-    except OSError:
-        continue
-    if ppid == "1":
-        shims.append(pid)
-
-if len(shims) != 1:
-    sys.stderr.write(
-        "as_role: expected exactly one worker-shim process whose own parent is PID 1, found %d (%s)\n"
-        % (len(shims), " ".join(sorted(shims)))
-    )
-    sys.exit(1)
-
-shim_pid = shims[0]
-shim_fields = fields_of(cmdline_bytes(shim_pid))
-if b"--" not in shim_fields:
-    sys.stderr.write(
-        "as_role: worker-shim %s own cmdline carries no -- separator, so its agent argv is unknown\n"
-        % shim_pid
-    )
-    sys.exit(1)
-direct_agent = shim_fields[shim_fields.index(b"--") + 1 :]
-expected = [direct_agent]
-if (
-    len(direct_agent) >= 5
-    and direct_agent[0] == b"/bin/sh"
-    and direct_agent[1] == b"-c"
-    and direct_agent[3] == b"legion-plugins"
-):
-    expected.append(direct_agent[4:])
-
-candidates = []
-for pid in pids:
-    if pid == shim_pid:
-        continue
-    try:
-        ppid = ppid_of(pid)
-    except OSError:
-        continue
-    if ppid != shim_pid:
-        continue
-    try:
-        fields = fields_of(cmdline_bytes(pid))
-    except OSError:
-        continue
-    if any(fields == e for e in expected):
-        candidates.append(pid)
-
-if len(candidates) != 1:
-    sys.stderr.write(
-        "as_role: expected exactly one child of worker-shim %s matching its own argv (directly, or through the install wrapper'"'"'s exec), found %d (%s)\n"
-        % (shim_pid, len(candidates), " ".join(sorted(candidates)))
-    )
-    sys.exit(1)
-
-pid = candidates[0]
-raw = cmdline_bytes(pid)
-fields = fields_of(raw)
-argv0 = fields[0].decode("utf-8", "replace") if fields else ""
-print("@@@PID@@@")
-print(pid)
-print("@@@CMDLINE@@@")
-print("argv0=%s argc=%d sha256=%s" % (argv0, len(fields), hashlib.sha256(raw).hexdigest()))
-PYEOF
-) || exit 1
-printf "%s\n" "$resolved"
-pid=$(printf "%s\n" "$resolved" | sed -n "/^@@@PID@@@\$/{n;p;}")
-xargs -0 sh -c '"'"'inner=$1; shift; exec env -i "$@" sh -c "$inner"'"'"' agent-env "$script" <"$proc_root/$pid/environ"
-'
-
-# resolve_proc_root prints the /proc root as_role should scan: the pod's own real /proc, except in
-# a test, which must set MULTIREPO_TEST_SEAM=1 to redirect it to MULTIREPO_PROC_ROOT (L1);
-# MULTIREPO_PROC_ROOT alone, without that marker, is refused outright, so a stray or malicious
-# variable in a live run can never quietly redirect the scan. A plain function, not as_role itself,
-# so the caller can keep its own answer: as_role runs inside a `$(...)` subshell to capture its
-# stdout, where a variable it merely assigns never reaches the caller back out.
+# resolve_proc_root prints the /proc root as-role.py scans: the pod's own, except in a test, which
+# must set MULTIREPO_TEST_SEAM=1 to redirect it to MULTIREPO_PROC_ROOT. MULTIREPO_PROC_ROOT alone is
+# refused, so a stray or malicious variable in a live run never quietly redirects the scan.
 resolve_proc_root() {
   if [ -n "${MULTIREPO_PROC_ROOT:-}" ]; then
     [ "${MULTIREPO_TEST_SEAM:-}" = 1 ] ||
@@ -639,39 +503,26 @@ resolve_proc_root() {
   printf '%s' /proc
 }
 
-# as_role <pod> <container> <proc root> <script> resolves the role's agent process once under
-# <proc root> and runs script under its own environment with sh -c, as the role's own bash tool
-# would run it — never the bare pod shell's.
-as_role() {
-  local pod=$1 container=$2 proc_root=$3 script=$4
-  kubectl exec "$pod" -c "$container" -- sh -c "$as_role_find_and_run" as-role "$proc_root" "$script"
-}
-
-# extract_section <text> <start marker> <end marker> is the lines strictly between
-# `@@@<start>@@@` and `@@@<end>@@@` in text (both exclusive): second-owner's one combined as_role
-# call prints every probe's result this way, so every probe runs under one pid resolution and one
-# environment snapshot (R3) instead of as_role scanning /proc again for each.
-extract_section() {
-  local text=$1 start=$2 end=$3
-  printf '%s\n' "$text" | sed -n "/^@@@${start}@@@\$/,/^@@@${end}@@@\$/p" | sed '1d;$d'
+# as_role_probe <pod> <container> <proc root> <probe branch> runs lib/as-role.py in the role's
+# container with that file as stdin, and prints its JSON object.
+as_role_probe() {
+  local pod=$1 container=$2 proc_root=$3 branch=$4
+  kubectl exec -i "$pod" -c "$container" -- python3 -I - \
+    "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$branch" <"$as_role_script"
 }
 
 # second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
-# .pullRequest.repo) and GitHub confirms it merged there (gh api .../pulls/<n> --jq .merged — the
-# daemon's own `done` phase is accepted only alongside `production_check`, never alone, since the
-# phase is not merge proof by itself, linger.go:32-33); the pod is bound to the issue by its
-# legion.dev/issue label, as `cache` binds it. The credential evidence runs live, as the role, in
-# one `as_role` call carrying all four probes under one resolved pid and one environment snapshot
-# (R3): the role's own LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR are checked against the expected
-# directories first, then a read of T (`gh api repos/<T> --jq .full_name`, must equal T exactly), a
-# positive control (a dry-run push to O's own repository, which must succeed — proving the
-# network, the credential helper and the ref are all sound before the negative probe can be
-# trusted), and the negative probe itself: a dry-run push to T, which must fail with a permission
-# refusal anchored to git's own lines (`remote: Permission to <T>.git denied` or
-# `The requested URL returned error: 403`) — never merely "any nonzero exit", which a bad ref, an
-# unreachable network or an unanswered credential helper would also give (N2). Both pushes run
-# `--no-verify -c core.hooksPath=/dev/null` (a dry-run still runs the workspace's own pre-push
-# hook, which is agent-writable) from the issue's own clone's git dir ($LEGION_WORKSPACE/.git).
+# .pullRequest.repo) and GitHub confirms it merged there (gh api .../pulls/<n> --jq .merged; the
+# daemon's `done` phase is accepted only beside `production_check`, never alone, since the phase is
+# not merge proof by itself); the pod is bound to the issue by its legion.dev/issue label, as
+# `cache` binds it. The credential evidence is lib/as-role.py's, run once under one resolved agent
+# process: the role's own LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR name the issue's owner directory;
+# `gh api repos/<T> --jq .full_name` reads T and says T; a dry-run push to O's own repository
+# succeeds (the positive control: the network, the credential helper and the ref are sound); and
+# the same push to T fails with git's own permission refusal naming T, never merely a nonzero exit,
+# which a bad ref, an unreachable network or an unanswered credential helper would also give. Each
+# push runs from a probe repository the prober makes (never the issue's clone), outside everything
+# the agent can write.
 second_owner() {
   local child=$1 pod=$2 container=${3:-implementer} pr_repo pr_number phase merged ok=1
   command -v kubectl >/dev/null || fail "second-owner: kubectl is required and is not on PATH"
@@ -692,81 +543,40 @@ second_owner() {
     merged=$(gh api "repos/$LEGION_E2E_REPO_O/pulls/$pr_number" --jq .merged) || merged=false
   fi
   [ "$merged" = true ] || ok=0
-  local probe_branch push_flags
-  probe_branch="legion-probe-$$-$(date +%s)"
-  push_flags='-c core.hooksPath=/dev/null push --no-verify --dry-run'
-  # The directory comparison runs inside the pod and reports only whether it matched — never the
-  # directories' own values (M3): $o_owner is the operator's own LEGION_E2E_REPO_O owner, already
-  # known and non-sensitive, so it is the only literal this host interpolates into the remote
-  # script; everything else here is the pod's own live environment, read and compared, never
-  # echoed.
-  local combined
-  combined="
-if [ -n \"\$LEGION_GH_OWNERS_DIR\" ] && [ \"\$GH_CONFIG_DIR\" = \"\$LEGION_GH_OWNERS_DIR/$o_owner\" ]; then
-  env_match=true
-else
-  env_match=false
-fi
-read_out=\$(gh api repos/$LEGION_E2E_REPO_T --jq .full_name 2>&1)
-read_status=\$?
-push_o_out=\$(git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_O\" \"HEAD:refs/heads/$probe_branch\" 2>&1)
-push_o_status=\$?
-push_t_out=\$(git --git-dir=\"\$LEGION_WORKSPACE/.git\" $push_flags \"https://github.com/$LEGION_E2E_REPO_T\" \"HEAD:refs/heads/$probe_branch\" 2>&1)
-push_t_status=\$?
-echo '@@@ENV@@@'
-echo \"\$env_match\"
-echo '@@@READ@@@'
-echo \"\$read_out\"
-echo '@@@READ_STATUS@@@'
-echo \"\$read_status\"
-echo '@@@PUSH_O@@@'
-echo \"\$push_o_out\"
-echo '@@@PUSH_O_STATUS@@@'
-echo \"\$push_o_status\"
-echo '@@@PUSH_T@@@'
-echo \"\$push_t_out\"
-echo '@@@PUSH_T_STATUS@@@'
-echo \"\$push_t_status\"
-echo '@@@END@@@'
-"
-  local proc_root
+
+  local proc_root probe_file
   proc_root=$(resolve_proc_root)
-  local combined_out
-  combined_out=$(as_role "$pod" "$container" "$proc_root" "$combined") ||
-    fail "second-owner: could not identify or run as the role's own process in $pod ($container)"
+  probe_file="$MULTIREPO_EVIDENCE_DIR/second-owner-probe.raw"
+  raw_fetch "$probe_file" "second-owner: the credential probes in $pod ($container)" \
+    as_role_probe "$pod" "$container" "$proc_root" "legion-probe-$$-$(date +%s)"
+  jq -e '
+    (.pid | type == "string") and (.argv0 | type == "string") and (.argc | type == "number")
+    and (.sha256 | type == "string") and (.env_match | type == "boolean")
+    and ([.read, .push_o, .push_t] | all(type == "object" and (.status | type == "number") and (.output | type == "string")))
+  ' "$probe_file" >/dev/null || fail "second-owner: the probe in $pod did not answer the object lib/as-role.py prints"
 
-  local pid cmdline env_match
-  pid=$(extract_section "$combined_out" PID CMDLINE)
-  cmdline=$(extract_section "$combined_out" CMDLINE ENV)
-  env_match=$(extract_section "$combined_out" ENV READ)
+  local pid argv0 argc sha256 env_match read_out read_status push_o_out push_o_status push_t_out push_t_status
+  pid=$(jq -r .pid "$probe_file")
+  argv0=$(jq -r .argv0 "$probe_file")
+  argc=$(jq -r .argc "$probe_file")
+  sha256=$(jq -r .sha256 "$probe_file")
+  env_match=$(jq -r .env_match "$probe_file")
+  read_out=$(jq -r .read.output "$probe_file")
+  read_status=$(jq -r .read.status "$probe_file")
+  push_o_out=$(jq -r .push_o.output "$probe_file")
+  push_o_status=$(jq -r .push_o.status "$probe_file")
+  push_t_out=$(jq -r .push_t.output "$probe_file")
+  push_t_status=$(jq -r .push_t.status "$probe_file")
+
   [ "$env_match" = true ] || ok=0
-
-  local read_out read_status
-  read_out=$(extract_section "$combined_out" READ READ_STATUS)
-  read_status=$(extract_section "$combined_out" READ_STATUS PUSH_O)
   [ "$read_status" = 0 ] && [ "$(lower "$read_out")" = "$repo_t" ] || ok=0
-
-  local push_o_out push_o_status
-  push_o_out=$(extract_section "$combined_out" PUSH_O PUSH_O_STATUS)
-  push_o_status=$(extract_section "$combined_out" PUSH_O_STATUS PUSH_T)
   [ "$push_o_status" = 0 ] || ok=0
-
-  local push_t_out push_t_status t_repo_re
-  push_t_out=$(extract_section "$combined_out" PUSH_T PUSH_T_STATUS)
-  push_t_status=$(extract_section "$combined_out" PUSH_T_STATUS END)
-  t_repo_re=$(regex_escape "$LEGION_E2E_REPO_T")
   [ "$push_t_status" != 0 ] || ok=0
-  # Both alternatives are anchored to T: a plain "error: 403" or "denied" elsewhere (another
-  # repository, a different push) never counts — only git's own permission-denial line naming T,
-  # or a 403 on a line that also names T's own GitHub URL.
-  if printf '%s' "$push_t_out" | grep -qE "remote: Permission to ${t_repo_re}\.git denied"; then
-    :
-  elif printf '%s' "$push_t_out" | grep -qE "github\.com/${t_repo_re}([./'\"]|$)" &&
-    printf '%s' "$push_t_out" | grep -q "error: 403"; then
-    :
-  else
-    ok=0
-  fi
+  # One line of git's own output, anchored to T: its permission refusal, or its 403 on T's URL. A
+  # 403 for another repository, or T's URL on one line and a 403 on another, never counts.
+  local t_repo_re
+  t_repo_re=$(regex_escape "$LEGION_E2E_REPO_T")
+  printf '%s\n' "$push_t_out" | grep -qiE "^(remote: Permission to ${t_repo_re}\.git denied|fatal: unable to access 'https://github\.com/${t_repo_re}/?': The requested URL returned error: 403)" || ok=0
 
   summary second-owner "pullRequest.repo: $pr_repo
 pullRequest.number: $pr_number
@@ -774,7 +584,7 @@ phase: $phase
 merged (GitHub, repos/$LEGION_E2E_REPO_O/pulls/$pr_number): $merged
 proc root: $proc_root
 role pid: $pid
-role cmdline: $cmdline
+role cmdline: argv0=$argv0 argc=$argc sha256=$sha256
 role env: LEGION_GH_OWNERS_DIR/GH_CONFIG_DIR name the issue's own owner directory: $env_match
 as role: gh api repos/$LEGION_E2E_REPO_T --jq .full_name = $read_out (exit $read_status)
 positive control: dry-run push to $LEGION_E2E_REPO_O as role, exit $push_o_status
@@ -976,10 +786,10 @@ $(cat "$prs_file")
 # negative no-repo <KEY>: the daemon never recorded it (.issues has no such key — refusing the
 # whole check, never a vacuous PASS, when .issues is not even an object, which `has` on `null`
 # would otherwise answer `false` to), Dispatch itself still resolves it to no repository
-# (.resolved_repo is null), and the latest repository note among the daemon's own messages (actor
-# {kind:"session", id:"legion-daemon:<PROJECT>"} — never any other author's) is the exact
-# no-repository admission refusal, word for word, bound to the daemon's own outbox marker
-# (internal/workflow/repository.go:76, internal/record/outbox.go:71-73,104-106: body =
+# (.resolved_repo is null), and the latest repository note among the messages claiming the
+# daemon's actor (actor {kind:"session", id:"legion-daemon:<PROJECT>"}; the id is caller-named, see
+# the header) is the exact no-repository admission refusal, word for word, with the daemon's outbox
+# marker (internal/workflow/repository.go:76, internal/record/outbox.go:71-73,104-106: body =
 # note + "\n\n<!-- legion-outbox:<id> -->").
 negative_no_repo() {
   local key=$1 ok=1 has
@@ -1010,7 +820,7 @@ negative_no_repo() {
 
   summary "negative-no-repo-$key" "issues has($key): $has
 resolved_repo: $resolved_repo
-daemon actor: $daemon_actor
+actor id the note must carry (named by its poster, not token-proved): $daemon_actor
 latest daemon repository note is the none-note: $latest_is_none
 " >/dev/null
   check "negative-no-repo-$key" "$ok"
@@ -1027,7 +837,7 @@ latest daemon repository note is the none-note: $latest_is_none
 # (internal/workflow/repository.go:94) appears among its messages, word for word, with the
 # baseline's own repository spelling and Dispatch's own resolved spelling of X substituted in —
 # never the operator's own LEGION_E2E_REPO_X spelling, which may differ only in case from what
-# Dispatch actually resolved and wrote — bound to the daemon's own actor and outbox marker. A
+# Dispatch actually resolved and wrote — with the daemon's claimed actor id and outbox marker. A
 # rerun needs no second message: `noteOnce` posts the kept-repository note once per resolution
 # (internal/workflow/repository.go:101-113), so check (3) is this protocol's primary proof and (4)
 # is the format checked, not required fresh.

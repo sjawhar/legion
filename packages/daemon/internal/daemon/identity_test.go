@@ -36,7 +36,7 @@ func TestSpawnSpecCarriesTheRoleAppIdentity(t *testing.T) {
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
 	var owners []string
 	repository := ghrepo.Repository{}
-	s := specs{stateDir: stateDir, project: "s1",
+	s := specs{stateDir: stateDir, project: "s1", repositories: noRepositoriesView,
 		repository: func(context.Context, string) (ghrepo.Repository, string, error) { return repository, "main", nil },
 		identity: func(_ context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
 			if role != claim.RoleImplementer {
