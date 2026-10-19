@@ -158,10 +158,12 @@ the saved help is the pin's).
 The shared clone's `credential.helper` is `!legion git-credential` with `credential.useHttpPath`
 on, so a pane's `git` and `jj git push` read the hosts.yml of the owner in the path git asks about
 and nothing else. The real gh is a compiled program, so when the first `gh` on the daemon's `PATH`
-is a script (a `gh` wrapper of the box's own, as the devbox's login `PATH` heads with), boot
-refuses it, naming it and `LEGION_GH_PATH` (`RefuseScriptGH`): run as the real gh, a wrapper
-would answer in place of the owner's App token. Set `LEGION_GH_PATH` to the real gh, or put it
-ahead of the wrapper in the shell that starts the daemon.
+is a script (a `gh` wrapper of the box's own, as the devbox's login `PATH` heads with, or asdf's
+shim), boot refuses it, naming it and `LEGION_GH_PATH` (`RefuseScriptGH`): run as the real gh, a
+wrapper would answer in place of the owner's App token. Set `LEGION_GH_PATH` to the real gh's
+install path (`mise which gh` or `asdf which gh` prints it). The check reads scripts only: mise's
+shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
+`PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.
 
 ## Rotating the App keys
 

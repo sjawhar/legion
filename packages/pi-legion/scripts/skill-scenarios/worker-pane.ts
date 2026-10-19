@@ -47,7 +47,14 @@ const pane = workerPane(
   { rig: runDir, port: Number(port), profile },
   base,
   { project, issue, role },
-  { daemonModule: path.join(checkout, "packages", "daemon"), systemPrompt: true }
+  // The pane's real gh is the recording stand-in rig.sh's standins writes to $R/bin/gh, named as
+  // an operator names one with LEGION_GH_PATH: it is a script, which the daemon's own resolution
+  // on PATH refuses.
+  {
+    daemonModule: path.join(checkout, "packages", "daemon"),
+    systemPrompt: true,
+    ghPath: path.join(runDir, "bin", "gh"),
+  }
 );
 for (const [key, value] of Object.entries(pane.env)) {
   if (value.includes("\n")) {

@@ -28,38 +28,19 @@ var daemonTools = []string{"git", "jj", "gh"}
 // pane's real gh rather than the `legion gh` first on the pane's PATH.
 func toolEnv(tool string) string { return "LEGION_" + strings.ToUpper(tool) + "_PATH" }
 
-// resolveTools resolves each daemon tool by its LEGION_<TOOL>_PATH override, which must be an
-// absolute executable, or on PATH. It names every missing tool with its override in one error,
-// refuses a gh found on PATH that is a script (RefuseScriptGH), and refuses a jj older than the
-// oldest the daemon runs (checkJJVersion).
+// resolveTools resolves each daemon tool (resolveTool). It names every missing tool with its
+// override in one error, and refuses a jj older than the oldest the daemon runs (checkJJVersion).
 func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
-	path, _ := lookupEnv("PATH")
 	tools := map[string]string{}
 	var missing []string
 	for _, tool := range daemonTools {
-		if configured, ok := lookupEnv(toolEnv(tool)); ok && configured != "" {
-			if !filepath.IsAbs(configured) || !isExecutable(configured) {
-				return nil, fmt.Errorf("%s is not an absolute executable path: %q", toolEnv(tool), configured)
-			}
-			tools[tool] = configured
-			continue
-		}
-		found := ""
-		for _, dir := range filepath.SplitList(path) {
-			candidate := filepath.Join(dir, tool)
-			if dir != "" && filepath.IsAbs(candidate) && isExecutable(candidate) {
-				found = candidate
-				break
-			}
+		found, err := resolveTool(lookupEnv, tool)
+		if err != nil {
+			return nil, err
 		}
 		if found == "" {
 			missing = append(missing, fmt.Sprintf("%s (set %s to an absolute executable path)", tool, toolEnv(tool)))
 			continue
-		}
-		if tool == "gh" {
-			if err := RefuseScriptGH(found); err != nil {
-				return nil, err
-			}
 		}
 		tools[tool] = found
 	}
@@ -72,13 +53,41 @@ func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, err
 	return tools, nil
 }
 
+// resolveTool is tool's LEGION_<TOOL>_PATH override, which must be an absolute executable, or the
+// first executable tool on PATH, or "" when there is neither. A gh found on PATH that is a script
+// is refused (RefuseScriptGH); an override is the operator's own word and is taken as it is.
+func resolveTool(lookupEnv func(string) (string, bool), tool string) (string, error) {
+	if configured, ok := lookupEnv(toolEnv(tool)); ok && configured != "" {
+		if !filepath.IsAbs(configured) || !isExecutable(configured) {
+			return "", fmt.Errorf("%s is not an absolute executable path: %q", toolEnv(tool), configured)
+		}
+		return configured, nil
+	}
+	path, _ := lookupEnv("PATH")
+	for _, dir := range filepath.SplitList(path) {
+		candidate := filepath.Join(dir, tool)
+		if dir != "" && filepath.IsAbs(candidate) && isExecutable(candidate) {
+			if tool == "gh" {
+				if err := RefuseScriptGH(candidate); err != nil {
+					return "", err
+				}
+			}
+			return candidate, nil
+		}
+	}
+	return "", nil
+}
+
 // RefuseScriptGH refuses gh, the first gh on PATH, when it is a script, a file whose first two
 // bytes are `#!`. The real gh is a compiled program, so a script there is a gh wrapper: a
 // machine's own shim, which picks a token of its own (or loops back through the `legion gh`
-// wrapper first on a pane's PATH), or a `legion gh` wrapper, which would run `legion gh` again.
-// Either, run as the real gh, replaces the GitHub App token of the owner's gh directory `legion gh`
-// hands it. A LEGION_GH_PATH override is the operator's own word and is taken as it is; this check
-// reads only what PATH found. `legion controller start` makes the same check on the operator's PATH.
+// wrapper first on a pane's PATH), a version manager's shim (asdf's), or a `legion gh` wrapper,
+// which would run `legion gh` again. Run as the real gh, a wrapper answers in place of the GitHub
+// App token of the owner's gh directory `legion gh` hands it. The check reads scripts only: a
+// compiled multiplexer such as mise's shim passes, and falls back to the next gh on PATH when mise
+// has no gh for the directory, so the refusal names an install path, not a shims directory. A
+// LEGION_GH_PATH override is the operator's own word and is taken as it is; this check reads only
+// what PATH found. `legion controller start` makes the same check on the operator's PATH.
 func RefuseScriptGH(gh string) error {
 	file, err := os.Open(gh)
 	if err != nil {
@@ -91,7 +100,7 @@ func RefuseScriptGH(gh string) error {
 		return fmt.Errorf("read %s, the first gh on PATH: %w", gh, err)
 	}
 	if string(head[:n]) == "#!" {
-		return fmt.Errorf("the first gh on PATH, %s, is a script, not the real gh: a gh wrapper would answer in place of the GitHub App token `legion gh` gives it; set LEGION_GH_PATH to the real gh's absolute path, or put the real gh ahead of the wrapper on PATH", gh)
+		return fmt.Errorf("the first gh on PATH, %s, is a script, not the real gh: a gh wrapper would answer in place of the GitHub App token `legion gh` gives it; set LEGION_GH_PATH to the real gh's install path (`mise which gh` or `asdf which gh` prints it; a version manager's shims directory is no install path)", gh)
 	}
 	return nil
 }
