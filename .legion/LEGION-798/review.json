@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-798",
+  "completed": "2026-10-19T00:19:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2043",
+  "reviewedHead": "d308efe829a352c9d5ffab6944ccd47d76caf28c",
+  "codeHead": "d308efe829a352c9d5ffab6944ccd47d76caf28c",
+  "round": 1,
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": ".legion/LEGION-798/implement.json:11, .legion/LEGION-798/test.json:18",
+      "description": "The required check `lint` is red at the CI head d308efe8 (Tests run 39178929507, job 117827350583, step 'Check no file names the private deployment repository, company, internal host, or tailnet host'): `.github/scripts/check-private-names.sh` refuses both handoff lines, each naming the deployment repository's Dispatch project key in the phrase that gives the production deployment's 660 s budget. Confirmed locally with the script over `.legion/LEGION-798`. Fix: reword both to 'the production deployment's 660 s budget' (no project key), in the implementer's round; the PR body's CI line must then name the new push's runs (it still cites run 39177606980 at d027e749, stale since the tester's code commit a2c061aa)."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:202-205, docs/kubernetes.md:1228-1230, docs/site/src/content/docs/legion/troubleshooting.md:58-62",
+      "description": "The documented guarantee is wider than the code: each sentence says a pod-block volume naming a missing ConfigMap or Secret is refused, unconditionally. The kubelet skips a volume no container mounts (the live check adds a volume_mounts entry for exactly that reason, live_install_test.go:461-463 and :486), so a declared-but-unmounted volume produces no FailedMount and the probe passes. Qualify with 'that a volume_mounts entry mounts'. Fix in this round beside the lint fix."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/live_install_test.go:549",
+      "description": "The 30 s bound from PodScheduled allows one missed 15 s recheck and compares the API server's second-truncated transition time with the runner's clock; a kubelet whose first mount attempt lands more than about 15 s after binding fails the check with a correct daemon. The plan's Risks allow widening the slack (never the refusal substring). Not blocking: unmeasured until the devbox run; carried in the PR body's Not proven / risk."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/probe.go:482-500, :535-547",
+      "description": "A FailedMount the kubelet has since cleared (the operator creates the object inside the 15 s between the kubelet's first mount attempt and the recheck) is still refused on that recheck, since missingVolume reads the event record and never its timestamp; the daemon exits, its Deployment restarts it, the fresh probe pod passes. One extra restart, the shape the providers rule already had; not a defect under the spec's design ('a missing volume can't heal by waiting'). Recorded in the PR body's Not proven / risk so the production check reads such a restart rightly."
+    }
+  ],
+  "verified": {
+    "ci": "Required set from the main ruleset: lint, typecheck, test, pr-title (branch protection: none). CI head = PR head d308efe8 (the tester's push carried code, a2c061aa, so it ran). Check-runs: typecheck success, test success, pr-title success, lint failure. Compare d308efe8...d308efe8: only .legion/ (trivially true).",
+    "threads": "gh api graphql reviewThreads: none; issue comments: none.",
+    "e2e": "E2E (implementer) and E2E (tester) both present: surface (the sandbox package's probe rig with the production retry and budget, in real time), command, observed, head d027e749, negative control (the kubelet-retried cache-sync form run to a 2 s budget with two creates). The tester re-ran the implementer's smoke independently and added TestProbeImageFindsAFailedMountOnTheRecheck (a2c061aa), red under a recheck mutation and on the base, green at the head.",
+    "blastRadius": "No exported symbol changed; providersMountFailure, probeWaiting and mountRecheck are package-private with callers only in probe.go, probe_test.go and live_install_test.go (grep over packages/, docs/, scripts/). bootprobe.Outcome.Refusal flows unchanged to daemon/kubernetes.go's boot and legion probe-boot's Prober.",
+    "thermonuclear": "deep-review and code-quality at d308efe8: no critical or important defect; the three minors above; cleanup carried in Fast-follow."
+  },
+  "fastFollow": "probe.go: extract the two halves of stuck (the container-status stops and the event-read mount refusal) and a `refused(format, args...)` helper for the four Outcome{Refusal} returns; missingObjectForm's comment to say the key is a wildcard too, its groups non-capturing, the two strings.Contains forms folded into the one regexp. probe_test.go: a plantMountFailure/wantRefusedOnce/wantRetriedToBudget trio shared by the providers, operator-volume and config-error tests; TestProbeImageFindsAFailedMountOnTheRecheck driven from the events reactor (create the event and advance the clock inside the first list) rather than a goroutine, a 50 ms sleep and a nudge, and the goroutine joined before the test returns. live_install_test.go: the watcher takes the first PodScheduled=True pod instead of buffering the last; the New/ProbeImage/poll-to-deletion tail shared with checkImageProbeCapabilityRefusal. troubleshooting.md:62-63 and kubernetes.md:218: the CreateContainerConfigError remedy says 'an object its environment reads', which runtime.kubernetes.pod.env (literal values) cannot configure today; say it is the same forms read from the container's status as a safety net."
+}
