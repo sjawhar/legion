@@ -20,10 +20,10 @@ import (
 // LauncherDir is root's bin, the directory of the legion launcher and the gh wrapper.
 func LauncherDir(root string) string { return filepath.Join(root, "bin") }
 
-// Install installs bin's legion launcher, which execs legionExecutable (the shipped daemon's
-// legionCliLauncherScript), and its gh, which execs legionExecutable's `legion gh`. Its two
-// callers pass their own executable: a tmux daemon's boot (internal/daemon) and `legion
-// controller start` on the operator's machine (cmd/legion).
+// Install installs bin's legion launcher, which execs legionExecutable, and its gh, which execs
+// legionExecutable's `legion gh`, the path absolute and single-quoted (shellprefix.Literal) in
+// both. Its two callers pass their own executable: a tmux daemon's boot (internal/daemon) and
+// `legion controller start` on the operator's machine (cmd/legion).
 func Install(root, legionExecutable string) error {
 	if !filepath.IsAbs(legionExecutable) {
 		return fmt.Errorf("legion launcher target %q is not an absolute path", legionExecutable)

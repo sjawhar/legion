@@ -905,9 +905,8 @@ func settledRequest(request, limit, defaultRequest string) string {
 	return cmp.Or(request, limit, defaultRequest)
 }
 
-// settleResources is a reservation the file set over defaults, as resolveKubernetes settles a role's
-// and readRepositoryCache the cache's: each limit and ephemeral-storage request the file set, else
-// the default's; each cpu or memory request as settledRequest settles it.
+// settleResources is the reservation set settled over defaults: each limit and ephemeral-storage
+// request set gives, else the default's; each cpu or memory request as settledRequest settles it.
 func settleResources(set, defaults RoleResources) RoleResources {
 	return RoleResources{
 		CPU: cmp.Or(set.CPU, defaults.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, defaults.CPURequest),

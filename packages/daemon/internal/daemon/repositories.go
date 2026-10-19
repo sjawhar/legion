@@ -449,7 +449,7 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 // call for an event (by issue key and sequence) requests the read; until it is covered, every call
 // answers an intake.RetryLater, so the event is delivered again after its delay, off its
 // acknowledgement window; once covered, it answers nil, for the caller to look the repository up
-// again and release the hold (releaseHold).
+// again.
 func (w *workflowRuntime) awaitMappingRead(issue intake.DispatchIssue) error {
 	w.awaitingMu.Lock()
 	defer w.awaitingMu.Unlock()
@@ -471,46 +471,69 @@ func (w *workflowRuntime) awaitMappingRead(issue intake.DispatchIssue) error {
 		Err: fmt.Errorf("%s resolves to %s, which the repository mapping did not serve when last read: the mapping is being read again before the issue is admitted", issue.Key, issue.ResolvedRepo)}
 }
 
-// releaseHold ends the hold of an admission event awaitMappingRead held back, as it goes on to be
-// applied. Events of its issue applied meanwhile went ahead of it, so it is applied only while
-// Dispatch still shows what it says: the issue in todo, handed to Legion or a child of a tree, on
-// the same repository. Otherwise it is superseded (intake.Superseded), acknowledged unapplied,
-// since the newer event carries the issue's current state: a person who withdrew the issue while
-// its event was held is not overruled. An event never held asks Dispatch nothing; a read that
-// fails keeps the hold, for the event to be delivered again.
-func (w *workflowRuntime) releaseHold(ctx context.Context, issue intake.DispatchIssue) error {
-	w.awaitingMu.Lock()
-	_, held := w.awaiting[issue.Key][issue.Seq]
-	w.awaitingMu.Unlock()
-	if !held {
-		return nil
-	}
-	now, err := w.dispatch.GetIssue(ctx, issue.Key)
-	if err != nil {
-		return fmt.Errorf("read %s from Dispatch before applying its event %d, held for a read of the repository mapping: %w", issue.Key, issue.Seq, err)
-	}
-	w.forgetHold(issue.Key, issue.Seq)
-	admissionBound := now.HandedOver || now.Parent != nil && *now.Parent != ""
-	if now.Status != "todo" || !admissionBound || !strings.EqualFold(now.ResolvedRepo, issue.ResolvedRepo) {
-		return &intake.Superseded{Err: fmt.Errorf("%s's event %d was held for a read of the repository mapping, and Dispatch now shows the issue %s, handed over %t, on %q: the newer event that changed it carries its current state",
-			issue.Key, issue.Seq, now.Status, now.HandedOver, now.ResolvedRepo)}
-	}
-	return nil
-}
-
-// forgetHold drops issue's hold for the event at seq, and every hold of the issue when seq is 0
-// (its record written, so no event of it is held any longer).
-func (w *workflowRuntime) forgetHold(issue string, seq int64) {
+// wasRetried is whether a delivery of issue's event at seq already failed to prepare (markRetried):
+// events of the issue applied since went ahead of it, and an unrecorded issue has no sequence to
+// fence a stale event with.
+func (w *workflowRuntime) wasRetried(issue string, seq int64) bool {
 	w.awaitingMu.Lock()
 	defer w.awaitingMu.Unlock()
-	if seq == 0 {
-		delete(w.awaiting, issue)
-		return
+	_, retried := w.retried[issue][seq]
+	return retried
+}
+
+// markRetried records that a delivery of issue's event at seq failed to prepare, for its next
+// delivery to be prepared from Dispatch's current view (prepareRepository).
+func (w *workflowRuntime) markRetried(issue string, seq int64) {
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	if w.retried == nil {
+		w.retried = map[string]map[int64]struct{}{}
+	}
+	if w.retried[issue] == nil {
+		w.retried[issue] = map[int64]struct{}{}
+	}
+	w.retried[issue][seq] = struct{}{}
+}
+
+// forgetPrepared drops what was kept for issue's event at seq, prepared at last at applied (the
+// sequence Dispatch had run to, for a retried event): the mark of its failed delivery
+// (markRetried) and its waits for a read of the mapping under either sequence.
+func (w *workflowRuntime) forgetPrepared(issue string, seq, applied int64) {
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	delete(w.retried[issue], seq)
+	if len(w.retried[issue]) == 0 {
+		delete(w.retried, issue)
 	}
 	delete(w.awaiting[issue], seq)
+	delete(w.awaiting[issue], applied)
 	if len(w.awaiting[issue]) == 0 {
 		delete(w.awaiting, issue)
 	}
+}
+
+// forgetIssue drops everything kept for issue's events, its record written: no event of it is
+// prepared as an admission any longer.
+func (w *workflowRuntime) forgetIssue(issue string) {
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	delete(w.retried, issue)
+	delete(w.awaiting, issue)
+}
+
+// currentIssue is event, as Dispatch's issue detail now shows its issue: its status, title,
+// parent, rank, hand-over and repository, at the sequence Dispatch has run to. The event's type
+// and actor are kept. release_children prepares a todo child from the same view.
+func currentIssue(event intake.DispatchIssue, now dispatch.Issue) intake.DispatchIssue {
+	current := event
+	current.Seq = max(event.Seq, now.LastSeq)
+	current.Status, current.Title, current.Rank, current.HandedOver = now.Status, now.Title, now.Rank, now.HandedOver
+	current.Parent = ""
+	if now.Parent != nil {
+		current.Parent = *now.Parent
+	}
+	current.ResolvedRepo, current.ResolvedRepoMissing = now.ResolvedRepo, false
+	return current
 }
 
 // mappingReadWait is how long an admission event held back for a read of the mapping
@@ -623,29 +646,62 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 // what the workflow reads in memory when it records the issue (ResolveRepository) is readied: an
 // issue coming up for admission (handed to Legion, or a child of a tree) on a repository the
 // mapping did not serve when last read waits for a read of the mapping that covers it
-// (awaitMappingRead) and then for Dispatch to still show it so (releaseHold), so a repository just
-// mapped, or an App just installed, is served for it and a person's withdrawal meanwhile stands,
+// (awaitMappingRead), so a repository just mapped, or an App just installed, is served for it,
 // and a served repository's default branch is read when the read Legion holds is older than its
 // TTL. An unrecorded issue's event in any other status asks GitHub nothing.
+//
+// An admission event whose preparation failed is delivered again after the issue's newer events,
+// and an unrecorded issue has no sequence to fence a stale one with. So its next delivery is
+// prepared as Dispatch's issue detail now shows the issue, at the sequence Dispatch has run to
+// (currentIssue), not as the event says: a person who withdrew the issue meanwhile is not
+// overruled, and an issue whose repository changed with no event of its own (an ancestor's, or the
+// project's default) is admitted on the one it resolves to now. Once the issue is recorded, a stale
+// event below that sequence is fenced as any is.
 func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
 	return w.prepareIssue(ctx, issue, true)
 }
 
 // prepareIssue is prepareRepository, holding back an admission event on a repository not served
-// for a read of the mapping only when await is set: reconcile's boot read prepares on the mapping
-// the boot has just read.
+// for a read of the mapping, and preparing a retried one from Dispatch's current view, only when
+// await is set: reconcile's boot read prepares on the mapping the boot has just read, from a
+// listing it has just read.
 func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.DispatchIssue, await bool) (intake.DispatchIssue, error) {
 	recorded, err := w.recordOf(ctx, issue.Key)
 	if err != nil {
 		return issue, err
 	}
 	if recorded != nil {
-		w.forgetHold(issue.Key, 0)
+		w.forgetIssue(issue.Key)
 		if issue.ResolvedRepoMissing {
 			issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
 		}
 		return issue, nil
 	}
+	admission := issue.Status == "todo" && (issue.HandedOver || issue.Parent != "")
+	if !await || !admission {
+		return w.prepareUnrecorded(ctx, issue, false)
+	}
+	delivered := issue.Seq
+	if w.wasRetried(issue.Key, delivered) {
+		now, err := w.dispatch.GetIssue(ctx, issue.Key)
+		if err != nil {
+			return issue, fmt.Errorf("read %s from Dispatch before applying its event %d again, whose preparation failed before: %w", issue.Key, delivered, err)
+		}
+		issue = currentIssue(issue, now)
+	}
+	prepared, err := w.prepareUnrecorded(ctx, issue, true)
+	if err != nil {
+		w.markRetried(issue.Key, delivered)
+		return prepared, err
+	}
+	w.forgetPrepared(issue.Key, delivered, prepared.Seq)
+	return prepared, nil
+}
+
+// prepareUnrecorded readies the event of an issue the workflow does not record, as
+// prepareRepository says, holding back an admission on a repository not served for a read of the
+// mapping when await is set.
+func (w *workflowRuntime) prepareUnrecorded(ctx context.Context, issue intake.DispatchIssue, await bool) (intake.DispatchIssue, error) {
 	if issue.ResolvedRepoMissing {
 		detail, err := w.dispatch.GetIssue(ctx, issue.Key)
 		if err != nil {
@@ -657,21 +713,16 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 		return issue, nil
 	}
 	mapped, refusal, _ := w.repositories.lookup(issue.ResolvedRepo)
-	if await && (issue.HandedOver || issue.Parent != "") {
-		if refusal != "" {
-			if err := w.awaitMappingRead(issue); err != nil {
-				return issue, err
-			}
-			mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
-		}
-		if err := w.releaseHold(ctx, issue); err != nil {
+	if refusal != "" && await && (issue.HandedOver || issue.Parent != "") {
+		if err := w.awaitMappingRead(issue); err != nil {
 			return issue, err
 		}
+		mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
 	}
 	if refusal != "" {
 		return issue, nil
 	}
-	_, err = w.defaultBranches.Named(ctx, mapped.Repo)
+	_, err := w.defaultBranches.Named(ctx, mapped.Repo)
 	return issue, err
 }
 

@@ -64,7 +64,7 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 		{name: "an installation that may not read the permission", login: "a-member", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "4999"},
 			wantLog: "level=ERROR msg=\"workflow: GitHub refuses the review App's installation", wantCalls: 1},
 		{name: "a review App token GitHub no longer accepts", login: "a-writer", status: http.StatusUnauthorized,
-			wantLog: "level=ERROR msg=\"workflow: GitHub refuses the review App's token", wantCalls: 1},
+			wantErr: "401", wantWait: tokenRefusedWait, wantCalls: 1},
 		{name: "a 403 out of rate limit", login: "a-writer", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset},
 			wantErr: "403", wantWait: 90 * time.Second, wantCalls: 1},
 		{name: "a 403 with retry-after", login: "a-writer", status: http.StatusForbidden, header: map[string]string{"Retry-After": "120"},
@@ -139,6 +139,56 @@ func TestTheReviewersRepositoryPermissionDecidesWhoMayEndARound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// GitHub answers 401 for a review App token it has not yet accepted (a token minted moments
+// before) as for one whose installation was removed since. Neither says anything about the
+// author, so a 401 decides nothing and keeps nothing: the cached token is dropped and the delivery
+// retried, whose fresh mint either reads the permission or, for a removed App, is refused as not
+// installed. GitHub's rate limit is not held for it.
+func TestA401ForTheReviewAppsTokenIsRetriedWithAFreshOne(t *testing.T) {
+	pool := reviewPermissionPool(t)
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"permission":"write","user":{"login":"a-writer"}}`)
+	}))
+	defer server.Close()
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+	tokens := &forgettingTokens{}
+	w.tokens = tokens
+	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: "a-writer"}
+	_, err := w.reviewerCanWrite(context.Background(), review)
+	var later *intake.RetryLater
+	if !errors.As(err, &later) || later.After != tokenRefusedWait {
+		t.Fatalf("a 401 = %v, want a %s retry", err, tokenRefusedWait)
+	}
+	if tokens.forgot != "review acme" {
+		t.Fatalf("forgot %q, want the review App's token for acme", tokens.forgot)
+	}
+	if left := w.rateLimitLeft(); left > 0 {
+		t.Fatalf("a 401 held GitHub's rate limit for %s, want no hold", left)
+	}
+	if canWrite, err := w.reviewerCanWrite(context.Background(), review); err != nil || !canWrite {
+		t.Fatalf("the retried review = %v, %v; want the writer's write access read again", canWrite, err)
+	}
+	if calls != 2 {
+		t.Fatalf("GitHub was asked %d times, want twice: the 401 kept no answer", calls)
+	}
+}
+
+// forgettingTokens are outboxTokens that record the cached token Forget drops.
+type forgettingTokens struct {
+	outboxTokens
+	forgot string
+}
+
+func (t *forgettingTokens) Forget(role appauth.AppRole, owner string) {
+	t.forgot = string(role) + " " + owner
 }
 
 // Any account can review a public repository's pull request, so an account GitHub gives no write

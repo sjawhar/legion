@@ -3,8 +3,12 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -18,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -377,18 +382,20 @@ func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testin
 
 // An issue handed to Legion on a repository mapped in Dispatch just before, whose mapping event
 // the daemon has not yet read, is not refused as not mapped: its preparation waits for a read of
-// the mapping that covers it, and it is recorded on the repository, so long as Dispatch still
-// shows it handed over in todo there. One the person withdrew while its event was held (moved to
-// backlog, the label taken off) is not admitted: the held event is superseded, acknowledged
-// unapplied, since the newer event carries the issue's current state.
+// the mapping that covers it. The held event comes back after the issue's newer events, so it is
+// prepared as Dispatch now shows the issue: still handed over, it is recorded on its repository;
+// withdrawn while it was held (moved to backlog, the label taken off), it records nothing; and on
+// another repository with no event of its own (an ancestor's or the project's default changed),
+// it is recorded on the one it resolves to now.
 func TestAnIssueOnARepositoryMappedJustBeforeIsAdmittedOnIt(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		now   dispatch.Issue
-		admit bool
+		name   string
+		now    dispatch.Issue
+		wantOn string
 	}{
-		{"still handed over in todo", dispatch.Issue{Key: "LEGION-302", Status: "todo", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 2}, true},
-		{"withdrawn while it was held", dispatch.Issue{Key: "LEGION-302", Status: "backlog", ResolvedRepo: "zeta/tools", LastSeq: 2}, false},
+		{"still handed over in todo", dispatch.Issue{Key: "LEGION-302", Status: "todo", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 2}, "zeta/tools"},
+		{"withdrawn while it was held", dispatch.Issue{Key: "LEGION-302", Status: "backlog", ResolvedRepo: "zeta/tools", LastSeq: 2}, ""},
+		{"on another repository with no event of its own", dispatch.Issue{Key: "LEGION-302", Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 1}, "acme/widgets"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -401,33 +408,123 @@ func TestAnIssueOnARepositoryMappedJustBeforeIsAdmittedOnIt(t *testing.T) {
 			client.issue = tc.now
 			fact := intake.DispatchIssue{Key: "LEGION-302", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
 			prepared, err := prepareAsDelivered(t, w, fact)
-			var superseded *intake.Superseded
-			if !tc.admit {
-				if !errors.As(err, &superseded) {
-					t.Fatalf("the held event of a withdrawn issue = %v, want it superseded", err)
-				}
-				if left := len(w.awaiting); left != 0 {
-					t.Fatalf("%d issues still held after the event was superseded, want none", left)
-				}
-				return
-			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if left := len(w.awaiting); left != 0 {
-				t.Fatalf("%d issues still held after the event proceeded, want none", left)
+			if len(w.awaiting) != 0 || len(w.retried) != 0 {
+				t.Fatalf("held %v and retried %v after the event was prepared, want neither", w.awaiting, w.retried)
 			}
 			engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
 			admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
 			if _, err := intake.ApplyFact(ctx, w.pool, "test", "handover", prepared, engine, admission); err != nil {
 				t.Fatal(err)
 			}
-			if got := recordedIssue(t, w, "LEGION-302"); got == nil || got.Repo != "zeta/tools" {
-				t.Fatalf("LEGION-302 = %+v, want it recorded on zeta/tools, mapped before it was handed over", got)
+			got := recordedIssue(t, w, "LEGION-302")
+			if tc.wantOn == "" {
+				if got != nil {
+					t.Fatalf("LEGION-302 = %+v, want nothing recorded: the person withdrew it while its event was held", got)
+				}
+				return
 			}
-			if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
-				t.Fatalf("GitHub filters = %v, want zeta/tools heard", filters)
+			if got == nil || got.Repo != tc.wantOn {
+				t.Fatalf("LEGION-302 = %+v, want it recorded on %s", got, tc.wantOn)
+			}
+			if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github."+strings.ReplaceAll(tc.wantOn, "/", ".")+".>") {
+				t.Fatalf("GitHub filters = %v, want %s heard", filters, tc.wantOn)
 			}
 		})
 	}
+}
+
+// An admission event whose preparation failed for any reason (here, the repository's default
+// branch read from GitHub), held for the mapping first or not, is delivered again after the
+// issue's newer events, so it is prepared as Dispatch now shows the issue: a person who withdrew
+// it meanwhile is not overruled, and one still handed over is recorded.
+func TestAnAdmissionWhosePreparationFailedIsPreparedAsDispatchNowShowsIt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		heldFirst bool
+		now       dispatch.Issue
+		admitted  bool
+	}{
+		{"withdrawn after a failed branch read", false, dispatch.Issue{Key: "LEGION-305", Status: "backlog", ResolvedRepo: "acme/widgets", LastSeq: 2}, false},
+		{"withdrawn after a hold and a failed branch read", true, dispatch.Issue{Key: "LEGION-305", Status: "backlog", ResolvedRepo: "zeta/tools", LastSeq: 2}, false},
+		{"still handed over after a failed branch read", false, dispatch.Issue{Key: "LEGION-305", Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 2}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			w, client, _, _ := mappingRig(t, map[string]bool{})
+			repo := "acme/widgets"
+			if tc.heldFirst {
+				repo = "zeta/tools"
+				client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
+				if err := w.refreshMapping(ctx); err != nil {
+					t.Fatal(err)
+				}
+				client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
+			}
+			github := &failingGitHub{named: map[string]string{"acme/widgets": "acme/widgets@main", "zeta/tools": "zeta/tools@main"}}
+			w.defaultBranches = newDefaultBranches(roleTokens{}, github.start(t), 0, time.Now)
+			client.issue = dispatch.Issue{Key: "LEGION-305", Status: "todo", HandedOver: true, ResolvedRepo: repo, LastSeq: 1}
+			fact := intake.DispatchIssue{Key: "LEGION-305", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: repo}
+			if tc.heldFirst {
+				var later *intake.RetryLater
+				if _, err := w.prepareRepository(ctx, fact); !errors.As(err, &later) {
+					t.Fatalf("the first delivery = %v, want it held for the mapping", err)
+				}
+				testwait.Eventually(t, "the mapping read the held event asked for", func() bool {
+					_, refusal, _ := w.repositories.lookup("zeta/tools")
+					return refusal == ""
+				})
+			}
+			github.fail.Store(true)
+			if _, err := w.prepareRepository(ctx, fact); err == nil {
+				t.Fatal("the delivery whose branch read failed was prepared, want it retried")
+			}
+			github.fail.Store(false)
+			client.issue = tc.now
+			prepared, err := prepareAsDelivered(t, w, fact)
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+			admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
+			if _, err := intake.ApplyFact(ctx, w.pool, "test", "handover", prepared, engine, admission); err != nil {
+				t.Fatal(err)
+			}
+			if got := recordedIssue(t, w, "LEGION-305"); (got != nil) != tc.admitted {
+				t.Fatalf("LEGION-305 = %+v, want recorded %t", got, tc.admitted)
+			}
+			if len(w.awaiting) != 0 || len(w.retried) != 0 {
+				t.Fatalf("held %v and retried %v after the event was prepared, want neither", w.awaiting, w.retried)
+			}
+		})
+	}
+}
+
+// failingGitHub answers GET /repos/{owner}/{repo} as newNamedGitHub does, and 502 while fail is set.
+type failingGitHub struct {
+	named map[string]string
+	fail  atomic.Bool
+}
+
+func (g *failingGitHub) start(t *testing.T) string {
+	t.Helper()
+	named := newNamedGitHub(t, g.named)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.fail.Load() {
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+			return
+		}
+		proxied, err := http.Get(named.url + r.URL.Path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer proxied.Body.Close()
+		w.WriteHeader(proxied.StatusCode)
+		_, _ = io.Copy(w, proxied.Body)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
 }

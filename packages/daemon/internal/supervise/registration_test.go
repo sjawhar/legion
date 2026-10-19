@@ -40,6 +40,44 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 	}
 }
 
+// A daemon stopping mid-relaunch leaves a claim with no Locator at all, in StateLaunching: the
+// registration deadline retires the live process (letGo clears Locator) and starts its relaunch,
+// but the relaunch's own backoff wait (launchAfter's backOff, machine.go) returns the context's
+// own cancellation before ever reaching a new Spawn, since the daemon's shutdown context is what
+// every internally-armed timer's Handle call carries (arm, machine.go). The retired process's own
+// connection then closing (onClosed is valid in StateLaunching, table.go) must not crash: probe
+// has nothing to probe and nothing to arm, since the claim's own relaunch path, not this stream
+// event, decides what happens to it next.
+func TestAStreamClosedAfterAShutdownInterruptedRelaunchDoesNotCrash(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateShimConnected)
+	h.shutdown()
+
+	h.advance(deadline)
+
+	if loc := h.claim().Locator; loc != nil {
+		t.Fatalf("claim %+v, want no Locator: the relaunch's own backoff wait should have been cut short by the shutdown before any new Spawn", loc)
+	}
+	h.wantState(StateLaunching)
+	if lines := h.logs.lines("the wait before the next launch was cut short"); len(lines) != 1 {
+		t.Fatalf("logged %v, want the relaunch's wait cut short by the shutdown once", lines)
+	}
+	before := len(h.rt.Methods())
+
+	h.must(StreamClosed{Claim: h.token})
+
+	h.wantState(StateLaunching)
+	if loc := h.claim().Locator; loc != nil {
+		t.Errorf("claim %+v, want still no Locator: the stream closing records no new process", loc)
+	}
+	if after := h.rt.Methods(); len(after) != before {
+		t.Errorf("runtime calls after the stream closed: %v, want none added: nothing to probe with no Locator", after[before:])
+	}
+	if lines := h.logs.lines("probed with no process to probe"); len(lines) != 1 {
+		t.Errorf("logged %v, want the no-op probe logged once", lines)
+	}
+}
+
 // The runtime's ProvisionBound adds onto the base Boot×RegistrationIntervals deadline while a
 // claim is still StateLaunching (armRegistration, machine.go): a live, unregistered process is
 // left alone through the base deadline and the bound both, but once the whole extended deadline

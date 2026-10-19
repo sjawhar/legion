@@ -2543,7 +2543,8 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   outside git's own form; see "Anatomy of a Sandbox pod"), so nothing an earlier release's agents
   wrote at `/legion/feed` runs in it. That check is also what guards a carried-over volume whose
   `feed` an earlier agent made a link to another directory of the volume: the kubelet mounts the
-  link's target as the feed, and agents can still write that directory by its own path, so the
+  link's target as the feed, and agents may still change what the next fetch reads there, through
+  that directory's own path or the link itself, which is no mount point in their containers, so the
   check, run before any git in an init container no agent runs beside, is what keeps the fetch
   from running what they wrote. Every other provisioning command is
   bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
