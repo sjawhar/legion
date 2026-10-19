@@ -532,7 +532,7 @@ phase_rank() {
   esac
 }
 phase_at_least() { local p; p=$(daemon_state | jq -r --arg i "$1" '.issues[$i].phase') || return 1; [ "$(phase_rank "$p")" -ge "$(phase_rank "$2")" ]; }
-wait_for_phase_at_least() { until_true "${3:-600}" "$1 to reach $2 or later" phase_at_least "$1" "$2"; }
+wait_for_phase_at_least() { until_true "${3:-$phase_seconds}" "$1 to reach $2 or later" phase_at_least "$1" "$2"; }
 instructed() { compgen -G "$evidence/instructed/$1.$2.$3.*" >/dev/null; }
 dispatch_messages() { dispatch_events "$1" | jq -c '[.[] | select(.type == "message.created") | {seq, actor: .actor.id, body: .payload.body}]'; }
 ready_messages() { dispatch_messages "$1" | jq -c '[.[] | select(.body | startswith("READY"))]'; }
@@ -853,7 +853,17 @@ child_planner_before=$(daemon_state | jq -c --arg c "$child" '.issues[$c] | {gen
 send_agent "$root1" architect "Acceptance child operations, one legion tool call at a time, reporting each result verbatim before the next. (1) Call park_child with issue $root1. (2) Call rerun_child with issue $child. (3) Now take child $child out of the workflow, with the legion operation your instructions name for that. Then wait."
 until_true 600 "$child to be backlog in Dispatch" dispatch_status_is "$child" backlog
 until_true 300 "$child to leave the workflow" issue_phase "$child" "done"
-until_true 300 "$child's planner to be suspended" issue_worker_state "$child" planner suspended
+# The park suspends the child's planner once its turn ends and names no deadline
+# (packages/daemon/internal/supervise/suspend.go, holdSuspension), so the wait is the proof's turn
+# budget, phase_seconds (lib/workflow.sh); a timeout prints the planner's claim as legion claims shows it.
+child_planner_unsuspended() {
+  note "$child's planner in legion claims list: $(claims list --json | jq -c --arg i "$child" '[.claims[] | select(.issue == $i and .role == "planner")
+    | {state, suspensionHeld: (.suspensionHeld // false), suspendedBy: (.suspendedBy // null), pending: (.pending.phase // null)}]')"
+}
+timeout_hook=child_planner_unsuspended
+until_true "$phase_seconds" "$child's planner to be suspended" issue_worker_state "$child" planner suspended
+# shellcheck disable=SC2034
+timeout_hook=''
 until_true 300 "the child-status notice for $child" notice_delivered "$root1" architect "$(notice_needle child-status "$child")"
 state_file park-child
 dispatch_events "$child" >"$evidence/child-events-after-park.json"

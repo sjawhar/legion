@@ -5791,8 +5791,17 @@ note "the close suspended the architect, planner, implementer, tester, reviewer 
 # in the phase recorded here, which carried-child requires it keep in its own tree. Its Dispatch
 # status is recorded too: the daemon writes none before testing (workflow's table), so a child left
 # in planning or implementing still shows the todo it was released in, and carried-child's path
-# depends on it.
-until_true 300 "the close to suspend $child3's planner" issue_worker_state "$child3" planner suspended
+# depends on it. The daemon names this suspension no deadline either, so the wait is the proof's
+# turn budget (phase_seconds, lib/workflow.sh), and a planner still unsuspended when it runs out is
+# named with whether its suspension is held for a turn, as tree 1's roles are.
+child3_planner_unsuspended() {
+  note "$child3's planner not yet suspended: $(claims_cli list --json | jq -c --arg i "$child3" '[.claims[] | select(.issue == $i and .role == "planner")
+    | {state, suspensionHeld: (.suspensionHeld // false), pending: (.pending.phase // null)}]')"
+  limit_pending_blocked
+}
+timeout_hook=child3_planner_unsuspended
+until_true "$phase_seconds" "the close to suspend $child3's planner" issue_worker_state "$child3" planner suspended
+timeout_hook=limit_pending_blocked
 child3_phase=$(daemon_state | jq -er --arg issue "$child3" '.issues[$issue].phase') || fail "the daemon's state holds no phase for $child3"
 case $child3_phase in admitted | done | held) fail "$child3 is in $child3_phase when tree 1 closes, not mid-run in a phase a role works" ;; esac
 child3_status=$(dispatch_get "issues/$child3" | jq -er .status) || fail "Dispatch could not be read for $child3"
