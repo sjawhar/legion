@@ -15,6 +15,8 @@
 
 ### Changed
 
+- The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
+  an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.

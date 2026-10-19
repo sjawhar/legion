@@ -154,7 +154,7 @@ export const envoyToolSpecs = [
   {
     name: "envoy_unsubscribe",
     description:
-      "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted.",
+      "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted. A subscription another plugin holds for this session's role stays, and the result lists it as kept.",
     arguments: (schema) => ({ topics: schema.array(schema.string()).optional() }),
     operation: EnvoyToolOperation.unsubscribe,
   },
@@ -191,7 +191,7 @@ export const envoyToolSpecs = [
   {
     name: "envoy_role_set",
     description:
-      "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session.",
+      "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session. Moving to a different role is refused while another plugin holds subscriptions that last only as long as this session keeps its current role.",
     arguments: (schema) => ({ role: schema.string() }),
     operation: EnvoyToolOperation.setRole,
   },
