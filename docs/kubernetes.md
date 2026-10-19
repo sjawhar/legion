@@ -2734,7 +2734,8 @@ issue's pod (every role container of it alike) and the image probe's.
   issue is recorded on the repository Dispatch resolves for it, with that repository's default
   branch as GitHub names it, when the daemon first records it, and keeps both. A claim on an issue
   the workflow does not record, such as an operator's tree, works the project's default
-  repository, and its launch is refused while the project serves no default. **Upgrade order:**
+  repository as it is at each launch, and its launch is refused while the project serves no
+  default. **Upgrade order:**
   Dispatch first (it resolves each issue's repository), then map the project's repositories there
   with the old `projects.<KEY>.repo` as the project's default, then delete the key and start this
   daemon; its first boot fills every record written before the record carried its repository from
