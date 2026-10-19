@@ -490,8 +490,9 @@ type plan struct {
 	// identity is the role's App bot identity for the owner of the repository it works, from the
 	// workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
-	// repository is the repository an issue's record names and its recorded default branch
-	// (workflowRuntime.issueRepository); nil without a workflow.
+	// repository is the repository an issue works and its default branch
+	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
+	// workflow does not record); nil without a workflow.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
 	// repositories is the project's repository mapping as the workflow serves it, empty until the
 	// workflow reads it at boot: every role's gh bundle holds a directory for each of its owners.
@@ -1593,17 +1594,16 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // over identity, minted for the owner of the repository the claim's issue works (repository): its
 // record's, or the project's default repository for an issue the workflow does not record. nil
 // without a workflow.
-func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Role, string) (runtime.GitIdentity, bool, error) {
+func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
 	if identity == nil || repository == nil {
 		return nil
 	}
-	return func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, bool, error) {
+	return func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error) {
 		repo, _, err := repository(ctx, issue)
-		if err != nil || repo.IsZero() {
-			return runtime.GitIdentity{}, false, err
+		if err != nil {
+			return runtime.GitIdentity{}, err
 		}
-		id, err := identity(ctx, role, repo.Owner())
-		return id, err == nil, err
+		return identity(ctx, role, repo.Owner())
 	}
 }
 
