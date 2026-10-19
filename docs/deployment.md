@@ -126,22 +126,27 @@ owner the command targets, read as gh reads it, with pflag's rules, from the rea
 each command down to its leaf (`-R`/`--repo` before or after the command, a repository, owner or
 `github.com` URL argument, every one of a slot gh's usage takes several of, a number written
 `OWNER/REPO#N`, a `repos/<owner>/…` endpoint of `gh api` or a search endpoint's `q`, a search
-query's plain `repo:`/`owner:`, the options naming a repository, an owner or an issue by URL, a
-`github.com` URL given any other option; `GH_REPO` only when none names one, for a command that
-reads it, `gh api`'s `{owner}` and `:owner` placeholders among them), and at the issue owner's
-when the command names no repository at all, once every `github.com` remote and `gh-resolved`
-setting of the working directory names that owner, since gh takes such a command's repository
-from there. A command whose last `--help` is true, and `gh --version` alone, only print. It fails
-closed: a command it cannot read for certain (an option the leaf's help does not list or names a
-repository with in a way it does not know, a subcommand gh does not know, a first word gh's own
-help does not list, anything before the command but `-R` and `--help`, an argument the leaf's
-usage has no place for or names in a way it does not know, a search qualifier gh or GitHub could
-read otherwise, a gh alias or an extension, run or named as `gh help`'s target, whose help it never
-reads since reading it runs them, `gh copilot` and `gh extension exec`), one naming two owners, one
-naming an owner the bundle holds no directory for, one naming none run in a clone of another
-owner's repository or beside another owner's remote, and every command under a `GH_HOST` other
-than `github.com` or a set `GH_TOKEN` or `GITHUB_TOKEN` are refused with exit 2, naming the
-argument, and send nothing. The saved help its tests read is the image's gh's, with that gh's whole
+query's plain `repo:`/`owner:`, the options naming a repository, an owner, a team or an issue by
+URL). The command's own repository counts too whenever gh resolves it, because no argument names
+it: `GH_REPO` for a command that reads it (`gh api`'s `{owner}` and `:owner` placeholders among
+them), and otherwise every `github.com` remote and `gh-resolved` setting of the working directory,
+read with gh's own URL parser, whatever the scheme. A command naming no owner, in a directory
+whose remotes name none, runs at the issue owner's. A command whose last `--help` is true, and
+`gh --version` alone, only print. It fails closed: a command it cannot read for certain (an option
+the leaf's help does not list or names a repository with in a way it does not know, a subcommand
+gh does not know, a first word gh's own help does not list, anything before the command but `-R`
+and `--help`, an argument the leaf's usage has no place for or names in a way it does not know, a
+search qualifier gh or GitHub could read otherwise, a gh alias or an extension, run or named as
+`gh help`'s target, whose help it never reads since reading it runs them, `gh copilot` and `gh
+extension exec`), one naming two owners (an option or a second repository naming one owner while
+gh acts on another's, or a workspace whose remotes name two), one naming an owner the bundle holds
+no directory for, every command where `PATH`'s first `gh` is the real one, and every command under
+a `GH_HOST` other than `github.com` or a set `GH_TOKEN` or `GITHUB_TOKEN` are refused with exit 2,
+naming the argument, and send nothing. The real gh runs with `GH_PATH` naming the pane's wrapper,
+so the git gh runs itself (a clone, the fetch of a fork's parent, `pr checkout`) authenticates
+through the helper gh names after it, `legion gh auth git-credential`, which answers as `legion
+git-credential` does, with `credential.useHttpPath` on for `github.com`; and with gh's update
+check and prompts off. The saved help its tests read is the image's gh's, with that gh's whole
 command reference, every argument and every repository-naming option of which the wrapper's tables
 know (`packages/daemon/cmd/legion/testdata`, with the script that regenerates it when that pin
 moves; `.github/scripts/check-gh-version.sh` fails the build until the saved help is the pin's).

@@ -18,8 +18,9 @@ run --version | head -1 >"$out/VERSION"
 run --help >"$out/gh.txt"
 run help reference >"$out/reference.txt"
 for path in "pr" "pr view" "pr create" "pr list" "pr ls" "pr comment" "api" "repo" "repo view" "repo clone" \
-  "repo create" "repo edit" "repo sync" "repo list" "repo deploy-key" "repo deploy-key add" "issue" "issue create" \
-  "issue edit" "issue transfer" "label" "label clone" "search" "search issues" "auth" "auth status" "co" "secret" \
+  "repo create" "repo edit" "repo fork" "repo sync" "repo list" "repo deploy-key" "repo deploy-key add" "issue" \
+  "issue close" "issue create" "issue develop" "issue edit" "issue transfer" "label" "label clone" "project" \
+  "project link" "project unlink" "search" "search issues" "auth" "auth setup-git" "auth status" "co" "secret" \
   "secret set" "browse" "extension" "agent-task" "agent-task view"; do
   # shellcheck disable=SC2086
   run $path --help >"$out/${path// /_}.txt"

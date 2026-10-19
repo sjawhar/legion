@@ -437,106 +437,145 @@ func (s ghSlot) takesMany() bool {
 	return s.variadic || slices.ContainsFunc(s.args, func(arg ghArg) bool { return arg.kind.many })
 }
 
-// slotsFor is the slot each of n positional arguments fills, in order, as gh's usage places them:
-// the first slot taking more than one takes every argument the slots after it leave (`gh codespace
-// cp <sources>... <dest>`), and a usage with none takes no more arguments than it has slots.
+// slotsFor is the slot each of n positional arguments fills, in order, as gh's usage places them
+// (slotIndexes).
 func (c *ghCommand) slotsFor(n int) ([]ghSlot, bool) {
+	indexes, ok := c.slotIndexes(n)
+	placed := make([]ghSlot, len(indexes))
+	for i, index := range indexes {
+		placed[i] = c.slots[index]
+	}
+	return placed, ok
+}
+
+// slotIndexes is the index in c.slots of the slot each of n positional arguments fills, in order,
+// as gh's usage places them: the first slot taking more than one takes every argument the slots
+// after it leave (`gh codespace cp <sources>... <dest>`), and a usage with none takes no more
+// arguments than it has slots.
+func (c *ghCommand) slotIndexes(n int) ([]int, bool) {
 	many := slices.IndexFunc(c.slots, ghSlot.takesMany)
-	if many < 0 {
-		if n > len(c.slots) {
-			return nil, false
-		}
-		return c.slots[:n], true
+	if many < 0 && n > len(c.slots) {
+		return nil, false
 	}
 	after := len(c.slots) - many - 1
-	placed := make([]ghSlot, n)
-	for i := range placed {
+	indexes := make([]int, n)
+	for i := range indexes {
 		switch {
-		case i < many:
-			placed[i] = c.slots[i]
+		case many < 0 || i < many:
+			indexes[i] = i
 		case i >= max(n-after, many+1):
-			placed[i] = c.slots[len(c.slots)-(n-i)]
+			indexes[i] = len(c.slots) - (n - i)
 		default:
-			placed[i] = c.slots[many]
+			indexes[i] = many
 		}
 	}
-	return placed, true
+	return indexes, true
+}
+
+// ghReadsGHRepoByPath are the leaves that read GH_REPO, and else the working directory's
+// repository, for their own repository without the inherited -R's placeholder: gh's `project
+// link` and `project unlink` take -R as a plain string and still call gh's repository override.
+var ghReadsGHRepoByPath = map[string]bool{"project link": true, "project unlink": true}
+
+// readsOwnRepository says whether gh resolves the leaf's own repository, from GH_REPO or the
+// working directory, when n positional arguments are given and nothing else names it: a leaf that
+// reads GH_REPO (readsGHRepo), and one whose usage has a slot for a repository the n arguments
+// leave empty (`gh repo view [<repository>]`, `gh repo fork [<repository>]`, `gh repo sync
+// [<destination-repository>]`), where gh takes the working directory's.
+func (c *ghCommand) readsOwnRepository(n int) bool {
+	if c.readsGHRepo() {
+		return true
+	}
+	indexes, _ := c.slotIndexes(n)
+	for index, slot := range c.slots {
+		if (slot.takes("repository") || slot.takes("second-repository")) && !slices.Contains(indexes, index) {
+			return true
+		}
+	}
+	return false
 }
 
 // ghOptionKinds is what the value of each option of gh's helps that names a repository, an owner,
-// an organization or a URL selects, keyed `--<name> <placeholder>`, or `<path> --<name>
+// an organization, a team or a URL selects, keyed `--<name> <placeholder>`, or `<path> --<name>
 // <placeholder>` for one whose meaning is one command's own: a repository, the repositories of the
 // command's --org ("org-repositories", a name alone that organization's), an owner, a host, a URL
 // that may name a repository ("url": an issue or pull request by number or URL), or nothing
 // ("nothing"). It holds every such option of gh 2.98.0's and 2.65.0's references: an option whose
-// help mentions a repository, an owner, an organization or a URL that it does not hold is one this
-// cannot read, refused when it is given. An option that mentions none is no selector, but for a
-// github.com web URL given it, which gh may read as the repository it names.
+// help mentions one that it does not hold is one this cannot read, refused when it is given. An
+// option that mentions none is no selector: gh reads its value as text (a body, a title), never as
+// a repository to act on.
 var ghOptionKinds = map[string]string{
-	"--repo [HOST/]OWNER/REPO":    "repository",
-	"--repo OWNER/REPO":           "repository",
-	"--repo string":               "repository",
-	"--repo strings":              "repository",
-	"--branch-repo string":        "repository",
-	"--template repository":       "repository",
-	"--project owner/number":      "repository",
-	"repo sync --source string":   "repository",
-	"--repos repositories":        "org-repositories",
-	"--owner string":              "owner",
-	"--owner strings":             "owner",
-	"--org string":                "owner",
-	"--org organization":          "owner",
-	"--org login":                 "owner",
-	"--repo-owner string":         "owner",
-	"--source-owner string":       "owner",
-	"--target-owner string":       "owner",
-	"--hostname string":           "host",
-	"--url string":                "url",
-	"--add-blocked-by number":     "url",
-	"--add-blocking number":       "url",
-	"--remove-blocked-by number":  "url",
-	"--remove-blocking number":    "url",
-	"--add-sub-issue number":      "url",
-	"--remove-sub-issue number":   "url",
-	"--parent number":             "url",
-	"--duplicate-of string":       "url",
-	"--signer-repo string":        "nothing", // matched against an attestation, never requested
-	"--signer-workflow string":    "nothing", // likewise
-	"--source-digest string":      "nothing", // likewise
-	"--source-ref string":         "nothing", // likewise
-	"--tuf-url string":            "nothing", // a TUF mirror, not GitHub
-	"--exclude strings":           "nothing", // repositories left out of `gh status`
-	"--head string":               "nothing", // a branch
-	"--branch string":             "nothing", // a branch
-	"--homepage URL":              "nothing", // the new repository's home page
-	"--team name":                 "nothing", // a team of the new repository's organization
-	"repo create --source string": "nothing", // a local directory
-	"--fork-name string":          "nothing",
-	"--remote string":             "nothing",
-	"--description string":        "nothing",
-	"--gitignore string":          "nothing",
-	"--license string":            "nothing",
-	"--default-branch name":       "nothing",
-	"--add-topic strings":         "nothing",
-	"--remove-topic strings":      "nothing",
-	"--visibility string":         "nothing",
-	"--visibility strings":        "nothing",
-	"--limit int":                 "nothing",
-	"--order string":              "nothing",
-	"--sort string":               "nothing",
-	"--match strings":             "nothing",
-	"--include-forks string":      "nothing",
-	"--user username":             "nothing", // a user of the --org, which names the owner
+	"--repo [HOST/]OWNER/REPO":     "repository",
+	"--repo OWNER/REPO":            "repository",
+	"--repo string":                "repository",
+	"--repo strings":               "repository",
+	"--branch-repo string":         "repository",
+	"--template repository":        "repository",
+	"--project owner/number":       "repository",
+	"repo sync --source string":    "repository",
+	"--repos repositories":         "org-repositories",
+	"--owner string":               "owner",
+	"--owner strings":              "owner",
+	"--org string":                 "owner",
+	"--org organization":           "owner",
+	"--org login":                  "owner",
+	"--repo-owner string":          "owner",
+	"--source-owner string":        "owner",
+	"--target-owner string":        "owner",
+	"--hostname string":            "host",
+	"--url string":                 "url",
+	"--add-blocked-by number":      "url",
+	"--add-blocking number":        "url",
+	"--remove-blocked-by number":   "url",
+	"--remove-blocking number":     "url",
+	"--add-sub-issue number":       "url",
+	"--remove-sub-issue number":    "url",
+	"--parent number":              "url",
+	"--duplicate-of string":        "url",
+	"--blocked-by numbers":         "url",
+	"--blocking numbers":           "url",
+	"project link --team string":   "repository", // OWNER/TEAM: the team's organization owns it
+	"project unlink --team string": "repository", // likewise
+	"--team-mentions string":       "nothing",    // a search filter, not a repository gh acts on
+	"--reviewer handle":            "nothing",    // a user or team of the pull request's own repository
+	"--review-requested user":      "nothing",    // a search filter, likewise
+	"--signer-repo string":         "nothing",    // matched against an attestation, never requested
+	"--signer-workflow string":     "nothing",    // likewise
+	"--source-digest string":       "nothing",    // likewise
+	"--source-ref string":          "nothing",    // likewise
+	"--tuf-url string":             "nothing",    // a TUF mirror, not GitHub
+	"--exclude strings":            "nothing",    // repositories left out of `gh status`
+	"--head string":                "nothing",    // a branch
+	"--branch string":              "nothing",    // a branch
+	"--homepage URL":               "nothing",    // the new repository's home page
+	"--team name":                  "nothing",    // a team of the new repository's organization
+	"repo create --source string":  "nothing",    // a local directory
+	"--fork-name string":           "nothing",
+	"--remote string":              "nothing",
+	"--description string":         "nothing",
+	"--gitignore string":           "nothing",
+	"--license string":             "nothing",
+	"--default-branch name":        "nothing",
+	"--add-topic strings":          "nothing",
+	"--remove-topic strings":       "nothing",
+	"--visibility string":          "nothing",
+	"--visibility strings":         "nothing",
+	"--limit int":                  "nothing",
+	"--order string":               "nothing",
+	"--sort string":                "nothing",
+	"--match strings":              "nothing",
+	"--include-forks string":       "nothing",
+	"--user username":              "nothing", // a user of the --org, which names the owner
 }
 
 // ghMentionsSelector is an option's description or placeholder that mentions a repository, an
-// owner, an organization or a URL.
-var ghMentionsSelector = regexp.MustCompile(`(?i)repositor|owner|organi[sz]ation|\borg\b|\burl\b|\brepo\b`)
+// owner, an organization, a team or URLs.
+var ghMentionsSelector = regexp.MustCompile(`(?i)repositor|owner|organi[sz]ation|\borg\b|\burls?\b|\brepo\b|\bteams?\b`)
 
 // ghOptionKind is what the value of the leaf path's option name selects: its ghOptionKinds kind,
-// "unknown" for one whose help mentions a repository, an owner, an organization or a URL that the
-// table does not hold, and "" for any other, which takes a github.com URL alone as a selector. An
-// option taking no value selects nothing.
+// "unknown" for one whose help mentions a repository, an owner, an organization, a team or URLs
+// that the table does not hold, and "" for any other, which selects nothing. An option taking no
+// value selects nothing.
 func ghOptionKind(path []string, name string, flag ghFlag) string {
 	if !flag.value {
 		return "nothing"
@@ -554,9 +593,10 @@ func ghOptionKind(path []string, name string, flag ghFlag) string {
 	return ""
 }
 
-// readsGHRepo says whether the leaf takes the inherited -R, whose default GH_REPO is.
+// readsGHRepo says whether the leaf reads GH_REPO for its own repository: it takes the inherited
+// -R, or is one of ghReadsGHRepoByPath.
 func (c *ghCommand) readsGHRepo() bool {
-	return c.flags["repo"].placeholder == "[HOST/]OWNER/REPO"
+	return c.flags["repo"].placeholder == "[HOST/]OWNER/REPO" || ghReadsGHRepoByPath[strings.Join(c.path, " ")]
 }
 
 // isAPI says whether the leaf is gh api, whose argument is an endpoint and which has no -R.
