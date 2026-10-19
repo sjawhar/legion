@@ -44,7 +44,9 @@
 # served.
 #
 # --notes is what a stage proof's EXIT trap runs once it has decided the run failed; it never changes
-# the run's status. <dest> is the key command's directory (install-model-gateway.sh --dest), <since>
+# the run's status. <dest> is the route's call-record directory (install-model-gateway.sh --dest,
+# or install-key-file-model-route.sh --dest; the key command itself lives elsewhere under the
+# key-file route's own --key-dir), <since>
 # the time the failing check began (%FT%TZ, UTC, as the record writes it) and <check> its name. It
 # prints each agent that could have failed the check for want of a key: when it last got none, from
 # where, and why.
@@ -130,7 +132,7 @@ case "${1:-}" in
 --notes)
   [ $# = 4 ] || refuse "$usage"
   [[ $3 =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || refuse "--notes <since> $3 is not a UTC time as %FT%TZ"
-  # <dest> holds one route's own key command and its *.calls beside it, whichever installer ran
+  # <dest> holds one route's own call record, *.calls, whichever installer ran
   # (lib/install-model-gateway.sh's hawk-token.calls, or lib/install-key-file-model-route.sh's
   # anthropic-key.calls): a route that never reached its first call leaves none yet, read the same
   # as an empty one below.

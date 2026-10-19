@@ -6,7 +6,7 @@
 # deploy/kubernetes/operator-route/models-key-file.yml gives Stage 4a's pods: an operator-supplied
 # key, read fresh on every call, never minted and never written into the tree.
 #
-#   scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-file <file>
+#   scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file>
 #
 # --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh):
 # the profile's files go under <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
@@ -20,11 +20,22 @@
 # baked in — though Oh My Pi itself caches the value for a running agent and only re-runs the
 # command on a 401 (the profile's own models.yml comment has this).
 #
-# Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
-#   <dir>/anthropic-key      the key command the profile names: reads --key-file fresh, for that
+# --dest and --key-dir hold different things, and the caller gives them different lifetimes:
+# --dest gets only the call record (<dest>/anthropic-key.log, <dest>/anthropic-key.calls), which
+# carries no secret and the stage proofs' own diagnostics (lib/model-gateway-unserved.sh --notes)
+# read from a kept evidence directory after a failing run. --key-dir gets the key command itself
+# (<key-dir>/anthropic-key), a script with --key-file's resolved path baked into it: anyone
+# holding that script can read the key for as long as --key-file's path still holds it, so the
+# caller must give --key-dir a path its own cleanup removes unconditionally, on every exit, not
+# the evidence directory or a workspace a failing run keeps for debugging (the same rule
+# lib/install-model-gateway.sh's hawk-token already follows for its own minted token file).
+#
+# Stdout is one line, the key command's path (under --key-dir); every refusal goes to stderr. It
+# writes:
+#   <key-dir>/anthropic-key  the key command the profile names: reads --key-file fresh, for that
 #                            one command
-#   <dir>/anthropic-key.log  one line per invocation and the file read's own failure, if any
-#   <dir>/anthropic-key.calls   one line per call and its outcome, in lib/model-gateway-unserved.sh's
+#   <dest>/anthropic-key.log  one line per invocation and the file read's own failure, if any
+#   <dest>/anthropic-key.calls   one line per call and its outcome, in lib/model-gateway-unserved.sh's
 #                            own record shape, so it and the stage proofs that read a route's
 #                            <key_command>.log/.calls read this route exactly as they read the
 #                            gateway's
@@ -57,10 +68,12 @@ fail() {
 profile=
 home=
 dest=
+key_dir=
 key_file=
 have_profile=
 have_home=
 have_dest=
+have_key_dir=
 have_key_file=
 while [ $# -gt 0 ]; do
   case $1 in
@@ -79,6 +92,11 @@ while [ $# -gt 0 ]; do
     have_dest=1
     shift 2
     ;;
+  --key-dir)
+    key_dir=$2
+    have_key_dir=1
+    shift 2
+    ;;
   --key-file)
     key_file=$2
     have_key_file=1
@@ -89,7 +107,8 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$have_profile" ] || refuse "--profile is required: the OMP profile to route"
 [ -n "$have_home" ] || refuse "--home is required: the HOME Oh My Pi runs under for the profile"
-[ -n "$have_dest" ] || refuse "--dest is required: the directory the key command is written to"
+[ -n "$have_dest" ] || refuse "--dest is required: the directory the key command's call record is written to"
+[ -n "$have_key_dir" ] || refuse "--key-dir is required: the directory the key command's own script is written to"
 [ -n "$have_key_file" ] || refuse "--key-file is required: the file holding the plaintext Anthropic key"
 
 # OMP reads an empty name or "default" as the profile every plain `omp` uses (the same rule as
@@ -127,8 +146,17 @@ if [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A -- "$dest")" ]; }; then
 fi
 mkdir -p "$dest"
 chmod 0700 "$dest"
-key_command=$dest/anthropic-key
 log=$dest/anthropic-key.log
+
+key_dir=$(realpath -m -- "$key_dir")
+case "$key_dir" in *[!A-Za-z0-9/._-]*) refuse "--key-dir $key_dir holds a character a plain \`!command\` word cannot" ;; esac
+[ "$key_dir" != "$dest" ] || refuse "--key-dir $key_dir is --dest: the key command's own script, which bakes in --key-file's path, must not sit where the call record is kept"
+if [ -e "$key_dir" ] && { [ ! -d "$key_dir" ] || [ -n "$(ls -A -- "$key_dir")" ]; }; then
+  refuse "--key-dir $key_dir exists and is not an empty directory"
+fi
+mkdir -p "$key_dir"
+chmod 0700 "$key_dir"
+key_command=$key_dir/anthropic-key
 
 {
   cat <<'EOF'
@@ -199,9 +227,9 @@ chmod 0700 "$key_command"
 # The preflight read: proves the file is readable before any pane exists, same spirit as
 # install-model-gateway.sh's preflight mint, with nothing to cache and nothing that can time out.
 status=0
-key=$("$key_command" --preflight 2>"$dest/anthropic-key.preflight") || status=$?
-reason=$(<"$dest/anthropic-key.preflight")
-rm -f "$dest/anthropic-key.preflight"
+key=$("$key_command" --preflight 2>"$key_dir/anthropic-key.preflight") || status=$?
+reason=$(<"$key_dir/anthropic-key.preflight")
+rm -f "$key_dir/anthropic-key.preflight"
 if [ "$status" != 0 ]; then
   unset key
   fail "the preflight got no key from --key-file $key_file: ${reason:-$key_command exited $status and said nothing} (log: $log)"

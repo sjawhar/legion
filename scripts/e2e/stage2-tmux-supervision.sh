@@ -132,7 +132,7 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$work/model-gateway-cache" || true
+  rm -rf "$work/model-gateway-cache" "$work/model-gateway-key" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -270,7 +270,7 @@ gateway)
 key-file)
   key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
   [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
-  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --key-file "$key_file") ||
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
     fail "the agents' model route through the key file could not be installed (the reason is above)"
   ;;
 esac

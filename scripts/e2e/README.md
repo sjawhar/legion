@@ -1903,8 +1903,8 @@ gives Stage 4a's pods: an operator-supplied key, read fresh on every call, never
 written into the tree.
 
 ```sh
-scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-file <file>
-# → <dir>/anthropic-key
+scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file>
+# → <key-dir>/anthropic-key
 ```
 
 `--key-file` names a file holding the plaintext Anthropic key alone (one line; a trailing newline
@@ -1912,22 +1912,31 @@ is read past), refused unless it is a regular file only its owner can read (no g
 permission bit) — checked once, here, before any pane exists, never read beyond that check, so a
 key a caller rotates mid-run takes effect on the very next call with no restart.
 
-It writes `<dir>/anthropic-key`, the key command: reads `--key-file` fresh under the caller's HOME
-and XDG base directories, for that one command. Unlike `hawk-token` there is nothing to mint and no
-login to lose to a relocked keyring, so there is no cache and no budget: every call is a plain, fast
-file read, `served` or `failed` (there is no `timeout` or `killed` here, since nothing is minted or
-waited on). It appends one tab-separated line per call to `<dir>/anthropic-key.calls`, and to the
+`--dest` and `--key-dir` must be different directories (refused otherwise), and the caller gives
+them different lifetimes. `--dest` gets only the call record (`<dest>/anthropic-key.log`,
+`<dest>/anthropic-key.calls`), which carries no secret and is what a stage proof keeps as evidence
+after every outcome. `--key-dir` gets the key command itself
+(`<key-dir>/anthropic-key`): a plain file read, with `--key-file`'s resolved path baked into it, so
+anyone holding that script can read the key for as long as `--key-file`'s path still holds one —
+the caller must give `--key-dir` a path its own cleanup removes unconditionally, on every exit, not
+the evidence directory or a workspace a failing run keeps for debugging, the same rule
+[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s `--cache-dir` already follows for
+its own minted token file. Unlike `hawk-token` there is nothing to mint and no login to lose to a
+relocked keyring, so there is no cache and no budget: every call is a plain, fast file read,
+`served` or `failed` (there is no `timeout` or `killed` here, since nothing is minted or waited
+on). It appends one tab-separated line per call to `<dest>/anthropic-key.calls`, and to the
 caller's `MODEL_GATEWAY_CALLS_FILE` when its environment names one, in exactly the record shape
 [`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads — the installer's preflight
 (`--preflight`) is no agent's and is left out, the same rule `hawk-token`'s own key command
 follows. The profile's `agent/models.yml` points the `anthropic` provider at
-`https://api.anthropic.com` with `apiKey` and `X-Api-Key` both `!exec <dir>/anthropic-key`, and its
-`agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every other
-provider a pane could reach without the key file, the same shape
+`https://api.anthropic.com` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and
+its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every
+other provider a pane could reach without the key file, the same shape
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes.
 
-The script creates the profile's one file, `<dir>`, and removes none of it; the caller does, with
-its work directory.
+The script creates the profile's two directories, `<dest>` and `<key-dir>`, and removes neither;
+the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it
+keeps no evidence.
 
 ## lib/model-gateway-unserved.sh
 
