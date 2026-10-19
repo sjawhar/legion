@@ -2709,7 +2709,7 @@ group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
-- `services`: get, list, watch, which the Service informer reads, so a launch hands an issue pod
+- `services`: list, watch, which the Service informer reads, so a launch hands an issue pod
   its repository cache's address only once the Service of that name is the cache's own
   ([The repository cache](#the-repository-cache)); without them the daemon refuses at boot,
   naming the refused list;
