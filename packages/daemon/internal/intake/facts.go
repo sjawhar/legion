@@ -494,13 +494,16 @@ func (ServerStarted) isFact() {}
 // CheckWake is a build compare that found the merge of issue Issue's production check in the
 // build (the check_compare outbox row's GitHub read): Look is the look the compare was queued for,
 // Cause what asked for it (`daemon boot`, `dispatch start` or `dispatch build`) and Detail the
-// build's commit. The workflow wakes the check by the one wake rule, or keeps the cause for the
-// next look while one is open.
+// build's commit. OpenedAt is the check the executor read the merge from (its OpenedAt, the check
+// instance's identity): the workflow ignores a wake of a check a later merge has replaced, and a
+// zero OpenedAt names none. The workflow wakes the check by the one wake rule, or keeps the cause
+// for the next look while one is open.
 type CheckWake struct {
-	Issue  string
-	Look   int
-	Cause  string
-	Detail string
+	Issue    string
+	Look     int
+	Cause    string
+	Detail   string
+	OpenedAt time.Time
 }
 
 func (CheckWake) isFact() {}
@@ -508,11 +511,14 @@ func (CheckWake) isFact() {}
 // CheckLookEnded is a look of issue Issue's production check ending with no report: Cause is
 // `look bound` (the check_look row due at the look's bound), `operator hold` (a check start the
 // outbox met an operator's suspension on) or `claim failed` (the implementer's claim failed in
-// the look). Look names the look, so a row of a look already ended changes nothing.
+// the look). Look names the look, so a row of a look already ended changes nothing, and OpenedAt
+// the check instance (its OpenedAt), so a row of a check a later merge of the same issue replaced
+// — whose looks count from one again — changes nothing either; a zero OpenedAt names none.
 type CheckLookEnded struct {
-	Issue string
-	Look  int
-	Cause string
+	Issue    string
+	Look     int
+	Cause    string
+	OpenedAt time.Time
 }
 
 func (CheckLookEnded) isFact() {}

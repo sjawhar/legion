@@ -182,7 +182,7 @@ const legionCheckWakeView = z.strictObject({
 });
 
 /** `api.CheckView` — an issue's open production check, the implementer's work after the merge
- * closed the issue (contract 30): the repository, pull request and merge commit the check looks
+ * closed the issue (contract 31): the repository, pull request and merge commit the check looks
  * for in production (`mergeCommit` is empty until the first build compare fills it for a pull
  * request merged before the daemon recorded merge commits), when it opened, how many looks the
  * implementer has taken and whether the latest is still open, what woke the latest look

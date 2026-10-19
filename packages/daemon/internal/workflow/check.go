@@ -46,9 +46,11 @@ func buildWake(cause string) bool {
 // implementer's live session; the rows are the same, since the start resumes either. One check
 // per issue: a second merge of the same issue — a rerun's, after a re-entry closed the first —
 // replaces the earlier record, whose bound row the new check then defers to its own bound
-// (checkBound).
+// (checkBound). The check's OpenedAt is its identity (record.ProductionCheck.ID), so it is the
+// clock truncated to the microsecond, Postgres's timestamptz precision: the value the rows and
+// facts of this transaction carry equals the one every later read of the record returns.
 func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, pr record.PullRequest, wake bool) error {
-	now := e.now()
+	now := e.now().Truncate(time.Microsecond)
 	check := record.ProductionCheck{
 		Issue: issue.Key, Project: issue.Project, Tree: issue.Tree, Repo: pr.Repo, Number: pr.Number, MergeSHA: pr.MergeSHA,
 		OpenedAt: now, BoundAt: now.Add(e.cfg.ProductionCheckBound),
@@ -68,9 +70,9 @@ func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, p
 // startLook starts the next look of issue's check, woken by cause with detail, last marking the
 // bound's look: the record counts the look open from now with that wake and no cause pending, the
 // implementer is started on the check task — a start with no phase, fenced on the check and its
-// look (record.SuperviseRequest.CheckLook) rather than on the generation, and stamped with the
-// generation the issue holds as the delivery's run — and a check_look row due at the look bound
-// ends the look should nobody report it.
+// look (record.SuperviseRequest.CheckLook and CheckOpenedAt) rather than on the generation, and
+// stamped with the generation the issue holds as the delivery's run — and a check_look row due at
+// the look bound, naming the check and the look, ends the look should nobody report it.
 func (e *Engine) startLook(ctx context.Context, tx pgx.Tx, issue record.Issue, check *record.ProductionCheck, cause, detail string, last bool) error {
 	now := e.now()
 	check.Looks++
@@ -82,10 +84,10 @@ func (e *Engine) startLook(ctx context.Context, tx pgx.Tx, issue record.Issue, c
 		return err
 	}
 	if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer,
-		Generation: issue.Generation, CheckLook: check.Looks, Task: checkTask(issue, *check, cause, detail, last)}); err != nil {
+		Generation: issue.Generation, CheckLook: check.Looks, CheckOpenedAt: check.OpenedAt, Task: checkTask(issue, *check, cause, detail, last)}); err != nil {
 		return err
 	}
-	if err := e.enqueueAt(ctx, tx, issue.Key, record.CheckLook{Look: check.Looks}, now.Add(CheckLookBound)); err != nil {
+	if err := e.enqueueAt(ctx, tx, issue.Key, record.CheckLook{Look: check.Looks, OpenedAt: check.OpenedAt}, now.Add(CheckLookBound)); err != nil {
 		return err
 	}
 	e.logOnCommit(ctx, "workflow: production check look started", "issue", issue.Key, "mergeCommit", check.MergeSHA, "look", check.Looks,
@@ -383,11 +385,17 @@ func (e *Engine) wake(ctx context.Context, tx pgx.Tx, check *record.ProductionCh
 
 // checkWake is a build compare that found the check's merge in a build (intake.CheckWake, the
 // check_compare row's finding): the wake rule applies (wake); a check no longer open changes
-// nothing.
+// nothing, and so does a wake of a check a later merge has replaced, one the fact does not name
+// (record.ProductionCheck.NamedBy), logged.
 func (e *Engine) checkWake(ctx context.Context, tx pgx.Tx, fact intake.CheckWake) (intake.Result, error) {
 	check, err := e.store.ProductionCheck(ctx, tx, fact.Issue)
 	if err != nil || check == nil || !check.Open() {
 		return intake.Result{}, err
+	}
+	if !check.NamedBy(fact.OpenedAt) {
+		e.logOnCommit(ctx, "workflow: production check wake ignored: it names a check a later merge replaced", "issue", check.Issue, "mergeCommit", check.MergeSHA,
+			"check", check.OpenedAt, "named", fact.OpenedAt, "kind", fact.Cause, "detail", fact.Detail)
+		return intake.Result{}, nil
 	}
 	return intake.Result{}, e.wake(ctx, tx, check, fact.Cause, fact.Detail)
 }
@@ -399,11 +407,11 @@ func (e *Engine) serverStarted(ctx context.Context, tx pgx.Tx, fact intake.Serve
 	return intake.Result{}, e.compareBuilds(ctx, tx, wakeDispatchStart, fact.Commit)
 }
 
-// compareBuilds queues one check_compare row, carrying cause and the build's commit, for every
-// open check of this project in the repository the daemon is built from (Config.BuiltFrom): the
-// row's executor reads GitHub for whether the build carries the check's merge and applies
-// intake.CheckWake when it does. A check whose last look has started gets none, since no look
-// follows; no build, or no repository the daemon is built from, compares nothing.
+// compareBuilds queues one check_compare row, carrying cause, the build's commit and the check
+// it is of, for every open check of this project in the repository the daemon is built from
+// (Config.BuiltFrom): the row's executor reads GitHub for whether the build carries the check's
+// merge and applies intake.CheckWake when it does. A check whose last look has started gets none,
+// since no look follows; no build, or no repository the daemon is built from, compares nothing.
 func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build string) error {
 	if build == "" || e.cfg.BuiltFrom == "" {
 		return nil
@@ -417,7 +425,7 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 		if check.Project != e.cfg.Project || check.Repo != e.cfg.BuiltFrom || check.Last {
 			continue
 		}
-		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: cause, Build: build}); err != nil {
+		if err := e.enqueue(ctx, tx, check.Issue, record.CheckCompare{Look: check.Looks, Cause: cause, Build: build, OpenedAt: check.OpenedAt}); err != nil {
 			return err
 		}
 		compared++
@@ -431,11 +439,18 @@ func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build stri
 // checkLookEnded is a look ending with no report (intake.CheckLookEnded: the look's bound, an
 // operator's hold met by its start, the implementer's failed claim): the look it names, still
 // open, ends as a pending report would (endLook); a look already ended, or a check closed, changes
-// nothing.
+// nothing, and so does a look of a check a later merge has replaced, one the fact does not name
+// (record.ProductionCheck.NamedBy), whose look 1 the current check's would otherwise be taken
+// for, logged.
 func (e *Engine) checkLookEnded(ctx context.Context, tx pgx.Tx, fact intake.CheckLookEnded) (intake.Result, error) {
 	check, err := e.store.ProductionCheck(ctx, tx, fact.Issue)
 	if err != nil || check == nil || !check.Open() || !check.LookOpen || check.Looks != fact.Look {
 		return intake.Result{}, err
+	}
+	if !check.NamedBy(fact.OpenedAt) {
+		e.logOnCommit(ctx, "workflow: production check look end ignored: it names a check a later merge replaced", "issue", check.Issue, "mergeCommit", check.MergeSHA,
+			"check", check.OpenedAt, "named", fact.OpenedAt, "look", fact.Look, "cause", fact.Cause)
+		return intake.Result{}, nil
 	}
 	return intake.Result{}, e.endLook(ctx, tx, check, fact.Cause)
 }

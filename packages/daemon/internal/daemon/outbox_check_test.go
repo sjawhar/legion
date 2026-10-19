@@ -81,13 +81,37 @@ func suspendedImplementer(t *testing.T, sup *supervisor, issue record.Issue, by 
 }
 
 // checkStart is the start row of look of issue's production check: the implementer, no phase, the
-// issue's generation, fenced on the check (record.SuperviseRequest.CheckLook).
+// issue's generation, fenced on the check (record.SuperviseRequest.CheckLook), naming no instance
+// (a row queued before starts carried one).
 func checkStart(t *testing.T, issue record.Issue, look int) record.OutboxRow {
 	t.Helper()
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Generation: issue.Generation,
 		CheckLook: look, Task: "Production check of " + issue.Key}, time.Now())
 	row.ID = 57
 	return row
+}
+
+// sameCheckFact says whether got is want, a fact of check: a check fact's OpenedAt is check's as
+// an instant (the executor reads it from Postgres, in a location of pgx's choosing, where want
+// names none) and every other field want's.
+func sameCheckFact(got, want intake.Fact, check record.ProductionCheck) bool {
+	switch got := got.(type) {
+	case intake.CheckLookEnded:
+		want, ok := want.(intake.CheckLookEnded)
+		if !ok || !got.OpenedAt.Equal(check.OpenedAt) {
+			return false
+		}
+		got.OpenedAt = want.OpenedAt
+		return got == want
+	case intake.CheckWake:
+		want, ok := want.(intake.CheckWake)
+		if !ok || !got.OpenedAt.Equal(check.OpenedAt) {
+			return false
+		}
+		got.OpenedAt = want.OpenedAt
+		return got == want
+	}
+	return got == want
 }
 
 // A check start is the one start a lingering tree runs: it reaches the implementer the linger
@@ -159,13 +183,15 @@ func TestACheckStartFinishesWithoutActingWhenItsLookIsNotOpen(t *testing.T) {
 
 // An operator's suspension of the implementer holds a phase start on the row's backoff until the
 // operator resumes it; a look cannot wait that long, so the check start finishes without acting and
-// ends the look as one nobody reported, with the hold as its cause.
+// ends the look as one nobody reported, with the hold as its cause, of the check the row's issue
+// holds.
 func TestACheckStartOnAnOperatorHeldImplementerEndsTheLook(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	root := checkRoot()
 	putOutboxIssue(t, pool, records, root)
-	putProductionCheck(t, pool, records, openCheck(root, "a1b2c3d4"))
+	check := openCheck(root, "a1b2c3d4")
+	putProductionCheck(t, pool, records, check)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	machine, _ := suspendedImplementer(t, sup, root, supervise.SuspendedByOperator)
 	facts := &outboxFactHandler{}
@@ -179,25 +205,74 @@ func TestACheckStartOnAnOperatorHeldImplementerEndsTheLook(t *testing.T) {
 		t.Fatalf("implementer = %s by %s with last start %d and %d resumes, want left to the operator", got.State, got.SuspendedBy, got.LastStartRow, len(rt.CallsOf("Resume")))
 	}
 	want := intake.CheckLookEnded{Issue: root.Key, Look: 1, Cause: "operator hold"}
-	if got := facts.facts(); len(got) != 1 || got[0] != want {
-		t.Fatalf("facts applied = %+v, want %+v", got, want)
+	if got := facts.facts(); len(got) != 1 || !sameCheckFact(got[0], want, check) {
+		t.Fatalf("facts applied = %+v, want %+v of the check opened %s", got, want, check.OpenedAt)
+	}
+}
+
+// A check start of a check a later merge replaced — its row names the first check's OpenedAt, and
+// the issue's check is the second, at a look 1 of its own — finishes without acting: the
+// implementer stays as it was, with no start recorded against it, since the look the row would
+// start is the first check's, ended long before, and the second's look 1 has a start row of its own.
+func TestACheckStartOfAReplacedCheckFinishesWithoutActing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	second := openCheck(root, "f00dfeed")
+	putProductionCheck(t, pool, records, second)
+	first := openCheck(root, "a1b2c3d4")
+	first.OpenedAt = second.OpenedAt.Add(-24 * time.Hour)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	machine, _ := suspendedImplementer(t, sup, root, supervise.SuspendedByDaemon)
+	facts := &outboxFactHandler{}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(),
+		handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
+
+	stale := mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleImplementer, Generation: root.Generation,
+		CheckLook: 1, CheckOpenedAt: first.OpenedAt, Task: "Production check of " + root.Key}, time.Now())
+	stale.ID = 58
+	if err := runner.execute(context.Background(), stale); err != nil {
+		t.Fatalf("the first check's start against the second = %v, want finished without acting", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.LastStartRow != 0 || got.Pending != nil || len(rt.CallsOf("Resume")) != 0 {
+		t.Fatalf("implementer = %s with last start %d, pending %+v and %d resumes, want left suspended with nothing started", got.State, got.LastStartRow, got.Pending, len(rt.CallsOf("Resume")))
+	}
+	if got := facts.facts(); len(got) != 0 {
+		t.Fatalf("facts applied = %+v, want none", got)
+	}
+	if got := readProductionCheck(t, pool, records, root.Key); !got.LookOpen || got.Looks != 1 {
+		t.Fatalf("the second check after the first check's start = look %d open %t, want its look 1 left open", got.Looks, got.LookOpen)
+	}
+
+	// The second check's own start row, naming it, resumes the implementer.
+	own := mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleImplementer, Generation: root.Generation,
+		CheckLook: 1, CheckOpenedAt: second.OpenedAt, Task: "Production check of " + root.Key}, time.Now())
+	own.ID = 59
+	if err := runner.execute(context.Background(), own); err != nil {
+		t.Fatalf("the second check's own start = %v, want the implementer resumed", err)
+	}
+	if got := machine.Claim(); got.LastStartRow != 59 || len(rt.CallsOf("Resume")) != 1 {
+		t.Fatalf("implementer after the second check's start = %s with last start %d and %d resumes, want resumed by row 59", got.State, got.LastStartRow, len(rt.CallsOf("Resume")))
 	}
 }
 
 // A check_look row ends the look it names as its bound; a check_bound row brings the check's bound
-// due. Each is applied through the workflow's handlers: the look's under the look's own event, so the
-// row run again is a duplicate, and the bound's under the row's, so a bound the workflow deferred as a
-// new row applies afresh.
+// due. Each is applied through the workflow's handlers: the look's under the event of the check
+// and the look, so the row run again is a duplicate, and the bound's under the row's, so a bound
+// the workflow deferred as a new row applies afresh.
 func TestCheckLookAndCheckBoundRowsApplyTheirFacts(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
 	root := checkRoot()
 	putOutboxIssue(t, pool, records, root)
+	check := openCheck(root, "a1b2c3d4")
+	putProductionCheck(t, pool, records, check)
 	facts := &outboxFactHandler{}
 	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
 
-	look := mustOutboxRow(t, root.Key, record.CheckLook{Look: 1}, time.Now())
+	look := mustOutboxRow(t, root.Key, record.CheckLook{Look: 1, OpenedAt: check.OpenedAt}, time.Now())
 	look.ID = 61
 	for range 2 {
 		if err := runner.execute(ctx, look); err != nil {
@@ -223,9 +298,54 @@ func TestCheckLookAndCheckBoundRowsApplyTheirFacts(t *testing.T) {
 		t.Fatalf("facts applied = %+v, want %+v", got, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !sameCheckFact(got[i], want[i], check) {
 			t.Fatalf("fact %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// A check_look row of no open check — none recorded, or one closed since — and one of a check a
+// later merge replaced (its OpenedAt another than the issue's check's) each finish without acting:
+// the look they would end is not the issue's check's.
+func TestACheckLookRowOfNoCheckOrAReplacedOneAppliesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		recorded bool
+		closed   bool
+		replaced bool
+	}{
+		{name: "no check"},
+		{name: "a closed check", recorded: true, closed: true},
+		{name: "a replaced check", recorded: true, replaced: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			root := checkRoot()
+			putOutboxIssue(t, pool, records, root)
+			check := openCheck(root, "a1b2c3d4")
+			if tc.closed {
+				closed := time.Now().UTC().Truncate(time.Microsecond)
+				check.LookOpen, check.ClosedAt, check.Outcome = false, &closed, record.CheckRecorded
+			}
+			if tc.recorded {
+				putProductionCheck(t, pool, records, check)
+			}
+			named := check.OpenedAt
+			if tc.replaced {
+				named = named.Add(-24 * time.Hour)
+			}
+			facts := &outboxFactHandler{}
+			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
+			row := mustOutboxRow(t, root.Key, record.CheckLook{Look: 1, OpenedAt: named}, time.Now())
+			row.ID = 61
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("check_look row = %v, want finished without acting", err)
+			}
+			if got := facts.facts(); len(got) != 0 {
+				t.Fatalf("facts applied = %+v, want none", got)
+			}
+		})
 	}
 }
 
@@ -326,10 +446,11 @@ func (g *checkGitHub) read() []string {
 
 // A check_compare row reads GitHub as the implement App for whether the build carries the check's
 // merge: a compare that answers ahead (or identical) wakes the check, under an event keyed by the
-// build and what asked for it; behind or diverged wakes nothing; a commit GitHub does not know wakes
-// nothing either; any other failure is the row's to retry. A check opened without its merge commit
-// has it read from the pull request and recorded before the compare, and a check closed since reads
-// nothing.
+// check, the build and what asked for it, the fact naming the check; behind or diverged wakes
+// nothing; a commit GitHub does not know wakes nothing either; any other failure is the row's to
+// retry. A check opened without its merge commit has it read from the pull request and recorded
+// before the compare, and a check closed since, or one a later merge replaced (the row names an
+// earlier check's OpenedAt), reads nothing.
 func TestACheckCompareWakesTheCheckOnlyWhenTheBuildCarriesTheMerge(t *testing.T) {
 	const merge, build = "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0", "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
 	compare := "/repos/acme/widgets/compare/" + merge + "..." + build + "?per_page=1"
@@ -340,6 +461,7 @@ func TestACheckCompareWakesTheCheckOnlyWhenTheBuildCarriesTheMerge(t *testing.T)
 		status   string
 		code     int
 		closed   bool
+		replaced bool
 		wantErr  string
 		reads    []string
 		facts    []intake.Fact
@@ -355,6 +477,7 @@ func TestACheckCompareWakesTheCheckOnlyWhenTheBuildCarriesTheMerge(t *testing.T)
 		{name: "an empty merge commit is read from the pull request first", status: "ahead", reads: []string{pull, compare},
 			facts: []intake.Fact{intake.CheckWake{Issue: "LEGION-208", Look: 1, Cause: "daemon boot", Detail: build}}},
 		{name: "a closed check reads nothing", recorded: merge, status: "ahead", closed: true},
+		{name: "a replaced check reads nothing", recorded: merge, status: "ahead", replaced: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -371,7 +494,11 @@ func TestACheckCompareWakesTheCheckOnlyWhenTheBuildCarriesTheMerge(t *testing.T)
 			facts := &outboxFactHandler{}
 			runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, tokens: outboxTokens{}, githubAPI: github.url, project: "legion",
 				handlers: []intake.Handler{facts}, log: quietLogger(), now: time.Now}
-			row := mustOutboxRow(t, root.Key, record.CheckCompare{Look: 1, Cause: "daemon boot", Build: build}, time.Now())
+			named := check.OpenedAt
+			if tc.replaced {
+				named = named.Add(-24 * time.Hour)
+			}
+			row := mustOutboxRow(t, root.Key, record.CheckCompare{Look: 1, Cause: "daemon boot", Build: build, OpenedAt: named}, time.Now())
 			row.ID = 71
 
 			err := runner.execute(context.Background(), row)
@@ -389,7 +516,7 @@ func TestACheckCompareWakesTheCheckOnlyWhenTheBuildCarriesTheMerge(t *testing.T)
 				t.Fatalf("facts applied = %+v, want %+v", got, tc.facts)
 			}
 			for i := range tc.facts {
-				if got[i] != tc.facts[i] {
+				if !sameCheckFact(got[i], tc.facts[i], check) {
 					t.Fatalf("fact %d = %+v, want %+v", i, got[i], tc.facts[i])
 				}
 			}

@@ -316,6 +316,12 @@ type SuperviseRequest struct {
 	// the outbox fences it on the open check and its look (the row acts only while the check is
 	// open at that look with the look open) instead of on the generation and the lingering tree.
 	CheckLook int `json:"checkLook,omitempty"`
+	// CheckOpenedAt is the check instance the look belongs to (ProductionCheck.OpenedAt, its ID):
+	// a later merge of the same issue replaces the check and counts its looks from one again, so a
+	// start row of the replaced check's look 1 would otherwise act on the new check's. The outbox
+	// finishes a start without acting when the issue's check is not the one it names; zero names
+	// no instance (a row queued before the field) and is not fenced.
+	CheckOpenedAt time.Time `json:"checkOpenedAt,omitzero"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
@@ -418,19 +424,26 @@ func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 // commit with Build, the commit a daemon boot or a Dispatch start reported itself built from,
 // which the executor runs as the implement App and which starts the look Look when the build
 // contains the merge. Cause names what asked for it (`daemon boot`, `dispatch start` or
-// `dispatch build`), for the look's wake.
+// `dispatch build`), for the look's wake. OpenedAt is the check instance the compare was queued
+// for (ProductionCheck.OpenedAt): the executor compares nothing once a later merge replaced it;
+// zero names no instance and is not fenced.
 type CheckCompare struct {
-	Look  int    `json:"look"`
-	Cause string `json:"cause"`
-	Build string `json:"build"`
+	Look     int       `json:"look"`
+	Cause    string    `json:"cause"`
+	Build    string    `json:"build"`
+	OpenedAt time.Time `json:"openedAt,omitzero"`
 }
 
 func (CheckCompare) OutboxKind() OutboxKind { return OutboxKindCheckCompare }
 
 // CheckLook is a look's bound: due at the look's wake plus the look bound, it ends look Look of
 // the issue's production check as a pending report would, when the look is still open then.
+// OpenedAt is the check instance the look is of (ProductionCheck.OpenedAt): a later merge of the
+// same issue replaces the check and counts its looks from one again, and a bound row of the
+// replaced check's look must not end the new check's; zero names no instance and is not fenced.
 type CheckLook struct {
-	Look int `json:"look"`
+	Look     int       `json:"look"`
+	OpenedAt time.Time `json:"openedAt,omitzero"`
 }
 
 func (CheckLook) OutboxKind() OutboxKind { return OutboxKindCheckLook }

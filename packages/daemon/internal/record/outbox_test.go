@@ -37,9 +37,10 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7, Release: true},
 		AutoMergeDisable{Number: 42},
 		ReadyMerge{Number: 42, Head: "c0de"},
-		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2},
-		CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f"},
-		CheckLook{Look: 2},
+		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2, CheckOpenedAt: now},
+		CheckCompare{Look: 2, Cause: "daemon boot", Build: "b00f", OpenedAt: now},
+		CheckLook{Look: 2, OpenedAt: now},
+		CheckLook{Look: 1},
 		CheckBound{},
 	}
 	for _, payload := range payloads {

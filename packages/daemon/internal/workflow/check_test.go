@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -253,7 +254,8 @@ func TestAWakeDuringAnOpenLookIsKeptForTheNextLook(t *testing.T) {
 }
 
 // Dispatch's start on a build queues a compare for each open check of the repository the daemon is
-// built from and no other, and none with no commit or with no repository configured.
+// built from and no other, each naming the check it is of, and none with no commit or with no
+// repository configured.
 func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
 	seedIssue(t, rig.pool, record.Issue{Key: "LEGION-300", Tree: "LEGION-300", Project: "LEGION", Title: "widgets", Phase: phase.AwaitingMerge, Generation: 2, Status: "retro", Rank: "W"})
@@ -262,7 +264,7 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 
 	rig.apply("started", intake.ServerStarted{Commit: "b00f"})
 	compares := checkCompares(t, rig.pool, "LEGION-209")
-	if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f"}) {
+	if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f", OpenedAt: checkOpened}) {
 		t.Fatalf("check_compare rows of the legion check = %+v, want one for look 1 of build b00f", compares)
 	}
 	if got := checkCompares(t, rig.pool, "LEGION-300"); len(got) != 0 {
@@ -286,7 +288,7 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 func TestTheBootComparesItsRevisionAndDispatchsBuild(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
 	rig.apply("boot-1", intake.DaemonBooted{Boot: 1, Revision: "r1", DispatchBuild: "d1"})
-	want := []record.CheckCompare{{Look: 1, Cause: "daemon boot", Build: "r1"}, {Look: 1, Cause: "dispatch build", Build: "d1"}}
+	want := []record.CheckCompare{{Look: 1, Cause: "daemon boot", Build: "r1", OpenedAt: checkOpened}, {Look: 1, Cause: "dispatch build", Build: "d1", OpenedAt: checkOpened}}
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("check_compare rows after a release boot = %+v, want %+v", got, want)
 	}
@@ -295,7 +297,7 @@ func TestTheBootComparesItsRevisionAndDispatchsBuild(t *testing.T) {
 		t.Fatalf("check_compare rows after a boot with no revision = %+v, want the two", got)
 	}
 	rig.apply("boot-3", intake.DaemonBooted{Boot: 3, Revision: "r3"})
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 3 || got[2] != (record.CheckCompare{Look: 1, Cause: "daemon boot", Build: "r3"}) {
+	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 3 || got[2] != (record.CheckCompare{Look: 1, Cause: "daemon boot", Build: "r3", OpenedAt: checkOpened}) {
 		t.Fatalf("check_compare rows after a boot with no Dispatch build = %+v, want the daemon's alone added", got)
 	}
 }
@@ -353,6 +355,54 @@ func TestCheckLookEndedEndsASilentLook(t *testing.T) {
 	rig.apply("look-bound-again", intake.CheckLookEnded{Issue: "LEGION-209", Look: 1, Cause: "look bound"})
 	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 {
 		t.Fatalf("suspend rows after a second row of the ended look = %v, want the one", got)
+	}
+}
+
+// A fact of a check a later merge of the same issue replaced — the first check closed as not run
+// when the child was set back to todo, and the rerun's merge opened the second, which counts its
+// looks from one again — changes nothing of the second: a look bound naming the first check's
+// OpenedAt leaves the second's look 1 open, and a build wake naming it starts no look and keeps no
+// cause, where the same facts naming the second check end the look and start the next.
+func TestAFactOfAReplacedCheckChangesNothingOfItsSuccessor(t *testing.T) {
+	rig := newCheckRig(t, "sjawhar/legion")
+	seedMergingChild(t, rig.pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	firstOpened := checkOpened.Add(-24 * time.Hour)
+	firstClosed := firstOpened.Add(2 * time.Hour)
+	seedRecord(t, rig.pool, func(tx pgx.Tx) error {
+		return record.NewStore().PutProductionCheck(t.Context(), tx, record.ProductionCheck{
+			Issue: "LEGION-209", Project: "LEGION", Tree: "LEGION-208", Repo: "sjawhar/legion", Number: 41, MergeSHA: "merge-41",
+			OpenedAt: firstOpened, BoundAt: firstOpened.Add(checkBound), Looks: 1, LookWakeAt: &firstOpened,
+			LastWakeKind: "merge", LastWakeDetail: "merge-41", LastWakeAt: &firstOpened, ClosedAt: &firstClosed, Outcome: record.CheckNotRun,
+		})
+	})
+	rig.apply("merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 43, MergeSHA: "merge-43"})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check == nil || !check.Open() || !check.OpenedAt.Equal(checkOpened) || check.Looks != 1 || !check.LookOpen {
+		t.Fatalf("the check after the rerun's merge = %+v, want the second check, opened at the merge, at look 1 open", check)
+	}
+
+	rig.clock.now = checkOpened.Add(CheckLookBound)
+	rig.apply("stale-bound", intake.CheckLookEnded{Issue: "LEGION-209", Look: 1, Cause: "look bound", OpenedAt: firstOpened})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); !check.LookOpen || check.Looks != 1 {
+		t.Fatalf("the second check after the first check's look bound = %+v, want its look 1 still open", check)
+	}
+	if got := superviseRequests(t, rig.pool, "suspend"); len(got) != 0 {
+		t.Fatalf("suspend rows after the first check's look bound = %v, want none", got)
+	}
+	rig.apply("bound", intake.CheckLookEnded{Issue: "LEGION-209", Look: 1, Cause: "look bound", OpenedAt: checkOpened})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.LookOpen || check.Looks != 1 || !check.Open() {
+		t.Fatalf("the second check after its own look bound = %+v, want it open at look 1 with the look ended", check)
+	}
+	if got := superviseRequests(t, rig.pool, "suspend"); got["LEGION-209/implementer"] != 1 {
+		t.Fatalf("suspend rows after the second check's look bound = %v, want the implementer's", got)
+	}
+
+	rig.apply("stale-wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "daemon boot", Detail: "b00f", OpenedAt: firstOpened})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 1 || check.LookOpen || check.PendingCauseKind != "" {
+		t.Fatalf("the second check after a wake of the first = %+v, want it unchanged at look 1 closed with no cause kept", check)
+	}
+	rig.apply("wake", intake.CheckWake{Issue: "LEGION-209", Look: 1, Cause: "daemon boot", Detail: "b00f", OpenedAt: checkOpened})
+	if check := productionCheck(t, rig.pool, "LEGION-209"); check.Looks != 2 || !check.LookOpen || check.LastWakeDetail != "b00f" {
+		t.Fatalf("the second check after its own wake = %+v, want look 2 open on build b00f", check)
 	}
 }
 
@@ -595,7 +645,9 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 	}
 }
 
-// checkCompares decodes the check_compare rows of issue, oldest first.
+// checkCompares decodes the check_compare rows of issue, oldest first, each OpenedAt in UTC so a
+// row compares equal to the time the test opened the check at, whatever location the row's JSON
+// decoded to.
 func checkCompares(t *testing.T, pool *pgxpool.Pool, issue string) []record.CheckCompare {
 	t.Helper()
 	var compares []record.CheckCompare
@@ -604,6 +656,7 @@ func checkCompares(t *testing.T, pool *pgxpool.Pool, issue string) []record.Chec
 		if err := json.Unmarshal(row.payload, &compare); err != nil {
 			t.Fatalf("decode check_compare row %d: %v", row.id, err)
 		}
+		compare.OpenedAt = compare.OpenedAt.UTC()
 		compares = append(compares, compare)
 	}
 	return compares

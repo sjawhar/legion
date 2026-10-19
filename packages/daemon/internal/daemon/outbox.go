@@ -737,10 +737,12 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 	}
 	// A check start (CheckLook) runs after the close: its issue holds no phase, its generation may
-	// be a later run's and its tree may linger, so it is fenced on the open check and its look
-	// (checkLookHolds) where a phase start is fenced on the generation and the phase.
+	// be a later run's and its tree may linger, so it is fenced on the open check — the instance the
+	// row names — and its look (checkLookHolds) where a phase start is fenced on the generation and
+	// the phase.
+	var check *record.ProductionCheck
 	if payload.CheckLook > 0 {
-		if holds, err := r.checkLookHolds(ctx, row, payload); err != nil || !holds {
+		if check, err = r.checkLookHolds(ctx, row, payload); err != nil || check == nil {
 			return err
 		}
 	} else {
@@ -808,7 +810,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if found {
 			if held := machine.Claim(); held.RuleHolds() {
 				if payload.CheckLook > 0 {
-					return r.checkLookHeld(ctx, row, payload)
+					return r.checkLookHeld(ctx, row, payload, *check)
 				}
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
 			}
@@ -1204,14 +1206,15 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
-// checkLookHolds says whether a check start row still has a look to start: its issue's production
-// check is open, at the look the row names, with that look open. A check closed since (a report,
-// its last look), a look its bound or a hold ended, or a later look's start leave the row nothing
-// to start, and it finishes without acting, logged with why.
-func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
+// checkLookHolds is the production check a check start row still has a look to start in, nil for
+// none: its issue's production check is open, the one the row names (record.ProductionCheck.NamedBy),
+// at the look the row names, with that look open. A check closed since (a report, its last look),
+// a check a later merge replaced, a look its bound or a hold ended, or a later look's start leave
+// the row nothing to start, and it finishes without acting, logged with why.
+func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (*record.ProductionCheck, error) {
 	check, err := r.productionCheck(ctx, row.Issue)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	var why string
 	switch {
@@ -1219,27 +1222,31 @@ func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, paylo
 		why = "the issue has no production check"
 	case !check.Open():
 		why = fmt.Sprintf("the check closed as %s", check.Outcome)
+	case !check.NamedBy(payload.CheckOpenedAt):
+		why = fmt.Sprintf("the check it names was replaced by the one opened %s", check.OpenedAt.UTC().Format(time.RFC3339))
 	case check.Looks != payload.CheckLook:
 		why = fmt.Sprintf("the check is at look %d", check.Looks)
 	case !check.LookOpen:
 		why = "the look has ended"
 	default:
-		return true, nil
+		return check, nil
 	}
 	r.log.Info("production check start finishes without acting", "row", row.ID, "issue", row.Issue, "look", payload.CheckLook, "why", why)
-	return false, nil
+	return nil, nil
 }
 
 // checkLookHeld is a check start that met an operator's suspension of the implementer
 // (supervise.Claim.RuleHolds): a phase start waits for the operator's resume, but a look cannot
 // run while the operator holds the implementer, and its bound would end it anyway, so the look
-// ends now as one nobody reported (intake.CheckLookEnded, cause `operator hold`) and the row
-// finishes without acting.
-func (r *outbox) checkLookHeld(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) error {
+// ends now as one nobody reported (intake.CheckLookEnded, cause `operator hold`, of check, the
+// one checkLookHolds read) and the row finishes without acting. The event is the issue, the check
+// (record.ProductionCheck.ID) and the look: the same look held twice is one fact, and a later
+// check's look 1 another than the replaced check's.
+func (r *outbox) checkLookHeld(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest, check record.ProductionCheck) error {
 	r.log.Info("production check start finishes without acting", "row", row.ID, "issue", row.Issue, "look", payload.CheckLook,
 		"why", "the operator suspended the implementer; the look ends")
-	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look-hold:%s:%d", row.Issue, payload.CheckLook),
-		intake.CheckLookEnded{Issue: row.Issue, Look: payload.CheckLook, Cause: "operator hold"}, r.handlers...); err != nil {
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look-hold:%s:%s:%d", row.Issue, check.ID(), payload.CheckLook),
+		intake.CheckLookEnded{Issue: row.Issue, Look: payload.CheckLook, Cause: "operator hold", OpenedAt: check.OpenedAt}, r.handlers...); err != nil {
 		return fmt.Errorf("end look %d of %s's production check on the operator's hold: %w", payload.CheckLook, row.Issue, err)
 	}
 	return nil
@@ -1247,10 +1254,31 @@ func (r *outbox) checkLookHeld(ctx context.Context, row record.OutboxRow, payloa
 
 // checkLook is a look's bound coming due (record.CheckLook): the look it names ends as one nobody
 // reported (intake.CheckLookEnded, cause `look bound`), which the workflow applies only while the
-// check is open at that look with the look open, so a look reported in time changes nothing.
+// check is open at that look with the look open, so a look reported in time changes nothing. The
+// check is read first: a row of no open check, or of a check a later merge replaced (NamedBy),
+// finishes without acting, and the event is the issue, the check read (record.ProductionCheck.ID)
+// and the look, so the row run again is a duplicate and a later check's look 1 is a fact of its
+// own rather than the replaced check's.
 func (r *outbox) checkLook(ctx context.Context, row record.OutboxRow, payload record.CheckLook) error {
-	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look:%s:%d", row.Issue, payload.Look),
-		intake.CheckLookEnded{Issue: row.Issue, Look: payload.Look, Cause: "look bound"}, r.handlers...); err != nil {
+	check, err := r.productionCheck(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
+	var why string
+	switch {
+	case check == nil:
+		why = "the issue has no production check"
+	case !check.Open():
+		why = fmt.Sprintf("the check closed as %s", check.Outcome)
+	case !check.NamedBy(payload.OpenedAt):
+		why = fmt.Sprintf("the check it names was replaced by the one opened %s", check.OpenedAt.UTC().Format(time.RFC3339))
+	}
+	if why != "" {
+		r.log.Info("outbox check look bound finished without acting", "row", row.ID, "issue", row.Issue, "look", payload.Look, "why", why)
+		return nil
+	}
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look:%s:%s:%d", row.Issue, check.ID(), payload.Look),
+		intake.CheckLookEnded{Issue: row.Issue, Look: payload.Look, Cause: "look bound", OpenedAt: check.OpenedAt}, r.handlers...); err != nil {
 		return fmt.Errorf("end look %d of %s's production check at its bound: %w", payload.Look, row.Issue, err)
 	}
 	return nil
@@ -1271,15 +1299,16 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 // checkCompare is a build compared against an issue's open production check (record.CheckCompare):
 // whether the build — the commit a daemon boot or a Dispatch start reported itself built from —
 // contains the check's merge commit, read from GitHub as the implement App, the App that merged
-// it. A check closed since, or whose last look has started, is compared with nothing. A check that
-// recorded no merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has it read
-// from its pull request first and recorded (recordMergeCommit), so this compare and every later
-// one has it. GitHub's compare of the merge with the build answering `identical` or `ahead` says
-// the merge is an ancestor of the build, so the build carries it: intake.CheckWake wakes the look
-// the row was queued for, once per build and cause. `behind` or `diverged` is a build without the
-// merge, and a commit GitHub does not know (404) is one it cannot place; neither wakes anything,
-// each logged. Any other failure retries on the row's backoff, a rate limit as every GitHub row's
-// (noteLimit, deferral).
+// it. A check closed since, or whose last look has started, is compared with nothing, and so is
+// one a later merge replaced since the row was queued (NamedBy). A check that recorded no
+// merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has it read from its pull
+// request first and recorded (recordMergeCommit), so this compare and every later one has it.
+// GitHub's compare of the merge with the build answering `identical` or `ahead` says the merge is
+// an ancestor of the build, so the build carries it: intake.CheckWake wakes the look the row was
+// queued for, once per check (record.ProductionCheck.ID), build and cause. `behind` or `diverged`
+// is a build without the merge, and a commit GitHub does not know (404) is one it cannot place;
+// neither wakes anything, each logged. Any other failure retries on the row's backoff, a rate
+// limit as every GitHub row's (noteLimit, deferral).
 func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload record.CheckCompare) error {
 	ctx, cancel := context.WithTimeout(ctx, checkCompareTimeout)
 	defer cancel()
@@ -1290,6 +1319,11 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	if check == nil || !check.Open() || check.Last {
 		r.log.Info("outbox check compare finished without acting: the check is closed or its last look has started",
 			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build)
+		return nil
+	}
+	if !check.NamedBy(payload.OpenedAt) {
+		r.log.Info("outbox check compare finished without acting: the check it names was replaced by a later merge",
+			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build, "check", check.OpenedAt, "named", payload.OpenedAt)
 		return nil
 	}
 	if r.tokens == nil {
@@ -1339,8 +1373,8 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 			"issue", row.Issue, "mergeCommit", check.MergeSHA, "build", payload.Build, "status", compare.Status, "cause", payload.Cause)
 		return nil
 	}
-	fact := intake.CheckWake{Issue: row.Issue, Look: payload.Look, Cause: payload.Cause, Detail: payload.Build}
-	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-wake:%s:%s:%s", row.Issue, payload.Cause, payload.Build), fact, r.handlers...); err != nil {
+	fact := intake.CheckWake{Issue: row.Issue, Look: payload.Look, Cause: payload.Cause, Detail: payload.Build, OpenedAt: check.OpenedAt}
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-wake:%s:%s:%s:%s", row.Issue, check.ID(), payload.Cause, payload.Build), fact, r.handlers...); err != nil {
 		return fmt.Errorf("wake %s's production check on build %s: %w", row.Issue, payload.Build, err)
 	}
 	r.log.Info("outbox check compare found the merge in the build; the check is woken", "row", row.ID, "issue", row.Issue,
