@@ -20,9 +20,11 @@ import (
 // objects/info/alternates names is the same in each and no agent writes what the token-holding
 // container reads. On a volume carried over from an earlier release, whose agents could write the
 // whole volume, feedSubPath may be a link to another directory of it, which the kubelet mounts in
-// its place and agents can still write by its own path: there the fetch's own check of the feed
-// (workspace.Fetch takes a feed only in the shape it writes), run before any git and in an init
-// container no agent runs beside, keeps the token-holding container from running what they wrote.
+// its place; agents may still change what the next fetch reads there, through that directory's own
+// path or the link itself, which is no mount point in their containers. There the fetch's own check
+// of the feed (workspace.Fetch takes a feed only in the shape it writes), run before any git and in
+// an init container no agent runs beside, keeps the token-holding container from running what they
+// wrote.
 // Each role container has its own launcher token projection at LauncherDir, and
 // its own memory-backed LauncherPrivateDir, where its launcher writes the generation's boot token
 // and launch credentials, and StateDir. GHConfigDir is a role container's gh bundle root
