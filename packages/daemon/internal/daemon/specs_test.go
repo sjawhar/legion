@@ -144,7 +144,7 @@ func TestAClaimsBackendIsItsRolesAndAClaudeRoleIsToldClaudeCodesTools(t *testing
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, backend: tc.backend}
+			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, backend: tc.backend, repositories: noRepositoriesView}
 			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: tc.role})
 			if err != nil {
 				t.Fatalf("SpawnSpec: %v", err)
