@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -287,10 +288,14 @@ func (m *Manager) installation(ctx context.Context, role AppRole, app config.Git
 	installation := m.installations[role][ownerKey]
 	m.mu.Unlock()
 	if installation == "" {
-		return "", fmt.Errorf("github_app_not_installed: %s not installed on %s", role, owner)
+		return "", fmt.Errorf("%w: %s not installed on %s", ErrNotInstalled, role, owner)
 	}
 	return installation, nil
 }
+
+// ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
+// about the owner, not GitHub's trouble, which a retry would only repeat.
+var ErrNotInstalled = errors.New("github_app_not_installed")
 
 func (m *Manager) discoverInstallations(ctx context.Context, app config.GitHubApp) (map[string]string, error) {
 	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())

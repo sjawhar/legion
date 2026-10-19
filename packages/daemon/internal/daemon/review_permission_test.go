@@ -263,6 +263,51 @@ func TestAReviewMintThatFailsTransientlyHoldsTheLimitWithoutMintingAgain(t *test
 	}
 }
 
+// A review on a repository whose owner the review App is not installed on (installed once, then
+// removed, while a record still names the repository, which GitHub intake keeps hearing) decides
+// nothing: the mint's refusal is answered at once as no write access, logged at error naming the
+// owner, and held for the permission window, rather than returned for a delivery that would mint
+// again on every redelivery. The review App's own review is restored from what was delivered.
+func TestAReviewOnAnOwnerTheReviewAppIsNotInstalledOnDecidesNothing(t *testing.T) {
+	pool := reviewPermissionPool(t)
+	var logged syncBuffer
+	w := reviewPermissionRuntime(pool, "http://unused.invalid", slog.New(slog.NewJSONHandler(&logged, nil)))
+	tokens := &notInstalledTokens{}
+	w.tokens = tokens
+	review := func(author string) intake.PullRequestReview {
+		return intake.PullRequestReview{Repo: "acme/widgets", Number: 42, State: "approved", Author: author, Body: "delivered body"}
+	}
+	for range 2 {
+		canWrite, err := w.reviewerCanWrite(context.Background(), review("a-writer"))
+		if err != nil || canWrite {
+			t.Fatalf("a review on an owner with no review App = %v, %v; want no write access and no error", canWrite, err)
+		}
+	}
+	if tokens.calls != 1 {
+		t.Fatalf("the review App was minted %d times for one author inside the permission window, want once", tokens.calls)
+	}
+	if !strings.Contains(logged.String(), `"installation_owner":"acme"`) || !strings.Contains(logged.String(), `"level":"ERROR"`) {
+		t.Fatalf("log = %s, want an error naming the owner the review App is not installed on", logged.String())
+	}
+	w.reviewAppLogin = "legion-review[bot]"
+	if body, err := w.reviewBody(context.Background(), review("legion-review[bot]")); err != nil || body != "delivered body" {
+		t.Fatalf("the review App's own review body = %q, %v; want the delivered body and no error", body, err)
+	}
+}
+
+// notInstalledTokens is a review App not installed on any owner: every mint is refused as
+// appauth refuses one (appauth.ErrNotInstalled), counted.
+type notInstalledTokens struct{ calls int }
+
+func (t *notInstalledTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	t.calls++
+	return appauth.Lease{}, fmt.Errorf("%w: %s not installed on %s", appauth.ErrNotInstalled, role, owner)
+}
+
+func (t *notInstalledTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	return t.Token(ctx, role, owner)
+}
+
 // transientOnceTokens answers its first mint with appauth.TransientError and every one after with
 // a lease, so a test can tell a retried mint from one the hold should have skipped.
 type transientOnceTokens struct{ calls int }
