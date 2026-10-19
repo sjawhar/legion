@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,15 +25,17 @@ import (
 )
 
 // detailDispatch answers GetIssue with each issue's detail as Dispatch shows it: in todo, handed
-// to Legion, at sequence seq, on its resolved repository. It refuses the first failures reads with
-// Dispatch's trouble, and counts the reads.
+// to Legion, at sequence seq, on its resolved repository, or, once withdrawn, moved to backlog with
+// the label off at the next sequence. It refuses the first failures reads with Dispatch's trouble,
+// and counts the reads.
 type detailDispatch struct {
 	outboxDispatch
-	mu       sync.Mutex
-	resolved map[string]string
-	seq      int64
-	failures int
-	reads    int
+	mu        sync.Mutex
+	resolved  map[string]string
+	seq       int64
+	failures  int
+	reads     int
+	withdrawn atomic.Bool
 }
 
 func (d *detailDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
@@ -42,6 +45,9 @@ func (d *detailDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue
 	if d.failures > 0 {
 		d.failures--
 		return dispatch.Issue{}, errors.New("Dispatch is restarting")
+	}
+	if d.withdrawn.Load() {
+		return dispatch.Issue{Key: key, Status: "backlog", Title: key, Rank: "A", ResolvedRepo: d.resolved[key], LastSeq: d.seq + 1}, nil
 	}
 	return dispatch.Issue{Key: key, Status: "todo", Title: key, Rank: "A", HandedOver: true, ResolvedRepo: d.resolved[key], LastSeq: d.seq}, nil
 }
@@ -235,4 +241,101 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	if reads := client.readCount(); reads != 2 {
 		t.Fatalf("Dispatch was read %d times, want the failed read and its retry", reads)
 	}
+}
+
+// An admission event whose apply fails is delivered again behind the issue's newer events, as one
+// whose preparation failed is. A person who withdrew the issue in between (backlog, the label off)
+// is not overruled: the redelivery is applied as Dispatch now shows the issue, which records
+// nothing, whatever failed before.
+func TestAnAdmissionWhoseApplyFailedIsAppliedAsDispatchNowShowsIt(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	conn, err := nats.Connect(workflowNATS(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(conn.Close)
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &detailDispatch{resolved: map[string]string{"LEGION-310": "acme/widgets"}, seq: 5}
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main"})
+	repos := newRepositories("LEGION")
+	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	w := &workflowRuntime{pool: pool, records: records, dispatch: client, repositories: repos,
+		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+	engine := workflow.New(records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	// The first apply fails, as a database error would, while the person withdraws the issue; each
+	// apply's fact is kept.
+	var mu sync.Mutex
+	var applied []intake.DispatchIssue
+	failOnce := applyFunc(func(_ context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
+		issue, _ := fact.(intake.DispatchIssue)
+		mu.Lock()
+		defer mu.Unlock()
+		applied = append(applied, issue)
+		if len(applied) == 1 {
+			client.withdrawn.Store(true)
+			return intake.Result{}, errors.New("the database is restarting")
+		}
+		return intake.Result{}, nil
+	})
+	consumers, err := intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: []ghrepo.Repository{ghrepo.MustParse("acme/widgets")},
+		AckWait: time.Second, NakDelay: 10 * time.Millisecond, Logger: quietLogger(), PrepareRepository: w.prepareRepository})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved := "acme/widgets"
+	if _, err := js.Publish(ctx, "notifications.dispatch.issue.LEGION-310.issue.updated",
+		retainedIssueEnvelope(t, "LEGION-310", 110, 5, "todo", map[string]string{"kind": "user", "id": "a-person"}, &resolved)); err != nil {
+		t.Fatal(err)
+	}
+	run, cancel := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- consumers.Run(run, pool, failOnce, engine, admission) }()
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			cancel()
+			<-done
+		}
+	})
+	testwait.Eventually(t, "the event applied again after its failed apply", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(applied) >= 2
+	})
+	// Stopping the consumer waits for the redelivery's transaction to end.
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	stopped = true
+	mu.Lock()
+	again := applied[1]
+	mu.Unlock()
+	if again.Status != "backlog" || again.HandedOver || again.Seq != 6 {
+		t.Fatalf("the redelivery applied %s handed over %t at seq %d, want backlog, the label off, at seq 6, as Dispatch now shows it", again.Status, again.HandedOver, again.Seq)
+	}
+	var got *record.Issue
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = records.Issue(ctx, tx, "LEGION-310")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("LEGION-310 = %s %s, want nothing recorded: the person withdrew it before its event was applied", got.Status, got.Phase)
+	}
+}
+
+// applyFunc is an intake.Handler of one function.
+type applyFunc func(context.Context, pgx.Tx, intake.Fact) (intake.Result, error)
+
+func (f applyFunc) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
+	return f(ctx, tx, fact)
 }

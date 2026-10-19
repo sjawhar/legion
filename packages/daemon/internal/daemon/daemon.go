@@ -1327,7 +1327,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady, prepare = workflow.claimReady, workflow.prepareRepository
+		claimReady, prepare = workflow.claimReady, workflow.prepareObserved
 		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes

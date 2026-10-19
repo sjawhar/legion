@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -49,6 +50,19 @@ type DispatchIssue struct {
 	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
 	// never records an issue from a fact still missing it.
 	ResolvedRepoMissing bool
+}
+
+// ObservedIssue is issue as Dispatch's detail shows it now, as a fact at the sequence Dispatch has
+// run to: its status, title, parent, rank, hand-over and repository, with no event's type or
+// actor, since no one event wrote that state. release_children's todo child and a redelivered
+// admission event are applied from it.
+func ObservedIssue(issue dispatch.Issue) DispatchIssue {
+	parent := ""
+	if issue.Parent != nil {
+		parent = *issue.Parent
+	}
+	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo

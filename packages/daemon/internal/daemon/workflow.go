@@ -95,9 +95,8 @@ type workflowRuntime struct {
 	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
 	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
 	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
-	// read covers; awaiting is each held admission event's request (awaitMappingRead), and retried
-	// each admission event whose preparation failed (markRetried), by issue key and then sequence,
-	// both under awaitingMu.
+	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
+	// and then the sequence it was delivered at, under awaitingMu.
 	repositories     *repositories
 	installs         appauth.Installations
 	mappingMu        sync.Mutex
@@ -106,7 +105,6 @@ type workflowRuntime struct {
 	mappingApplied   atomic.Uint64
 	awaitingMu       sync.Mutex
 	awaiting         map[string]map[int64]uint64
-	retried          map[string]map[int64]struct{}
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -414,7 +412,7 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 			continue
 		}
 		if _, err := w.prepareIssue(ctx, intake.DispatchIssue{Key: summary.Key, Status: summary.Status, Parent: deref(summary.Parent),
-			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}, false); err != nil {
+			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}, false, false); err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
 	}
