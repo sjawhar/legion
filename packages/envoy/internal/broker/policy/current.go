@@ -164,6 +164,18 @@ func (c *Current) CheckName(name string) error {
 	return err
 }
 
+// StillMinted reads name alone from the store, as LoadOne does, without touching the live set,
+// and reports whether it is still served as the minted secret source names: a release of a
+// minted secret reads the store nothing else would, so a deleted or retagged secret stops
+// minting at once rather than at the next reload. A failed store call is an error.
+func (c *Current) StillMinted(ctx context.Context, name, source string) (bool, error) {
+	lk, err := c.loader.LoadOne(ctx, name)
+	if err != nil {
+		return false, err
+	}
+	return lk.Served && lk.Secret.Source == source, nil
+}
+
 // merge sets name in secrets as lk found it: the served secret, or no entry.
 func merge(secrets map[string]Secret, name string, lk Lookup) {
 	if lk.Served {

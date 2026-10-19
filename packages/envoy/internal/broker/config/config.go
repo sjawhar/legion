@@ -110,6 +110,13 @@ type Config struct {
 	// authenticating once its entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts.
 	// Unset, no service logs in with a token.
 	ServiceLogins map[string]string
+	// BROKER_MINT_TARGETS: the service accounts a minted secret may name, whitespace-separated
+	// <service account email>=<owner email> entries. A minted secret is served only when its
+	// mint-service-account tag is listed here, its owner tag is the listed owner and its tier is
+	// human, so only that person approves a token for the account. Keyed by account. Needs
+	// BROKER_SECRETS_STORE gcp-secret-manager, the only store that mints. Unset, no minted secret
+	// is served.
+	MintTargets map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -405,6 +412,22 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience = issuer, audience
 	if len(cfg.ServiceLogins) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
+	}
+	for _, text := range strings.Fields(getenv("BROKER_MINT_TARGETS")) {
+		account, owner, ok := strings.Cut(text, "=")
+		if !ok || !policy.ValidMintTarget(account) || !policy.ValidPersonOwner(owner) {
+			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS entry %q is not <service account email>=<owner email>", text)
+		}
+		if _, dup := cfg.MintTargets[account]; dup {
+			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS names %s twice", account)
+		}
+		if cfg.MintTargets == nil {
+			cfg.MintTargets = map[string]string{}
+		}
+		cfg.MintTargets[account] = owner
+	}
+	if len(cfg.MintTargets) > 0 && cfg.SecretsStore != secrets.StoreGCP {
+		return Config{}, fmt.Errorf("BROKER_MINT_TARGETS needs BROKER_SECRETS_STORE=%s, the only store that mints", secrets.StoreGCP)
 	}
 	token, err := secretValue(getenv, "BROKER_UI_TOKEN")
 	if err != nil {

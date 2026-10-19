@@ -108,8 +108,8 @@ func main() {
 	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
 	// Manager under Application Default Credentials.
 	var secretStore secrets.Store
-	// mintToken mints a minted secret's value: only the GCP store has one, and a minted secret
-	// served under any other store fails its release naming the store.
+	// mintToken mints a minted secret's value. Only the GCP store mints (config.Load refuses
+	// BROKER_MINT_TARGETS under any other), and without targets no minted secret is served.
 	var mintToken func(context.Context, string, time.Duration) (string, error)
 	var credentials string
 	switch {
@@ -126,14 +126,16 @@ func main() {
 		fatal(err)
 		defer client.Close()
 		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
-		mintToken, err = secrets.NewGCPTokenMinter(ctx)
-		fatal(err)
+		if len(cfg.MintTargets) > 0 {
+			mintToken, err = secrets.NewGCPTokenMinter(ctx)
+			fatal(err)
+		}
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts)), MintTargets: cfg.MintTargets}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.

@@ -52,10 +52,17 @@ const (
 	// carrying a well-formed one is a minted kind, which has no value by design and is never
 	// refused ReasonNoCurrentValue.
 	ReasonMintTargetMalformed = "mint-target-malformed"
+	// ReasonMintTargetNotListed: the mint-service-account tag names an account BROKER_MINT_TARGETS
+	// does not list, or the secret's owner is not the owner it lists for that account, or its tier
+	// is not human. Only the listed owner approves a token for a listed account.
+	ReasonMintTargetNotListed = "mint-target-not-listed"
 )
 
 // mintTargetPattern is a mint-service-account tag: a service account's email.
 var mintTargetPattern = regexp.MustCompile(`^[a-z0-9-]{6,30}@[a-z0-9-]+\.iam\.gserviceaccount\.com$`)
+
+// ValidMintTarget reports whether account is of a mint-service-account tag's form.
+func ValidMintTarget(account string) bool { return mintTargetPattern.MatchString(account) }
 
 // slugPattern is a secret's name under the prefix: the lowercase form of an environment-variable
 // name, with each underscore a hyphen.
@@ -86,6 +93,10 @@ type Loader struct {
 	// Services are the registered services a secret's owner tag may name: the broker's
 	// BROKER_SERVICES. An owner tag naming any other service is refused as malformed.
 	Services []string
+	// MintTargets are the accounts a minted secret may name, each with the one owner its secret
+	// must carry: the broker's BROKER_MINT_TARGETS. A minted secret naming any other account, or
+	// carrying another owner or the agent tier, is refused ReasonMintTargetNotListed.
+	MintTargets map[string]string
 }
 
 // Load reads the namespace into a Set, logging one RefusedMessage line for each secret it refuses.
@@ -213,7 +224,10 @@ func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Se
 		if !mintTargetPattern.MatchString(target) {
 			return Secret{}, ReasonMintTargetMalformed, nil
 		}
-		s.MintTarget, s.Source = target, MintSourcePrefix+target
+		if owner, listed := l.MintTargets[target]; !listed || s.Owner != owner || s.Tier != TierHuman {
+			return Secret{}, ReasonMintTargetNotListed, nil
+		}
+		s.Source = MintSourcePrefix + target
 		return s, "", nil
 	}
 	if !ls.HasCurrentValue {

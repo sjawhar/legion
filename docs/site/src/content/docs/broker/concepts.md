@@ -243,11 +243,15 @@ reason of at most 400 characters. The broker evaluates every name
   `MIXED_APPROVERS`; request them separately.
 - A **minted** secret carries a `mint-service-account` tag naming a Google service account
   (`<name>@<project>.iam.gserviceaccount.com`) and holds no value: each release mints a fresh
-  access token for that account, lasting the shorter of an hour and what is left of the grant, so a
-  request naming one must sign a lifetime of at most an hour (`--ttl 3600` or less), else it is
-  refused `MINT_REQUIRES_LIFETIME`. Only the GCP store mints, under the broker's own identity, which
-  needs Token Creator on that account. A tag naming no service account is refused
-  `mint-target-malformed`.
+  access token for that account, lasting the shorter of an hour and what is left of the grant. The
+  broker serves one only when `BROKER_MINT_TARGETS` lists the account with the secret's owner and
+  the secret is human-tier, so only that owner approves a token for it; otherwise it is refused
+  `mint-target-not-listed` (or `mint-target-malformed` for a tag that is not a service account's
+  email). A request naming one must ask for at most an hour (`--ttl 1h`), else it is refused
+  `MINT_REQUIRES_LIFETIME`. Each release reads the secret again, so deleting or retagging it
+  stops minting at once. Only the GCP store mints; the broker needs Token Creator on each listed
+  account and the IAM Credentials API enabled. Create one with no version, encrypted with the
+  agent-secrets key like any other agent secret.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
   decide. A session has at most one pending request for each secret: an identical request from the

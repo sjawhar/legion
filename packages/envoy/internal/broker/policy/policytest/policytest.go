@@ -73,9 +73,17 @@ func (c *CountingDescriber) DescribeSecret(ctx context.Context, in *secretsmanag
 	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
-// Loader is the policy.Loader over store, with services registered.
+// MintTarget is the one account the test Loader lets a minted secret name, and MintOwner the owner
+// its secret must carry.
+const (
+	MintTarget = "agent-admin@example-project.iam.gserviceaccount.com"
+	MintOwner  = "sami@example.com"
+)
+
+// Loader is the policy.Loader over store, with services registered and MintTarget listed for
+// MintOwner.
 func Loader(store *secrets.Local, services ...string) policy.Loader {
-	return policy.Loader{Store: Store(store), Prefix: Prefix, Services: services}
+	return policy.Loader{Store: Store(store), Prefix: Prefix, Services: services, MintTargets: map[string]string{MintTarget: MintOwner}}
 }
 
 // Current loads store's policy, as the broker does at boot; Refresh rereads it after store

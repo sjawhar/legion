@@ -93,14 +93,23 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 }
 
 // release is one granted name's value: read from its frozen source, or minted when the source is
-// a minted secret's (policy.MintSourcePrefix), for at most MaxMintLifetime and never past expires.
+// a minted secret's (policy.MintSourcePrefix), for at most MaxMintLifetime and never past expires,
+// once the store still serves that name as that minted secret (policy.Current.StillMinted), so a
+// secret deleted or retagged since mints nothing more.
 func (m *Machine) release(ctx context.Context, g requestedSecret, expires *time.Time) (string, error) {
 	sa, minted := strings.CutPrefix(g.source, policy.MintSourcePrefix)
 	if !minted {
 		return m.Secrets.Read(ctx, g.source)
 	}
 	if m.MintToken == nil {
-		return "", fmt.Errorf("secret %s is a minted kind, but this broker's secret store has no token minter", g.name)
+		return "", fmt.Errorf("secret %s is a minted kind, but this broker has no token minter", g.name)
+	}
+	still, err := m.Policy.StillMinted(ctx, g.name, g.source)
+	if err != nil {
+		return "", err
+	}
+	if !still {
+		return "", fmt.Errorf("%w: %s is no longer served as this grant's minted secret", ErrGrantNotLive, g.name)
 	}
 	life := MaxMintLifetime
 	if expires != nil {

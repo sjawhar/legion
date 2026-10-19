@@ -154,8 +154,8 @@ type Machine struct {
 	// its own (requester).
 	ServiceAccounts map[string]string
 	// MintToken mints a Google access token for serviceAccount lasting lifetime, the value Values
-	// releases for a minted secret. nil where the store mints nothing (AWS, the fake store), and
-	// then a release of a minted secret fails naming the store.
+	// releases for a minted secret. nil when the broker has no BROKER_MINT_TARGETS, which then
+	// serves no minted secret; a release of one fails naming the missing minter.
 	MintToken func(ctx context.Context, serviceAccount string, lifetime time.Duration) (string, error)
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed

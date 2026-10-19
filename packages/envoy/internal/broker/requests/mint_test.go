@@ -12,7 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
-const mintTarget = "agent-admin@example-project.iam.gserviceaccount.com"
+const mintTarget = policytest.MintTarget
 
 // mintCall is one call the fake minter answered.
 type mintCall struct {
@@ -119,5 +119,27 @@ func TestValuesWithoutMinterFails(t *testing.T) {
 	values, _, err := m.Values(ctx, dec.GrantID, enr)
 	if err == nil || !strings.Contains(err.Error(), "no token minter") || values != nil {
 		t.Fatalf("Values with no minter = %v, %v; want an error naming the store's missing minter", values, err)
+	}
+}
+
+// TestValuesStopsMintingOnceTheSecretIsGone pins the release's own reread: a live grant of a
+// minted secret mints nothing once the secret is deleted or retagged, before any policy reload.
+func TestValuesStopsMintingOnceTheSecretIsGone(t *testing.T) {
+	m, enr, key, approver := newFixture(t)
+	calls := withMintedSecret(t, m)
+	ctx := context.Background()
+	req, err := m.Create(ctx, enr, signRequestFor(t, m, key, 3600, "ADMIN_GCP_TOKEN"), "")
+	if err != nil || req.RecordID == nil {
+		t.Fatalf("Create = %+v, %v", req, err)
+	}
+	dec, err := m.ApplyDecision(ctx, *req.RecordID, true, approver)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision = %+v, %v", dec, err)
+	}
+	retargeted := policytest.Secret("ADMIN_GCP_TOKEN", fixtureOperator, policy.TierHuman, "")
+	retargeted.Tags[policy.TagMint] = "other-admin@example-project.iam.gserviceaccount.com"
+	fixtureStore(m).Put(retargeted) // no policy reload
+	if values, _, err := m.Values(ctx, dec.GrantID, enr); !errors.Is(err, ErrGrantNotLive) || values != nil || len(*calls) != 0 {
+		t.Fatalf("Values after a retag = %v, %v after %d mints; want ErrGrantNotLive and no mint", values, err, len(*calls))
 	}
 }

@@ -357,6 +357,25 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 		t.Fatalf("Load(gcp) = %+v, %v", cfg, err)
 	}
 
+	const sa = "agent-admin@example-project.iam.gserviceaccount.com"
+	e := gcp()
+	e["BROKER_MINT_TARGETS"] = " " + sa + "=sami@example.com\n"
+	if cfg, err = Load(env(e)); err != nil || cfg.MintTargets[sa] != "sami@example.com" || len(cfg.MintTargets) != 1 {
+		t.Fatalf("Load(BROKER_MINT_TARGETS) = %v, %v", cfg.MintTargets, err)
+	}
+	for _, bad := range []string{sa, sa + "=Sami", "admin@example-project.iam.gserviceaccount.com=sami@example.com", sa + "=a@example.com " + sa + "=b@example.com"} {
+		e := gcp()
+		e["BROKER_MINT_TARGETS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MINT_TARGETS") {
+			t.Errorf("BROKER_MINT_TARGETS = %q: err = %v, want a refusal naming the setting", bad, err)
+		}
+	}
+	e = validEnv()
+	e["BROKER_MINT_TARGETS"] = sa + "=sami@example.com"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), secrets.StoreGCP) {
+		t.Errorf("BROKER_MINT_TARGETS under the AWS store: err = %v, want a refusal naming %s", err, secrets.StoreGCP)
+	}
+
 	for name, tc := range map[string]struct {
 		edit func(map[string]string)
 		want string

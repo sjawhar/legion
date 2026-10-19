@@ -87,10 +87,7 @@ type Secret struct {
 	Owner string
 	// Tier is TierAgent or TierHuman.
 	Tier string
-	// MintTarget is the service account a release mints a one-hour Google access token for; empty
-	// for a stored secret.
-	MintTarget string
-	kind       ownerKind
+	kind ownerKind
 }
 
 // approver is who decides an approval request for secret: anyone signed in to Dispatch for a

@@ -2336,8 +2336,8 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and source (its ARN, or its Secret Manager
-resource name: `policy.Secret.Source`), is recorded on every request, and a
+SHA-256 of every served secret's name, owner, tier and source (its ARN, its Secret Manager
+resource name, or `gcp-token:<service account>` for a minted secret: `policy.Secret.Source`), is recorded on every request, and a
 live grant is re-checked once it has moved, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
