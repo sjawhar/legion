@@ -90,8 +90,10 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 // ghWrapperScript is the `gh` wrapper both runtimes install first on PATH: a script whose one
-// command execs `legion gh` with its arguments (packages/daemon/docker/gh, workerbin.Install).
-var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('(?:[^']|'\\'')*'|[^\s'"\\]+) gh "\$@"\n?$`)
+// command execs `legion gh` with its arguments (packages/daemon/docker/gh, workerbin.Install),
+// the legion path a bare word, or quoted as a shell reads it, in single quotes (shellprefix.Literal)
+// or in double quotes with no expansion.
+var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('(?:[^']|'\\'')*'|"[^"$` + "`" + `\\]*"|[^\s'"\\$` + "`" + `]+) gh "\$@"\n?$`)
 
 // ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute
 // path: gh names its git credential helper after it (GH_PATH). It is refused when PATH's first gh
@@ -171,9 +173,9 @@ func withGitHubUseHTTPPath(env []string) ([]string, error) {
 //
 // Every selector the leaf's help names counts: a `<repository>` (or another repository) argument,
 // before `--` or, for a leaf passing the rest on, the first after it; an `<owner>`; a URL argument
-// that is a github.com URL (for a pr command, which reads any other as a branch of its own
-// repository, only a pull request's names its repository); OWNER/REPO#N where the leaf reads it
-// (ghReadsRepositoryNumber); a search `<query>`'s repo:/owner:/user:/org: qualifiers; `gh api`'s
+// that is a github.com URL (through gh's pr finder, which reads any other as a branch of the
+// command's own repository, only a pull request's names its repository); OWNER/REPO#N where the
+// leaf reads it (ghLeafQuirks); a search `<query>`'s repo:/owner:/user:/org: qualifiers; `gh api`'s
 // endpoint (repos/<owner>/, orgs/<owner>/, users/<owner>/, a search endpoint's q) and a GraphQL
 // query's owner variable (`-F owner=<login>`); and the options naming a repository, an owner, a
 // team or an issue by URL (ghOptionKinds). So does the command's own repository when gh resolves

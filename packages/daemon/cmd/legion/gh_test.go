@@ -437,8 +437,12 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"api", "repos/:owner/:repo/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
 		{argv: []string{"api", "graphql", "-f", "o=:owner", "-f", "query=q"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}},
 		{argv: []string{"api", "repos/{owner}/{repo}/commits/{branch}"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
-		// agent-task view reads OWNER/REPO#N as that repository; a pr command reads it as a branch.
+		// agent-task view reads OWNER/REPO#N as that repository, and a URL through gh's pr
+		// finder: only a pull request's names its repository. A pr command reads OWNER/REPO#N as a
+		// branch of its own repository.
 		{argv: []string{"agent-task", "view", "sjawhar/legion#1"}, owner: "sjawhar"},
+		{argv: []string{"agent-task", "view", "https://github.com/sjawhar/legion/pull/1"}, remotes: remotes(acmeClone), owner: "sjawhar"},
+		{argv: []string{"agent-task", "view", "https://github.com/sjawhar/legion/issues/1"}, remotes: remotes(acmeClone), err: "more than one owner"},
 		{argv: []string{"pr", "view", "sjawhar/legion#1", "-R", "acme/widgets"}, owner: "acme"},
 		// The first re-review's reproductions.
 		{argv: []string{"-R", "sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
@@ -853,7 +857,15 @@ func TestTheRuntimesGhWrappersAreOnesLegionGhAccepts(t *testing.T) {
 			t.Errorf("%s gh wrapper %q is not one legion gh accepts", name, script)
 		}
 	}
-	for _, script := range []string{"#!/bin/sh\nGH_TOKEN=x exec /usr/bin/gh \"$@\"\n", "#!/bin/sh\nexec /usr/bin/gh \"$@\"\n", "\x7fELF"} {
+	for _, script := range []string{"#!/bin/sh\nexec \"/opt/legion state/legion\" gh \"$@\"\n", "#!/bin/sh\nexec '/opt/legion'\\''s/legion' gh \"$@\"\n", "#!/bin/sh\nexec /opt/legion/bin/legion gh \"$@\"\n"} {
+		if !ghWrapperScript.MatchString(script) {
+			t.Errorf("legion gh refuses %q as its wrapper", script)
+		}
+	}
+	for _, script := range []string{
+		"#!/bin/sh\nGH_TOKEN=x exec /usr/bin/gh \"$@\"\n", "#!/bin/sh\nexec /usr/bin/gh \"$@\"\n", "\x7fELF",
+		"#!/bin/sh\nexec \"$HOME/legion\" gh \"$@\"\n", "#!/bin/sh\nexec $(cat /x) gh \"$@\"\n", "#!/bin/sh\nexec `cat /x` gh \"$@\"\n",
+	} {
 		if ghWrapperScript.MatchString(script) {
 			t.Errorf("legion gh accepts %q as its wrapper", script)
 		}

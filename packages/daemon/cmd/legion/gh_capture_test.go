@@ -514,6 +514,9 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		{issueWorkspace, nil, []string{"pr", "view", "sjawhar/legion#2", "--json", "title"}, "acme", ""},
 		{issueWorkspace, nil, []string{"pr", "view", "https://github.com/sjawhar/legion/issues/5", "--json", "title"}, "", "more than one owner"},
 		{otherClone, nil, []string{"pr", "view", "https://github.com/acme/widgets/tree/x", "--json", "title"}, "", "more than one owner"},
+		// Round 6's: agent-task view reads a URL through gh's pr finder too (final, non-blocking);
+		// gh 2.65.0 has no agent-task and refuses it as no command its help lists.
+		{issueWorkspace, nil, []string{"agent-task", "view", "https://github.com/sjawhar/legion/issues/1"}, "", "more than one owner||no command gh's own help lists"},
 	}
 	for _, scheme := range []string{"git+https://github.com/sjawhar/legion.git", "ftp://github.com/sjawhar/legion", "ftps://github.com/sjawhar/legion", "file://github.com/sjawhar/legion", "github.com://sjawhar/legion", "git@github.com/sjawhar:legion"} {
 		rows = append(rows, row{workspace([][]string{origin, {"remote", "add", "upstream", scheme}}), nil, []string{"pr", "list", "--json", "title"}, "", "more than one owner"})
