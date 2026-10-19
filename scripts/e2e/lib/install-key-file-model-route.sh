@@ -150,7 +150,13 @@ log=$dest/anthropic-key.log
 
 key_dir=$(realpath -m -- "$key_dir")
 case "$key_dir" in *[!A-Za-z0-9/._-]*) refuse "--key-dir $key_dir holds a character a plain \`!command\` word cannot" ;; esac
-[ "$key_dir" != "$dest" ] || refuse "--key-dir $key_dir is --dest: the key command's own script, which bakes in --key-file's path, must not sit where the call record is kept"
+case "$key_dir/" in
+"$dest/") refuse "--key-dir $key_dir is --dest: the key command's own script, which bakes in --key-file's path, must not sit where the call record is kept" ;;
+"$dest/"*) refuse "--key-dir $key_dir is inside --dest $dest: the key command's own script must not sit where the call record is kept" ;;
+esac
+case "$dest/" in
+"$key_dir/"*) refuse "--dest $dest is inside --key-dir $key_dir: the call record must not sit where the key command's own script, which bakes in --key-file's path, is kept" ;;
+esac
 if [ -e "$key_dir" ] && { [ ! -d "$key_dir" ] || [ -n "$(ls -A -- "$key_dir")" ]; }; then
   refuse "--key-dir $key_dir exists and is not an empty directory"
 fi

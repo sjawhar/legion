@@ -124,6 +124,57 @@ describe("the key-file model route installer", () => {
     expect(result.stderr.toString()).toContain("--key-dir");
   });
 
+  test("refuses --key-dir nested inside --dest, and --dest nested inside --key-dir", () => {
+    const run = join(dir, `install-${++installs}`);
+    const home = join(run, "omp-home");
+    mkdirSync(join(home, ".omp"), { recursive: true });
+    const keyFile = join(run, "anthropic-key-file");
+    writeFileSync(keyFile, "sk-ant-x\n", { mode: 0o600 });
+    const dest = join(run, "model-gateway");
+    const nestedKeyDir = join(dest, "key");
+    const result = Bun.spawnSync(
+      [
+        "bash",
+        join(lib, "install-key-file-model-route.sh"),
+        "--profile",
+        "legion-e2e-test",
+        "--home",
+        home,
+        "--dest",
+        dest,
+        "--key-dir",
+        nestedKeyDir,
+        "--key-file",
+        keyFile,
+      ],
+      { env: { PATH: process.env.PATH ?? "", HOME: operatorHome } }
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.stderr.toString()).toContain("--key-dir");
+
+    const keyDir = join(run, "model-gateway-key");
+    const nestedDest = join(keyDir, "dest");
+    const reversed = Bun.spawnSync(
+      [
+        "bash",
+        join(lib, "install-key-file-model-route.sh"),
+        "--profile",
+        "legion-e2e-test",
+        "--home",
+        home,
+        "--dest",
+        nestedDest,
+        "--key-dir",
+        keyDir,
+        "--key-file",
+        keyFile,
+      ],
+      { env: { PATH: process.env.PATH ?? "", HOME: operatorHome } }
+    );
+    expect(reversed.exitCode).toBe(2);
+    expect(reversed.stderr.toString()).toContain("--dest");
+  });
+
   test("refuses with no --key-dir at all", () => {
     const run = join(dir, `install-${++installs}`);
     const home = join(run, "omp-home");

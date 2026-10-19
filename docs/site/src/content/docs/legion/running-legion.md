@@ -166,7 +166,7 @@ on the same repositories.
   - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
   - `secrets`: create, delete, update, get (never list);
   - `pods`: get, list, watch; `pods/log`: get;
-  - `services`: get, list, watch, so a launch checks its repository cache's Service is the cache's
+  - `services`: list, watch, so a launch checks its repository cache's Service is the cache's
     own before an issue pod is told its address;
   - `events`: list;
   - and a cluster-scoped get on the CRD `sandboxes.agents.x-k8s.io` and a get on the Deployment
@@ -427,7 +427,8 @@ the complete shape (rendered in the [configuration reference](/legion/legion/ref
    legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
    ```
 
-The command checks the file and the plugins, fetches a fresh controller credential from the daemon
+The command checks the file and the plugins, reads the project's repositories from the daemon (the
+controller is told them), fetches a fresh controller credential from the daemon
 with your operator token, then fetches the review App's token for the controller's `gh` and keeps
 it refreshed while the session runs (against a daemon with no GitHub App, it says so and the
 controller's `gh` acts as nobody), and starts Oh My Pi in the foreground; its first turn runs the

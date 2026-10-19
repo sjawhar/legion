@@ -121,6 +121,11 @@ cleanup() {
   # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
   # command the trap interrupted, not the cleanup command that failed.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (the production audit, closing pull requests) can hang or be
+  # SIGKILLed mid-teardown: the key-file route's own key command, which bakes in --key-file's
+  # resolved path, must never survive this script on any exit, so it is never conditioned on how
+  # the rest of cleanup goes.
+  rm -rf "$work/model-gateway-key" || true
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
     production_audit >&2 || audit_failed=1
@@ -135,7 +140,7 @@ cleanup() {
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
   close_unpassed_run_pull_requests
-  rm -rf "$work/model-gateway-cache" "$work/model-gateway-key" || true
+  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else

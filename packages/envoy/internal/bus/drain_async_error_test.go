@@ -19,6 +19,17 @@ import (
 // consumer is gone, which is what the delete was for, so the report is a warning:
 // TestListenerFollowsTheInterestRegistryAcrossNATSRestarts refuses any ERROR from a restart or
 // the shutdown after it (LEGION-278).
+//
+// A delivery held in its handler keeps the connection's drain open until the delete has reported.
+// nats.go removes the watcher's subscription before it sends the delete (checkDrained), and
+// drains its request subscription at its next 10 ms check once no other subscription is left
+// (drainConnection), without waiting for the delete's answer. An answer that comes back after
+// that has no subscription to arrive on, so the close ends the delete with "connection closed",
+// and nats.go queues that report after it has closed its async callback queue, so it never runs;
+// a delete sent once the drain reaches the publishes is refused as "connection draining", which
+// the bus logs at ERROR. Without the held delivery the test reads that scheduling race rather
+// than the report. Both functions behave so at the pinned nats.go (v1.50.0) and through v1.54.0;
+// re-check on a nats.go bump.
 func TestADrainThatFindsItsConsumerGoneWarns(t *testing.T) {
 	_, uri := testnats.Start(t)
 	logs := captureBusLogs(t)
@@ -66,24 +77,46 @@ func TestADrainThatFindsItsConsumerGoneWarns(t *testing.T) {
 		t.Fatalf("deleted %d consumers, want the watcher's one", deleted)
 	}
 
-	if err := client.Drain(5 * time.Second); err != nil {
+	held := make(chan struct{})
+	if _, err := client.Conn.Subscribe("drain_async_error.held", func(*natsgo.Msg) {
+		close(held)
+		for deadline := time.Now().Add(5 * time.Second); len(asyncErrorReports(logs)) == 0 && time.Now().Before(deadline); {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}); err != nil {
+		t.Fatalf("subscribe the held delivery: %v", err)
+	}
+	if err := client.Conn.Publish("drain_async_error.held", nil); err != nil {
+		t.Fatalf("publish the held delivery: %v", err)
+	}
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held delivery never reached its handler")
+	}
+
+	// The drain's deadline outlasts the held delivery's 5 s, so a delete that never reports fails
+	// on its reports rather than on the drain.
+	if err := client.Drain(10 * time.Second); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
-	var reports []string
-	for deadline := time.Now().Add(5 * time.Second); len(reports) == 0 && time.Now().Before(deadline); {
-		time.Sleep(50 * time.Millisecond)
-		for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
-			var record struct {
-				Level string `json:"level"`
-				Msg   string `json:"msg"`
-				Error string `json:"error"`
-			}
-			if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "envoy nats async error" {
-				reports = append(reports, record.Level+" "+record.Error)
-			}
-		}
-	}
-	if got, want := strings.Join(reports, ", "), "WARN nats: consumer not found"; got != want {
+	if got, want := strings.Join(asyncErrorReports(logs), ", "), "WARN nats: consumer not found"; got != want {
 		t.Fatalf("the drain's async error reports = %q, want %q", got, want)
 	}
+}
+
+// asyncErrorReports is every async error the bus has logged so far, each as its level and error.
+func asyncErrorReports(logs *busLogs) []string {
+	var reports []string
+	for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+		var record struct {
+			Level string `json:"level"`
+			Msg   string `json:"msg"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == "envoy nats async error" {
+			reports = append(reports, record.Level+" "+record.Error)
+		}
+	}
+	return reports
 }

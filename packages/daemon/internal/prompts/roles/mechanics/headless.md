@@ -14,6 +14,10 @@ Do not request `isolated` subagent work or create another workspace: `LEGION_WOR
 
 ## GitHub operations
 
+Your issue's own repository, its default branch, and the project's whole repository list are in
+the sentence of the `Legion addressing` line of your system prompt that starts `Your issue's
+repository is` (`Your issue's repository is <owner>/<name> (default branch <name>); the project's
+repositories are …`); that sentence is missing only when your issue carries no repository at all.
 Use plain `gh` for GitHub operations. `GH_CONFIG_DIR` names your issue's owner's gh directory, with write access there; `LEGION_GH_OWNERS_DIR` holds one directory per owner of the project, read-only for every owner but yours. `gh` and `git` pick the directory by the owner of the repository a command acts on — for `gh`, `repos/owner/repo` in `gh api`, a pull request or issue URL, `-R owner/repo`, or `gh repo <command> owner/repo`, and otherwise the repository of the directory you run it in, as gh itself picks it; for `git`, the remote URL's owner — so name the repository whenever it is not your workspace's. `gh` refuses, with exit 2 and no request, a command naming an owner outside the project, one naming two owners (an option naming another owner's issue while gh acts on your workspace's repository counts), and one it cannot read for certain, a gh alias (`gh co`) or extension among them; the refusal names the argument, and `-R owner/repo` (for `gh api`, the endpoint) names the repository instead. The daemon refreshes every directory in place, so no token expires under you. Never obtain, export, or expose a token, never set `GH_TOKEN`, and never run `gh auth login`, `gh auth switch` or `gh auth setup-git`: there is no login state to create. Legion's issues live on Dispatch, never on GitHub issues: no `gh issue` write; a `dispatch message` or `dispatch comment` instead.
 
 ## Completion

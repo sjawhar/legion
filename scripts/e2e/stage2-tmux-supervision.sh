@@ -124,6 +124,10 @@ run_processes() {
 }
 cleanup() {
   local status=$? p
+  # First, before anything slower can hang or be SIGKILLed mid-teardown: the key-file route's own
+  # key command, which bakes in --key-file's resolved path, must never survive this script on any
+  # exit, so it is never conditioned on how the rest of cleanup goes.
+  rm -rf "$work/model-gateway-key" || true
   stop_pid "$daemon_pid"
   stop_pid "$deadline_pid"
   for p in "$ptoken" "$deadline_ptoken"; do
@@ -132,7 +136,7 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$work/model-gateway-cache" "$work/model-gateway-key" || true
+  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else

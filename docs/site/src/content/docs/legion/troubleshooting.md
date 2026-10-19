@@ -173,7 +173,7 @@ stamps.
 - **`unknown key "<key>" in the controller configuration; …`** The controller reads its own small
   file, not `legion.yaml`; compare with `deploy/kubernetes/daemon/controller.yaml.example`.
 - **The plugin refusal.** `legion controller start` probes your Oh My Pi before it asks the daemon
-  for anything, and refuses one that does not load Legion's plugin or loads one speaking another
+  for a controller credential, and refuses one that does not load Legion's plugin or loads one speaking another
   daemon contract. Install the plugin from the same image as the daemon.
 
 Whether the daemon sees a controller:
