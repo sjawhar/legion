@@ -139,9 +139,10 @@ func (r *liveRig) checkCacheSecondPod() error {
 	return nil
 }
 
-// cache-lost-volume: with the cache warm, the harness pushes legion/S4A-9 onto the repository as a
-// commit of its own — a file only that commit adds, on top of the default branch's head — and
-// checks inside the cache's pod that its clone lacks that commit (deleted when the harness ends).
+// cache-lost-volume: with the cache warm, the harness pushes cache-b's branch, legion/<issue> for
+// its run's own issue (cacheRunIssue), onto the repository as a commit of its own — a file only
+// that commit adds, on top of the default branch's head — and checks inside the cache's pod that
+// its clone lacks that commit (deleted when the harness ends).
 // cache-b's Sandbox and volume are then deleted while no runtime runs. Relaunched with the branch as
 // its recovery source, the new pod fills its new feed from the cache again, and, while the cache
 // still lacks the commit, GitHub's delta brings it (more than no bytes); the workspace is
@@ -279,8 +280,9 @@ func (r *liveRig) cacheHolds(name, id string) (bool, error) {
 }
 
 // pushRunCommit puts branch on the run's repository at a new commit on parent that adds path
-// holding content — built with GitHub's git data API, so nothing reaches the default branch — and
-// deletes the branch when the run ends, whatever happens in between. It returns the commit.
+// holding content — built with GitHub's git data API, so nothing reaches the default branch — and,
+// once it has created the branch, deletes it when the run ends, whatever happens in between: a
+// branch it could not create is not its own, so it is left as it is. It returns the commit.
 func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, error) {
 	github, err := r.github()
 	if err != nil {
@@ -308,14 +310,14 @@ func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, e
 	}, &created); err != nil {
 		return "", fmt.Errorf("write the commit adding %s: %w", path, err)
 	}
+	if err := github.Post(r.ctx, "/git/refs", map[string]string{"ref": "refs/heads/" + branch, "sha": created.SHA}, nil); err != nil {
+		return "", fmt.Errorf("create refs/heads/%s at %s: %w", branch, created.SHA, err)
+	}
 	r.t.Cleanup(func() {
 		if err := r.deleteBranch(branch); err != nil {
 			fmt.Printf("teardown: could not delete branch %s of %s: %v\n", branch, r.env.repo, err)
 		}
 	})
-	if err := github.Post(r.ctx, "/git/refs", map[string]string{"ref": "refs/heads/" + branch, "sha": created.SHA}, nil); err != nil {
-		return "", fmt.Errorf("create refs/heads/%s at %s: %w", branch, created.SHA, err)
-	}
 	return created.SHA, nil
 }
 

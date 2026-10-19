@@ -782,6 +782,7 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	}
 	r.prompt = prompt
 
+	cacheIssue := cacheRunIssue(env.project)
 	for _, c := range []struct {
 		name, tree, issue string
 		role              claim.Role
@@ -806,8 +807,10 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"displaced", "S4A-6", "S4A-6", claim.RoleArchitect},
 		{"displacer", "S4A-6", "S4A-6", claim.RoleImplementer},
 		// cache-b is one more issue pod on the run's repository, launched while its cache is Ready
-		// (cache-second-pod) and again after its volume is lost (cache-lost-volume).
-		{"cache-b", "S4A-9", "S4A-9", claim.RoleArchitect},
+		// (cache-second-pod) and again after its volume is lost (cache-lost-volume). Its issue is
+		// its run's own (cacheRunIssue), since cache-lost-volume pushes the issue's branch onto the
+		// repository every run shares.
+		{"cache-b", cacheIssue, cacheIssue, claim.RoleArchitect},
 		// second-owner is an issue pod on the repository of the run's other owner (second-owner).
 		{"second-owner", "S4A-7", "S4A-7", claim.RoleImplementer},
 	} {
