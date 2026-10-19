@@ -233,11 +233,3 @@ func nameRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 	}
 	return nil
 }
-
-// deref is a Dispatch parent pointer as a key, "" for none.
-func deref(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
