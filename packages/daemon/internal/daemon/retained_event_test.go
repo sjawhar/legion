@@ -23,12 +23,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
-// detailDispatch answers GetIssue with each issue's resolved repository, refusing the first
-// failures reads with Dispatch's trouble, and counts the reads.
+// detailDispatch answers GetIssue with each issue's detail as Dispatch shows it: in todo, handed
+// to Legion, at sequence seq, on its resolved repository. It refuses the first failures reads with
+// Dispatch's trouble, and counts the reads.
 type detailDispatch struct {
 	outboxDispatch
 	mu       sync.Mutex
 	resolved map[string]string
+	seq      int64
 	failures int
 	reads    int
 }
@@ -41,7 +43,7 @@ func (d *detailDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue
 		d.failures--
 		return dispatch.Issue{}, errors.New("Dispatch is restarting")
 	}
-	return dispatch.Issue{Key: key, ResolvedRepo: d.resolved[key]}, nil
+	return dispatch.Issue{Key: key, Status: "todo", Title: key, Rank: "A", HandedOver: true, ResolvedRepo: d.resolved[key], LastSeq: d.seq}, nil
 }
 
 func (d *detailDispatch) readCount() int {
@@ -173,9 +175,10 @@ func TestARetainedEventKeepsTheSessionFenceOfItsActor(t *testing.T) {
 }
 
 // A retained event of an issue the daemon has not recorded is applied with the repository
-// Dispatch resolves for it now, read from the issue's detail, and with the event's own actor and
-// sequence. A read Dispatch fails leaves the event unapplied and retried; it is never applied with
-// no repository, and never dropped for the boot snapshot to stand in for.
+// Dispatch resolves for it now, read from the issue's detail, and with the event's own actor. A
+// read Dispatch fails leaves the event unapplied and retried, and the retry applies the issue as
+// that detail shows it, at its sequence; it is never applied with no repository, and never
+// dropped for the boot snapshot to stand in for.
 func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *testing.T) {
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
@@ -189,7 +192,7 @@ func TestARetainedEventOfAnUnrecordedIssueReadsItsRepositoryFromDispatch(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := &detailDispatch{resolved: map[string]string{"LEGION-301": "acme/widgets"}, failures: 1}
+	client := &detailDispatch{resolved: map[string]string{"LEGION-301": "acme/widgets"}, seq: 4, failures: 1}
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@release/v7.1"})
 	repos := newRepositories("LEGION")
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
