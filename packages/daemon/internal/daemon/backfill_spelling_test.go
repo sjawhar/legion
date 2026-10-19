@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -106,6 +108,56 @@ func TestTheBackfillRefusesTwoClonesOfOneRepository(t *testing.T) {
 	want := "fill the repository of LEGION-301: two shared clones spell acme/widgets (" + clones[1] + ", " + clones[0] + "); remove the one no issue works in and restart"
 	if err == nil || err.Error() != want {
 		t.Fatalf("backfill = %v, want %q", err, want)
+	}
+}
+
+// A record written before the record carried its repository may already have a pull request,
+// which names the repository the issue worked in. The fill takes Dispatch's resolution only when
+// that pull request is on it, in any case: one on another repository (the issue's own repository
+// or an ancestor's, set in Dispatch since, outranking the project's default) refuses the boot,
+// naming the issue, both repositories and the fix, and fills nothing, since a record on the wrong
+// repository would create branches there and disarm a stranger's pull request.
+func TestTheBackfillRefusesARecordWhosePullRequestIsOnAnotherRepository(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main", "zeta/tools": "zeta/tools@main"})
+	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-1", ResolvedRepo: "acme/widgets"}}}
+	for _, tc := range []struct{ name, prRepo, want string }{
+		{"on another repository", "zeta/tools", "fill the repository of LEGION-1: Dispatch resolves it to acme/widgets, but its pull request #7 is on zeta/tools: set the issue's repository in Dispatch to zeta/tools (dispatch issue-update --issue LEGION-1 --repo zeta/tools) and restart"},
+		{"on the resolved repository in another case", "ACME/Widgets", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			if _, err := pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch)
+				values ('LEGION-1', 'LEGION-1', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1, '', '')`); err != nil {
+				t.Fatal(err)
+			}
+			records := record.NewStore()
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: "LEGION-1", Repo: tc.prRepo, Number: 7, Branch: "legion/LEGION-1",
+					HeadSHA: "head", State: record.PullRequestOpen})
+			}); err != nil {
+				t.Fatal(err)
+			}
+			w := &workflowRuntime{pool: pool, records: records, log: quietLogger()}
+			err := backfillRepositories(ctx, pool, records, client, "LEGION", t.TempDir(),
+				newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), quietLogger())
+			got := recordedIssue(t, w, "LEGION-1")
+			if tc.want != "" {
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("backfill = %v, want %q", err, tc.want)
+				}
+				if got.Repo != "" {
+					t.Fatalf("LEGION-1 = %s after a refused backfill, want it unfilled", got.Repo)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Repo != "acme/widgets" || got.GitHubRepo != "acme/widgets" {
+				t.Fatalf("LEGION-1 = %s (GitHub's %s), want acme/widgets", got.Repo, got.GitHubRepo)
+			}
+		})
 	}
 }
 

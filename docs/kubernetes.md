@@ -2736,7 +2736,8 @@ issue's pod (every role container of it alike) and the image probe's.
   Dispatch first (it resolves each issue's repository), then map the project's repositories there
   with the old `projects.<KEY>.repo` as the project's default, then delete the key and start this
   daemon; its first boot fills every record written before the record carried its repository from
-  Dispatch's resolution, and refuses to boot, naming each record, while Dispatch resolves none.
+  Dispatch's resolution, and refuses to boot, naming each record, while Dispatch resolves none, or
+  resolves one other than the repository of the issue's pull request.
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
   `service_account_token` must last at least 600 s, the least the API server issues, and its
