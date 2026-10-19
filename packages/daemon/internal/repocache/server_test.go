@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -548,6 +550,47 @@ func TestATarAskedForDuringAFetchWaitsForIt(t *testing.T) {
 	}
 }
 
+// A tar's reader that stops reading partway holds nothing a refresh waits on: the stream takes the
+// clone's refs and packs under the read lock and sends them with no lock held, so the next tick's
+// fetch goes through while the reader stalls, /healthz moves to its head, and the stalled reader,
+// once it reads on, gets the whole tar it began, as it stood when it began. The pack is large
+// enough that the cache blocks writing it to a reader that stopped.
+func TestAStalledTarReaderDoesNotHoldTheNextFetch(t *testing.T) {
+	remote := newRemote(t)
+	large := make([]byte, 24<<20)
+	if _, err := rand.Read(large); err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "work")
+	git(t, filepath.Dir(work), "clone", "--quiet", remote, work)
+	if err := os.WriteFile(filepath.Join(work, "large.bin"), large, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	git(t, work, "add", ".")
+	git(t, work, "commit", "--quiet", "-m", "large")
+	git(t, work, "push", "--quiet", "origin", "HEAD:main")
+	began := git(t, work, "rev-parse", "HEAD")
+	opts := testOptions(t, newTestRunner(t, remote))
+	opts.Refresh = 50 * time.Millisecond
+	c := start(t, opts)
+	c.waitFor(t, "at the large commit", func(_ int, h Health) bool { return h.Head == began })
+
+	stalled := c.get(t, "/tar", c.bearer(t))
+	defer stalled.Body.Close()
+	first := make([]byte, 4096)
+	if _, err := io.ReadFull(stalled.Body, first); err != nil {
+		t.Fatalf("read the tar's first bytes: %v", err)
+	}
+	moved := advance(t, remote, "moved")
+	c.waitFor(t, "at the moved head while a tar's reader stalls", func(_ int, h Health) bool { return h.Head == moved })
+
+	unpacked, _ := unpack(t, io.MultiReader(bytes.NewReader(first), stalled.Body))
+	indexed(t, unpacked)
+	if got := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"); got != began {
+		t.Errorf("the stalled tar's main is %s, want the head it began at, %s", got, began)
+	}
+}
+
 // The next tick's fetch brings what the remote gained, and /healthz says so; every fetch reads the
 // token file again, so a token the Secret's projection rotated is the one the next fetch presents.
 func TestEachTickFetchesWithTheTokenFileAsItIsThen(t *testing.T) {
@@ -570,9 +613,13 @@ func TestEachTickFetchesWithTheTokenFileAsItIsThen(t *testing.T) {
 	if tokens[0] != "ghs_first" || tokens[len(tokens)-1] != "ghs_rotated" {
 		t.Errorf("the transfers presented %q, want ghs_first first and the rotated ghs_rotated last", tokens)
 	}
-	for _, transfer := range run.transfers()[1:] {
-		if transfer != "--git-dir="+c.dir()+" fetch" {
-			t.Errorf("a later tick ran %q, want a fetch into the cache's clone", transfer)
+	for i, transfer := range run.transfers()[1:] {
+		want := "--git-dir=" + c.dir() + " fetch"
+		if i%2 == 1 {
+			want = "--git-dir=" + c.dir() + " ls-remote"
+		}
+		if transfer != want {
+			t.Errorf("a later tick's transfer %d is %q, want %q: each tick fetches into the cache's clone, then reads GitHub's HEAD", i+1, transfer, want)
 		}
 	}
 }
@@ -631,8 +678,8 @@ func TestARestartOnAVolumeThatHoldsTheCloneFetchesIntoIt(t *testing.T) {
 	if health := again.ready(t); health.Head != moved {
 		t.Errorf("the restarted cache serves %s, want what its fetch brought, %s", health.Head, moved)
 	}
-	if transfers := run.transfers(); len(transfers) != 2 || transfers[1] != "--git-dir="+again.dir()+" fetch" {
-		t.Errorf("the cache ran %q, want a clone, then the restart's fetch", transfers)
+	if transfers := run.transfers(); !slices.Equal(transfers, []string{"clone --bare", "--git-dir=" + again.dir() + " fetch", "--git-dir=" + again.dir() + " ls-remote"}) {
+		t.Errorf("the cache ran %q, want a clone, then the restart's fetch and its read of GitHub's HEAD", transfers)
 	}
 	again.cancel()
 	if err := <-again.done; err != nil {
@@ -677,6 +724,40 @@ func TestACacheRestartedAfterAnInterruptedFetchClearsItsLocks(t *testing.T) {
 	}
 	if !logged(again.log.all(), "removed the stale git lock "+filepath.Join(again.dir(), "refs/heads/main.lock")) {
 		t.Errorf("the restart did not log the lock it removed: %q", again.log.all())
+	}
+}
+
+// GitHub renaming the repository's default branch moves the cache's HEAD with it at the next fetch.
+// The fetch's prune removes the old branch, so a HEAD left naming it would name nothing: every
+// publish would fail, and a restart would end Serve, the cache never ready again. Restarted on its
+// volume after the rename, the cache is ready at the renamed branch's head, its HEAD names that
+// branch, and the old branch is gone.
+func TestACacheFollowsARenamedDefaultBranch(t *testing.T) {
+	remote := newRemote(t)
+	opts := testOptions(t, newTestRunner(t, remote))
+	first := start(t, opts)
+	first.ready(t)
+	first.cancel()
+	if err := <-first.done; err != nil {
+		t.Fatalf("the first Serve ended with %v", err)
+	}
+	first.done <- nil
+	moved := advance(t, remote, "moved")
+	git(t, remote, "branch", "-m", "main", "trunk")
+
+	again := start(t, opts)
+	if health := again.ready(t); health.Head != moved {
+		t.Fatalf("the restarted cache serves %+v, want the renamed branch's head %s", health, moved)
+	}
+	head, err := os.ReadFile(filepath.Join(again.dir(), "HEAD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(head) != "ref: refs/heads/trunk\n" {
+		t.Errorf("the cache's HEAD is %q, want the renamed branch", head)
+	}
+	if refs := git(t, again.dir(), "for-each-ref", "--format=%(refname)", "refs/heads"); refs != "refs/heads/trunk" {
+		t.Errorf("the cache's branches are %q, want trunk alone", refs)
 	}
 }
 

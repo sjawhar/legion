@@ -840,6 +840,150 @@ func TestFetchIntoAFeedThatHoldsTheRepositoryFetchesEveryBranch(t *testing.T) {
 	}
 }
 
+// A fetch into a feed that holds the repository points its HEAD at the branch GitHub's HEAD names
+// now, read under the same credential and bound as the fetch: GitHub renaming the default branch
+// would otherwise leave HEAD naming the branch the fetch's prune removed, and an issue's clone of
+// the feed would check nothing out. The move is logged; a fetch with nothing renamed moves nothing.
+func TestFetchPointsTheFeedsHeadAtGitHubsDefaultBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+	var logged []string
+	req.Log = func(line string) { logged = append(logged, line) }
+	first, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	if slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "default branch") }) {
+		t.Errorf("a fetch with nothing renamed logged a move: %q", logged)
+	}
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-m", "main", "trunk")
+	before := len(run.Calls())
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the Fetch after the rename: %v", err)
+	}
+	if head := strings.TrimSpace(runSetup(t, first.Feed, "git", "--git-dir="+first.Feed, "symbolic-ref", "HEAD")); head != "refs/heads/trunk" {
+		t.Errorf("the feed's HEAD names %s, want the renamed refs/heads/trunk", head)
+	}
+	read := findCall(t, run.Calls()[before:], "git", "--git-dir="+first.Feed, "ls-remote")
+	if want := []string{"git", "--git-dir=" + first.Feed, "ls-remote", "--symref", "https://github.com/acme/widgets", "HEAD"}; !slices.Equal(read.Argv, want) {
+		t.Errorf("Fetch read GitHub's HEAD with %q, want %q", read.Argv, want)
+	}
+	assertCredentialedEnvironmentBounded(t, read, read.Timeout)
+	if want := "the default branch of acme/widgets is now trunk (HEAD named refs/heads/main)"; !slices.Contains(logged, want) {
+		t.Errorf("the move was not logged as %q: %q", want, logged)
+	}
+}
+
+// A feed repository Fetch did not write is not taken as its own. Before this release an issue's
+// agents could write the issue volume's feed directory, so an upgraded volume may hold a repository
+// there carrying a hook, configuration or link that the token-holding fetch would run or follow.
+// Fetch takes an existing feed only in the shape it writes, and otherwise removes it, says so, and
+// fills the feed afresh: no planted hook runs, and nothing planted survives.
+func TestFetchTakesNoFeedItDidNotWrite(t *testing.T) {
+	for name, plant := range map[string]func(t *testing.T, feed, marker string){
+		"a hook": func(t *testing.T, feed, marker string) {
+			writeExecutable(t, filepath.Join(feed, "hooks", "reference-transaction"), "#!/bin/sh\ntouch "+marker+"\n")
+		},
+		"core.hooksPath": func(t *testing.T, feed, marker string) {
+			hooks := t.TempDir()
+			writeExecutable(t, filepath.Join(hooks, "reference-transaction"), "#!/bin/sh\ntouch "+marker+"\n")
+			runSetup(t, feed, "git", "--git-dir="+feed, "config", "core.hooksPath", hooks)
+		},
+		"an http.proxy": func(t *testing.T, feed, _ string) {
+			runSetup(t, feed, "git", "--git-dir="+feed, "config", "http.proxy", "http://127.0.0.1:1")
+		},
+		"alternates": func(t *testing.T, feed, _ string) {
+			if err := os.WriteFile(filepath.Join(feed, "objects", "info", "alternates"), []byte(t.TempDir()+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"info/grafts": func(t *testing.T, feed, _ string) {
+			if err := os.WriteFile(filepath.Join(feed, "info", "grafts"), []byte("0000000000000000000000000000000000000000\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a symlinked refs directory": func(t *testing.T, feed, _ string) {
+			elsewhere := filepath.Join(t.TempDir(), "refs")
+			if err := os.Rename(filepath.Join(feed, "refs"), elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, filepath.Join(feed, "refs")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a gitfile": func(t *testing.T, feed, _ string) {
+			elsewhere := filepath.Join(t.TempDir(), "elsewhere.git")
+			if err := os.Rename(feed, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(feed, []byte("gitdir: "+elsewhere+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a symlinked owner directory": func(t *testing.T, feed, _ string) {
+			owner := filepath.Dir(feed)
+			elsewhere := filepath.Join(t.TempDir(), "acme")
+			if err := os.Rename(owner, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, owner); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			req := fetchRequest(t)
+			var logged []string
+			req.Log = func(line string) { logged = append(logged, line) }
+			first, err := Fetch(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("the first Fetch: %v", err)
+			}
+			marker := filepath.Join(t.TempDir(), "the hook ran")
+			plant(t, first.Feed, marker)
+			advanceRemote(t, run.remote)
+			before := len(run.Calls())
+
+			again, err := Fetch(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("the Fetch after the plant: %v", err)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatal("a planted hook ran in the fetch")
+			}
+			if !slices.ContainsFunc(logged, func(line string) bool { return strings.Contains(line, "is not one this fetch wrote") }) {
+				t.Errorf("Fetch did not say it refused the feed: %q", logged)
+			}
+			findCall(t, run.Calls()[before:], "git", "clone", "--bare")
+			if info, err := os.Lstat(filepath.Dir(again.Feed)); err != nil || !info.IsDir() {
+				t.Errorf("the feed's owner directory is %v (%v), want a directory", info, err)
+			}
+			if why, err := foreignFeed(again.Feed); err != nil || why != "" {
+				t.Errorf("the refilled feed reads as foreign: %q (%v)", why, err)
+			}
+			if got, want := strings.TrimSpace(runSetup(t, again.Feed, "git", "--git-dir="+again.Feed, "rev-parse", "refs/heads/main")), strings.TrimSpace(runSetup(t, again.Feed, "git", "--git-dir="+run.remote, "rev-parse", "main")); got != want {
+				t.Errorf("the refilled feed's main is %s, want the remote's %s", got, want)
+			}
+		})
+	}
+}
+
+// writeExecutable writes an executable script at path, making its directory.
+func writeExecutable(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A clone that dies mid-transfer leaves nothing at the feed's repository: the clone runs in a
 // temporary sibling renamed into place once git finished, so a feed on a volume that outlives the
 // process (the issue's own, the cache's) never holds a half-cloned repository the next Fetch would
@@ -1330,8 +1474,9 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 }
 
 // The cache's stream, its verification and the delta from GitHub share one FetchTimeout, counted
-// from when the cache is ready, so a fetch ends within FetchBudget however long it waited. A cache
-// ready 35 minutes in, whose pack takes 20 minutes to index and whose history takes 5 to check,
+// from when the cache is ready, so the fetch's waits, transfers and checks end within FetchBudget
+// however long it waited. A cache ready 35 minutes in, whose pack takes 20 minutes to index and
+// whose history takes 5 to check,
 // leaves the delta the last 5 minutes, and the fresh feed is filled. A cache ready on the wait's
 // last ask, 39 min 50 s in, whose pack takes the whole bound to index, leaves nothing to check its
 // history in: the fetch fails then, 69 min 50 s in, naming the bound, and fills nothing.

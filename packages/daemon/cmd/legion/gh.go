@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,14 +22,21 @@ const ghUsage = "usage: legion gh [gh args…]  (the gh first on a Legion pane's
 // runGh is `legion gh`, the gh a pane or pod runs. It reads the owner of the repository the
 // command acts on as gh resolves it (ghTargetOf) and execs the real gh (LEGION_GH_PATH) as `gh`
 // with its arguments untouched and GH_CONFIG_DIR set to that owner's gh directory under
-// LEGION_GH_OWNERS_DIR; a command naming no repository keeps GH_CONFIG_DIR, the issue's owner's,
-// once the working directory's git remotes name no other owner. A command it cannot read for
-// certain, one naming two owners, and one naming an owner the bundle holds no directory for are
-// refused, exit 2, naming why, and the real gh never runs: no token but the target owner's is ever
-// sent. Each of the three variables is runtime-set and required; an unset one is refused, exit 2,
-// naming it. With no LEGION_GH_PATH, --help prints this command's usage, so `legion gh --help`
-// outside a pane answers as every legion command does.
-func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
+// LEGION_GH_OWNERS_DIR; a command naming no repository, in a working directory whose git remotes
+// name none, keeps GH_CONFIG_DIR, the issue's owner's. A command it cannot read for certain, one
+// naming two owners, and one naming an owner the bundle holds no directory for are refused, exit
+// 2, naming why, and the real gh never runs: no token but the target owner's is ever sent.
+//
+// The git gh runs itself (a clone, a fetch of a fork's parent, `pr checkout`) authenticates
+// through the credential helper gh names after its own executable, GH_PATH: runGh sets it to the
+// `gh` wrapper first on PATH, so that helper is `legion gh auth git-credential`, which answers as
+// `legion git-credential` does, from the directory of the owner in git's path (useHttpPath set for
+// github.com through GIT_CONFIG_COUNT), never with GH_CONFIG_DIR's token; with no wrapper ahead of
+// the real gh it refuses. The child also runs with gh's update check and prompts off, which a TTY
+// would otherwise reach. Each of the three variables is runtime-set and required; an unset one is
+// refused, exit 2, naming it. With no LEGION_GH_PATH, --help prints this command's usage, so
+// `legion gh --help` outside a pane answers as every legion command does.
+func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	env := processEnvironment()
 	if env["LEGION_GH_PATH"] == "" && len(args) == 1 && helpRequested(args[0]) {
 		fmt.Fprintln(stderr, ghUsage)
@@ -39,7 +48,15 @@ func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
 			return 2
 		}
 	}
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "git-credential" {
+		return runGitCredential(ctx, args[2:], stdout, stderr)
+	}
 	gh := env["LEGION_GH_PATH"]
+	wrapper, err := ghWrapperPath(gh)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion gh: %v\n", err)
+		return 2
+	}
 	owner, err := ghTargetOf(args, env, func(path []string) (string, error) { return readGhHelp(gh, path) }, readGitRemotes)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion gh: %v\n", err)
@@ -52,25 +69,77 @@ func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
 			return 2
 		}
 	}
-	childEnv := make([]string, 0, len(env))
+	set := map[string]string{"GH_CONFIG_DIR": dir, "GH_PATH": wrapper, "GH_NO_UPDATE_NOTIFIER": "1", "GH_PROMPT_DISABLED": "1"}
+	childEnv := make([]string, 0, len(env)+len(set)+3)
 	for _, pair := range os.Environ() {
-		if !strings.HasPrefix(pair, "GH_CONFIG_DIR=") {
+		if name, _, _ := strings.Cut(pair, "="); set[name] == "" {
 			childEnv = append(childEnv, pair)
 		}
 	}
-	childEnv = append(childEnv, "GH_CONFIG_DIR="+dir)
+	for _, name := range slices.Sorted(maps.Keys(set)) {
+		childEnv = append(childEnv, name+"="+set[name])
+	}
+	if childEnv, err = withGitHubUseHTTPPath(childEnv); err != nil {
+		fmt.Fprintf(stderr, "legion gh: %v\n", err)
+		return 2
+	}
 	err = syscall.Exec(gh, append([]string{"gh"}, args...), childEnv)
 	fmt.Fprintf(stderr, "legion gh: run %s: %v\n", gh, err)
 	return 1
 }
 
+// ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute
+// path: gh names its git credential helper after it (GH_PATH). It is refused when PATH's first gh
+// is the real gh itself, or there is none, since gh's own helper would then answer every github.com
+// request with GH_CONFIG_DIR's token.
+func ghWrapperPath(gh string) (string, error) {
+	wrapper, err := exec.LookPath("gh")
+	if err == nil {
+		wrapper, err = filepath.Abs(wrapper)
+	}
+	if err != nil {
+		return "", fmt.Errorf("no gh on PATH runs `legion gh` (%v), so the git gh runs would authenticate with GH_CONFIG_DIR's token; run it as a Legion pane's gh", err)
+	}
+	wrapperInfo, err := os.Stat(wrapper)
+	if err != nil {
+		return "", fmt.Errorf("stat %s: %w", wrapper, err)
+	}
+	if ghInfo, err := os.Stat(gh); err == nil && os.SameFile(wrapperInfo, ghInfo) {
+		return "", fmt.Errorf("the first gh on PATH is the real gh, %s, not the wrapper that runs `legion gh`, so the git gh runs would authenticate with GH_CONFIG_DIR's token; run it as a Legion pane's gh", wrapper)
+	}
+	return wrapper, nil
+}
+
+// withGitHubUseHTTPPath adds credential.https://github.com.useHttpPath=true to env's GIT_CONFIG_COUNT
+// entries, which git reads as it reads `-c`, so the git gh runs tells its credential helper the
+// repository's path, whose owner `legion git-credential` answers for. A GIT_CONFIG_COUNT that is no
+// count is refused.
+func withGitHubUseHTTPPath(env []string) ([]string, error) {
+	count := 0
+	for _, pair := range env {
+		if value, ok := strings.CutPrefix(pair, "GIT_CONFIG_COUNT="); ok {
+			n, err := strconv.Atoi(value)
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("GIT_CONFIG_COUNT is %q, which is no count, so git's configuration cannot be extended; unset it", value)
+			}
+			count = n
+		}
+	}
+	key, value := fmt.Sprintf("GIT_CONFIG_KEY_%d", count), fmt.Sprintf("GIT_CONFIG_VALUE_%d", count)
+	out := make([]string, 0, len(env)+3)
+	for _, pair := range env {
+		if name, _, _ := strings.Cut(pair, "="); name != "GIT_CONFIG_COUNT" && name != key && name != value {
+			out = append(out, pair)
+		}
+	}
+	return append(out, key+"=credential.https://github.com.useHttpPath", value+"=true", fmt.Sprintf("GIT_CONFIG_COUNT=%d", count+1)), nil
+}
+
 // ghTargetOf is the owner, lowercased, of the repository the gh command argv (gh's arguments,
 // without `gh`) acts on, empty when the command names none. It fails closed: whenever it cannot be
 // certain which owner the command targets it is an error, which names the argument it could not
-// place, and nothing is sent. A command that names no repository at all names no owner, and gh
-// then acts on the repository it reads from the working directory's git remotes (remotes), which
-// must all be the owner's whose token GH_CONFIG_DIR holds (workingDirectory); `gh --version`
-// alone, and a command whose last --help is true, name none either, since gh only prints.
+// place, and nothing is sent. `gh --version` alone, and a command whose last --help is true, name
+// none, since gh only prints.
 //
 // It reads the command as gh does, from gh's own help of each command on the way (help): the
 // path of subcommands down to the leaf the arguments run, every option's arity, and the arguments
@@ -92,14 +161,15 @@ func runGh(_ context.Context, args []string, _, stderr io.Writer) int {
 // an `<owner>`, a URL argument that is a github.com URL, a number argument written OWNER/REPO#N, a
 // search `<query>`'s repo:/owner:/user:/org: qualifiers, `gh api`'s endpoint (repos/<owner>/,
 // orgs/<owner>/, users/<owner>/, a search endpoint's q) and a GraphQL query's owner variable (`-F
-// owner=<login>`), and the options naming a repository, an owner or an issue by URL
-// (ghOptionKinds), and a github.com URL given any other option. They must all name one owner; two
-// are an error. Only when none names one does GH_REPO name the owner, for a leaf that reads it: one
-// with the inherited -R, and gh api when its endpoint or a typed field holds a placeholder gh fills
-// from it (:owner, {repo} …). A GraphQL query naming its repository otherwise, by a node id or in
-// the query text, names none gh could resolve, and runs as the issue owner's. GH_HOST naming
-// another host than github.com, where gh would send no token of the bundle's, and a GH_TOKEN or
-// GITHUB_TOKEN, which gh sends in place of any directory's token, are errors.
+// owner=<login>`), and the options naming a repository, an owner, a team or an issue by URL
+// (ghOptionKinds). So does the command's own repository when gh resolves it, because no argument
+// names it and the leaf reads one (fromOwnRepository): GH_REPO for a leaf that reads it, gh api's
+// :owner and {repo} placeholders among them, and otherwise every github.com repository the working
+// directory's git remotes name (remotes), read as gh reads them; a command naming no owner at all
+// counts those too. They must all name one owner; two are an error. A GraphQL query naming its
+// repository otherwise, by a node id or in the query text, names none gh could resolve. GH_HOST
+// naming another host than github.com, where gh would send no token of the bundle's, and a
+// GH_TOKEN or GITHUB_TOKEN, which gh sends in place of any directory's token, are errors.
 func ghTargetOf(argv []string, env map[string]string, help func(path []string) (string, error), remotes func() ([]ghRemote, error)) (string, error) {
 	if host := env["GH_HOST"]; host != "" && !strings.EqualFold(host, "github.com") {
 		return "", fmt.Errorf("GH_HOST is %q, another host than github.com, so it sends no token; unset GH_HOST", host)
@@ -161,23 +231,16 @@ func ghTargetOf(argv []string, env map[string]string, help func(path []string) (
 	if err := sel.fromCommand(cmd, parsed); err != nil {
 		return "", err
 	}
+	if err := sel.fromOwnRepository(cmd, parsed, env, remotes); err != nil {
+		return "", err
+	}
 	switch len(sel.owners) {
+	case 0:
+		return "", nil
 	case 1:
 		for owner := range sel.owners {
 			return owner, nil
 		}
-	case 0:
-		// gh takes the repository of a leaf with the inherited -R, and the one gh api's
-		// placeholders name, from GH_REPO when it is set, and every other from the working
-		// directory.
-		readsGHRepo := cmd.readsGHRepo()
-		if sel.api {
-			readsGHRepo = sel.readsBase
-		}
-		if readsGHRepo && env["GH_REPO"] != "" {
-			return repositoryOwner(env["GH_REPO"], "GH_REPO", sel.api)
-		}
-		return "", workingDirectory(env, remotes, sel.api)
 	}
 	var listed []string
 	for owner, what := range sel.owners {

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"archive/tar"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,8 +86,10 @@ type FetchReport struct {
 //
 // What the fetch does once it may start — at once, or once the cache is ready — shares one
 // FetchTimeout: the cache's stream, its verification and the delta from GitHub, or a clone or fetch
-// from GitHub, each bounded by what remains of it, and none started past it. So a fetch ends within
-// FetchBudget, however long it waited on the cache. Every attempt of a transfer from GitHub reads
+// from GitHub, each bounded by what remains of it, and none started past it. So the fetch's wait,
+// transfers and checks end within FetchBudget, however long it waited on the cache; the few local
+// git commands around them (reading refs, writing the feed's configuration) keep CommandTimeout
+// each and take moments. Every attempt of a transfer from GitHub reads
 // the provisioning token anew as it starts (FetchRequest.Token, fetchCredential.renew), so it
 // presents the token as its file stands then, not as it stood when the fetch began. A transfer
 // from GitHub that fails transiently (transientCloneFailure) is run again after the next of
@@ -127,19 +130,16 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	defer func() {
 		_ = credential.remove()
 	}()
-	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
-		return FetchReport{}, fmt.Errorf("create feed parent: %w", err)
-	}
-	present, err := pathExists(feed)
+	present, err := ownFeedRepository(feed, request.Repo, request.Clock.Now(), request.Log)
 	if err != nil {
 		return FetchReport{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
+		return FetchReport{}, fmt.Errorf("create feed parent: %w", err)
 	}
 	held := &fetchCredential{remote: credential, env: merge(credential.env, isolatedGitConfig), read: request.Token, held: []string{token}}
 	report := FetchReport{Feed: feed}
 	if present {
-		if err := RemoveStaleFeedLocks(feed, request.Clock.Now(), request.Log); err != nil {
-			return FetchReport{}, err
-		}
 		deadline := request.Clock.Now().Add(FetchTimeout)
 		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, held, deadline); err != nil {
 			return FetchReport{}, err
@@ -200,8 +200,13 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 	if err != nil {
 		return err
 	}
-	if err := transferWithRetries(ctx, run, request, transfer, held, deadline); err != nil {
+	if _, err := transferWithRetries(ctx, run, request, transfer, held, deadline); err != nil {
 		return err
+	}
+	if transfer.verb == "fetch" {
+		if err := followHead(ctx, run, request, gitDir, held, deadline); err != nil {
+			return err
+		}
 	}
 	refsAfter, err := feedRefs(ctx, run, gitDir, true)
 	if err != nil {
@@ -221,6 +226,44 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 		if _, kept := refsAfter[ref]; !kept {
 			r.Refs++
 		}
+	}
+	return nil
+}
+
+// followHead points the bare repository gitDir's HEAD at the branch GitHub's HEAD names now
+// (`git ls-remote --symref`), under the fetch's credential, retries and deadline, and logs the
+// move when there is one. A fetch never moves HEAD and prunes the branches GitHub deleted, so a
+// repository whose default branch GitHub renamed would keep a HEAD naming a branch that is gone:
+// the cache could publish no head, and an issue's clone would check nothing out. A clone takes
+// GitHub's HEAD itself. A repository GitHub answers with no default branch (nothing pushed yet)
+// keeps its HEAD.
+func followHead(ctx context.Context, run Runner, request FetchRequest, gitDir string, held *fetchCredential, deadline time.Time) error {
+	read := feedTransfer{verb: "ls-remote", argv: []string{"git", "--git-dir=" + gitDir, "ls-remote", "--symref", GitHubURL(request.Repo), "HEAD"}}
+	result, err := transferWithRetries(ctx, run, request, read, held, deadline)
+	if err != nil {
+		return fmt.Errorf("read GitHub's default branch of %s: %w", request.Repo, err)
+	}
+	target := ""
+	for _, line := range strings.Split(result.Stdout, "\n") {
+		if ref, rest, ok := strings.Cut(strings.TrimPrefix(line, "ref: "), "\t"); ok && strings.HasPrefix(line, "ref: ") && rest == "HEAD" {
+			target = ref
+		}
+	}
+	if target == "" {
+		return nil
+	}
+	if !strings.HasPrefix(target, "refs/heads/") {
+		return fmt.Errorf("GitHub's HEAD of %s names %q, not a branch", request.Repo, target)
+	}
+	current, err := runCommandTimeout(ctx, run, []string{"git", "--git-dir=" + gitDir, "symbolic-ref", "--quiet", "HEAD"}, isolatedGitConfig, "", run.Timeout())
+	if err != nil {
+		return err
+	}
+	if was := strings.TrimSpace(current.Stdout); was != target {
+		if _, err := FeedGit(ctx, run, gitDir, "symbolic-ref", "HEAD", target); err != nil {
+			return err
+		}
+		request.Log(fmt.Sprintf("the default branch of %s is now %s (HEAD named %s)", request.Repo, strings.TrimPrefix(target, "refs/heads/"), cmp.Or(was, "nothing")))
 	}
 	return nil
 }
@@ -277,11 +320,13 @@ const CachePoll = 10 * time.Second
 // first clone is bounded by FetchTimeout, and the rest is its pod's scheduling and volume.
 const CacheWaitTimeout = FetchTimeout + 10*time.Minute
 
-// FetchBudget is the whole of a fetch, end to end: at most CacheWaitTimeout waiting for the
-// repository cache, then FetchTimeout for the cache's stream, its verification and the delta from
-// GitHub together. The Sandbox runtime allows a launching pod's provisioning this much
-// (sandbox.Runtime.ProvisionBound), so a fetch that runs out of it fails, naming why, before the
-// launch would give up on it.
+// FetchBudget bounds a fetch's waits, transfers and checks, end to end: at most CacheWaitTimeout
+// waiting for the repository cache, then FetchTimeout for the cache's stream, its verification and
+// the delta from GitHub together. The few local git commands around them keep CommandTimeout each
+// and take moments, which the launch's boot timeout past ProvisionBound covers. The Sandbox runtime
+// allows a launching pod's provisioning this much and the shared clone's (sandbox.Runtime.
+// ProvisionBound), so a fetch that runs out of it fails, naming why, before the launch would give
+// up on it.
 const FetchBudget = CacheWaitTimeout + FetchTimeout
 
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
@@ -585,44 +630,45 @@ func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Re
 
 // transferWithRetries runs transfer under the one-shot credential held until it succeeds, retrying
 // a transient failure as Fetch says, each attempt bounded by what remains before deadline and run
-// on the provisioning token as it stands when the attempt starts (renew).
-func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, held *fetchCredential, deadline time.Time) error {
+// on the provisioning token as it stands when the attempt starts (renew). It answers the attempt
+// that succeeded.
+func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, held *fetchCredential, deadline time.Time) (Result, error) {
 	now := request.Clock.Now()
 	if _, err := remaining(request, deadline, "the "+transfer.verb+" from GitHub"); err != nil {
-		return err
+		return Result{}, err
 	}
 	for attempt := 1; ; attempt++ {
 		if err := held.renew(); err != nil {
-			return fmt.Errorf("%s attempt %d: %w", transfer.verb, attempt, err)
+			return Result{}, fmt.Errorf("%s attempt %d: %w", transfer.verb, attempt, err)
 		}
 		result, runErr := runCommandTimeout(ctx, run, transfer.argv, held.env, "", deadline.Sub(now))
 		result.Stderr = held.scrub(result.Stderr)
 		_, failed := checkedResult(transfer.argv, result, runErr)
 		if failed == nil {
-			return nil
+			return result, nil
 		}
 		if runErr != nil || !transientCloneFailure(result) {
-			return failed
+			return Result{}, failed
 		}
 		if attempt > len(fetchBackoff) {
-			return fmt.Errorf("%w\n%s attempt %d failed, and the fetch retries a %s at most %d times", failed, transfer.verb, attempt, transfer.verb, len(fetchBackoff))
+			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and the fetch retries a %s at most %d times", failed, transfer.verb, attempt, transfer.verb, len(fetchBackoff))
 		}
 		wait := fetchBackoff[attempt-1]
 		if !request.Clock.Now().Add(wait).Before(deadline) {
-			return fmt.Errorf("%w\n%s attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
+			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
 		}
 		request.Log(fmt.Sprintf("%s attempt %d failed; retrying in %s: %s", transfer.verb, attempt, wait,
 			strings.ReplaceAll(strings.TrimSpace(result.Stderr), "\n", " | ")))
 		if transfer.destination != "" {
 			if err := os.RemoveAll(transfer.destination); err != nil {
-				return fmt.Errorf("remove what %s attempt %d left at %s: %w", transfer.verb, attempt, transfer.destination, err)
+				return Result{}, fmt.Errorf("remove what %s attempt %d left at %s: %w", transfer.verb, attempt, transfer.destination, err)
 			}
 		}
 		if err := request.Clock.Sleep(ctx, wait); err != nil {
-			return fmt.Errorf("%w\nthe wait before %s attempt %d ended: %w", failed, transfer.verb, attempt+1, err)
+			return Result{}, fmt.Errorf("%w\nthe wait before %s attempt %d ended: %w", failed, transfer.verb, attempt+1, err)
 		}
 		if now = request.Clock.Now(); !now.Before(deadline) {
-			return fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
+			return Result{}, fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
 		}
 	}
 }

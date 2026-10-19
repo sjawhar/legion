@@ -24,8 +24,9 @@ import (
 // clones the local bare remote instead, whose file transport joins the https the runner allows,
 // after appending the one-shot credential it was handed, the token file's path and what it held,
 // to WINIT_CREDENTIAL_LOG; its fetch from github.com/acme/widgets into a bare repository (a feed
-// that holds the repository, or one unpacked from the repository cache) fetches from that remote
-// in the same way. With WINIT_CLONE_FAILURES set (failClones), the clone first counts itself in
+// that holds the repository, or one unpacked from the repository cache), and that fetch's read of
+// GitHub's HEAD (`ls-remote --symref`), reach that remote in the same way. With
+// WINIT_CLONE_FAILURES set (failClones), the clone first counts itself in
 // that directory's `attempts`, and an attempt whose number names a file there fails as git does:
 // it leaves a partial clone at its destination, writes the file to stderr with @TOKEN@ replaced by
 // the token it was handed, and exits 128, git's fatal status. Every other invocation is the real
@@ -48,6 +49,10 @@ fi
 if [ "$2 $3 $4 $5" = "fetch --prune --quiet https://github.com/acme/widgets" ]; then
 	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
 	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" fetch --prune --quiet "$WINIT_REMOTE" "$6"
+fi
+if [ "$2 $3 $4 $5" = "ls-remote --symref https://github.com/acme/widgets HEAD" ]; then
+	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" "$1" ls-remote --symref "$WINIT_REMOTE" HEAD
 fi
 exec "$WINIT_REAL_GIT" "$@"
 `
@@ -585,8 +590,8 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	if main := v.git(t, "--git-dir="+feed, "rev-parse", "refs/heads/main"); main != head {
 		t.Fatalf("the feed's main is %s, want the remote's %s", main, head)
 	}
-	if credential := logLines(t, v.credentialLog); len(credential) != 1 || !strings.HasSuffix(credential[0], " ghs_test") {
-		t.Fatalf("GitHub was reached with %q, want one fetch with the provisioning token", credential)
+	if credential := logLines(t, v.credentialLog); len(credential) != 2 || !strings.HasSuffix(credential[0], " ghs_test") || !strings.HasSuffix(credential[1], " ghs_test") {
+		t.Fatalf("GitHub was reached with %q, want the delta's fetch and its read of GitHub's HEAD, each with the provisioning token", credential)
 	}
 	holdsNoToken(t, v.feed, "after fetch")
 

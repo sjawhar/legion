@@ -134,12 +134,12 @@ func (r *liveRig) checkCacheSecondPod() error {
 }
 
 // cache-lost-volume: with the cache warm, the harness pushes legion/S4A-9 onto the repository as a
-// commit of its own — a file only that commit adds, on top of the default branch's head — so the
-// branch's commit is neither the default branch's nor the head the cache serves (deleted when the
-// harness ends). cache-b's Sandbox and volume are then deleted while no runtime runs. Relaunched
-// with the branch as its recovery source, the new pod fills its new feed from the cache again — the
-// branch the cache has not fetched arriving in GitHub's delta — and provisions the workspace on
-// the branch: its @- is that commit, and the file that commit added is in the workspace.
+// commit of its own — a file only that commit adds, on top of the default branch's head — and
+// checks inside the cache's pod that its clone lacks that commit (deleted when the harness ends).
+// cache-b's Sandbox and volume are then deleted while no runtime runs. Relaunched with the branch as
+// its recovery source, the new pod fills its new feed from the cache again, and, while the cache
+// still lacks the commit, GitHub's delta brings it (more than no bytes); the workspace is
+// provisioned on the branch: its @- is that commit, and the file that commit added is in it.
 func (r *liveRig) checkCacheLostVolume() error {
 	status, err := r.awaitCacheReady()
 	if err != nil {
@@ -173,7 +173,10 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if branchHead == base || branchHead == cached {
 		return fmt.Errorf("the pushed %s is %s, which the default branch (%s) or the cache (%s) already holds", dir.Bookmark, branchHead, base, cached)
 	}
-	note("operator", "pushed %s on %s at %s, adding %s on the default branch's %s (the cache serves %s); deleted when the run ends", dir.Bookmark, r.env.repo, branchHead, marker, base, cached)
+	if held, err := r.cacheHolds(status.Sandbox, branchHead); err != nil || held {
+		return fmt.Errorf("the cache %s holds the just-pushed %s already (%v), so the recovery would prove nothing of GitHub's delta", status.Sandbox, branchHead, err)
+	}
+	note("operator", "pushed %s on %s at %s, adding %s on the default branch's %s (the cache serves %s and lacks %s); deleted when the run ends", dir.Bookmark, r.env.repo, branchHead, marker, base, cached, branchHead)
 
 	r.stopRuntime()
 	name := SandboxName(c.token)
@@ -216,6 +219,17 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if err := r.assertCacheFed(c); err != nil {
 		return err
 	}
+	if held, err := r.cacheHolds(status.Sandbox, branchHead); err != nil {
+		return err
+	} else if !held {
+		fetched, err := r.fetchLog(name)
+		if err != nil {
+			return err
+		}
+		if match := cacheStreamLine.FindStringSubmatch(fetched); match == nil || printedCount(match[3]) <= 0 {
+			return fmt.Errorf("the cache still lacks %s, yet the recovered pod's fetch brought nothing from GitHub: %s", branchHead, strings.TrimSpace(fetched))
+		}
+	}
 	log, err := r.initLog(name)
 	if err != nil {
 		return err
@@ -237,6 +251,25 @@ func (r *liveRig) checkCacheLostVolume() error {
 	note("runtime", "Spawn(%s) with WorkspaceRecoveredFrom %s into a new Sandbox and volume", c.token, dir.Bookmark)
 	note("operator", "init log: %s; workspace @- %s = %s, not the default branch's %s; %s holds the pushed line", oneLine(log), parent, dir.Bookmark, base, marker)
 	return nil
+}
+
+// cacheHolds is whether the cache name's clone, asked inside its own pod, holds the object id.
+func (r *liveRig) cacheHolds(name, id string) (bool, error) {
+	clone, err := workspace.FeedRepository(CacheRoot, r.env.repo)
+	if err != nil {
+		return false, err
+	}
+	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", `if git --git-dir="$1" cat-file -e "$2"; then echo held; else echo absent; fi`, "sh", clone, id)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(out) {
+	case "held":
+		return true, nil
+	case "absent":
+		return false, nil
+	}
+	return false, fmt.Errorf("asking the cache %s whether it holds %s answered %q", name, id, strings.TrimSpace(out))
 }
 
 // pushRunCommit puts branch on the run's repository at a new commit on parent that adds path

@@ -271,7 +271,7 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
 
 // Contract 31: every recorded issue carries the repository it targets and its default branch, its
 // pull request the repository it is in, and the state the project's repository mapping as the
-// daemon serves it, each left-out repository named with the App it lacks. Contract 30: each mapped
+// daemon serves it, each left-out repository named with the App it lacks. Contract 32: each mapped
 // repository carries its cache under the Kubernetes runtime, Ready with its last health read or
 // the read's failure, and the caches of repositories no longer mapped are listed with when they go.
 // A state without the mapping, or without its caches, is refused.

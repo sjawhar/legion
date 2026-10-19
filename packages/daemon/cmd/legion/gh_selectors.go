@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -18,11 +17,14 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
-// selectors is every owner a command names, each with the argument that names it, and whether gh
-// api's arguments hold a placeholder gh fills from the command's own repository (readsBase).
+// selectors is every owner a command names, each with the argument that names it; whether an
+// argument names the command's own repository (targeted), so gh resolves none of its own; and
+// whether gh api's arguments hold a placeholder gh fills from the command's own repository
+// (readsBase).
 type selectors struct {
 	api       bool
 	owners    map[string]string
+	targeted  bool
 	readsBase bool
 }
 
@@ -52,10 +54,11 @@ func (s *selectors) owner(value, what string) error {
 // place as that repository's.
 var ghRepositoryNumber = regexp.MustCompile(`^([^/\s#]+/[^/\s#]+)#[0-9]+$`)
 
-// fromCommand collects the owners the leaf's arguments and options name.
+// fromCommand collects the owners the leaf's arguments and options name, and whether one names
+// the command's own repository: -R, a repository, owner or URL argument, or OWNER/REPO#N.
 func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 	leaf := cmd.quoted()
-	targeted, second := len(parsed.values["repo"]) > 0 && cmd.readsGHRepo(), ""
+	s.targeted = len(parsed.values["repo"]) > 0 && cmd.readsGHRepo()
 	if s.api {
 		if err := s.fromAPI(parsed); err != nil {
 			return err
@@ -75,7 +78,7 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 				if err := s.repository(ghRepositoryNumber.FindStringSubmatch(arg)[1], "the issue or pull request "+arg); err != nil {
 					return err
 				}
-				targeted = true
+				s.targeted = true
 				continue
 			}
 			switch kind {
@@ -83,31 +86,32 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 				if err := s.repository(arg, "the repository "+arg); err != nil {
 					return err
 				}
-				targeted = true
+				s.targeted = true
 			case "new-repository":
 				// OWNER/NAME names the new repository's owner; a name alone, none.
 				if strings.Contains(arg, "/") {
 					if err := s.repository(arg, "the repository "+arg); err != nil {
 						return err
 					}
-					targeted = true
+					s.targeted = true
 				}
 			case "second-repository":
+				// Another repository the command acts on beside its own, which gh resolves
+				// (fromOwnRepository).
 				if err := s.repository(arg, "the repository "+arg); err != nil {
 					return err
 				}
-				second = arg
 			case "owner":
 				if err := s.owner(arg, "the owner "+arg); err != nil {
 					return err
 				}
-				targeted = true
+				s.targeted = true
 			case "url":
 				if isWebURL(arg) {
 					if err := s.repository(arg, "the URL "+arg); err != nil {
 						return err
 					}
-					targeted = true
+					s.targeted = true
 				}
 			case "query":
 				query = append(query, arg)
@@ -117,13 +121,27 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 			return err
 		}
 	}
-	if err := s.fromOptions(cmd, parsed); err != nil {
-		return err
+	return s.fromOptions(cmd, parsed)
+}
+
+// fromOwnRepository collects the owner of the repository gh takes as the command's own when no
+// argument names it and the leaf reads one (readsOwnRepository), and, for a command naming no
+// owner at all, wherever gh might: GH_REPO for a leaf that reads it, gh api's base placeholders
+// among them, and otherwise the working directory's git remotes (fromWorkingDirectory). So an
+// option or a second repository naming one owner while gh acts on another's repository names
+// two owners, and is refused.
+func (s *selectors) fromOwnRepository(cmd *ghCommand, parsed ghArgs, env map[string]string, remotes func() ([]ghRemote, error)) error {
+	reads := !s.targeted && cmd.readsOwnRepository(len(parsed.positionals))
+	if s.api {
+		reads = s.readsBase
 	}
-	if second != "" && cmd.readsGHRepo() && !targeted {
-		return cannotPlace(second, "names a second repository while the command's own repository is not named", false)
+	if !reads && len(s.owners) > 0 {
+		return nil
 	}
-	return nil
+	if repo := env["GH_REPO"]; repo != "" && (cmd.readsGHRepo() || (s.api && s.readsBase)) {
+		return s.repository(repo, "GH_REPO "+repo)
+	}
+	return s.fromWorkingDirectory(remotes)
 }
 
 // fromAPI collects the owners gh api's endpoint and fields name: the endpoint's (endpoint); a
@@ -172,7 +190,7 @@ func (s *selectors) fromAPI(parsed ghArgs) error {
 // fromOptions collects the owners the leaf's options name, by what each selects (ghOptionKind): a
 // repository or an owner, each of a comma-separated list; a repository of --org's, a name alone
 // that organization's; github.com alone as a host; a web URL; nothing. An option this cannot read
-// is refused, and a github.com web URL given any other option is a selector too.
+// is refused.
 func (s *selectors) fromOptions(cmd *ghCommand, parsed ghArgs) error {
 	orgs := parsed.values["org"]
 	for _, name := range slices.Sorted(maps.Keys(parsed.values)) {
@@ -181,15 +199,10 @@ func (s *selectors) fromOptions(cmd *ghCommand, parsed ghArgs) error {
 			continue
 		}
 		for _, value := range parsed.values[name] {
-			if flag.selects == "unknown" {
-				return cannotPlace("--"+name+" "+value, "is an option whose help names a repository, an owner or a URL in a way this does not know", s.api)
-			}
-			if flag.selects == "" {
-				if isWebURL(value) && isGitHubWebHost(value) {
-					if err := s.repository(value, "--"+name+" "+value); err != nil {
-						return err
-					}
-				}
+			switch flag.selects {
+			case "unknown":
+				return cannotPlace("--"+name+" "+value, "is an option whose help names a repository, an owner, a team or a URL in a way this does not know", s.api)
+			case "", "nothing":
 				continue
 			}
 			for _, item := range strings.Split(value, ",") {
@@ -335,12 +348,6 @@ func isWebURL(s string) bool {
 	return err == nil && (u.Scheme == "http" || u.Scheme == "https")
 }
 
-// isGitHubWebHost says whether the URL s is github.com's.
-func isGitHubWebHost(s string) bool {
-	u, err := url.Parse(s)
-	return err == nil && isGitHubHost(u.Hostname())
-}
-
 // isGitHubHost says whether host is github.com as gh reads a host: github.com, or one of its
 // subdomains (www.github.com, ssh.github.com), in any case.
 func isGitHubHost(host string) bool {
@@ -349,16 +356,17 @@ func isGitHubHost(host string) bool {
 }
 
 // repositoryOwner is the owner, lowercased, of a repository named as gh names one — OWNER/REPO,
-// HOST/OWNER/REPO, or a github.com URL — refused when it names no owner, another host, or an
-// owner that is no GitHub login.
+// HOST/OWNER/REPO, or a github.com URL, its host github.com or a subdomain as gh normalizes it
+// (isGitHubHost) — refused when it names no owner, another host, or an owner that is no GitHub
+// login.
 func repositoryOwner(value, what string, api bool) (string, error) {
 	host, rest := "", value
 	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		host, rest = parsed.Host, strings.Trim(parsed.Path, "/")
+		host, rest = parsed.Hostname(), strings.Trim(parsed.Path, "/")
 	} else if parts := strings.Split(strings.Trim(value, "/"), "/"); len(parts) >= 3 {
 		host, rest = parts[0], strings.Join(parts[1:], "/")
 	}
-	if host != "" && !strings.EqualFold(host, "github.com") && !strings.EqualFold(host, "www.github.com") {
+	if host != "" && !isGitHubHost(host) {
 		return "", cannotPlace(value, "names another host than github.com", api)
 	}
 	parts := strings.Split(rest, "/")
@@ -393,14 +401,46 @@ func (r ghRemote) what() string {
 	return fmt.Sprintf("remote %q (%s)", r.name, r.url)
 }
 
-// ghSSHRemote is a remote in scp-like form, [USER@]HOST:PATH.
-var ghSSHRemote = regexp.MustCompile(`^(?:[^@/:]+@)?([^/:]+):(.*)$`)
+// ghRemoteSchemes are the URL schemes gh's git.ParseURL reads as they are; a remote with no such
+// prefix and a colon it reads as scp-like ssh.
+var ghRemoteSchemes = []string{"ssh:", "git+ssh:", "git:", "http:", "git+https:", "https:", "ftp:", "ftps:", "file:"}
 
-// owner is the owner, lowercased, of the github.com repository the remote setting names, "" for
-// one naming none gh reads: a remote on another host by https or git, or a local path, and a
-// gh-resolved "base", whose remote's own URL is read beside it. why says why a setting is one this
-// cannot read: an ssh remote on another host, which gh may read as an alias of github.com from
-// ssh's configuration, and one naming no owner that is a GitHub login.
+// ghParseGitURL reads a git remote's URL as gh does (cli/cli's git.ParseURL, gh 2.65.0 through
+// 2.98.0): a value with none of ghRemoteSchemes' prefixes, a colon and no backslash becomes an ssh
+// URL, its first colon the path's first slash (`[user@]host:path`, `github.com://owner/repo`
+// among them); git+https and git+ssh are https and ssh; and an ssh URL's path loses a doubled
+// leading slash and its host its port. gh then takes the repository from the host and path
+// whatever the scheme.
+func ghParseGitURL(raw string) (*url.URL, error) {
+	known := slices.ContainsFunc(ghRemoteSchemes, func(scheme string) bool { return strings.HasPrefix(raw, scheme) })
+	if !known && strings.Contains(raw, ":") && !strings.Contains(raw, `\`) {
+		raw = "ssh://" + strings.Replace(raw, ":", "/", 1)
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	switch u.Scheme {
+	case "git+https":
+		u.Scheme = "https"
+	case "git+ssh":
+		u.Scheme = "ssh"
+	}
+	if u.Scheme == "ssh" {
+		if strings.HasPrefix(u.Path, "//") {
+			u.Path = strings.TrimPrefix(u.Path, "/")
+		}
+		u.Host = strings.TrimSuffix(u.Host, ":"+u.Port())
+	}
+	return u, nil
+}
+
+// owner is the owner, lowercased, of the github.com repository the remote setting names, read as
+// gh reads it (ghParseGitURL), "" for one naming none gh reads: a remote with no host (a local
+// path) or on another host, and a gh-resolved "base", whose remote's own URL is read beside it. why
+// says why a setting is one this cannot read: a URL gh's parser refuses, an ssh remote on another
+// host, which gh may read as an alias of github.com from ssh's configuration, and a github.com one
+// naming no OWNER/REPO whose owner is a GitHub login.
 func (r ghRemote) owner() (owner, why string) {
 	if r.resolved != "" {
 		if r.resolved == "base" {
@@ -412,74 +452,45 @@ func (r ghRemote) owner() (owner, why string) {
 		}
 		return owner, ""
 	}
-	var host, path string
-	ssh := false
-	if parsed, err := url.Parse(r.url); err == nil && parsed.Scheme != "" && strings.Contains(r.url, "://") {
-		switch strings.ToLower(parsed.Scheme) {
-		case "https", "http", "git":
-		case "ssh", "git+ssh", "ssh+git":
-			ssh = true
-		default:
-			return "", ""
-		}
-		host, path = parsed.Hostname(), parsed.Path
-	} else if m := ghSSHRemote.FindStringSubmatch(r.url); m != nil {
-		host, path, ssh = m[1], m[2], true
-	} else {
-		return "", ""
-	}
+	u, err := ghParseGitURL(r.url)
 	switch {
-	case isGitHubHost(host):
-	case ssh:
+	case err != nil:
+		return "", "is a URL this cannot read as gh does"
+	case u.Hostname() == "":
+		return "", ""
+	case u.Scheme == "ssh" && !isGitHubHost(u.Hostname()):
 		return "", "is an ssh remote whose host gh may read as github.com through ssh's configuration"
-	default:
+	case !isGitHubHost(u.Hostname()):
 		return "", ""
 	}
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	if owner = strings.ToLower(parts[0]); len(parts) < 2 || !ghconfig.IsOwner(owner) {
-		return "", "names no owner that is a GitHub login"
+	parts := strings.SplitN(strings.Trim(u.Path, "/"), "/", 3)
+	if owner = strings.ToLower(parts[0]); len(parts) != 2 || parts[1] == "" || !ghconfig.IsOwner(owner) {
+		return "", "names no OWNER/REPO whose owner is a GitHub login"
 	}
 	return owner, ""
 }
 
-// ghTokenOwner is the owner whose gh directory under LEGION_GH_OWNERS_DIR GH_CONFIG_DIR names, the
-// owner whose token gh sends for a command naming no repository; "" for none (an ownerless
-// controller's GH_CONFIG_DIR, the bundle root).
-func ghTokenOwner(env map[string]string) string {
-	dir := filepath.Clean(env["GH_CONFIG_DIR"])
-	if filepath.Dir(dir) != filepath.Clean(env["LEGION_GH_OWNERS_DIR"]) || !ghconfig.IsOwner(filepath.Base(dir)) {
-		return ""
-	}
-	return filepath.Base(dir)
-}
-
-// workingDirectory refuses a command naming no repository unless every github.com repository the
-// working directory's git remotes name (remotes) is the owner's whose token gh sends for it
-// (ghTokenOwner): gh takes such a command's repository from those remotes, an `upstream` before an
-// `origin` and a gh-resolved one before either, so a clone of another owner's repository, or a
-// workspace with another owner's remote beside its own, would get the wrong owner's token. A
-// working directory that is no git repository names none.
-func workingDirectory(env map[string]string, remotes func() ([]ghRemote, error), api bool) error {
+// fromWorkingDirectory collects the owner of every github.com repository the working directory's
+// git remotes name (remotes): gh takes the repository of a command it resolves none for from
+// those remotes, an `upstream` before an `origin` and a gh-resolved one before either, so every
+// one counts, and a workspace whose remotes name two owners names two. A remote this cannot read
+// is refused; a working directory that is no git repository names none.
+func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) error {
 	advice := "name the repository with -R <owner>/<repo>"
-	if api {
+	if s.api {
 		advice = "name it in the endpoint, repos/<owner>/<repo>/…"
 	}
 	listed, err := remotes()
 	if err != nil {
-		return fmt.Errorf("cannot tell which repository the command targets: the working directory's git remotes, from which gh takes the repository of a command naming none, cannot be read (%v), so it sends no token; %s", err, advice)
+		return fmt.Errorf("cannot tell which repository the command targets: the working directory's git remotes, from which gh takes the command's own repository, cannot be read (%v), so it sends no token; %s", err, advice)
 	}
-	token := ghTokenOwner(env)
 	for _, remote := range listed {
 		owner, why := remote.owner()
 		if why != "" {
 			return fmt.Errorf("cannot tell which repository the command targets: the working directory's %s %s, so it sends no token; %s", remote.what(), why, advice)
 		}
-		if owner != "" && owner != token {
-			whose := "no owner's"
-			if token != "" {
-				whose = token + "'s"
-			}
-			return fmt.Errorf("cannot tell which repository the command targets: the working directory's %s names %s, and gh takes the repository of a command naming none from there while it sends %s token, so it sends no token; %s", remote.what(), owner, whose, advice)
+		if owner != "" {
+			s.add(owner, "the working directory's "+remote.what())
 		}
 	}
 	return nil
