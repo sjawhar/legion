@@ -436,6 +436,156 @@ func TestHandoffCompleteRecordsRetroAtTheCommitItStandsOn(t *testing.T) {
 	}
 }
 
+// seedCheck records key's production check on acme/widgets#42 at look 2 — open, with its look
+// open, unless closed — as the close and a pending first look leave it.
+func seedCheck(t *testing.T, h *harness, key string, closed bool) {
+	t.Helper()
+	opened := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+	woke := opened.Add(time.Hour)
+	check := record.ProductionCheck{
+		Issue: key, Project: testProject, Tree: key, Repo: "acme/widgets", Number: 42, MergeSHA: "a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0",
+		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 2, LookOpen: true, LookWakeAt: &woke,
+		LastWakeKind: "issue.deployed", LastWakeDetail: "run 7 completed 2026-10-19T07:00:00Z", LastWakeAt: &woke,
+	}
+	if closed {
+		check.LookOpen, check.ClosedAt, check.Outcome = false, &woke, record.CheckRecorded
+	}
+	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return record.NewStore().PutProductionCheck(context.Background(), tx, check)
+	})
+	if err != nil {
+		t.Fatalf("seed the production check of %s: %v", key, err)
+	}
+}
+
+// lastCheckReport is the newest check report facts recorded.
+func lastCheckReport(t *testing.T, facts *factRecorder) intake.CheckReport {
+	t.Helper()
+	recorded := facts.recorded()
+	if len(recorded) == 0 {
+		t.Fatal("no fact reached the intake")
+	}
+	fact, ok := recorded[len(recorded)-1].(intake.CheckReport)
+	if !ok {
+		t.Fatalf("the fact recorded is %T, want a check report", recorded[len(recorded)-1])
+	}
+	return fact
+}
+
+// The implementer's call on its closed issue, whose production check is open, is a report on the
+// check's current look: it carries no commit (the look pushed nothing) and one of the three
+// verdicts, and the fact is the check report of that look, not a phase completion. A claim that
+// took no task reports all the same — the check fences itself on the look, not on a run — and
+// nothing reads GitHub. A repeated report of the same look and verdict is answered as already
+// received.
+func TestHandoffCompleteRecordsACheckReportOfTheOpenLookWithoutACommit(t *testing.T) {
+	github := newHandoffGitHub(t)
+	h, facts := newHandoffHarness(t, github, nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	seedCheck(t, h, "LEGION-208", false)
+	token, boot := h.launch("LEGION-208", claim.RoleImplementer)
+	registration := h.registered(boot, "ses_implementer_untasked")
+	implementer := liveClaim{h: h, token: token, session: "ses_implementer_untasked", secret: registration.Secret, tree: "LEGION-208", issue: "LEGION-208"}
+
+	for _, verdict := range []string{"pending", "fail", "pass"} {
+		answer := completion(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked: " + verdict, Verdict: verdict}))
+		if answer.Note != "" {
+			t.Fatalf("answer = %+v, want no note on a check report", answer)
+		}
+		want := intake.CheckReport{Issue: "LEGION-208", Claim: token, Look: 2, Verdict: verdict, Summary: "looked: " + verdict}
+		if got := lastCheckReport(t, facts); got != want {
+			t.Fatalf("check report = %+v, want %+v", got, want)
+		}
+	}
+	if got := facts.recorded(); len(got) != 3 {
+		t.Fatalf("facts = %#v, want the three reports", got)
+	}
+	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked again", Verdict: "pass"}), http.StatusConflict, "HANDOFF_ALREADY_RECORDED"); !strings.Contains(message, "look 2") {
+		t.Fatalf("refusal = %q, want it to name the look", message)
+	}
+	if got := facts.recorded(); len(got) != 3 {
+		t.Fatalf("facts = %#v, want the repeated report deduplicated", got)
+	}
+	github.mu.Lock()
+	defer github.mu.Unlock()
+	if len(github.bearers) != 0 {
+		t.Fatalf("GitHub was called %d times for a check report, want never", len(github.bearers))
+	}
+}
+
+// A check report names its verdict: one of pass, pending or fail, and nothing else, with nothing
+// recorded otherwise. Ready stays the merger's alone, as on every other call.
+func TestHandoffCompleteRefusesACheckReportWithoutOneOfTheThreeVerdicts(t *testing.T) {
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	seedCheck(t, h, "LEGION-208", false)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	for _, verdict := range []string{"", "maybe"} {
+		if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: verdict}), http.StatusBadRequest, "CHECK_VERDICT_REQUIRED"); message != "a production check report names a verdict of pass, pending or fail" {
+			t.Fatalf("refusal of verdict %q = %q, want the three named", verdict, message)
+		}
+	}
+	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass", Ready: true}), http.StatusBadRequest, "READY_ROLE_FORBIDDEN")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want none", got)
+	}
+}
+
+// The implementer on a done issue with no open production check — none ever opened, or the check
+// closed on an earlier look — reports on nothing: the call is refused by name, with nothing
+// recorded, rather than read as a completion of a phase no role works.
+func TestHandoffCompleteRefusesTheImplementerOnADoneIssueWithNoOpenCheck(t *testing.T) {
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass"}), http.StatusConflict, "CHECK_NOT_OPEN"); message != "LEGION-208 has no open production check; this completion changed nothing" {
+		t.Fatalf("refusal with no check = %q", message)
+	}
+	seedCheck(t, h, "LEGION-208", true)
+	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pass"}), http.StatusConflict, "CHECK_NOT_OPEN")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want none", got)
+	}
+}
+
+// The engine's refusal of a check report — the look the route read ended before the report landed —
+// is answered as the engine wrote it.
+func TestHandoffCompleteAnswersTheEnginesRefusalOfACheckReport(t *testing.T) {
+	h, _ := newHandoffHarness(t, newHandoffGitHub(t), nil, &intake.Refusal{Status: http.StatusConflict, Code: "CHECK_LOOK_NOT_OPEN", Message: "look 2 of LEGION-208's production check is not open"})
+	seedIssueAt(t, h, "LEGION-208", phase.Done)
+	seedCheck(t, h, "LEGION-208", false)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "looked", Verdict: "pending"}), http.StatusConflict, "CHECK_LOOK_NOT_OPEN"); message != "look 2 of LEGION-208's production check is not open" {
+		t.Fatalf("refusal = %q, want the engine's sentence", message)
+	}
+}
+
+// The commit is a phase completion's field, read once the grant is redeemed and the record says
+// the call is one: an expired grant is refused before the missing commit is, a phase completion
+// without a commit is still refused for it, and an implementer's verdict on a phase completion is
+// still a tester's field.
+func TestHandoffCompleteReadsTheCommitOnlyForAPhaseCompletionAfterTheGrant(t *testing.T) {
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	h, facts := newHandoffHarness(t, newHandoffGitHub(t), credential.New(func() time.Time { return now }), nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	expired := implementer.grant(t)
+	now = now.Add(time.Minute)
+	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: expired, Summary: "implemented"}), http.StatusForbidden, "GRANT_EXPIRED")
+	now = now.Add(-time.Minute)
+
+	if message := refused(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented"}), http.StatusBadRequest, "MISSING_FIELD"); message != "commit is required" {
+		t.Fatalf("a phase completion naming no commit was refused with %q; want the field named", message)
+	}
+	assertFailure(t, h.complete(HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Verdict: "pending", Commit: headSHA}), http.StatusBadRequest, "VERDICT_ROLE_FORBIDDEN")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want none", got)
+	}
+}
+
 // READY is read against the issue's pull request on GitHub, so a merger of a project the
 // configuration names no repository for is refused before GitHub is called, and nothing is
 // recorded. Configuration requires a repository, so this is a guard, not a state a running daemon

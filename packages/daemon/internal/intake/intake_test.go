@@ -429,6 +429,119 @@ func TestAJobEnvelopeIsNoFact(t *testing.T) {
 	}
 }
 
+// Dispatch's own start is not an issue event: it arrives on its one subject, read before the issue
+// subjects, and decodes to the build commit it names. A start naming no commit — a Dispatch built
+// without one stamped — is no fact and no poison, since there is nothing to compare; an envelope
+// from another source on that subject, or a payload that is not the start's object, is poison.
+func TestDecodeServerStartedNamesTheBuildOrIsNoFact(t *testing.T) {
+	const build = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+	for _, tc := range []struct {
+		name    string
+		source  string
+		payload string
+		want    Fact
+		wantErr string
+	}{
+		{name: "a stamped build", source: "dispatch", payload: `{"commit":"` + build + `","started_at":"2026-10-19T06:00:00Z"}`, want: ServerStarted{Commit: build}},
+		{name: "an empty commit", source: "dispatch", payload: `{"commit":"","started_at":"2026-10-19T06:00:00Z"}`},
+		{name: "no commit", source: "dispatch", payload: `{"started_at":"2026-10-19T06:00:00Z"}`},
+		{name: "another source", source: "github", payload: `{"commit":"` + build + `"}`, wantErr: `Dispatch subject has envelope source "github"`},
+		{name: "a payload that is not the start", source: "dispatch", payload: `["` + build + `"]`, wantErr: "decode Dispatch server.started payload"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			decoded, err := decodeMessage(serverStartedSubject, "CAPTURE", capturedRepositories, envelopeJSON(t, "dispatch-server-started-1", tc.source, tc.payload))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("decode = %v, want poison naming %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decode server.started: %v", err)
+			}
+			if !reflect.DeepEqual(decoded.Fact, tc.want) || decoded.Source != "dispatch" || decoded.EventID != "dispatch-server-started-1" {
+				t.Fatalf("decoded = %#v, want fact %#v from dispatch under its event id", decoded, tc.want)
+			}
+		})
+	}
+}
+
+// deployedEvent is Dispatch's issue.deployed event of issue as its delivery timeline appends it,
+// with payload as the event's payload object.
+func deployedEvent(issue, payload string) string {
+	return `{"id":31,"issue_key":"` + issue + `","seq":7,"type":"issue.deployed","actor":{"kind":"system","id":"delivery-timeline"},"notify":true,"payload":` + payload + `}`
+}
+
+// Dispatch's issue.deployed names the pull request the production run shipped and the run: it
+// decodes to the fact that wakes the issue's production check, with the completion read as RFC
+// 3339. A payload missing the repository, a positive number or the completion is poison, as a
+// malformed artifact event is; another project's event is skipped before its payload is read.
+func TestDecodeIssueDeployedCarriesTheRunAndRefusesAMalformedPayload(t *testing.T) {
+	completed := time.Date(2026, 10, 19, 6, 12, 0, 0, time.UTC)
+	const full = `{"repo":"sjawhar/legion","number":1300,"run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`
+	for _, tc := range []struct {
+		name    string
+		issue   string
+		payload string
+		want    Fact
+		wantErr string
+	}{
+		{name: "a shipped pull request", issue: "CAPTURE-4", payload: full,
+			want: IssueDeployed{Issue: "CAPTURE-4", Repo: "sjawhar/legion", Number: 1300, RunID: 38230245571, CompletedAt: completed}},
+		{name: "a completion in another zone", issue: "CAPTURE-4", payload: strings.Replace(full, "06:12:00Z", "08:12:00+02:00", 1),
+			want: IssueDeployed{Issue: "CAPTURE-4", Repo: "sjawhar/legion", Number: 1300, RunID: 38230245571, CompletedAt: completed}},
+		{name: "another project's", issue: "OTHER-4", payload: full},
+		{name: "no repo", issue: "CAPTURE-4", payload: `{"number":1300,"run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`, wantErr: "has no repo"},
+		{name: "no number", issue: "CAPTURE-4", payload: `{"repo":"sjawhar/legion","run_id":38230245571,"completed_at":"2026-10-19T06:12:00Z"}`, wantErr: "has no positive integer number"},
+		{name: "no completion", issue: "CAPTURE-4", payload: `{"repo":"sjawhar/legion","number":1300,"run_id":38230245571}`, wantErr: "has no RFC 3339 completed_at"},
+		{name: "a completion that is not a time", issue: "CAPTURE-4", payload: strings.Replace(full, "2026-10-19T06:12:00Z", "yesterday", 1), wantErr: "has no RFC 3339 completed_at"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subject := "notifications.dispatch.issue." + tc.issue + ".issue.deployed"
+			decoded, err := decodeMessage(subject, "CAPTURE", capturedRepositories, envelopeJSON(t, "dispatch-31", "dispatch", deployedEvent(tc.issue, tc.payload)))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("decode = %v, want poison naming %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decode issue.deployed: %v", err)
+			}
+			if !reflect.DeepEqual(decoded.Fact, tc.want) {
+				t.Fatalf("fact = %#v, want %#v", decoded.Fact, tc.want)
+			}
+		})
+	}
+}
+
+// Dispatch's start reaches the daemon through a durable of its own, on the start's one subject:
+// a start naming a build is applied and acknowledged there, and one naming none is acknowledged
+// without reaching a handler. The issue durable's filter never matches the subject, so neither
+// durable's position depends on the other's.
+func TestConsumeAppliesADispatchStartThroughItsOwnDurable(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	stop := startConsume(t, js, spec, pool, writeHandler("started", nil))
+	defer stop()
+
+	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-none", "dispatch", `{"commit":"","started_at":"2026-10-19T06:00:00Z"}`))
+	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`))
+	testwait.Eventually(t, "the stamped start committed", func() bool { return writeCount(t, pool) == 1 })
+	assertNoAckPending(t, stream, dispatchServerConsumerName(spec.Project))
+	testwait.Eventually(t, "both starts delivered to the server durable", func() bool {
+		return consumerInfo(t, stream, dispatchServerConsumerName(spec.Project)).Delivered.Consumer == 2
+	})
+	if delivered := consumerInfo(t, stream, dispatchConsumerName(spec.Project)).Delivered.Consumer; delivered != 0 {
+		t.Fatalf("the issue durable was delivered %d messages, want none: the start is not an issue event", delivered)
+	}
+	if got := writeCount(t, pool); got != 1 {
+		t.Fatalf("%d facts committed, want only the start that names a build", got)
+	}
+}
+
 func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)
@@ -574,7 +687,7 @@ func TestAFreshConsumerStartsAtTheNextMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)
 	}
-	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 		if pending := consumerInfo(t, stream, name).NumPending; pending != 0 {
 			t.Errorf("%s was created with %d messages of history pending, want 0", name, pending)
 		}
@@ -598,9 +711,11 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	js, stream := testJetStream(t)
 	spec := consumerSpec(&lockedBuffer{})
 	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	publish(t, js, serverStartedSubject, envelopeJSON(t, "dispatch-server-started-1", "dispatch", `{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`))
 	publish(t, js, "notifications.github.sjawhar.legion.pr.42", capturedGitHubEnvelope(t, "pr-opened.json"))
 	for _, config := range []jetstream.ConsumerConfig{
 		{Durable: dispatchConsumerName(spec.Project), FilterSubject: "notifications.dispatch.issue.>", AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
+		{Durable: dispatchServerConsumerName(spec.Project), FilterSubject: serverStartedSubject, AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
 		{Durable: githubConsumerName(spec.Project), FilterSubjects: githubFilters(spec.Repositories), AckPolicy: jetstream.AckExplicitPolicy, AckWait: spec.AckWait},
 	} {
 		if _, err := stream.CreateConsumer(context.Background(), config); err != nil {
@@ -612,7 +727,7 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 	if _, err := OpenConsumers(context.Background(), js, spec); err != nil {
 		t.Fatalf("OpenConsumers over existing consumers: %v", err)
 	}
-	for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 		if pending := consumerInfo(t, stream, name).NumPending; pending != 1 {
 			t.Errorf("%s has %d messages pending after the boot, want its backlog of 1", name, pending)
 		}
@@ -623,8 +738,8 @@ func TestAnExistingConsumerKeepsItsPosition(t *testing.T) {
 
 	stop := startConsume(t, js, spec, pool, writeHandler("existing", nil))
 	defer stop()
-	testwait.Eventually(t, "both backlogs delivered and acknowledged", func() bool {
-		for _, name := range []string{dispatchConsumerName(spec.Project), githubConsumerName(spec.Project)} {
+	testwait.Eventually(t, "every backlog delivered and acknowledged", func() bool {
+		for _, name := range []string{dispatchConsumerName(spec.Project), dispatchServerConsumerName(spec.Project), githubConsumerName(spec.Project)} {
 			if info := consumerInfo(t, stream, name); info.NumPending != 0 || info.NumAckPending != 0 || info.Delivered.Consumer == 0 {
 				return false
 			}

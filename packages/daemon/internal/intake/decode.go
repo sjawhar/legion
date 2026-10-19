@@ -40,10 +40,15 @@ type envoyEnvelope struct {
 	TraceID        string `json:"trace_id"`
 }
 
+// serverStartedSubject is the one subject Dispatch publishes its own start on (not an issue's):
+// the daemon's third durable filters on it (OpenConsumers), and decodeMessage matches it whole.
+const serverStartedSubject = "notifications.dispatch.server.started"
+
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
 // project is the daemon's Dispatch project: another project's issue event is a nil Fact.
 // repositories are its configured repositories: a GitHub event whose payload names another
-// repository is a nil Fact, whatever subject carried it.
+// repository is a nil Fact, whatever subject carried it. Dispatch's own start is matched before
+// the issue subjects, which it is not one of.
 func decodeMessage(subject, project string, repositories []ghrepo.Repository, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
@@ -57,6 +62,11 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 	var unread []string
 	var err error
 	switch {
+	case subject == serverStartedSubject:
+		if envelope.Source != "dispatch" {
+			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
+		}
+		fact, err = decodeServerStarted(envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.dispatch.issue."):
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
@@ -98,6 +108,23 @@ func (e envoyEnvelope) valid() error {
 		return fmt.Errorf("Envoy envelope payload is not JSON")
 	}
 	return nil
+}
+
+// decodeServerStarted decodes Dispatch's server.started: the build commit Dispatch started on
+// (ServerStarted), which the workflow compares against the open production checks. A start naming
+// no commit — a Dispatch built without one stamped — is no fact, not poison: there is nothing to
+// compare, and the daemon's own boot covers its own build.
+func decodeServerStarted(payload string) (Fact, error) {
+	var started struct {
+		Commit string `json:"commit"`
+	}
+	if err := json.Unmarshal([]byte(payload), &started); err != nil {
+		return nil, fmt.Errorf("decode Dispatch server.started payload: %w", err)
+	}
+	if started.Commit == "" {
+		return nil, nil
+	}
+	return ServerStarted{Commit: started.Commit}, nil
 }
 
 type dispatchEvent struct {
@@ -204,6 +231,27 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch artifact.version payload has no positive integer version.number")
 		}
 		return DispatchArtifact{Key: event.IssueKey, ArtifactID: artifact.ArtifactID, Kind: DispatchArtifactVersion, Version: artifact.Version.Number}, nil
+	case "issue.deployed":
+		var deployed struct {
+			Repo        string `json:"repo"`
+			Number      int    `json:"number"`
+			RunID       int64  `json:"run_id"`
+			CompletedAt string `json:"completed_at"`
+		}
+		if err := json.Unmarshal(event.Payload, &deployed); err != nil {
+			return nil, fmt.Errorf("decode Dispatch issue.deployed payload: %w", err)
+		}
+		if deployed.Repo == "" {
+			return nil, fmt.Errorf("Dispatch issue.deployed payload has no repo")
+		}
+		if deployed.Number <= 0 {
+			return nil, fmt.Errorf("Dispatch issue.deployed payload has no positive integer number")
+		}
+		completedAt, err := time.Parse(time.RFC3339, deployed.CompletedAt)
+		if err != nil {
+			return nil, fmt.Errorf("Dispatch issue.deployed payload has no RFC 3339 completed_at: %w", err)
+		}
+		return IssueDeployed{Issue: event.IssueKey, Repo: deployed.Repo, Number: deployed.Number, RunID: deployed.RunID, CompletedAt: completedAt.UTC()}, nil
 	default:
 		return nil, nil
 	}

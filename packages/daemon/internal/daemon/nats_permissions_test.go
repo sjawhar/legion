@@ -29,8 +29,9 @@ import (
 )
 
 const (
-	dispatchGrantConsumer = "legion-go-CAPTURE-dispatch"
-	githubGrantConsumer   = "legion-go-CAPTURE-github"
+	dispatchGrantConsumer       = "legion-go-CAPTURE-dispatch"
+	dispatchServerGrantConsumer = "legion-go-CAPTURE-dispatch-server"
+	githubGrantConsumer         = "legion-go-CAPTURE-github"
 )
 
 // The deployment and this proof share daemonpermissions.Grant: core wraps the same values as the
@@ -39,14 +40,14 @@ const (
 func TestDaemonPermissionsOnRealServers(t *testing.T) {
 	for _, image := range testnatsimages.Images {
 		t.Run(image.Name, func(t *testing.T) {
-			t.Run("the daemon restarts, acknowledges Dispatch and GitHub, and receives exceptions", func(t *testing.T) {
+			t.Run("the daemon restarts, acknowledges Dispatch, its start and GitHub, and receives exceptions", func(t *testing.T) {
 				grant := daemonpermissions.Grant()
 				daemonSeed, admin, js, server, uri := startDaemonGrantServer(t, image.Ref, grant)
 				defer admin.Close()
 				stream := createDaemonNotificationStream(t, js)
 
 				first := connectDaemonGrant(t, uri, daemonSeed, &syncBuffer{})
-				for _, name := range []string{dispatchGrantConsumer, githubGrantConsumer} {
+				for _, name := range []string{dispatchGrantConsumer, dispatchServerGrantConsumer, githubGrantConsumer} {
 					if _, err := stream.Consumer(t.Context(), name); err != nil {
 						t.Fatalf("the first daemon creates %s: %v", name, err)
 					}
@@ -73,6 +74,8 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 
 				publishDaemonGrantFixture(t, js, "../intake/testdata/dispatch/issue-updated.json")
 				publishDaemonGrantFixture(t, js, "../intake/testdata/github/pr-opened.json")
+				publishDaemonGrantEnvelope(t, js, "notifications.dispatch.server.started", "dispatch-server-started-grant",
+					`{"commit":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c","started_at":"2026-10-19T06:00:00Z"}`)
 				if err := admin.Publish("notifications.envoy.exceptions.notifications.role.example", []byte("retry this notice")); err != nil {
 					t.Fatalf("publish the role-lane exception: %v", err)
 				}
@@ -92,17 +95,17 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				if string(got) != "retry this notice" {
 					t.Fatalf("role-lane exception = %q, want %q", got, "retry this notice")
 				}
-				testwait.Eventually(t, "the daemon naking one delivery and applying its redelivery with both event types", func() bool {
-					return handler.calls.Load() >= 3
+				testwait.Eventually(t, "the daemon naking one delivery and applying its redelivery with every event type", func() bool {
+					return handler.calls.Load() >= 4
 				})
-				requireDaemonGrantAcknowledged(t, stream, dispatchGrantConsumer, githubGrantConsumer)
+				requireDaemonGrantAcknowledged(t, stream, dispatchGrantConsumer, dispatchServerGrantConsumer, githubGrantConsumer)
 				if strings.Contains(logs.String(), "NATS refused the daemon a permission") {
 					t.Fatalf("the daemon logged a permission refusal:\n%s", logs.String())
 				}
 				if serverLog := daemonGrantServerLogs(t, server); strings.Contains(serverLog, "Permissions Violation") {
 					t.Fatalf("the server logged a permissions violation:\n%s", serverLog)
 				}
-				t.Log("restarted daemon created both consumers, NAKed then acknowledged both event kinds, and received the role-lane exception without a permission refusal")
+				t.Log("restarted daemon created the three consumers, NAKed then acknowledged every event kind, and received the role-lane exception without a permission refusal")
 			})
 
 			t.Run("without the dispatch consumer-create permission, the daemon and server report it", func(t *testing.T) {
@@ -212,9 +215,25 @@ func publishDaemonGrantFixture(t *testing.T, js jetstream.JetStream, path string
 	}
 }
 
+// publishDaemonGrantEnvelope publishes an Envoy envelope from Dispatch on subject, eventID its id
+// and payload its payload: Dispatch's server.started, which no captured fixture carries.
+func publishDaemonGrantEnvelope(t *testing.T, js jetstream.JetStream, subject, eventID, payload string) {
+	t.Helper()
+	data, err := json.Marshal(map[string]any{
+		"event_id": eventID, "source": "dispatch", "source_event_id": eventID + "-source", "topic": subject,
+		"dedupe_key": eventID, "issued_at": 1, "payload_summary": "dispatch started", "payload": payload, "trace_id": eventID + "-trace",
+	})
+	if err != nil {
+		t.Fatalf("encode the %s envelope: %v", subject, err)
+	}
+	if _, err := js.Publish(t.Context(), subject, data); err != nil {
+		t.Fatalf("publish %s: %v", subject, err)
+	}
+}
+
 func requireDaemonGrantAcknowledged(t *testing.T, stream jetstream.Stream, consumers ...string) {
 	t.Helper()
-	testwait.Eventually(t, "the daemon acknowledging both retained event types", func() bool {
+	testwait.Eventually(t, "the daemon acknowledging every retained event type", func() bool {
 		for _, name := range consumers {
 			consumer, err := stream.Consumer(t.Context(), name)
 			if err != nil {

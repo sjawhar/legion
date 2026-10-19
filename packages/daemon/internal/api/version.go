@@ -208,4 +208,17 @@ package api
 // which cites the controller skill's Slack reference. A plugin from before 29 subscribes to no
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
-const DaemonAPIVersion = 29
+//
+// 30: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
+// production check is work after the close. The phase enum gains `accepting` (between `reviewing`
+// and `retro`, the architect's `sign_off` phase, a backward target too) and loses
+// `production_check`; the issue record on GET /legion/v1/state gains `check` (api.CheckView), the
+// issue's open production check with its repository, pull request, merge commit, looks, last wake
+// and bound, absent once it closes; `HandoffCompleteRequest.commit` becomes optional, since the
+// implementer's report on a look of that check (`handoff_complete` on a done issue whose check is
+// open) pushes nothing, and its `verdict` gains `pending` beside `pass` and `fail`;
+// `PhaseBackwardRequest` gains an optional `issue`, which the architect's grant, serving its whole
+// tree, names the issue it returns from `accepting` with. A 29 plugin's strict reader refuses a
+// state carrying `check` or the phase `accepting`, and its `handoff_complete` requires a commit the
+// check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair.
+const DaemonAPIVersion = 30
