@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-798",
-  "completed": "2026-10-19T00:40:00Z",
+  "completed": "2026-10-19T01:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2043",
   "headSha": "d027e7499a28f981038e3d957df86c80380ee474",
   "rounds": [
-    "Round 1 (reviewer: REQUEST_CHANGES on CI alone): the required `lint` check was red at d308efe8 because `.github/scripts/check-private-names.sh` refused `.legion/LEGION-798/implement.json:11` and `.legion/LEGION-798/test.json:18`, each naming the deployment repository's Dispatch project key beside the 660 s budget; both reworded to 'the production deployment's … budget'. The reviewer's minor on the docs (the refusal holds only for a volume a volume_mounts entry mounts, since the kubelet skips an unmounted volume) fixed in the same round in docs/kubernetes.md (two places) and the troubleshooting page. No runtime code changed: the proof below stands at d027e749, probe.go unchanged since."
+    "Round 1 (reviewer: REQUEST_CHANGES on CI alone): the required `lint` check was red at d308efe8 because `.github/scripts/check-private-names.sh` refused `.legion/LEGION-798/implement.json:11` and `.legion/LEGION-798/test.json:18`, each naming the deployment repository's Dispatch project key beside the 660 s budget; both reworded to 'the production deployment's … budget' (48022b2c, 28649d19); lint green at 28649d19 (Tests run 39180620932, job 117832385554). The reviewer's minor on the docs (the refusal holds only for a volume a volume_mounts entry mounts, since the kubelet skips an unmounted volume) fixed in docs/kubernetes.md (two places) and the troubleshooting page (71df6dc3). The reviewer's not-blocking thread on the live check's 30 s bound taken now rather than after the first devbox run: the bound is 2*mountRecheck + 15 s (45 s), the refusal substring unchanged, the README row with it (74cc68d4), so a kubelet whose first mount attempt lands past the first recheck does not fail the stage 4a check with a correct daemon. No runtime code changed in the round: probe.go is unchanged since d027e749 and the proof below stands; live_install_test.go is an e2e-tagged check, vetted with `go vet -tags e2e`."
   ],
   "proof": [
     {
