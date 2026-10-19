@@ -144,7 +144,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged,
+		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged, MergeSHA: "d4e5f6",
 		// A base that requires no check reads back as such, never as a set that was not read.
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
@@ -316,7 +316,99 @@ func samePullRequest(got, want PullRequest) bool {
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
 		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted && got.HeadCountedBefore == want.HeadCountedBefore &&
 		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
-		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead
+		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead && got.MergeSHA == want.MergeSHA
+}
+
+// A production check is one record per closed issue, every field read back as written, with its
+// null columns (the wake times, the close and the outcome) absent until written; it is keyed by its
+// issue, so a second write of the same issue replaces the first. The open lists leave a closed
+// check out, OpenProductionChecksOfTree those of other trees too, and both order by the open.
+func TestStoreRoundTripsProductionChecksAndListsTheOpenOnesByTree(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	opened := time.Date(2026, 10, 19, 8, 0, 0, 0, time.UTC)
+	woke, lastWoke, closed := opened.Add(time.Minute), opened.Add(2*time.Hour), opened.Add(3*time.Hour)
+	root, child, other := issueFixture("LEGION-300"), issueFixture("LEGION-301"), issueFixture("LEGION-310")
+	child.Tree, other.Tree = root.Key, other.Key
+	fresh := ProductionCheck{
+		Issue: child.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1301,
+		OpenedAt: opened.Add(time.Hour), BoundAt: opened.Add(337 * time.Hour),
+	}
+	woken := ProductionCheck{
+		Issue: root.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1300, MergeSHA: "d4e5f6",
+		OpenedAt: opened, BoundAt: opened.Add(336 * time.Hour), Looks: 2, LookOpen: true, LookWakeAt: &woke,
+		LastWakeKind: "issue.deployed", LastWakeDetail: "run 77 completed 2026-10-19T09:00:00Z", LastWakeAt: &lastWoke,
+		PendingCauseKind: "daemon boot", PendingCauseDetail: "build b00f", Last: true,
+	}
+	done := ProductionCheck{
+		Issue: other.Key, Project: "LEGION", Tree: other.Key, Repo: "sjawhar/legion", Number: 1310, MergeSHA: "e5f6a7",
+		OpenedAt: opened.Add(-time.Hour), BoundAt: opened.Add(335 * time.Hour), Looks: 1,
+		LastWakeKind: "merge", LastWakeAt: &opened, ClosedAt: &closed, Outcome: CheckRecorded,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, issue := range []Issue{root, child, other} {
+			must(t, records.PutIssue(ctx, tx, issue))
+		}
+		must(t, records.PutProductionCheck(ctx, tx, ProductionCheck{Issue: root.Key, Project: "LEGION", Tree: root.Key, Repo: "sjawhar/legion", Number: 1300, OpenedAt: opened, BoundAt: opened}))
+		for _, check := range []ProductionCheck{fresh, woken, done} {
+			must(t, records.PutProductionCheck(ctx, tx, check))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, want := range []ProductionCheck{fresh, woken, done} {
+			got, err := records.ProductionCheck(ctx, tx, want.Issue)
+			must(t, err)
+			if !sameProductionCheck(got, want) {
+				t.Fatalf("production check of %s = %+v, want %+v", want.Issue, got, want)
+			}
+		}
+		if !fresh.Open() || done.Open() {
+			t.Fatalf("Open = %v and %v for a check without and with a close, want true and false", fresh.Open(), done.Open())
+		}
+		none, err := records.ProductionCheck(ctx, tx, "LEGION-999")
+		must(t, err)
+		if none != nil {
+			t.Fatalf("production check of an issue with none = %+v, want nil", none)
+		}
+		open, err := records.OpenProductionChecks(ctx, tx)
+		must(t, err)
+		if len(open) != 2 || !sameProductionCheck(&open[0], woken) || !sameProductionCheck(&open[1], fresh) {
+			t.Fatalf("open production checks = %+v, want the root's then the child's", open)
+		}
+		ofTree, err := records.OpenProductionChecksOfTree(ctx, tx, root.Key)
+		must(t, err)
+		if len(ofTree) != 2 || ofTree[0].Issue != root.Key || ofTree[1].Issue != child.Key {
+			t.Fatalf("open production checks of %s = %+v, want the root's then the child's", root.Key, ofTree)
+		}
+		ofOther, err := records.OpenProductionChecksOfTree(ctx, tx, other.Key)
+		must(t, err)
+		if len(ofOther) != 0 {
+			t.Fatalf("open production checks of %s = %+v, want none: its one check is closed", other.Key, ofOther)
+		}
+	})
+	refused := done
+	refused.Outcome = "shrug"
+	if err := st.Tx(ctx, func(tx pgx.Tx) error { return records.PutProductionCheck(ctx, tx, refused) }); err == nil || !strings.Contains(err.Error(), "check constraint") {
+		t.Fatalf("PutProductionCheck with outcome %q = %v, want the check constraint to refuse it", refused.Outcome, err)
+	}
+}
+
+func sameProductionCheck(got *ProductionCheck, want ProductionCheck) bool {
+	return got != nil && got.Issue == want.Issue && got.Project == want.Project && got.Tree == want.Tree && got.Repo == want.Repo &&
+		got.Number == want.Number && got.MergeSHA == want.MergeSHA && got.OpenedAt.Equal(want.OpenedAt) && got.BoundAt.Equal(want.BoundAt) &&
+		got.Looks == want.Looks && got.LookOpen == want.LookOpen && sameInstant(got.LookWakeAt, want.LookWakeAt) &&
+		got.LastWakeKind == want.LastWakeKind && got.LastWakeDetail == want.LastWakeDetail && sameInstant(got.LastWakeAt, want.LastWakeAt) &&
+		got.PendingCauseKind == want.PendingCauseKind && got.PendingCauseDetail == want.PendingCauseDetail && got.Last == want.Last &&
+		sameInstant(got.ClosedAt, want.ClosedAt) && got.Outcome == want.Outcome
+}
+
+// sameInstant is whether two optional times are both absent or name the same instant.
+func sameInstant(got, want *time.Time) bool {
+	if got == nil || want == nil {
+		return got == nil && want == nil
+	}
+	return got.Equal(*want)
 }
 
 // A new generation keeps an open pull request but none of the old generation's fix-attempt
@@ -1344,13 +1436,14 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
-		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
-		"slots":            {"issue", "index", "admitted_at"},
-		"processed_events": {"source", "event_id", "processed_at"},
-		"outbox":           {"id", "kind", "issue", "payload", "attempts", "next_at", "last_error", "created_at", "lease_token", "lease_until"},
+		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
+		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
+		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
+		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},
+		"design_gates":      {"issue", "artifact_id", "latest_version", "approved_version"},
+		"slots":             {"issue", "index", "admitted_at"},
+		"processed_events":  {"source", "event_id", "processed_at"},
+		"outbox":            {"id", "kind", "issue", "payload", "attempts", "next_at", "last_error", "created_at", "lease_token", "lease_until"},
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		for table, expected := range want {

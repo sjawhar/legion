@@ -877,9 +877,13 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 				if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: seeded.issue.Key, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head", MergeNote: seeded.mergeNote}); err != nil {
 					return err
 				}
+				// The pull request is written as the schema under test holds it, not through the
+				// store, whose row has columns later migrations add (0047's merge_sha).
 				number, _ := strconv.Atoi(strings.TrimPrefix(seeded.issue.Key, "LEGION-"))
-				if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: seeded.pr, Issue: seeded.issue.Key, Repo: "acme/widgets", Number: number,
-					Branch: "legion/" + seeded.issue.Key, HeadSHA: "ready-head", Failing: []string{}}); err != nil {
+				if _, err := tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at, failing,
+					fix_attempts, blocked_attempts, check_runs, generation, snapshot, head_counted, state)
+					values ($1, 'acme/widgets', $2, $3, 'ready-head', now(), '[]', 0, 0, '[]', 0, '', '', $4)`,
+					seeded.issue.Key, number, "legion/"+seeded.issue.Key, string(seeded.pr)); err != nil {
 					return err
 				}
 			}

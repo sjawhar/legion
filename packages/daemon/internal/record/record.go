@@ -243,6 +243,10 @@ type PullRequest struct {
 	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
 	// MergeabilityConflicting once it cannot. "" means the read has never run.
 	Mergeability Mergeability
+	// MergeSHA is the merge commit GitHub reported for the pull request (the production check
+	// looks for it in a build): empty until the merge, and for a pull request merged before the
+	// column existed, whose check's first compare fills it from GitHub.
+	MergeSHA string
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
@@ -282,6 +286,61 @@ const (
 	MergeabilityUnknown     Mergeability = "UNKNOWN"
 	MergeabilityMergeable   Mergeability = "MERGEABLE"
 	MergeabilityConflicting Mergeability = "CONFLICTING"
+)
+
+// ProductionCheck is an issue's production check: the work after the close in which the
+// implementer drives the merged change in production and reports what it saw. There is one per
+// closed issue, opened at the merge; it copies the repository, the pull request's number and the
+// merge commit, and is fenced on itself (the issue and the look number) rather than on the tree
+// generation, so a re-admission that clears the tree's merged pull requests leaves it as it is.
+// Looks counts the implementer's looks, each a wake of its session that ends with a report
+// (pass, pending or fail) or at its bound; LookOpen is whether the latest look is still running
+// and LookWakeAt when it woke. LastWakeKind and LastWakeDetail are what woke the latest look
+// (the merge, a deploy event, a build compare, the bound) and LastWakeAt when; PendingCauseKind
+// and PendingCauseDetail hold a wake that arrived while a look was open, which the next look
+// starts with. Last marks the bound's look, after which no look starts. A closed check has
+// ClosedAt and its Outcome.
+type ProductionCheck struct {
+	Issue   string
+	Project string
+	Tree    string
+	Repo    string
+	Number  int
+	// MergeSHA is the merge commit the check looks for in a build, empty until the first compare
+	// fills it for a pull request merged before the daemon recorded merge commits.
+	MergeSHA string
+	OpenedAt time.Time
+	// BoundAt is when the whole check is bound: the check's last look starts then
+	// (config.Config.ProductionCheckBound after OpenedAt).
+	BoundAt            time.Time
+	Looks              int
+	LookOpen           bool
+	LookWakeAt         *time.Time
+	LastWakeKind       string
+	LastWakeDetail     string
+	LastWakeAt         *time.Time
+	PendingCauseKind   string
+	PendingCauseDetail string
+	Last               bool
+	ClosedAt           *time.Time
+	Outcome            CheckOutcome
+}
+
+// Open says whether the check is still open: no look has closed it.
+func (c ProductionCheck) Open() bool { return c.ClosedAt == nil }
+
+// CheckOutcome is how a production check closed; "" while it is open.
+type CheckOutcome string
+
+const (
+	// CheckRecorded is a look's pass: the implementer drove the change in production and
+	// recorded it on the pull request.
+	CheckRecorded CheckOutcome = "recorded"
+	// CheckDefect is a look's fail: the change misbehaved in production, filed as an issue.
+	CheckDefect CheckOutcome = "defect"
+	// CheckNotRun is a check that closed with no look that could see the change in production:
+	// the last look reported pending, or a look could not run.
+	CheckNotRun CheckOutcome = "not_run"
 )
 
 // DesignGate records the current document version and the version a human approved, if any.
@@ -357,6 +416,14 @@ type Store interface {
 	// OpenPullRequests is every open pull request of the Dispatch project key project's issues.
 	OpenPullRequests(ctx context.Context, tx pgx.Tx, project string) ([]PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
+	// ProductionCheck is issue's production check, nil for none; PutProductionCheck writes it,
+	// one per issue.
+	ProductionCheck(ctx context.Context, tx pgx.Tx, issue string) (*ProductionCheck, error)
+	PutProductionCheck(ctx context.Context, tx pgx.Tx, check ProductionCheck) error
+	// OpenProductionChecks is every open check, oldest opened first, then by issue;
+	// OpenProductionChecksOfTree those of tree's issues, in the same order.
+	OpenProductionChecks(ctx context.Context, tx pgx.Tx) ([]ProductionCheck, error)
+	OpenProductionChecksOfTree(ctx context.Context, tx pgx.Tx, tree string) ([]ProductionCheck, error)
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
 	// ClaimSession is the session claims records for token, "" and no error when the token holds

@@ -226,8 +226,8 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
 	return workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
-		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
-		MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
+		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
+		ReviewAppLogin: reviewAppLogin, MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
 	}
 }
 

@@ -125,10 +125,11 @@ func defaultsFor(port int) Config {
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
 		},
-		Linger:           72 * time.Hour,
-		ReviewRoundCap:   3,
-		MaxFixAttempts:   3,
-		ControllerLaunch: ControllerLaunchOperator,
+		Linger:               72 * time.Hour,
+		ProductionCheckBound: 336 * time.Hour,
+		ReviewRoundCap:       3,
+		MaxFixAttempts:       3,
+		ControllerLaunch:     ControllerLaunchOperator,
 	}
 }
 
@@ -247,6 +248,7 @@ github_apps:
     app_id: "22"
     private_key: review-key
 linger_hours: 96
+production_check_hours: 48
 review_round_cap: 5
 max_fix_attempts: 4
 `))
@@ -277,8 +279,8 @@ max_fix_attempts: 4
 	if cfg.GitHubApps.Review.AppID != "22" || cfg.GitHubApps.Review.PrivateKey != "review-key" {
 		t.Errorf("review app = %#v", cfg.GitHubApps.Review)
 	}
-	if cfg.Linger != 96*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
-		t.Errorf("Linger=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 5, 4", cfg.Linger, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
+	if cfg.Linger != 96*time.Hour || cfg.ProductionCheckBound != 48*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
+		t.Errorf("Linger=%s ProductionCheckBound=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 48h, 5, 4", cfg.Linger, cfg.ProductionCheckBound, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
 	}
 }
 
@@ -1194,6 +1196,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "gates", line: "gates: {design: off}", class: modelled},
 		{key: "github_apps", line: "github_apps: {implement: {app_id: \"1\", private_key: key}, review: {app_id: \"2\", private_key: key}}", class: modelled},
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
+		{key: "production_check_hours", line: "production_check_hours: 336", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
 		{key: "capabilities", line: `capabilities: {decided: {secrets: "dispatch://LEGION-205 enrolls pods later"}}`, class: modelled},

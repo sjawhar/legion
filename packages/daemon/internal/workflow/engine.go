@@ -30,8 +30,12 @@ type Config struct {
 	ReviewRoundCap int
 	MaxFixAttempts int
 	Linger         time.Duration
-	MergeQueueRole string
-	Clock          func() time.Time
+	// ProductionCheckBound is how long a closed issue's production check waits for its deploy
+	// before its last look (config.Config.ProductionCheckBound, `production_check_hours`): the
+	// check's bound_at is its open plus this. Zero takes the shipped 14 days.
+	ProductionCheckBound time.Duration
+	MergeQueueRole       string
+	Clock                func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -59,6 +63,9 @@ func New(store record.Store, cfg Config, log *slog.Logger) *Engine {
 	}
 	if cfg.MaxFixAttempts <= 0 {
 		cfg.MaxFixAttempts = 3
+	}
+	if cfg.ProductionCheckBound <= 0 {
+		cfg.ProductionCheckBound = 336 * time.Hour
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
