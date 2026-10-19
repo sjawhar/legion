@@ -149,7 +149,7 @@ test("the legion tool's description is the exact text Oh My Pi agents read, for 
 });
 
 /** The `legion` tool's parameter schema as Oh My Pi agents are given it, serialized whole: every
- * property and every `op` value in the order the tool has always declared them. */
+ * property and every `op` value in the order the tool declares them. */
 const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",

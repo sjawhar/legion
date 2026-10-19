@@ -72,7 +72,7 @@ const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
 /** The tool's one object schema, `op` choosing the operation; its fields and the `op` values are
- * in the order the tool has always declared them, which `tools.test.ts` pins. */
+ * in the order `tools.test.ts` pins. */
 function toolSchema(pi: PiApi): unknown {
   const z = pi.zod;
   const phase = phaseOpParameters(z);

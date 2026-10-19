@@ -67,8 +67,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   with `claude-envoy`'s Legion tool, and the claim session boots through the claim boot both share
   (`@legion/pi-shared/legion-claim-core`), in the same order and with the same log lines. The
   template gives the tool the description and parameter schema pi-legion wrote itself, each
-  pinned byte for byte in `src/tools.test.ts`, and a root architect's `handoff_complete` is still
-  refused as unavailable before its arguments are read. Two things a phase op answers differ:
+  pinned byte for byte in `src/tools.test.ts`. Three things a phase op answers differ:
+  - A root architect's `handoff_complete` is refused as unavailable before its own fields are
+    read, after naming any field `handoff_complete` does not take:
+    `{op: "handoff_complete", phase: "plan"}` answers `handoff_complete does not accept field
+    "phase"; handoff_complete is not available to a root architect session, which runs no phase`,
+    where it answered the first clause alone.
   - A refusal names every problem with the call's arguments, joined by `; `, where it named the
     first: a field the operation does not take first, then each of its own fields in turn
     (`request_backward_move requires to; request_backward_move requires reason`).
