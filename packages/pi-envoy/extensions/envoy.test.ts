@@ -4402,6 +4402,10 @@ describe("envoy OMP extension", () => {
     // the role is unheld, already held by the claimant, or held by the session it names as its
     // predecessor (every holder here is live).
     const holders = new Map<string, string>();
+    // The listener's `last_seen` per session, which a heartbeat of that session moves (1 unless set).
+    const lastSeen = new Map<string, number>();
+    // While positive, each read of a role's holder fails with a 500.
+    let failingRoleReads = 0;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       const body = init?.body === undefined ? undefined : JSON.parse(init.body.toString());
@@ -4456,11 +4460,15 @@ describe("envoy OMP extension", () => {
           reached();
           await release;
         }
+        if (failingRoleReads > 0) {
+          failingRoleReads -= 1;
+          return new Response(JSON.stringify({ error: "listener failed" }), { status: 500 });
+        }
         const holder = holders.get(role);
         if (holder === undefined) {
           return new Response(JSON.stringify({ error: "no live holder" }), { status: 404 });
         }
-        return response({ role, holder, last_seen: 1 });
+        return response({ role, holder, last_seen: lastSeen.get(holder) ?? 1 });
       }
       if (url.pathname === "/v1/interests/unsubscribe") {
         if (failingHandBacks > 0) {
@@ -4621,6 +4629,9 @@ describe("envoy OMP extension", () => {
     const failHandBacks = (count: number) => {
       failingHandBacks = count;
     };
+    const failRoleReads = (count: number) => {
+      failingRoleReads = count;
+    };
     return {
       fixture,
       live,
@@ -4630,6 +4641,7 @@ describe("envoy OMP extension", () => {
       claimSessions,
       handedBack,
       holders,
+      lastSeen,
       manager,
       notifications,
       landed,
@@ -4642,6 +4654,7 @@ describe("envoy OMP extension", () => {
       holdRegistration,
       failClaims,
       failHandBacks,
+      failRoleReads,
       onHandBack: (hook: () => void) => {
         handBackHook = hook;
       },
@@ -6132,6 +6145,7 @@ describe("envoy OMP extension", () => {
       claimSessions,
       refuseRegistrations,
       failHandBacks,
+      failRoleReads,
       tick,
     } = await gatedRoleFixture("abandoned-hold", "ses_ab");
     const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
@@ -6146,7 +6160,9 @@ describe("envoy OMP extension", () => {
     await refused;
     expect(holders.get(role)).toBe("ses_ab");
     // The listener is back; a resume opens a session whose records name the role, and the
-    // listener still names the session this process left.
+    // listener still names the session this process left. Its first read of that holder fails,
+    // which decides nothing.
+    failRoleReads(2);
     await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
     const resumed = live("ses_ab_c", { fresh: true });
     fixture.pi.appendEntry("envoy-role-claim", { role });
@@ -6169,6 +6185,73 @@ describe("envoy OMP extension", () => {
     for (let step = 0; step < 10; step += 1) await drain();
     expect(claimSessions.length).toBe(refusedOnce);
     expect(holders.get(role)).toBe("ses_ab");
+  });
+
+  test("an abandoned hold whose session another process heartbeats again is the newer holder: refused once seen, never taken back", async () => {
+    const role = "legion-controller";
+    const {
+      fixture,
+      live,
+      context,
+      holders,
+      lastSeen,
+      claimSessions,
+      refuseRegistrations,
+      failHandBacks,
+      tick,
+    } = await gatedRoleFixture("abandoned-hold-heartbeated", "ses_ah");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const ticks = async (count: number) => {
+      for (let each = 0; each < count; each += 1) {
+        tick();
+        for (let step = 0; step < 10; step += 1) await drain();
+      }
+    };
+    // A /new lands during a listener outage, so the hand-back of ses_ah is abandoned.
+    const refused = refuseRegistrations(2);
+    failHandBacks(2);
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      live("ses_ah_n", { fresh: true })
+    );
+    await refused;
+    // A resume opens a session whose records name the role; its claims wait on the listener.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const resumed = live("ses_ah_c", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+    await ticks(1);
+    const waiting = claimSessions.filter((claim) => claim === `${role}@ses_ah_c`).length;
+    expect(waiting).toBe(2);
+    // Another process resumes ses_ah and heartbeats it: the next refusal sees it, and stands.
+    lastSeen.set("ses_ah", 2);
+    await ticks(3);
+    expect(claimSessions.filter((claim) => claim === `${role}@ses_ah_c`).length).toBe(waiting + 1);
+    // That process ends; nothing here takes the role back.
+    holders.delete(role);
+    await ticks(2);
+    expect(holders.has(role)).toBe(false);
+  });
+
+  test("a fork's run that ends after the host moved keeps the announcement, so the parent's frames arrive before any pass", async () => {
+    const { fixture, live, context } = await gatedRoleFixture("fork-run-ends-after-move", "ses_fe");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+    await fixture.handlers.get("agent_start")?.({}, context);
+    // A fork aborts no run: the host moves, and the run ends on the fork.
+    const forked = live("ses_fe_f");
+    await fixture.handlers.get("agent_end")?.(
+      { messages: [{ role: "assistant", stopReason: "stop" }] },
+      forked
+    );
+    const parent = natsState.controls.get("notifications.agent.ses_fe");
+    if (parent === undefined) throw new Error("the parent's agent subject was not subscribed");
+    parent.push(
+      forwardedRoleEnvelope("legion-controller", "frame for the parent", "fe-parent"),
+      "_INBOX.fe"
+    );
+    for (let step = 0; step < 5; step += 1) await new Promise<void>((r) => setImmediate(r));
+    expect(fixture.messages.some((message) => message.includes("frame for the parent"))).toBe(true);
   });
 
   test("a hand-back the listener fails under the session's own id is made by a later pass", async () => {

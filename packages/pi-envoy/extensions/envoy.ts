@@ -507,8 +507,10 @@ export default function envoyExtension(pi: PiApi): void {
   // `session_before_branch`) and why: read until the next pass sees where the host went, to learn
   // whether the session it went to continues the one it left, and by the frame drop meanwhile. A
   // session event ends it wherever it lands (a `/reload` lands on the session it announced
-  // leaving), and so does a run that started on that session under it and ended unaborted: a
-  // switch that goes ahead aborts that run, so that switch was cancelled.
+  // leaving), and so does a run that started on that session under it and ended unaborted there:
+  // a switch that goes ahead aborts a run still going, so that switch was cancelled. (A run that
+  // starts and ends while another extension's announcement handler still runs reads the same, and
+  // no host event tells the two apart.)
   let announced:
     | { readonly from: string; readonly reason: SessionSwitchReason | undefined }
     | undefined;
@@ -541,9 +543,11 @@ export default function envoyExtension(pi: PiApi): void {
   // next pass hands it back (`settleEndedHolds`).
   const pendingHandBacks = new Map<string, { readonly topic: string; readonly id: string }>();
   // Per role topic, a hold this process gave up under a session it has left whose hand-back the
-  // listener refused: left for the listener to reap, and never a newer holder, so a claim the
-  // listener refuses naming it records no refusal and the next pass claims again.
-  const abandonedHolds = new Map<string, string>();
+  // listener refused, left for the listener to reap: a claim the listener refuses naming it records
+  // no refusal, and a later pass claims again, for as long as the listener's `last_seen` for that
+  // session stands still (`lastSeen`, read at each such refusal). Once it moves, another process
+  // heartbeats that session, which is then the newer holder.
+  const abandonedHolds = new Map<string, { readonly id: string; lastSeen?: number }>();
   // Per session, a role the listener refused to that session's automatic claim because another
   // live session holds it: that holder is the newer one, so no pass claims the role for that
   // session again until a session event lands on it, the model or a plugin claims a role for it,
@@ -1666,6 +1670,33 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
+  // Whether a claim of `role` the listener refused, naming `holder`, waits on this process's own
+  // abandoned hold of `topic` (`abandonedHolds`): the listener's `last_seen` for that session, read
+  // now, is the one an earlier such refusal read, or the first read. A `last_seen` that moved
+  // means another process heartbeats that session, which is the newer holder from then on. A read
+  // that fails, or finds another holder, leaves the next pass to decide.
+  const waitsOnReap = async (
+    topic: string,
+    role: string,
+    holder: string | undefined
+  ): Promise<boolean> => {
+    const abandoned = abandonedHolds.get(topic);
+    if (abandoned === undefined || abandoned.id !== holder) return false;
+    const seen = await requireEnvoy()
+      .client.getRole(role)
+      .then(
+        (info) => (info.holder === holder ? info.last_seen : undefined),
+        () => undefined
+      );
+    if (seen === undefined) return true;
+    if (abandoned.lastSeen !== undefined && seen !== abandoned.lastSeen) {
+      abandonedHolds.delete(topic);
+      return false;
+    }
+    abandoned.lastSeen = seen;
+    return true;
+  };
+
   /**
    * Claim `role` for `forSession`, the session the move was decided for. A hard claim (the
    * default; what envoy_role_set does) is last-claim-wins. A soft claim is what automatic
@@ -1727,10 +1758,11 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (!result.claimed) {
+      endRole();
       // Only a soft claim is refused. A holder that is this process's own abandoned hold is waited
       // out, since the listener reaps it; any other is the newer holder, and the role stays its
       // for this session.
-      const waitingOnReap = abandonedHolds.get(topic) === result.holder;
+      const waitingOnReap = await waitsOnReap(topic, role, result.holder);
       if (!waitingOnReap) refusedRoles.set(id, role);
       logger.warn(
         waitingOnReap
@@ -1738,7 +1770,6 @@ export default function envoyExtension(pi: PiApi): void {
           : "envoy: role held by another live session; not reclaimed",
         { role, sessionID: id, holder: result.holder }
       );
-      endRole();
       return false;
     }
     // Moving to another role ends the one this session held.
@@ -2021,7 +2052,7 @@ export default function envoyExtension(pi: PiApi): void {
     }
     for (const { key, topic, id } of failed) {
       if (id === host) pendingHandBacks.set(key, { topic, id });
-      else abandonedHolds.set(topic, id);
+      else abandonedHolds.set(topic, { id });
     }
     return restored;
   };
@@ -2518,7 +2549,8 @@ export default function envoyExtension(pi: PiApi): void {
     endInjectedUserTurns(sessionID);
     const lastReply = event.messages?.findLast((message) => message.role === "assistant");
     // A run that started under a switch's announcement and ended with a reply it was not aborted
-    // in, the host still on the session it announced leaving: that switch was cancelled.
+    // in, the host still on the session it announced leaving: that switch was cancelled. A fork's
+    // run ends after the host moved, which keeps the announcement, and with it the parent's frames.
     if (runUnderAnnouncement !== undefined && event.willContinue !== true) {
       if (
         announced === runUnderAnnouncement &&
