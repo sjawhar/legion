@@ -2080,16 +2080,15 @@ volume to detach from the old one, which shows as transient `FailedAttachVolume`
 events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
-from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) and `/proc/meminfo`'s
-`MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's
-whole reservation while its siblings idle. The reservation is the pod's working set, not one
-container's; each container's own request and limit are what the API shows, and its requests are
-what the scheduler counts — except on GKE Autopilot, confirmed live by
-[Stage 4a's live proof](../scripts/e2e/README.md): there `nproc` reflects gVisor's own host-vCPU
-presentation instead, a known gap
+from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) — except on GKE Autopilot,
+confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md): there `nproc` reflects
+gVisor's own host-vCPU presentation instead, a known gap
 ([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the
 pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu
-limits there.
+limits there — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers,
+and an active role may use the pod's whole reservation while its siblings idle. The reservation is
+the pod's working set, not one container's; each container's own request and limit are what the
+API shows, and its requests are what the scheduler counts.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum of requests: at the defaults, two pods fit a floor

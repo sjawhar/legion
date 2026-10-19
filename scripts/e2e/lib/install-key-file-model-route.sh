@@ -13,12 +13,14 @@
 #
 # --key-file names a file holding the plaintext Anthropic API key alone (one line; a trailing
 # newline is read past): refused unless it is a regular file only its owner can read (no group or
-# other permission bit). Never read here beyond that permission check — each call reads it fresh,
-# so a key the caller rotates mid-run takes effect on the very next call with no restart.
+# other permission bit). The preflight below reads it once, before any pane exists, to prove it is
+# readable; every later call reads it fresh again, so a key the caller rotates mid-run takes effect
+# on the key command's very next call, though Oh My Pi itself caches the value for a running agent
+# and only re-runs the command on a 401 (the profile's own models.yml comment has this).
 #
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
-#   <dir>/anthropic-key      the key command the profile names: reads --key-file fresh under the
-#                            caller's HOME and XDG base directories, for that one command
+#   <dir>/anthropic-key      the key command the profile names: reads --key-file fresh, for that
+#                            one command
 #   <dir>/anthropic-key.log  one line per invocation and the file read's own failure, if any
 #   <dir>/anthropic-key.calls   one line per call and its outcome, in lib/model-gateway-unserved.sh's
 #                            own record shape, so it and the stage proofs that read a route's
@@ -26,13 +28,15 @@
 #                            gateway's
 #   the profile's agent/models.yml and agent/config.yml (see the heredocs below)
 #
-# A pane cannot read an arbitrary path of the operator's choosing itself: the key command, and only
-# it, is handed --key-file's path (baked into the written script at install time, never into a
-# pane's own environment or the profile's models.yml, which names only the key command). Unlike
-# hawk-token there is nothing to mint and no login to lose to a relocked keyring, so there is no
-# preflight budget and no cache: every call is a plain, fast file read, checked for its own
-# permission bits once, here, before any pane exists, so a key file a group or other user can read
-# is refused loudly at install rather than silently leaking the key to them on the first call.
+# No key reaches a pane's own environment or the profile's models.yml, which names only the key
+# command's path (baked in at install time): the key command alone is handed --key-file's path.
+# A pane runs as the operator's own uid, though, so an agent's own bash can still read --key-file
+# directly, or run the key command itself — the same exposure lib/install-model-gateway.sh's
+# hawk-token has, not a widening. Unlike hawk-token there is nothing to mint and no login to lose
+# to a relocked keyring, so there is no preflight budget and no cache: every call is a plain, fast
+# file read, checked for its own permission bits once, here, before any pane exists, so a key file
+# a group or other user can read is refused loudly at install rather than silently leaking the key
+# to them on the first call.
 set -euo pipefail
 
 me=install-key-file-model-route
@@ -104,13 +108,13 @@ for file in models.yml config.yml; do
   [ ! -e "$agent/$file" ] || refuse "$agent/$file exists; this installs a fresh profile's model route only"
 done
 
+key_file=$(realpath -- "$key_file" 2>/dev/null) || refuse "--key-file does not exist"
 [ -f "$key_file" ] || refuse "--key-file $key_file is not a regular file"
 perms=$(stat -c %a -- "$key_file") || refuse "--key-file $key_file: stat failed"
 case $perms in
 [0-7]00) ;;
 *) refuse "--key-file $key_file is mode $perms: group or other can read it; chmod 600 it (it holds a plaintext Anthropic key)" ;;
 esac
-key_file=$(realpath -- "$key_file")
 
 dest=$(realpath -m -- "$dest")
 # The path is written into YAML as an OMP `!command`, so it stays one plain word.

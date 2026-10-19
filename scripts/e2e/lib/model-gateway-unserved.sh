@@ -136,7 +136,6 @@ case "${1:-}" in
   # as an empty one below.
   calls=("$2"/*.calls)
   case "${#calls[@]}" in
-  0) exit 0 ;;
   1) [ -e "${calls[0]}" ] && record=${calls[0]} || exit 0 ;;
   *) refuse "--notes $2 holds more than one *.calls file (${calls[*]}); it is not one route's own --dest" ;;
   esac

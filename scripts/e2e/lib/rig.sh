@@ -31,16 +31,18 @@
 # real_bin_path DEST NAME... symlinks DEST/NAME to the real NAME binary mise resolves for the
 # caller's own environment, for every NAME given, and prints DEST. The daemon and every pane it
 # launches run with HOME relocated to the run's own isolated home (make_omp_home,
-# lib/omp-home.sh), which hides mise's global config from the dotfiles gh and jj shims: both
-# shims search PATH for mise's own shim first and, under a HOME mise has no pin for, get handed
-# the call straight back (jj) or refused by mise's own recursion guard (gh) — gh and jj
-# themselves are unusable inside a pane until this is worked around, which cost a live Stage 3
-# reviewer several minutes of its own turn finding the same fix. A caller prepends this
+# lib/omp-home.sh), which hides mise's global config from the dotfiles jj shim: it searches PATH
+# for mise's own shim first and, under a HOME mise has no pin for, gets handed the call straight
+# back — jj is unusable inside a pane until this is worked around. A caller prepends this
 # directory to the daemon's own PATH before launching it, so the daemon and every pane it spawns
-# use it: `PATH="$(real_bin_path "$work/realbin" gh jj):$PATH"`. The role's own GH_CONFIG_DIR
-# (lib/workflow.sh, set per pane by the daemon itself) gives the real, unshimmed gh the same
-# App identity its shim would otherwise have selected, so nothing about which account a pane
-# acts as changes.
+# use it: `PATH="$(real_bin_path "$work/realbin" gh jj):$PATH"`. PATH reaches every pane
+# (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go); gh's own real binary
+# already reached panes this way before per-owner credentials (#2008) existed. Since then, a
+# pane's gh is the daemon's own wrapper (legion gh, LEGION_GH_PATH), which resolves "the real gh"
+# by walking its own PATH the same way (resolveTools, packages/daemon/internal/daemon/tools.go) —
+# so this directory's gh is what LEGION_GH_PATH ends up naming, one step removed from a pane's own
+# PATH lookup, not instead of it. jj has no such wrapper and keeps resolving through this
+# directory directly.
 real_bin_path() {
   local dest=$1 name target
   shift

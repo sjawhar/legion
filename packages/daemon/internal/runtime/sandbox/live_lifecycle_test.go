@@ -360,17 +360,18 @@ func isGKEExtendedDurationAffinity(a *corev1.Affinity) bool {
 	}
 }
 
-// guaranteedPod is the reservation rule every Legion pod is held to: it carries no affinity but
-// GKE's own extended-duration one when extendedDurationAffinity allows it (isGKEExtendedDuration
-// Affinity's doc has the evidence; the probe never carries it and always passes false), its
-// qosClass is Guaranteed, and every container — the init containers included — reserves cpu and
-// memory with the request equal to the limit and at least the reservation configured for it (cpu
-// floored at cpuFloor, zero off GKE and off every multi-container pod on it), and carries the
-// ephemeral-storage request and limit configured for it, the request under the limit, except that
-// ephemeralStorageClamped asks for the limit to equal the request instead of the configured limit
-// (GKE's own admission, gkeEphemeralStorageClamped's doc has the evidence): want's entry for each
-// regular container by name, and init for every init container (nil when the pod has none to
-// hold). A container want does not name is a refusal: nothing a Legion pod runs is unreserved.
+// guaranteedPod is the reservation rule the rig's pods are held to, since the rig configures no
+// request below a limit (liveOverrides): it carries no affinity but GKE's own extended-duration
+// one when extendedDurationAffinity allows it (isGKEExtendedDurationAffinity's doc has the
+// evidence; the probe never carries it and always passes false), its qosClass is Guaranteed, and
+// every container — the init containers included — reserves cpu and memory with the request equal
+// to the limit and at least the reservation configured for it (cpu floored at cpuFloor, zero off
+// GKE and off every multi-container pod on it), and carries the ephemeral-storage request and
+// limit configured for it, the request under the limit, except that ephemeralStorageClamped asks
+// for the limit to equal the request instead of the configured limit (GKE's own admission,
+// gkeEphemeralStorageClamped's doc has the evidence): want's entry for each regular container by
+// name, and init for every init container (nil when the pod has none to hold). A container want
+// does not name is a refusal: nothing a Legion pod runs is unreserved.
 func guaranteedPod(pod *corev1.Pod, want map[string]corev1.ResourceRequirements, init *corev1.ResourceRequirements, cpuFloor resource.Quantity, ephemeralStorageClamped, extendedDurationAffinity bool) error {
 	if pod.Spec.Affinity != nil && !(extendedDurationAffinity && isGKEExtendedDurationAffinity(pod.Spec.Affinity)) {
 		return fmt.Errorf("carries an affinity, which no Legion pod asks for: %+v", pod.Spec.Affinity)

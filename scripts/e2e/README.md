@@ -545,9 +545,11 @@ ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_N
 
 **Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
 stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
-required inputs and the same model route and proof human as
-[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), so it too runs from the operator's own Oh My
-Pi session and refuses to start in `prerequisites` when `gh` acts as anyone but `sjawhar-agent[bot]`. It creates
+required inputs and the same proof human as
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh) — the Hawk gateway route only, since this
+script has not taken Stage 3's own `LEGION_E2E_MODEL_ROUTE` — so it too runs from the operator's
+own Oh My Pi session and refuses to start in `prerequisites` when `gh` acts as anyone but
+`sjawhar-agent[bot]`. It creates
 no Docker container: the daemon and Dispatch take their own databases in the running Postgres
 container `ACCEPT_PG_CONTAINER` names
 (user `postgres`, password `ci`), and NATS is the native `ACCEPT_NATS_BIN`. Real agents drive the
@@ -2056,6 +2058,7 @@ timed-out wait runs before it fails), and defines `note` and `fail`, which exits
 | `stop_pid PID` | TERM, then KILL after 10 s; best effort, so a failed cleanup never hides the check that failed. An empty PID does nothing; a PID that cannot name one process of the run (0 however spelled, so any value with a leading zero, 1, a negative or non-numeric value, the calling shell or its process group's leader) is refused with a printed line, since `kill 0` signals the caller's whole process group |
 | `stop_tree PID` | stops a background loop with every process under it: it freezes the loop, stops each child the same way, then kills the loop, so the `kubectl`, `jq` or `sleep` the loop was waiting on goes with it. It signals a pid only while its parent is the calling shell, so a pid the watcher left and another process reused is never hit, and refuses the same pids `stop_pid` does: `kill -STOP 0` would freeze the whole driver and a later `kill -KILL 0` end it. Stage 3's and Stage 4b's watchers are stopped with it |
 | `run_processes` | prints every pid whose working directory or command line names `$work` |
+| `real_bin_path DEST NAME…` | symlinks `DEST/NAME` to the real `NAME` binary `mise which NAME` resolves in the caller's own environment, for every `NAME`, and prints `DEST`: a devbox's own `jj` resolves through a shim chain that a pane's relocated `HOME` (`make_omp_home`) breaks, since mise has no pin for a directory whose global config a relocated `HOME` hides — `jj`'s own shim hands the call straight back to itself, exit 127. Needs `jj` pinned in the caller's own `mise.toml`; refuses naming the tool if `mise which` fails. Stage 3 prepends `real_bin_path "$work/realbin" gh jj` to the daemon's own PATH (`start_daemon`), which every pane inherits (`paneEnvAllowList`) |
 
 ## lib/omp-home.sh
 

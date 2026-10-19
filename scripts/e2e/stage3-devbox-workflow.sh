@@ -433,8 +433,8 @@ production_audit() {
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions" |
-    jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]')
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || fail "could not read $prod_envoy_url/v1/sessions"
+  envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then
     printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"
@@ -575,8 +575,8 @@ development=${from:+from $from}${until:+until $until}
 # (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go, includes PATH). This
 # box's own gh and jj resolve through the dotfiles+mise shim chain, which a pane's own relocated
 # HOME breaks (real_bin_path, lib/rig.sh); the proof starts the daemon with both tools' real
-# binaries first on its PATH (start_daemon) instead. real_gh is also this check's own assertion
-# target below (pane-credentials).
+# binaries first on its PATH (start_daemon) instead. real_gh is also in-agent-credentials' own
+# negative control and note below.
 real_gh=$(mise which gh) || fail "mise has no gh"
 realbin=$(real_bin_path "$work/realbin" gh jj)
 require_proof_human
@@ -1109,9 +1109,9 @@ restart_scenarios() {
   # One bash command on purpose. The pane's gh is the launcher directory's wrapper (`legion gh`),
   # which runs the real gh the pane is told (LEGION_GH_PATH: $realbin's own gh, a symlink to mise's
   # real gh and the first gh on the daemon's own PATH — real_bin_path, lib/rig.sh; the daemon's own
-  # command -v finds that symlink's own path, never its resolved target) with GH_CONFIG_DIR at the
-  # directory of
-  # the owner the command names in the claim's gh bundle (LEGION_GH_OWNERS_DIR), which the daemon
+  # resolveTools walks its own PATH the same way a pane's command -v would, and returns that
+  # symlink's own path, never its resolved target) with GH_CONFIG_DIR at the directory of the
+  # owner the command names in the claim's gh bundle (LEGION_GH_OWNERS_DIR), which the daemon
   # writes: the repository's owner's, with the role's App token; no grant is in the path of a
   # GitHub call, and GH_TOKEN is set empty so nothing outranks the file. Each output carries a
   # marker the instruction itself cannot produce (the instruction holds the unexpanded command), so
@@ -1158,7 +1158,7 @@ restart_scenarios() {
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
-  note "real implementer pane ran $state/bin/gh, the wrapper, over $real_gh with GH_CONFIG_DIR=$cred_dir ($owner's directory of $cred_root; 0700, config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number; the shared clone's helper is !legion git-credential with credential.useHttpPath"
+  note "real implementer pane ran $state/bin/gh, the wrapper, over $realbin/gh (-> $real_gh) with GH_CONFIG_DIR=$cred_dir ($owner's directory of $cred_root; 0700, config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number; the shared clone's helper is !legion git-credential with credential.useHttpPath"
   pass
 
   begin pending-dispatch-status-write
