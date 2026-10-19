@@ -1,6 +1,9 @@
 package core_test
 
 import (
+	"encoding/json"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -84,6 +87,52 @@ func TestSessionPermissions(t *testing.T) {
 		Publish:   core.Rules{Allow: []string{"_INBOX.>", "agentstream.*.frames"}},
 		Subscribe: core.Rules{Allow: []string{"notifications.>", "agentstream.*.control"}},
 	}, core.SessionPermissions())
+}
+
+// A user holding SessionPermissions alone publishes a reply and never subscribes to a reply inbox,
+// so it may answer a request but not make one: sessions that share one user holding the set would
+// otherwise each receive every other session's replies. The rules are read from the rendered block,
+// as the server reads them. A host's user subscribes to the inboxes for its listener, which the same
+// check finds.
+func TestSessionPermissionsRefuseASubscribeToReplyInboxes(t *testing.T) {
+	publish, subscribe := renderedRules(t, core.SessionPermissions())
+	require.Contains(t, publish, "_INBOX.>", "a session publishes the receipt a role delivery waits for")
+	for _, entry := range subscribe {
+		require.False(t, admitsInbox(entry), "the session's subscribe entry %q admits a reply inbox", entry)
+	}
+	_, host := renderedRules(t, core.HostPermissions("example-host-a"))
+	require.True(t, slices.ContainsFunc(host, admitsInbox), "the host's set subscribes to the inboxes, for its listener")
+}
+
+// renderedRules renders one user holding p and returns the publish and subscribe allow lists its
+// line of the block holds.
+func renderedRules(t *testing.T, p core.Permissions) (publish, subscribe []string) {
+	t.Helper()
+	const key = "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO"
+	text, err := core.Authorization{Users: []core.User{{
+		Name: "example-session", NKey: key, Publish: &p.Publish, Subscribe: &p.Subscribe, HasSeed: true,
+	}}}.Render(nil)
+	require.NoError(t, err)
+	var user struct {
+		Permissions struct {
+			Publish, Subscribe struct{ Allow []string }
+		}
+	}
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, `"nkey": "`+key+`"`) {
+			require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(line)), &user), line)
+			return user.Permissions.Publish.Allow, user.Permissions.Subscribe.Allow
+		}
+	}
+	t.Fatalf("the rendered block holds no line for the user:\n%s", text)
+	return nil, nil
+}
+
+// admitsInbox reports whether a subscribe allow entry, a subject pattern and an optional queue
+// group after a space, admits any subject under _INBOX.: its first token is _INBOX, * or >.
+func admitsInbox(entry string) bool {
+	first, _, _ := strings.Cut(strings.Fields(entry)[0], ".")
+	return first == "_INBOX" || first == "*" || first == ">"
 }
 
 func TestHostPermissionsAreTheListenersThenTheSessions(t *testing.T) {
