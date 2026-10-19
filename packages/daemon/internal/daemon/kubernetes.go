@@ -476,7 +476,8 @@ func requirements(key string, reservation config.RoleResources) (corev1.Resource
 // (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
 // per-claim pods, or issue pods on one tree volume — remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
+		_ func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}

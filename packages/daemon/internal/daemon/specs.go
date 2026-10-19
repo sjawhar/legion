@@ -44,9 +44,10 @@ type specs struct {
 	// identity is the role's App bot identity every pane commits as, minted for the owner of the
 	// repository the launch works; nil for a daemon with no GitHub Apps.
 	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
-	// repository is the repository issue's record names and its recorded default branch
-	// (workflowRuntime.issueRepository), zero for an issue the workflow does not record; nil for a
-	// daemon with no workflow, whose launches work no repository.
+	// repository is the repository an issue works and its default branch
+	// (workflowRuntime.issueRepository: its record's, or the project's default for an issue the
+	// workflow does not record); nil for a daemon with no workflow, whose launches work no
+	// repository.
 	repository func(ctx context.Context, issue string) (ghrepo.Repository, string, error)
 	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
 	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
@@ -115,8 +116,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			return runtime.SpawnSpec{}, fmt.Errorf("the repository of %s: %w", c.Token, err)
 		}
 	}
-	// A launch on no repository commits nowhere, so it carries no git identity.
-	if s.identity != nil && !spec.Repository.IsZero() {
+	if s.identity != nil {
 		id, err := s.identity(ctx, c.Role, spec.Repository.Owner())
 		if err != nil {
 			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)

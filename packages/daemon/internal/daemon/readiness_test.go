@@ -47,7 +47,7 @@ func TestReadinessAttempt(t *testing.T) {
 			if !testCase.wantPassed {
 				attemptErr = errors.New("unavailable")
 			}
-			got := readinessAttempt(func(context.Context) error { return attemptErr }, testCase.unreachable)(context.Background())
+			got := readinessAttempt(func(context.Context) error { return attemptErr }, bootTimeout, testCase.unreachable)(context.Background())
 			if got.Passed != testCase.wantPassed {
 				t.Fatalf("Outcome.Passed = %t, want %t", got.Passed, testCase.wantPassed)
 			}

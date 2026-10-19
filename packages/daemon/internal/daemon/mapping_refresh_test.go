@@ -71,7 +71,8 @@ func mappingRig(t *testing.T, missing map[string]bool) (*workflowRuntime, *mappi
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "zeta/tools", Project: "LEGION"}}}
 	installs := &installations{missing: missing}
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: "LEGION", installs: installs,
-		repositories: newRepositories("LEGION"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger()}
+		repositories: newRepositories("LEGION"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger(),
+		mappingChanged: make(chan struct{}, 1)}
 	if err := w.loadMapping(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +86,26 @@ func mappingRig(t *testing.T, missing map[string]bool) (*workflowRuntime, *mappi
 	if w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{Project: "LEGION", Repositories: heard, Logger: quietLogger()}); err != nil {
 		t.Fatal(err)
 	}
+	running, stop := context.WithCancel(ctx)
+	refreshed := make(chan struct{})
+	go func() { w.refreshOnMappingChange(running); close(refreshed) }()
+	t.Cleanup(func() { stop(); <-refreshed })
 	return w, client, installs, stream
+}
+
+// prepareAsDelivered prepares fact as the Dispatch consumer does, delivering it again after a
+// held-back preparation (intake.RetryLater) until it is prepared or fails.
+func prepareAsDelivered(t *testing.T, w *workflowRuntime, fact intake.DispatchIssue) (intake.DispatchIssue, error) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		prepared, err := w.prepareRepository(context.Background(), fact)
+		var later *intake.RetryLater
+		if !errors.As(err, &later) || time.Now().After(deadline) {
+			return prepared, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func githubFilterSubjects(t *testing.T, stream jetstream.Stream) []string {
@@ -114,10 +134,10 @@ func recordedIssue(t *testing.T, w *workflowRuntime, key string) *record.Issue {
 	return got
 }
 
-// A refresh publishes a repository as served only once GitHub intake hears it: a refresh that
-// fails before its subscription update leaves the repository left out, so the issue that came up
-// for admission is not recorded on it, and the next admission recheck refreshes again. An issue
-// is never recorded on a repository GitHub intake does not hear.
+// A read of the mapping publishes a repository as served only once GitHub intake hears it: a read
+// that fails before its subscription update leaves the repository left out, so no issue is
+// recorded on it, and the next read covers the issue that came up for admission. An issue is never
+// recorded on a repository GitHub intake does not hear.
 func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -132,10 +152,9 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 			installs.missing["review zeta/tools"] = false
 			w.records = &faultyStore{Store: w.records, failIssues: tc.fail}
 			fact := intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
-			_, err := w.prepareRepository(ctx, fact)
 			if tc.fail {
-				if err == nil {
-					t.Fatal("the failed snapshot did not fail the preparation")
+				if err := w.refreshMapping(ctx); err == nil {
+					t.Fatal("the failed snapshot did not fail the read")
 				}
 				if _, _, leftOut := w.repositories.lookup("zeta/tools"); !leftOut {
 					t.Fatal("the failed refresh published zeta/tools as served")
@@ -143,10 +162,8 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 				if filters := githubFilterSubjects(t, stream); slices.Contains(filters, "notifications.github.zeta.tools.>") {
 					t.Fatalf("GitHub filters = %v after a failed refresh, want zeta/tools not yet heard", filters)
 				}
-				if _, err = w.prepareRepository(ctx, fact); err != nil {
-					t.Fatalf("the retried preparation: %v", err)
-				}
-			} else if err != nil {
+			}
+			if _, err := prepareAsDelivered(t, w, fact); err != nil {
 				t.Fatal(err)
 			}
 			engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
@@ -317,7 +334,7 @@ func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testin
 	handOver := func(seq int64) {
 		t.Helper()
 		fact := intake.DispatchIssue{Key: "LEGION-301", Seq: seq, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "acme/widgets"}
-		prepared, err := w.prepareRepository(ctx, fact)
+		prepared, err := prepareAsDelivered(t, w, fact)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -353,5 +370,34 @@ func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testin
 	}
 	if filters := githubFilterSubjects(t, stream); !slices.Equal(filters, []string{"notifications.github.acme.widgets.>"}) {
 		t.Fatalf("GitHub filters = %v, want acme/widgets heard", filters)
+	}
+}
+
+// An issue handed to Legion on a repository mapped in Dispatch just before, whose mapping event
+// the daemon has not yet read, is not refused as not mapped: its preparation waits for a read of
+// the mapping that covers it, and it is recorded on the repository.
+func TestAnIssueOnARepositoryMappedJustBeforeIsAdmittedOnIt(t *testing.T) {
+	ctx := context.Background()
+	w, client, _, stream := mappingRig(t, map[string]bool{})
+	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
+	if err := w.refreshMapping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
+	fact := intake.DispatchIssue{Key: "LEGION-302", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
+	prepared, err := prepareAsDelivered(t, w, fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
+	if _, err := intake.ApplyFact(ctx, w.pool, "test", "handover", prepared, engine, admission); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordedIssue(t, w, "LEGION-302"); got == nil || got.Repo != "zeta/tools" {
+		t.Fatalf("LEGION-302 = %+v, want it recorded on zeta/tools, mapped before it was handed over", got)
+	}
+	if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
+		t.Fatalf("GitHub filters = %v, want zeta/tools heard", filters)
 	}
 }

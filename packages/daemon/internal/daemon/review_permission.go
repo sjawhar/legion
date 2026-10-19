@@ -51,13 +51,17 @@ type permissionKey struct{ repository, login string }
 // An account GitHub does not know on the repository is answered `404`: no write access, logged,
 // and the review decides nothing. A `403` that is not GitHub's rate limit is no write access too,
 // but it says the review App's installation may not read collaborators at all, so no author but
-// the review App decides while it lasts: it is logged at error, naming the installation. A
+// the review App decides while it lasts: it is logged at error, naming the installation. So is a
+// review App with no installation on the repository's owner (appauth.ErrNotInstalled: installed
+// once, then removed, while a record still names the repository, which GitHub intake keeps
+// hearing), answered at once, since a retry would only mint again on every redelivery. A
 // rate limit is returned as an intake.RetryLater naming the wait GitHub asks for, which intake
 // waits out before the review's delivery is tried again, and is held: while it stands, every
 // account with no answer kept is answered with the wait left and no call is made, since GitHub
 // warns that calling on through a limit can get an integration banned. Any other failure - a mint
-// that failed, a network error, a 5xx, the pull request's record unread - is returned, and intake
-// retries the delivery after its nak delay rather than applying it with a permission nobody read.
+// that failed transiently, a network error, a 5xx, the pull request's record unread - is returned,
+// and intake retries the delivery after its nak delay rather than applying it with a permission
+// nobody read.
 func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.PullRequestReview) (bool, error) {
 	if review.Author == w.reviewAppLogin {
 		return false, nil
@@ -151,6 +155,11 @@ func (w *workflowRuntime) reviewAppClient(ctx context.Context, repository ghrepo
 // readPermission reads login's permission on repository from GitHub, as reviewerCanWrite says.
 func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.Repository, login string) (bool, error) {
 	client, lease, err := w.reviewAppClient(ctx, repository)
+	if errors.Is(err, appauth.ErrNotInstalled) {
+		w.log.Error("workflow: the review App is not installed on the owner of the review's repository, so the review decides nothing; install the review App there for its reviews to decide a round",
+			"app", appauth.Review, "installation_owner", repository.Owner(), "repo", repository.String(), "login", login, "error", err)
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}

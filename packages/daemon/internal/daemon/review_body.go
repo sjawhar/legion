@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 )
@@ -23,7 +24,9 @@ import (
 // before the delivery is tried again rather than applying a review whose footer it could not
 // restore. While GitHub's rate limit stands, the read is answered with the wait left and no call
 // is made, as reviewerCanWrite's permission read is; the limit is held the same way (holdIfLimited)
-// whichever of the mint or the read itself meets it.
+// whichever of the mint or the read itself meets it. A review App with no installation on the
+// repository's owner (appauth.ErrNotInstalled) cannot read it: the review is restored as it was
+// delivered, logged, since a retry would only mint again on every redelivery.
 func (w *workflowRuntime) reviewBody(ctx context.Context, review intake.PullRequestReview) (string, error) {
 	if review.Author != w.reviewAppLogin {
 		return review.Body, nil
@@ -39,6 +42,11 @@ func (w *workflowRuntime) reviewBody(ctx context.Context, review intake.PullRequ
 		return "", rateLimitRefusal(left, fmt.Sprintf("read review %d's body on %s#%d", review.ID, repository.String(), review.Number))
 	}
 	client, _, err := w.reviewAppClient(ctx, repository)
+	if errors.Is(err, appauth.ErrNotInstalled) {
+		w.log.Error("workflow: the review App is not installed on the owner of its review's repository, so its review's body is read as delivered",
+			"app", appauth.Review, "installation_owner", repository.Owner(), "repo", repository.String(), "review", review.ID, "error", err)
+		return review.Body, nil
+	}
 	if err != nil {
 		return "", w.holdIfLimited(err)
 	}

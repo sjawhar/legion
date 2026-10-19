@@ -5,14 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -299,12 +302,11 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var accepted []mappedRepository
 	var refused []refusedRepository
-	err := onAppSchedule(ctx, "repository mapping read", appMintRetry, w.log, func(err error) bool { return appTransient(err) || dispatch.Unreachable(err) },
-		func(ctx context.Context) error {
-			var err error
-			accepted, refused, err = readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
-			return err
-		})
+	err := bootprobe.Run(ctx, "repository mapping read", appMintRetry, w.log, readinessAttempt(func(ctx context.Context) error {
+		var err error
+		accepted, refused, err = readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
+		return err
+	}, appMintAttempt, func(err error) bool { return appTransient(err) || dispatch.Unreachable(err) }))
 	if err != nil {
 		return err
 	}
@@ -319,14 +321,14 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 // retry, and logs the mapping the daemon serves.
 func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 	var named []mappedRepository
-	err := onAppSchedule(ctx, "repository read", appMintRetry, w.log, func(err error) bool {
-		var answer *githubrest.Answer
-		return appTransient(err) || errors.As(err, &answer) && answer.Status >= 500
-	}, func(ctx context.Context) error {
+	err := bootprobe.Run(ctx, "repository read", appMintRetry, w.log, readinessAttempt(func(ctx context.Context) error {
 		var err error
 		named, err = nameAccepted(ctx, w.repositories.Mapped(), w.defaultBranches)
 		return err
-	})
+	}, appMintAttempt, func(err error) bool {
+		var answer *githubrest.Answer
+		return appTransient(err) || errors.As(err, &answer) && answer.Status >= 500
+	}))
 	if err != nil {
 		return err
 	}
@@ -386,38 +388,93 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 }
 
 // mappingChange is Dispatch's consumer's RepositoryMapping: the project's
-// settings.repo_project.updated asks refreshOnMappingChange to read the mapping again, and its
-// event is acknowledged at once. A refresh reads Dispatch and GitHub and can take longer than the
-// event's acknowledgement window (AckWait), and one run inside that window would be cut off and
-// its event delivered again, never finishing. A change that arrives while one waits is read by
-// the same refresh, since a refresh reads the whole mapping.
+// settings.repo_project.updated asks refreshOnMappingChange to read the mapping again
+// (requestMappingRead), and its event is acknowledged at once. A read takes Dispatch and GitHub
+// and can take longer than the event's acknowledgement window (AckWait), and one run inside that
+// window would be cut off and its event delivered again, never finishing.
 func (w *workflowRuntime) mappingChange(context.Context) error {
+	w.requestMappingRead()
+	return nil
+}
+
+// requestMappingRead asks refreshOnMappingChange for a read of the mapping and is the request's
+// number: a read that finishes having started after the request covers it (mappingApplied). A
+// request made while one waits is covered by the same read, since a read takes the whole mapping.
+func (w *workflowRuntime) requestMappingRead() uint64 {
+	request := w.mappingRequested.Add(1)
 	select {
 	case w.mappingChanged <- struct{}{}:
 	default:
 	}
-	return nil
+	return request
 }
 
-// refreshOnMappingChange refreshes the mapping (refreshMapping) on each change mappingChange
-// signals, until ctx ends, each attempt bounded by appMintAttempt and retried on the App mint's
-// backoff, with no limit on attempts, until it applies: a refresh reads the whole mapping, so
-// retrying it loses no change, and a daemon stopped before one applies reads the mapping at boot.
+// refreshOnMappingChange reads the mapping (refreshMapping) on each request, until ctx ends. Each
+// attempt is bounded by appMintAttempt, and a failed one is logged and tried again on the App
+// mint's backoff, with no limit, until it applies: a read takes the whole mapping, so retrying
+// loses no request, and a daemon stopped before one applies reads the mapping at boot. A finished
+// read covers every request made before it started.
 func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
-	retry := appMintRetry
-	retry.Attempts = 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-w.mappingChanged:
 		}
-		everyFailure := func(error) bool { return true }
-		if err := onAppSchedule(ctx, "repository mapping refresh", retry, w.log, everyFailure, w.refreshMapping); err != nil {
-			return
+		wait := appMintRetry.Initial
+		for {
+			covers := w.mappingRequested.Load()
+			attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
+			err := w.refreshMapping(attempt)
+			cancel()
+			if err == nil {
+				w.mappingApplied.Store(covers)
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			w.log.Warn("workflow: the repository mapping read failed, so the daemon serves the mapping it last read; reading it again", "retryIn", wait.String(), "error", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			wait = min(2*wait, appMintRetry.Max)
 		}
 	}
 }
+
+// awaitMappingRead holds back an admission event on a repository the mapping did not serve as
+// last read until a read of the mapping that started after the event first came covers it: a
+// repository mapped, or an App installed, just before the event is then served for it. The first
+// call for an event (by issue key and sequence) requests the read; until it is covered, every call
+// answers an intake.RetryLater, so the event is delivered again after its delay, off its
+// acknowledgement window; once covered, it answers nil, for the caller to look the repository up
+// again.
+func (w *workflowRuntime) awaitMappingRead(issue intake.DispatchIssue) error {
+	key := issue.Key + "#" + strconv.FormatInt(issue.Seq, 10)
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	request, asked := w.awaiting[key]
+	if !asked {
+		if w.awaiting == nil {
+			w.awaiting = map[string]uint64{}
+		}
+		request = w.requestMappingRead()
+		w.awaiting[key] = request
+	}
+	if w.mappingApplied.Load() >= request {
+		delete(w.awaiting, key)
+		return nil
+	}
+	return &intake.RetryLater{After: mappingReadWait,
+		Err: fmt.Errorf("%s resolves to %s, which the repository mapping did not serve when last read: the mapping is being read again before the issue is admitted", issue.Key, issue.ResolvedRepo)}
+}
+
+// mappingReadWait is how long an admission event held back for a read of the mapping
+// (awaitMappingRead) waits before it is tried again.
+const mappingReadWait = time.Second
 
 // heardAtBoot is what GitHub intake hears when the boot opens it: the served repositories of the
 // mapping the boot read and every repository a record of the project names.
@@ -516,17 +573,26 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 }
 
 // prepareRepository readies a Dispatch issue event before it is applied (intake's
-// ConsumerSpec.PrepareRepository), and is the event to apply. An issue's repository is its record's
-// once recorded, so a recorded issue's event asks nothing of Dispatch or GitHub: a retained event
-// that names no repository (ResolvedRepoMissing) takes the record's, and one naming another is
-// applied as it is, for the workflow to keep the record's and say so. For an issue not yet
-// recorded, a retained event's repository is read from Dispatch's issue detail, a read that fails
-// leaving the event to be retried; then, for an event in todo, what the workflow reads in memory
-// when it records the issue (ResolveRepository) is readied: a left-out repository's Apps are
-// checked again when an issue on it comes up for admission (handed to Legion, or a child of a
-// tree), and a served repository's default branch is read when the read Legion holds is older
-// than its TTL. An unrecorded issue's event in any other status asks GitHub nothing.
+// ConsumerSpec.PrepareRepository, and release_children's todo child), and is the event to apply.
+// An issue's repository is its record's once recorded, so a recorded issue's event asks nothing of
+// Dispatch or GitHub: a retained event that names no repository (ResolvedRepoMissing) takes the
+// record's, and one naming another is applied as it is, for the workflow to keep the record's and
+// say so. For an issue not yet recorded, a retained event's repository is read from Dispatch's
+// issue detail, a read that fails leaving the event to be retried; then, for an event in todo,
+// what the workflow reads in memory when it records the issue (ResolveRepository) is readied: an
+// issue coming up for admission (handed to Legion, or a child of a tree) on a repository the
+// mapping did not serve when last read waits for a read of the mapping that covers it
+// (awaitMappingRead), so a repository just mapped, or an App just installed, is served for it,
+// and a served repository's default branch is read when the read Legion holds is older than its
+// TTL. An unrecorded issue's event in any other status asks GitHub nothing.
 func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
+	return w.prepare(ctx, issue, true)
+}
+
+// prepare is prepareRepository, holding back an admission event on a repository not served for a
+// read of the mapping only when await is set: reconcile's boot read prepares on the mapping the
+// boot has just read.
+func (w *workflowRuntime) prepare(ctx context.Context, issue intake.DispatchIssue, await bool) (intake.DispatchIssue, error) {
 	recorded, err := w.recordOf(ctx, issue.Key)
 	if err != nil {
 		return issue, err
@@ -547,12 +613,13 @@ func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.Di
 	if issue.Status != "todo" || issue.ResolvedRepo == "" {
 		return issue, nil
 	}
-	if _, _, leftOut := w.repositories.lookup(issue.ResolvedRepo); leftOut && (issue.HandedOver || issue.Parent != "") {
-		if err := w.refreshMapping(ctx); err != nil {
-			return issue, fmt.Errorf("check the left-out repository %s again: %w", issue.ResolvedRepo, err)
-		}
-	}
 	mapped, refusal, _ := w.repositories.lookup(issue.ResolvedRepo)
+	if refusal != "" && await && (issue.HandedOver || issue.Parent != "") {
+		if err := w.awaitMappingRead(issue); err != nil {
+			return issue, err
+		}
+		mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
+	}
 	if refusal != "" {
 		return issue, nil
 	}

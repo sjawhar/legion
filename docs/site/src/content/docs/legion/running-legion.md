@@ -33,7 +33,11 @@ The daemon records an issue on that repository, and its default branch as GitHub
 first records the issue, and keeps both: a later change of the issue's repository in Dispatch is
 not applied, and the daemon says so on the issue. An issue whose repository resolves to none, or to
 one the daemon does not serve, is not admitted, and the daemon says why on the issue. A claim an
-operator starts on an issue the workflow does not record works the project's default repository.
+operator starts on an issue the workflow does not record works the project's default repository as
+it is at each launch, whatever repository Dispatch resolves for that issue: change the default
+while an operator's tree runs and its next launch, or its pane's next GitHub token after a restart,
+is for the new default, whose workspace it does not have. While the project serves no default, its
+launches are refused and an adopted pane's gh keeps its last tokens until they expire.
 
 The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
 mapped repository both the implement and the review App are installed on, and leaves out one either

@@ -91,10 +91,11 @@ type Options struct {
 	// directory of the owner a command names. Required with GitHubCredential.
 	GH string
 	// RepositoryOwner is the owner of the repository a claim's issue works, from the daemon's own
-	// record: the owner whose directory of a pane's gh bundle holds the write token. The refresher
-	// asks it for a tree pane the runtime adopted after a restart, whose launch's owner it never
-	// saw, and never reads that from the pane's gh directory, which the pane's own user can write.
-	// Required with GitHubCredential.
+	// state (its claims, then the issue's record, or the project's default repository for an issue
+	// the workflow does not record): the owner whose directory of a pane's gh bundle holds the
+	// write token. The refresher asks it for a tree pane the runtime adopted after a restart, whose
+	// launch's owner it never saw, and never reads that from the pane's gh directory, which the
+	// pane's own user can write. Required with GitHubCredential.
 	RepositoryOwner func(ctx context.Context, token claim.Token) (string, error)
 	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
