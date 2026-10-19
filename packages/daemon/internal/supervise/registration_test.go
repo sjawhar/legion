@@ -47,9 +47,7 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 // every internally-armed timer's Handle call carries (arm, machine.go). The retired process's own
 // connection then closing (onClosed is valid in StateLaunching, table.go) must not crash: probe
 // has nothing to probe and nothing to arm, since the claim's own relaunch path, not this stream
-// event, decides what happens to it next (confirmed live, 2026-10-19, on Stage 2's own
-// unregistered-agent-retired-at-the-deadline check — a 100% reproducible nil-pointer panic in
-// (*Machine).probe, packages/daemon/internal/supervise/machine.go:1120, before this fix).
+// event, decides what happens to it next.
 func TestAStreamClosedAfterAShutdownInterruptedRelaunchDoesNotCrash(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateShimConnected)
