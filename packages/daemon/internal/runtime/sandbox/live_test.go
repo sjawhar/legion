@@ -73,6 +73,7 @@ var liveChecks = []liveCheck{
 	{"image-probe", (*liveRig).checkImageProbe, nil},
 	{"image-probe-negative", (*liveRig).checkImageProbeRefusal, nil},
 	{"image-probe-capability-negative", (*liveRig).checkImageProbeCapabilityRefusal, nil},
+	{"image-probe-missing-volume-negative", (*liveRig).checkImageProbeMissingVolumeRefusal, nil},
 	{"root-ready", (*liveRig).checkRootReady, nil},
 	{"gvisor", (*liveRig).checkGVisor, nil},
 	{"resources", (*liveRig).checkResources, nil},

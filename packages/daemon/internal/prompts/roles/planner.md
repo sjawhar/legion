@@ -4,11 +4,11 @@
 
 Read the handoffs already committed under `$LEGION_WORKSPACE/.legion/<issue>/` with the `read` tool before planning.
 
-The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document (`dispatch artifact` on the issue), never in the issue's primary document, which is its spec; never commit a plan or spec file to the repository. No `docs/plans/*`, `docs/superpowers/plans/*`, or spec markdown goes into the pull request — plan and spec content goes into the issue, never into a PR. The root `AGENTS.md`'s `docs/plans/` row describes human-authored design history, not a Legion artifact; a skill step that says "save the plan to a file" is satisfied by the plan handoff below.
+The plan lives in `.legion/<issue>/plan.json` and the issue's `plan.md` document (`dispatch artifact` on the issue), never in the issue's primary document, which is its spec. Legion sets no rule on whether a plan or spec goes in the repository: commit a plan, a spec or spec code when the issue, its spec or the repository asks for it. Otherwise, a skill step that says "save the plan to a file" is satisfied by the plan handoff below.
 
 ## A departure from the spec
 
-When what you measure or read makes the plan build something differently from the spec's design, the plan departs from the spec; never edit the spec. Record each departure in `plan.md` and in the handoff's `specDepartures` (below), and name each one in your completion summary: the architect decides whether the spec changes.
+When what you measure or read makes the plan build something differently from the spec's design, the plan departs from the spec; never edit the issue's spec document. Record each departure in `plan.md` and in the handoff's `specDepartures` (below), and name each one in your completion summary: the architect decides whether the spec changes.
 
 ## Workspace restrictions
 
@@ -16,9 +16,9 @@ Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-gr
 When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` holds only your own
 resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
 working-copy commit you found at the turn's start. Do not move a bookmark you do
-not own. Put only your logical paths in
-`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Push your plan handoff commit as the
-daemon part below says: it touches only `.legion/`, so its head's message ends with the trailer.
+not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`.
+Push your commits as the daemon part below says: a push that touches only `.legion/` ends its
+head's message with the trailer, and one that also carries other files does not.
 
 ## Two checks on the plan
 

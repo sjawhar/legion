@@ -95,8 +95,8 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 
 	resources := DefaultResources()
-	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", Memory: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
-	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
+	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", CPURequest: "1500m", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	resources[claim.RoleTester] = RoleResources{CPU: "2", CPURequest: "2", Memory: "6Gi", MemoryRequest: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
 	want := Runtime{Name: "kubernetes", Kubernetes: &Kubernetes{
 		Namespace:    "legion",
 		Image:        workerImage,
@@ -175,13 +175,13 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 	}{
 		{"issue_volume", block.IssueVolume, "20Gi"},
 		{"resources", block.Resources, map[claim.Role]RoleResources{
-			claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleImplementer: {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleTester:      {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
-			claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleArchitect:   {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RolePlanner:     {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleImplementer: {CPU: "750m", CPURequest: "750m", Memory: "6Gi", MemoryRequest: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleTester:      {CPU: "750m", CPURequest: "750m", Memory: "6Gi", MemoryRequest: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleReviewer:    {CPU: "750m", CPURequest: "750m", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleMerger:      {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleController:  {CPU: "1", CPURequest: "1", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 		}},
 		{"scheduling", block.Scheduling, Scheduling{}},
 		{"kubeconfig", block.Kubeconfig, ""},
@@ -217,14 +217,107 @@ func TestARoleSettingOnlyItsCPUKeepsTheDefaultMemory(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 	resources := cfg.Runtime.Kubernetes.Resources
-	if got, want := resources[claim.RoleReviewer], (RoleResources{CPU: "2", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+	if got, want := resources[claim.RoleReviewer], (RoleResources{CPU: "2", CPURequest: "2", Memory: "4Gi", MemoryRequest: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
 		t.Errorf("reviewer = %+v, want %+v: the file's cpu and the default memory and disk bound", got, want)
 	}
-	if got, want := resources[claim.RolePlanner], (RoleResources{CPU: "250m", Memory: "2Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+	if got, want := resources[claim.RolePlanner], (RoleResources{CPU: "250m", CPURequest: "250m", Memory: "2Gi", MemoryRequest: "2Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
 		t.Errorf("planner = %+v, want %+v: the default cpu and disk bound and the file's memory", got, want)
 	}
-	if got, want := resources[claim.RoleArchitect], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+	if got, want := resources[claim.RoleArchitect], (RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
 		t.Errorf("architect = %+v, want the default %+v: a role the file leaves out", got, want)
+	}
+}
+
+// An explicit CPU or memory request may be below its role's limit. The loader keeps that request
+// rather than settling it to the limit, so the daemon renders a Burstable reservation; the field
+// the file leaves out still settles its request to its limit, and the role reads Burstable.
+func TestARoleCanRequestLessMemoryThanItsLimit(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {implementer: {memory: 32Gi, memory_request: 8Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	implementer := cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer]
+	want := RoleResources{CPU: "750m", CPURequest: "750m", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
+	if implementer != want {
+		t.Errorf("implementer = %+v, want %+v", implementer, want)
+	}
+	if !implementer.Burstable() {
+		t.Errorf("implementer %+v reads Guaranteed, want Burstable", implementer)
+	}
+	if architect := cfg.Runtime.Kubernetes.Resources[claim.RoleArchitect]; architect.Burstable() {
+		t.Errorf("architect %+v reads Burstable, want the default's Guaranteed", architect)
+	}
+}
+
+// A cpu or memory request settles to the file's request where it set one, else to the file's limit
+// where it set that, else to the default's request: a role the file names for another field keeps
+// the default's request shape, Burstable or not, rather than taking the default's limit.
+func TestSettledRequestFallsBackToTheDefaultsRequest(t *testing.T) {
+	for _, tc := range []struct{ name, request, limit, defaultRequest, want string }{
+		{"the file's request", "8Gi", "32Gi", "6Gi", "8Gi"},
+		{"the file's limit alone", "", "32Gi", "6Gi", "32Gi"},
+		{"neither set: the default's request", "", "", "2Gi", "2Gi"},
+	} {
+		if got := settledRequest(tc.request, tc.limit, tc.defaultRequest); got != tc.want {
+			t.Errorf("%s: settledRequest(%q, %q, %q) = %q, want %q", tc.name, tc.request, tc.limit, tc.defaultRequest, got, tc.want)
+		}
+	}
+}
+
+// A file that raises a limit alone settles its request to that limit, never to the default's
+// smaller request: setting `memory: 8Gi` keeps the role Guaranteed at 8Gi.
+func TestARoleRaisingALimitAloneStaysGuaranteed(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {tester: {cpu: 2, memory: 8Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	tester := cfg.Runtime.Kubernetes.Resources[claim.RoleTester]
+	if want := (RoleResources{CPU: "2", CPURequest: "2", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}); tester != want {
+		t.Errorf("tester = %+v, want %+v", tester, want)
+	}
+	if tester.Burstable() {
+		t.Errorf("tester %+v reads Burstable, want Guaranteed", tester)
+	}
+}
+
+// A cpu or memory request is held to its settled limit, whichever side the file set, and must be a
+// positive quantity; each refusal names the key, as `legion start --check-config` prints it.
+func TestARoleRequestMustBeAQuantityNoGreaterThanItsLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, resources, want string
+	}{
+		{
+			name:      "memory request past its limit",
+			resources: "implementer: {memory: 32Gi, memory_request: 33Gi}",
+			want:      "runtime.kubernetes.resources.implementer.memory_request 33Gi exceeds memory 32Gi",
+		},
+		{
+			name:      "memory request past the default limit",
+			resources: "implementer: {memory_request: 7Gi}",
+			want:      "runtime.kubernetes.resources.implementer.memory_request 7Gi exceeds memory 6Gi",
+		},
+		{
+			name:      "cpu request past its limit",
+			resources: "planner: {cpu: 500m, cpu_request: 750m}",
+			want:      "runtime.kubernetes.resources.planner.cpu_request 750m exceeds cpu 500m",
+		},
+		{
+			name:      "memory request is not a quantity",
+			resources: "implementer: {memory_request: several}",
+			want:      "runtime.kubernetes.resources.implementer.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			name:      "cpu request of zero",
+			resources: "reviewer: {cpu_request: 0}",
+			want:      "runtime.kubernetes.resources.reviewer.cpu_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {"+tc.resources+"}\n"), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("LoadForValidation error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 
@@ -239,10 +332,10 @@ func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 	resources := cfg.Runtime.Kubernetes.Resources
-	if got, want := resources[claim.RoleTester], (RoleResources{CPU: "750m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+	if got, want := resources[claim.RoleTester], (RoleResources{CPU: "750m", CPURequest: "750m", Memory: "6Gi", MemoryRequest: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "1Gi"}); got != want {
 		t.Errorf("tester = %+v, want %+v: the file's limit over the default request", got, want)
 	}
-	if got, want := resources[claim.RoleMerger], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "2Gi"}); got != want {
+	if got, want := resources[claim.RoleMerger], (RoleResources{CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "2Gi"}); got != want {
 		t.Errorf("merger = %+v, want %+v: the file's request under the default limit", got, want)
 	}
 }
@@ -453,12 +546,12 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			// reservation that replaced them, never as a generic unknown key.
 			name: "a role's requests mapping",
 			body: kubernetesFile + "    resources: {planner: {requests: {cpu: 500m, memory: 1Gi}}}\n",
-			want: "runtime.kubernetes.resources.planner.requests is gone: a role's reservation is one cpu and one memory, each both its request and its limit",
+			want: "runtime.kubernetes.resources.planner.requests is gone: a role's reservation is its cpu and memory limits, with cpu_request and memory_request below them where set",
 		},
 		{
 			name: "a role's limits mapping",
 			body: kubernetesFile + "    resources: {planner: {cpu: 500m, limits: {memory: 2Gi}}}\n",
-			want: "runtime.kubernetes.resources.planner.limits is gone: a role's reservation is one cpu and one memory, each both its request and its limit",
+			want: "runtime.kubernetes.resources.planner.limits is gone: a role's reservation is its cpu and memory limits, with cpu_request and memory_request below them where set",
 		},
 		{
 			// The settled request is held to the settled limit, whichever side the file set.
@@ -494,7 +587,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "the TypeScript role_profiles",
 			body: kubernetesFile + "    role_profiles: {tester: large}\n",
-			want: "unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, a cpu and a memory each both request and limit, and a role absent there takes the daemon's default",
+			want: "unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, its cpu and memory limits with optional lower cpu_request and memory_request, and a role absent there takes the daemon's default",
 		},
 		{
 			name: "session_store postgres without its key",

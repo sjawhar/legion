@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
+  `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the end of any
+  output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
+
 ### Changed
 
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):

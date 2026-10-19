@@ -24,7 +24,9 @@ GitHub sends webhooks to the listener's public route `/webhook/github`, for exam
 
 - **The GitHub App's webhook.** Set the App's webhook URL to that route. This is the usual
   setup: one webhook covers every repository the App is installed on, and Dispatch, which holds the
-  App's key, asks GitHub to redeliver deliveries that failed.
+  App's key, asks GitHub to redeliver deliveries that failed. `scripts/github-apps/envoy.json` is
+  that App's manifest, its events and its read-only permissions, which
+  [Running Legion](/legion/legion/running-legion/#the-github-apps) registers.
 - **A repository webhook**, for a repository the App is not on.
 
 Either way the webhook's secret must equal the listener's `ENVOY_GITHUB_WEBHOOK_SECRET`. The

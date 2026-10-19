@@ -19,7 +19,7 @@ your cluster, from one published worker image.
 | Postgres | One database for the daemon's record (`postgres_dsn`, or `LEGION_POSTGRES_DSN` in its environment). |
 | [Dispatch](/legion/dispatch/) | Its URL and a bearer token for Legion's agents, and the project's repositories mapped to it in Dispatch's Settings → Repositories → Projects, one of them the project's default ([below](#the-projects-repositories)). |
 | The Envoy listener and NATS | The listener's URL and API token, and the NATS URLs. The daemon reads Dispatch's issue events and each repository's GitHub events from Envoy's notification stream on NATS, and reaches agents through the listener. [Envoy](/legion/dispatch/envoy/) covers how a repository's webhooks reach the listener and the NATS subjects the daemon's user needs. |
-| Two GitHub Apps | An **implement** App (the implementer's and merger's identity) and a **review** App (every other role's), each installed on every repository Legion works, with its private key ([below](#the-two-github-apps)). |
+| Three GitHub Apps | An **implement** App (the implementer's and merger's identity), a **review** App (every other role's) and an **Envoy** App (the webhook that feeds Envoy, and Dispatch's GitHub reads), each installed on the owner of every repository Legion works, with its private key ([below](#the-github-apps)). |
 | The worker image | `ghcr.io/sjawhar/legion-worker`, pinned by digest. |
 | A model route | An Oh My Pi provider file and settings overlay, and the credential they read ([below](#the-model-route)). |
 
@@ -35,28 +35,58 @@ not applied, and the daemon says so on the issue. An issue whose repository reso
 one the daemon does not serve, is not admitted, and the daemon says why on the issue.
 
 The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
-mapped repository both GitHub Apps are installed on, and leaves out one either App is missing from:
-the boot logs it, `legion state --json` lists it under `repositories.refused` with the App it lacks,
-and an issue on it is not admitted until the App is installed, when moving the issue to `todo`
-again admits it. A project with no repository mapped does not boot; one whose every repository
-lacks an App boots serving none and admits nothing until an App is installed.
+mapped repository both the implement and the review App are installed on, and leaves out one either
+App is missing from: the boot logs it, `legion state --json` lists it under `repositories.refused`
+with the App it lacks, and an issue on it is not admitted until the App is installed, when moving
+the issue to `todo` again admits it. A project with no repository mapped does not boot; one whose
+every repository lacks an App boots serving none and admits nothing until an App is installed.
 
-## The two GitHub Apps
+## The GitHub Apps
 
-Create two GitHub Apps and install both on every repository Legion works. The daemon
-mints each agent's token from its role's App, with the App's whole installation permissions, so the
-Apps' permissions are exactly what Legion's agents can do on GitHub:
+Legion uses three GitHub Apps, each installed on the owner of every repository Legion works: an
+implement App, a review App and an Envoy App. The daemon mints each agent's token from its role's
+App, with the App's whole installation permissions, so the implement and review Apps' permissions
+are exactly what Legion's agents can do on GitHub:
 
 | App | Write | Read |
 | --- | --- | --- |
 | **review** (planner, tester, reviewer, architect) | contents, pull requests, checks, actions, issues | metadata, packages |
-| **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows, repository projects, organization projects | checks, metadata, packages |
+| **implement** (implementer, merger) | contents, pull requests, issues, actions, statuses, workflows | checks, metadata, packages |
 
 The implement App cannot create a check run, and a review never comes from the App that wrote the
 change. `gh api /apps/<app slug> --jq .permissions` shows what an App holds. The daemon itself reads
 GitHub with the implement App too: every two minutes it reads each open pull request's base branch
 and the checks that branch requires (its rulesets and its branch protection), the set the merger's
 `READY` checks, since only those decide whether CI is red at a head.
+
+`scripts/github-apps/create.ts` registers all three from the manifests beside it:
+`scripts/github-apps/implement.json` and `review.json` hold the permissions above and carry no
+webhook, and `scripts/github-apps/envoy.json` is the App whose webhook carries GitHub's events to
+Envoy. That App only reads, and Dispatch reads GitHub with it. The script serves a page on this
+machine's loopback address with one Create button per App. You click each and confirm on GitHub,
+and the script writes GitHub's whole answer for each App (its id, private key, client secret and
+webhook secret) to `<out>/implement.json`, `review.json` and `envoy.json`, readable only by you:
+
+```sh
+bun scripts/github-apps/create.ts --out <new dir> --name-prefix <prefix>- \
+  --webhook-url https://<listener host>/webhook/github [--org <org>] [--public] \
+  scripts/github-apps/implement.json scripts/github-apps/review.json scripts/github-apps/envoy.json
+```
+
+`--org` registers them under an organization, which only its owners and App managers can do;
+without it they belong to the account that clicks. The Apps are private unless you pass
+`--public`, and GitHub lets a private App be installed only on the account that owns it. Register
+them under the one owner whose repositories Legion works, and keep them private. Pass `--public`
+only when Legion works repositories under more than one owner: then any account can install them,
+and an install of the Envoy App sends that account's repository events to your listener and adds
+an installation that Dispatch searches.
+
+`--webhook-url` becomes the Envoy App's webhook. That App's webhook secret is the listener's
+`ENVOY_GITHUB_WEBHOOK_SECRET`, its client id is Dispatch's `DISPATCH_APP_CLIENT_ID`, and its
+private key, base64-encoded, is `DISPATCH_APP_PEM_B64`. The review App's id is the listener's
+`ENVOY_REVIEWER_APP_ID`. Store the private keys where `github_apps.<role>` and Dispatch read them,
+delete the files, then install every App from `https://github.com/apps/<slug>/installations/new`
+on the same repositories.
 
 ## The cluster
 
@@ -67,16 +97,36 @@ and the checks that branch requires (its rulesets and its branch protection), th
 - **A node pool for Legion.** Every pod selects nodes labelled `legion.dev/pool=legion` and
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
-- **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod reserves cpu and memory
-  with its request equal to its limit, so every pod is `Guaranteed`, and bounds its ephemeral
-  storage — the node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go
-  and Bun caches a build fills — with a per-role limit over a smaller request. A role's reservation
-  is `runtime.kubernetes.resources.<role>` (`cpu`, `memory`, `ephemeral_storage` the disk limit,
-  `ephemeral_storage_request` what the scheduler reserves of it, each optional, the request at most
-  the limit), and the daemon's defaults fill the rest — 750m and 6Gi for the implementer and
+- **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod carries a
+  cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
+  node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go and Bun caches a
+  build fills — with a per-role limit over a smaller request. A role's reservation is
+  `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
+  `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
+  `ephemeral_storage_request` what the scheduler reserves of it, each optional, each request at most
+  its limit), and the daemon's defaults fill the rest — 750m and 6Gi for the implementer and
   tester; 750m and 4Gi for the reviewer; 250m and 1Gi for the architect, planner and merger; 1 CPU
-  and 4Gi for the controller (`controller: daemon` only); 20Gi of disk for the implementer and
-  tester and 10Gi for every other role, over a 1Gi request each. The image probe pod, which every
+  and 4Gi for the controller (`controller: daemon` only), each both request and limit; 20Gi of disk
+  for the implementer and tester and 10Gi for every other role, over a 1Gi request each. A cpu or
+  memory request the file leaves out equals the role's limit, so a deployment that sets none runs
+  only `Guaranteed` pods. A lower request — `implementer: {memory: 32Gi, memory_request: 8Gi}` for
+  an agent whose memory comes in bursts — makes every pod holding that role `Burstable`: more pods
+  fit a node and a cluster that bills by requests bills less, but under node memory pressure the
+  kubelet evicts a `Burstable` pod using more than its request before any `Guaranteed` one, or the
+  kernel OOM-kills it, which stalls the tree until the pod is relaunched and its roles resume. The
+  `resource-limits` row of `legion state --json` and `legion start --check-config` both name the
+  roles that make a pod `Burstable`. On GKE Autopilot's general-purpose, `Balanced` and `Scale-Out`
+  pods, a request below the limit is honoured only in a cluster that supports bursting
+  (1.30.2-gke.1394000 or later on cgroup v2, with the `efficiency-daemon` DaemonSet running), and
+  otherwise each limit is set to the request; even then such a pod, alone on its node, bursts only
+  to about its own summed requests (21Gi for the implementer example above, never its 32Gi limit).
+  A `Performance`-class pod bursts into its node's allocatable, but GKE sizes that node from the
+  summed requests of its pods and DaemonSets, rounded up to a machine type, and bills that VM, so
+  every Autopilot class sets the burst ceiling from the requests. To give a role real headroom on
+  Autopilot, raise the pod's summed requests (the role's own request, or an idle sibling's) rather
+  than its limit alone. See
+  [Issue sizing](https://github.com/sjawhar/legion/blob/main/docs/kubernetes.md#issue-sizing-one-reservation-per-pod)
+  for the sources. The image probe pod, which every
   boot runs before anything is served, carries a fixed reservation of its own and no role's share:
   250m and 1Gi over 5Gi of disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi
   at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from

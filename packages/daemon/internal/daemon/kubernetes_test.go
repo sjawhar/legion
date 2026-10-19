@@ -410,16 +410,18 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 	}
 }
 
-// Every role's reservation reaches the runtime's Options as that role's container requirements,
-// its cpu and memory the request and the limit alike — the file's values where it set them, here
-// one role's — so every container the runtime builds from them is Guaranteed, and its ephemeral
-// storage the limit the file or the default set with the request under it; and the image probe
-// carries its own fixed reservation (probeReservation), 250m and 1Gi over a 5Gi disk bound and a
-// 1Gi disk request, translated the same way and no role's share — a probe that reserved the
-// controller's 1 CPU and 4Gi could not boot the daemon on a pool with room for less.
+// Every role's reservation reaches the runtime's Options as that role's container requirements:
+// its cpu and memory requests the file's where it set one below its limit, its limit otherwise —
+// here one role keeps request == limit at sizes the file set and another requests less than it may
+// use, which the runtime renders as a Burstable pod — and its ephemeral storage the limit the file
+// or the default set with the request under it; and the image probe carries its own fixed
+// reservation (probeReservation), 250m and 1Gi over a 5Gi disk bound and a 1Gi disk request,
+// translated the same way and no role's share — a probe that reserved the controller's 1 CPU and
+// 4Gi could not boot the daemon on a pool with room for less.
 func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
-	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", Memory: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", CPURequest: "1500m", Memory: "8Gi", MemoryRequest: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	cfg.Runtime.Kubernetes.Resources[claim.RoleTester] = config.RoleResources{CPU: "2", CPURequest: "500m", Memory: "32Gi", MemoryRequest: "8Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
@@ -435,7 +437,7 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 		}
 		want := corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
-				corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
+				corev1.ResourceCPU: resource.MustParse(reservation.CPURequest), corev1.ResourceMemory: resource.MustParse(reservation.MemoryRequest),
 				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest),
 			},
 			Limits: corev1.ResourceList{
@@ -444,8 +446,15 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 			},
 		}
 		if !reflect.DeepEqual(got, want) {
-			t.Errorf("%s's requirements = %+v, want %+v (cpu and memory request == limit; ephemeral-storage request under its limit)", role, got, want)
+			t.Errorf("%s's requirements = %+v, want %+v (each request the reservation's, under or at its limit)", role, got, want)
 		}
+	}
+	tester := opts.Resources[claim.RoleTester]
+	if request, limit := tester.Requests[corev1.ResourceMemory], tester.Limits[corev1.ResourceMemory]; request.Cmp(resource.MustParse("8Gi")) != 0 || limit.Cmp(resource.MustParse("32Gi")) != 0 {
+		t.Errorf("the tester requests memory %s under a limit of %s, want 8Gi under 32Gi", request.String(), limit.String())
+	}
+	if request, limit := tester.Requests[corev1.ResourceCPU], tester.Limits[corev1.ResourceCPU]; request.Cmp(resource.MustParse("500m")) != 0 || limit.Cmp(resource.MustParse("2")) != 0 {
+		t.Errorf("the tester requests cpu %s under a limit of %s, want 500m under 2", request.String(), limit.String())
 	}
 	probe, err := imageProbe(cfg, promptrefs.New())
 	if err != nil {
