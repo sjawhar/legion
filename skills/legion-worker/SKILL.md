@@ -328,7 +328,7 @@ or `review`), with the ordinary `write` tool: a JSON object with `schemaVersion:
 phase's own fields exactly as your role prompt spells them — the planner's `requiredSkills`,
 `gapAnalysis`, `planReview` and `specDepartures` records; the implementer's `proof` array; the
 tester's `implementerProof`, `failures` and, whenever it reports no failure, its own `proof`; the
-reviewer's `verdict`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
+reviewer's `decision`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
 entry, in either phase, is an object of six non-empty strings: `criterion` (the acceptance line it
 proves), `surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
 A handoff built from the one already on disk (a test handoff that accumulates review rounds) is
@@ -342,10 +342,10 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 Then push (below) and report completion: call the `legion` tool with `op: "handoff_complete"` and
-`summary` (two sentences for the architect; the tester adds `verdict: "pass"` or `"fail"`, the
-merger `ready: true`). **Push before you complete is a hard rule.** `handoff_complete` finds, with
-your pane's jj, the newest commit on the issue branch that carries `.legion/<KEY>/<phase>.json`
-and reports it to the daemon, and refuses — posting nothing — while:
+`summary` (two sentences for the architect; the tester, and no other role, adds `verdict: "pass"`
+or `"fail"`; the merger `ready: true`). **Push before you complete is a hard rule.**
+`handoff_complete` finds, with your pane's jj, the newest commit on the issue branch that carries
+`.legion/<KEY>/<phase>.json` and reports it to the daemon, and refuses — posting nothing — while:
 
 - the file has a change still in the working copy: commit it, then complete again;
 - the file is missing from the workspace: write it, then commit and push it;
@@ -429,8 +429,9 @@ Report completion to the architect: call the `legion` tool with `op: "handoff_co
 (`handoff_complete`; `read_record`, your issue's record, which is what "re-read your issue
 record" means; and `request_backward_move`), and nothing of yours runs `legion` from bash. The
 tool call is what the extension's phase stall records, and a turn that ends with the phase still
-open gets one reminder; do not complete again on that reminder when your first completion was
-accepted — it stands, and a second is refused because the issue has already left your phase.
+open gets one reminder (two when the first is answered with the tool call written as text again);
+do not complete again on a reminder when your first completion was accepted — it stands, and a
+second is refused because the issue has already left your phase.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or

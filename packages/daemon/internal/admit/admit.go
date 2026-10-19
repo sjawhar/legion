@@ -432,10 +432,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// root's or a live tree's own state, not the record it briefly showed on Dispatch. Re-read
 		// afterward: the engine's own write (phase, hold, linger) must not be clobbered by
 		// recordObservation writing back the stale copy this call fetched before the engine ran.
-		if _, err := a.engine.Apply(ctx, tx, intake.DispatchIssue{
-			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title,
-			Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: handed, ResolvedRepo: summary.ResolvedRepo,
-		}); err != nil {
+		if _, err := a.engine.Apply(ctx, tx, intake.ListedIssue(summary)); err != nil {
 			return fmt.Errorf("apply engine transition for %s: %w", summary.Key, err)
 		}
 		refreshed, err := a.store.Issue(ctx, tx, summary.Key)

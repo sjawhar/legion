@@ -11,7 +11,7 @@ tags:
   - worker-image
   - verification
 date: 2026-09-13
-status: active
+status: superseded — `omp-pin.ts` and the bun CLI's `probe-image` are gone with the TypeScript daemon; the Oh My Pi build is `omp_invocation` in `legion.yaml` for a tmux daemon (refused under `runtime: kubernetes`, whose pods run the worker image's) and `.omp-pin` for the worker image and the e2e scripts, and the Go `legion probe-image` takes `--plugin-root` and `--envoy-plugin-root`; the behaviour-first rule (reproduce the bug the bump exists for against both builds) still stands
 module: omp-pin
 related_issues:
   - "LEGION-32"

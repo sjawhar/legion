@@ -10,7 +10,7 @@ tags:
   - tmux
   - bash-interceptor
 date: 2026-09-12
-status: active
+status: superseded — the grant rig (`packages/pi-envoy/scripts/grant-rig`), the grant file its role tokens redeemed for credentials and the `gh` shim it drove are gone with LEGION-631 and the TypeScript daemon; the stand-in daemon a real worker runs against today is `packages/pi-legion/scripts/skill-scenarios/daemon-standin.ts`, which serves the Go daemon's routes (the `legion` tool's in-process grants among them), with `daemon-pane.go` writing the pane's gh files
 module: pi-envoy
 related_issues:
   - "LEGION-12"

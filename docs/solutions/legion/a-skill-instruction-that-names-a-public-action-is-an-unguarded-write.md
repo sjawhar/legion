@@ -12,7 +12,7 @@ tags:
   - github-issues
   - acceptance-grep
 date: 2026-09-13
-status: superseded by LEGION-631 — the `legion gh` boundary and the `worker-bin/gh` shim this note's rule rests on are gone; a pane's `gh` is the plain binary acting as the role's App from `GH_CONFIG_DIR`, nothing refuses a merge or a GitHub-issue write, and the no-GitHub-issue rule lives as prose in the prompts and skills (`dispatch_message`/`dispatch_comment` instead)
+status: superseded by LEGION-631 — the TypeScript `legion gh` boundary (`cmdGh` and its merge and issue-write refusals) and the `worker-bin/gh` shim this note's rule rests on are gone; a pane's `gh` is now the Go `legion gh` wrapper, which picks the gh directory of the owner a command names and refuses a command it cannot read for certain, but refuses no merge or GitHub-issue write, and the no-GitHub-issue rule lives as prose in the prompts and skills (`dispatch_message`/`dispatch_comment` instead)
 module: packages/daemon/src/cli, skills
 problem_type: safety
 severity: high

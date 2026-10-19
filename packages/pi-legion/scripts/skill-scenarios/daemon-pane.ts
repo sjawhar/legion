@@ -44,9 +44,10 @@ export function runDaemonPane(module: string, args: readonly string[], input?: s
 /** The claim a pane is launched for and the rig's stand-ins for what the daemon knows at boot
  * (daemon-pane.go's paneRequest). `ghToken` stands in for the claim's GitHub App token: it is
  * rendered into the claim's gh bundle under `<stateDir>/secrets/<claim>-gh`, the pane's
- * `LEGION_GH_OWNERS_DIR`, whose one owner's directory is its `GH_CONFIG_DIR`, and the first `gh` on
- * `path` is its `LEGION_GH_PATH`; omitted, the pane gets no gh variable, as from a daemon with no
- * GitHub Apps. */
+ * `LEGION_GH_OWNERS_DIR`, whose one owner's directory is its `GH_CONFIG_DIR`, and its
+ * `LEGION_GH_PATH` is `ghPath` when the rig names one (its recording stand-in), else the real gh as
+ * the daemon resolves it at boot, the first `gh` on `path`, refused when that is a script; omitted,
+ * the pane gets no gh variable, as from a daemon with no GitHub Apps. */
 interface PaneRequest {
   readonly project: string;
   readonly issue: string;
@@ -59,6 +60,7 @@ interface PaneRequest {
   readonly bootTokenFile: string;
   readonly ghToken?: string;
   readonly path: string;
+  readonly ghPath?: string;
   readonly systemPrompt?: boolean;
 }
 
@@ -93,6 +95,9 @@ export interface WorkerClaim {
 export interface PaneSource {
   readonly daemonModule: string;
   readonly systemPrompt?: boolean;
+  /** The real gh the pane is told, as an operator names one with `LEGION_GH_PATH`: the rig's
+   * recording stand-in. Omitted, the daemon's own resolution on the inherited PATH. */
+  readonly ghPath?: string;
 }
 
 /** The pane the Legion daemon's tmux runtime gives a phase worker for `claim`, pointed at the
@@ -103,7 +108,8 @@ export interface PaneSource {
  * the profile's envoy.json, `envoySettings`, which reads no Envoy from the workspace's
  * `.envoy/envoy.json`; the default listener and no NATS when that Envoy is off), the claim's gh
  * bundle, which holds `RIG_GH_TOKEN` (`LEGION_GH_OWNERS_DIR`, `GH_CONFIG_DIR` and `LEGION_GH_PATH`,
- * the first `gh` on the inherited PATH), with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty,
+ * `source.ghPath`, or the first `gh` on the inherited PATH, which must be no script), with
+ * `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty,
  * `PI_SHELL_PREFIX`, the four XDG base directories, the boot token pointer
  * (`<state>/secrets/boot`, the file the stand-in checks), and PATH with the launcher directory
  * first; no grant file, since the `legion` tool mints its grants in-process and no agent runs
@@ -152,6 +158,7 @@ export function workerPane(
     ghToken: RIG_GH_TOKEN,
     path: env.PATH ?? "",
     systemPrompt: source.systemPrompt,
+    ghPath: source.ghPath,
   };
   const pane = JSON.parse(
     runDaemonPane(source.daemonModule, ["pane"], JSON.stringify(request))

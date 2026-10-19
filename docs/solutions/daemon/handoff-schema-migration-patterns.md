@@ -140,9 +140,9 @@ removed); and `describePhaseHandoffProblems` rendering the union's unmatched dis
 a missing key, and a non-string alike — as `phase: expected one of ${HANDOFF_PHASES.join("|")}` instead
 of the bare `Invalid input`. Proven on the branch CLI in scratch workspaces before and after
 (baseline: a blank `observed` wrote, `failed: 1` with no failures wrote, rejected-with-clean-pass wrote,
-`phase: "retro"` read as `phase: Invalid input`); the tester's live contrast with the pane's deployed
-`legion`, which still accepted all of it, is in
-[`../legion/worker-pane-shell-gotchas.md`](../legion/worker-pane-shell-gotchas.md) §13.
+`phase: "retro"` read as `phase: Invalid input`); the pane's deployed `legion` still accepted all of
+it, the stale-build skew
+[`../legion/worker-pane-shell-gotchas.md`](../legion/worker-pane-shell-gotchas.md) §13 describes.
 
 Residuals a fresh-eyes review of the diff named; none blocks, each is the first thing to check when
 this schema is touched again:
