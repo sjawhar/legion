@@ -148,7 +148,8 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			w, _, installs, stream := mappingRig(t, map[string]bool{"review zeta/tools": true})
+			w, client, installs, stream := mappingRig(t, map[string]bool{"review zeta/tools": true})
+			client.issue = dispatch.Issue{Key: "LEGION-301", Status: "todo", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 1}
 			installs.missing["review zeta/tools"] = false
 			w.records = &faultyStore{Store: w.records, failIssues: tc.fail}
 			fact := intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
@@ -318,11 +319,12 @@ func TestGitHubIntakeHearsEachRepositoryAsGitHubSpellsIt(t *testing.T) {
 
 // A project whose every mapped repository lacks an App boots serving none: GitHub intake hears no
 // repository's events, and an issue handed to Legion on one is not admitted, the daemon saying why
-// on it. Once the App is installed, the issue's next admission recheck serves the repository and
-// records the issue on it, which GitHub intake then hears.
+// on it. Once the App is installed, the issue's next hand-over is held for a read of the mapping,
+// which serves the repository and records the issue on it, which GitHub intake then hears.
 func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testing.T) {
 	ctx := context.Background()
-	w, _, installs, stream := mappingRig(t, map[string]bool{"review acme/widgets": true, "review zeta/tools": true})
+	w, client, installs, stream := mappingRig(t, map[string]bool{"review acme/widgets": true, "review zeta/tools": true})
+	client.issue = dispatch.Issue{Key: "LEGION-301", Status: "todo", HandedOver: true, ResolvedRepo: "acme/widgets", LastSeq: 2}
 	if served := w.repositories.Accepted(); len(served) != 0 {
 		t.Fatalf("served %v, want none", served)
 	}
@@ -375,29 +377,57 @@ func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testin
 
 // An issue handed to Legion on a repository mapped in Dispatch just before, whose mapping event
 // the daemon has not yet read, is not refused as not mapped: its preparation waits for a read of
-// the mapping that covers it, and it is recorded on the repository.
+// the mapping that covers it, and it is recorded on the repository, so long as Dispatch still
+// shows it handed over in todo there. One the person withdrew while its event was held (moved to
+// backlog, the label taken off) is not admitted: the held event is superseded, acknowledged
+// unapplied, since the newer event carries the issue's current state.
 func TestAnIssueOnARepositoryMappedJustBeforeIsAdmittedOnIt(t *testing.T) {
-	ctx := context.Background()
-	w, client, _, stream := mappingRig(t, map[string]bool{})
-	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
-	if err := w.refreshMapping(ctx); err != nil {
-		t.Fatal(err)
-	}
-	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
-	fact := intake.DispatchIssue{Key: "LEGION-302", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
-	prepared, err := prepareAsDelivered(t, w, fact)
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
-	admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
-	if _, err := intake.ApplyFact(ctx, w.pool, "test", "handover", prepared, engine, admission); err != nil {
-		t.Fatal(err)
-	}
-	if got := recordedIssue(t, w, "LEGION-302"); got == nil || got.Repo != "zeta/tools" {
-		t.Fatalf("LEGION-302 = %+v, want it recorded on zeta/tools, mapped before it was handed over", got)
-	}
-	if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
-		t.Fatalf("GitHub filters = %v, want zeta/tools heard", filters)
+	for _, tc := range []struct {
+		name  string
+		now   dispatch.Issue
+		admit bool
+	}{
+		{"still handed over in todo", dispatch.Issue{Key: "LEGION-302", Status: "todo", HandedOver: true, ResolvedRepo: "zeta/tools", LastSeq: 2}, true},
+		{"withdrawn while it was held", dispatch.Issue{Key: "LEGION-302", Status: "backlog", ResolvedRepo: "zeta/tools", LastSeq: 2}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			w, client, _, stream := mappingRig(t, map[string]bool{})
+			client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
+			if err := w.refreshMapping(ctx); err != nil {
+				t.Fatal(err)
+			}
+			client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true}, dispatch.RepoProject{Repo: "zeta/tools", Project: "LEGION"})
+			client.issue = tc.now
+			fact := intake.DispatchIssue{Key: "LEGION-302", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
+			prepared, err := prepareAsDelivered(t, w, fact)
+			var superseded *intake.Superseded
+			if !tc.admit {
+				if !errors.As(err, &superseded) {
+					t.Fatalf("the held event of a withdrawn issue = %v, want it superseded", err)
+				}
+				if left := len(w.awaiting); left != 0 {
+					t.Fatalf("%d issues still held after the event was superseded, want none", left)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if left := len(w.awaiting); left != 0 {
+				t.Fatalf("%d issues still held after the event proceeded, want none", left)
+			}
+			engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+			admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
+			if _, err := intake.ApplyFact(ctx, w.pool, "test", "handover", prepared, engine, admission); err != nil {
+				t.Fatal(err)
+			}
+			if got := recordedIssue(t, w, "LEGION-302"); got == nil || got.Repo != "zeta/tools" {
+				t.Fatalf("LEGION-302 = %+v, want it recorded on zeta/tools, mapped before it was handed over", got)
+			}
+			if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
+				t.Fatalf("GitHub filters = %v, want zeta/tools heard", filters)
+			}
+		})
 	}
 }
