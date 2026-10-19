@@ -1116,13 +1116,10 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 }
 
 // probe asks the runtime about the claim's process now and judges the answer. A claim can reach
-// here with no Locator at all: a connection closing (onClosed, table.go) says nothing about
-// whether its claim is still the one that opened it, and a claim retired at the registration
-// deadline, then interrupted by the daemon stopping before its own relaunch could set a new one
-// (launchAfter's letGo then backOff, machine.go), is left exactly so — in StateLaunching, with no
-// process to probe, until the daemon's own restart or recovery relaunches it. Nothing here is
-// stale by any fence (the claim really has no Locator right now), so there is nothing to probe and
-// nothing to arm: the claim's own relaunch path, not this probe, decides what happens to it next.
+// here with no Locator at all: onClosed (table.go) fires on a connection closing, which says
+// nothing about whether its claim is still the one that opened it. There is nothing to probe and
+// nothing to arm in that case — the claim's own relaunch path, not this probe, decides what
+// happens to it next.
 func (m *Machine) probe(ctx context.Context, alive func(context.Context) error, again TimerKind, after time.Duration) error {
 	if m.claim.Locator == nil {
 		m.log.Info("supervise: probed with no process to probe; nothing to do")
