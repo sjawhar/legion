@@ -39,14 +39,13 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 // relaunchRefused is a relaunch checkLaunch refused, relaunch the call that made it
 // (relaunchAfterFailure, launchAfter) and so the one to try again. A claim that records its
 // process, or runs none — a spawn, a resume, a retry — is left as it was. A live claim that records
-// none is a retirement's relaunch whose stop already ended the process: the registration deadline
-// and a prompt retirement check before they stop, so the check failed while the stop waited out its
-// grace, and a claim left there would have nothing watching or relaunching it. A reserved cleanup
-// suspends it for the daemon, its session kept, for the tree's close to retire. Any other failure
-// is not the tree's — a store that did not answer — and ends nothing: the claim waits launching with
-// no process, its task kept, and the relaunch is tried again at the probe interval (TimerRelaunch,
-// relaunchAgain), as a stop that fails is. A restart meanwhile finds the claim launching with no
-// process, which the boot launches again as an unfinished launch.
+// none has already let its process go: a retirement's relaunch whose stop already ended the process
+// (the registration deadline and a prompt retirement check before they stop, so the check failed
+// while the stop waited out its grace), or a launch whose write failed, waiting (relaunchLater). A
+// claim left there would have nothing watching or relaunching it. A reserved cleanup suspends it
+// for the daemon, its session kept, for the tree's close to retire. Any other failure is not the
+// tree's — a store that did not answer — and ends nothing: the relaunch waits (relaunchLater), as
+// a stop that fails does.
 func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Context) error, err error) error {
 	if m.claim.Locator != nil || !slices.Contains(live, m.claim.State) {
 		return err
@@ -56,13 +55,22 @@ func (m *Machine) relaunchRefused(ctx context.Context, relaunch func(context.Con
 		return errors.Join(err, m.suspended(ctx, SuspendedByDaemon))
 	}
 	m.log.Warn("supervise: the lifecycle check of the retired process's relaunch failed; trying it again at the probe interval", "error", err)
-	m.claim.State = StateLaunching
-	m.relaunch = relaunch
-	m.arm(TimerRelaunch, m.deps.Timeouts.Probe, "")
+	m.relaunchLater(relaunch)
 	return errors.Join(err, m.persist(ctx))
 }
 
-// relaunchAgain is the relaunch relaunchRefused left waiting (TimerRelaunch). A suspension held
+// relaunchLater leaves a claim whose process is already let go waiting launching with no process,
+// its task kept, and tries relaunch again at the probe interval (TimerRelaunch, relaunchAgain): a
+// relaunch whose lifecycle check the store did not answer (relaunchRefused), or a launch whose
+// write failed (launchAfter). Nothing else would relaunch such a claim before a restart, which
+// takes it up from what the store last holds.
+func (m *Machine) relaunchLater(relaunch func(context.Context) error) {
+	m.claim.State = StateLaunching
+	m.relaunch = relaunch
+	m.arm(TimerRelaunch, m.deps.Timeouts.Probe, "")
+}
+
+// relaunchAgain is the relaunch relaunchLater left waiting (TimerRelaunch). A suspension held
 // meanwhile ends here, with no process left to stop, rather than in a relaunch; otherwise the
 // relaunch is tried again as it was first made, charged as that call charges it.
 func relaunchAgain(m *Machine, ctx context.Context, _ Event) error {

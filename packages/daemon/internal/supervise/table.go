@@ -92,8 +92,9 @@ const (
 	// TimerSuspend is the held suspension's timer (holdSuspension): the stop timeout of its wait for
 	// the agent's turn, and the retry of a stop that failed.
 	TimerSuspend TimerKind = "suspend"
-	// TimerRelaunch is the retry of a retired process's relaunch whose lifecycle check failed with
-	// no cleanup reserved (relaunchRefused): the claim waits launching with no process until it fires.
+	// TimerRelaunch is the retry of a relaunch left waiting with no process (relaunchLater): one whose
+	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
+	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
 )
 
@@ -527,7 +528,7 @@ func fillTable(t *builder) {
 		[]ClaimState{StateSuspended}, StateWorking, StateIdle, StateReady, StateLaunching, StateShimConnected, StateRegistered)
 	t.ignore(onSuspendTimer, "no suspension is held", StateQueued, StateLaunchUncertain, StateSuspended, StateRetired, StateFailed)
 
-	t.row(onRelaunchTimer, "the retired process's relaunch is tried again, or a suspension held meanwhile ends it", relaunchAgain,
+	t.row(onRelaunchTimer, "the waiting relaunch is tried again, or a suspension held meanwhile ends it", relaunchAgain,
 		[]ClaimState{StateFailed, StateSuspended}, StateLaunching)
 	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)

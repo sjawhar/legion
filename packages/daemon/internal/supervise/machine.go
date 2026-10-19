@@ -430,9 +430,9 @@ type Machine struct {
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
 	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
-	// relaunch is the relaunch a refused lifecycle check left waiting (relaunchRefused), tried again
-	// when TimerRelaunch fires. It is memory only, as the timer is: a restart launches that claim
-	// again as an unfinished launch.
+	// relaunch is the relaunch relaunchLater left waiting, tried again when TimerRelaunch fires; it
+	// lives as long as that timer, which letGo disarms with it. It is memory only, as the timer is: a
+	// restart launches that claim again as an unfinished launch.
 	relaunch func(context.Context) error
 	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
@@ -743,8 +743,8 @@ func (m *Machine) Wait() {
 // a launch that records none (launchRecordsNoProcess): a hello is dropped, and a registration is
 // refused. The process that sent it is not the claim's: its launch was cut short by the daemon's
 // stop, which the next boot launches again once its orphan reconciliation has reaped every process
-// no claim records, or it is the retired process whose relaunch waits (relaunchRefused), which the
-// relaunch waits out.
+// no claim records, or it is the process a relaunch waiting at the probe interval let go
+// (relaunchLater), which the relaunch waits out.
 func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	pending := m.claim.Pending
 	switch ev := ev.(type) {
@@ -850,8 +850,8 @@ func (m *Machine) fenceRequest(request string, generation uint64, session string
 }
 
 // launchRecordsNoProcess is whether the claim is launching with no process recorded: a launch
-// written launching before it starts (launchAfter) and cut short, or a retired process's relaunch
-// waiting on its lifecycle check (relaunchRefused). Every other live state records its process.
+// written launching before it starts (launchAfter) and cut short, or a relaunch waiting at the
+// probe interval (relaunchLater). Every other live state records its process.
 func (m *Machine) launchRecordsNoProcess() bool {
 	return m.claim.State == StateLaunching && m.claim.Locator == nil
 }
@@ -885,7 +885,10 @@ func (m *Machine) launch(ctx context.Context) error {
 
 // launchAfter is launch, whose first try waits the backoff when charged: the launch follows a
 // launch failure charged just before it (relaunchAfterFailure). Each try is written launching, at
-// its generation and with every charge so far, before its backoff waits.
+// its generation and with every charge so far, before its backoff waits. A try whose write fails
+// has started nothing and is tried again at the probe interval (relaunchLater), the process it let
+// go stopped: by then the claim records no process, so nothing else would launch it before a
+// restart. One the daemon's stop cut short is left to the next boot, as a start it cut short is.
 func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged) }, err)
@@ -898,7 +901,14 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 
 		m.claim.State = StateLaunching
 		if err := m.persist(ctx); err != nil {
-			return errors.Join(err, m.stopPrevious(ctx))
+			err = errors.Join(err, m.stopPrevious(ctx))
+			if ctx.Err() != nil {
+				return err
+			}
+			m.log.Warn("supervise: the launch could not be written; trying it again at the probe interval",
+				"generation", m.claim.Generation, "error", err)
+			m.relaunchLater(func(ctx context.Context) error { return m.launchAfter(ctx, charged) })
+			return err
 		}
 		if charged {
 			if err := m.backOff(ctx); err != nil {
@@ -1096,13 +1106,14 @@ func (m *Machine) retire(ctx context.Context) error {
 	return m.persist(ctx)
 }
 
-// letGo ends what the machine had with the claim's process: no timer watches it, no send talks to
-// it, no suspension is held for its turn and no turn of it is interrupted any more (the interrupt's
-// start finds it over, quiesced), and the process the claim records, when it records one, moves
-// into previous — the claim no longer runs it (it was stopped, found dead, or left behind), and the
-// next launch of the same session waits it out.
+// letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
+// on one (relaunchLater), no send talks to it, no suspension is held for its turn and no turn of it
+// is interrupted any more (the interrupt's start finds it over, quiesced), and the process the
+// claim records, when it records one, moves into previous — the claim no longer runs it (it was
+// stopped, found dead, or left behind), and the next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
+	m.relaunch = nil
 	m.forgetSend()
 	m.held = nil
 	m.interruptOver()
