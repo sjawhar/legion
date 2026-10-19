@@ -182,7 +182,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 	if err != nil {
 		return err
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, projectOwners(cfg))
 	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
@@ -445,17 +445,18 @@ func requirements(key string, reservation config.RoleResources) (corev1.Resource
 
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
-// token source (the implement App's) and every tree role's gh files (gitHubCredential, minted for
-// owner, the repository's), and registers its launcher acceptor on the stream listener. A daemon
-// with no GitHub Apps hands it neither, and sandbox.New's own refusal names what is missing. Boot
-// has already run the cluster check (plan.clusterCheck): Agent Sandbox is installed and no Sandbox
-// of a layout before this one — per-claim pods, or issue pods on one tree volume — remains.
-func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owner string) runtimeFactory {
+// token source (the implement App's, minted for the repository's owner) and every tree role's gh
+// bundle (gitHubCredential, a directory for each of owners), and registers its launcher acceptor on
+// the stream listener. A daemon with no GitHub Apps hands it neither, and sandbox.New's own refusal
+// names what is missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox
+// is installed and no Sandbox of a layout before this one — per-claim pods, or issue pods on one
+// tree volume — remains.
+func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
 		opts.Conns, opts.StreamURL, opts.Store = listener, address, st
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
-			opts.GitHubCredential = gitHubCredential(apps, owner)
+			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)
 		}
 		rt, err := sandbox.New(ctx, rc, opts)
 		if err != nil {

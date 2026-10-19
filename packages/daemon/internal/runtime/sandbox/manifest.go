@@ -85,6 +85,7 @@ var runtimeOwned = map[string]bool{
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"DISPATCH_URL": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
+	"LEGION_GH_OWNERS_DIR": true, "LEGION_GH_PATH": true,
 	"PATH": true, "PI_SHELL_PREFIX": true, "GIT_TERMINAL_PROMPT": true,
 	"XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
 	"POD_UID": true, bootTokenKey + "_FILE": true, dispatchTokenKey + "_FILE": true,
@@ -174,6 +175,14 @@ type launch struct {
 	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
 	// controller's is held to one.
 	sessionsInDatabase bool
+	// gitHubOwners are the owners of the pod's gh bundle, sorted, whose files each role's gh volume
+	// projects, and gitHubDefault the one whose directory is every agent's GH_CONFIG_DIR: the
+	// bundle writeLauncherSecrets mints for a new pod, or, for a pod a launch keeps, the default its
+	// role Secret records (GitHubDefaultKey, launcherBound), the projection being the pod's own.
+	gitHubOwners  []string
+	gitHubDefault string
+	// gh is the image's real gh (Tools.GH), every agent's LEGION_GH_PATH.
+	gh string
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -196,7 +205,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if _, ok := spec.Secrets[provisionTokenKey]; ok {
 		return launch{}, refuse("secret %s is a key the runtime writes itself", provisionTokenKey)
 	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != ""}
+	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != "", gh: r.tools.GH}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}
 	}
@@ -469,13 +478,25 @@ func kubeletEscape(text string) string {
 
 // volumes are the pod's volume and jj config home with, between them, the volumes only its kind's
 // init containers mount (podKind.initVolumes), then each launcher role's token projection, private
-// credential directory, state and gh volume: the two gh files of its role Secret (GitHubHostsKey
-// as hosts.yml, GitHubConfigKey as config.yml), read-only to the pod's user, from the same Secret
-// as the launcher token, so the refresher's one Update reaches the container's GHConfigDir.
+// credential directory, state and gh volume: each owner's two gh files of its role Secret
+// (GitHubHostsKey(owner) as <owner>/hosts.yml, GitHubConfigKey(owner) as <owner>/config.yml) for
+// the launch's owners (gitHubOwners), read-only to the pod's user, from the same Secret as the
+// launcher token, so the refresher's one Update reaches the container's GHConfigDir. A projection's
+// items are fixed for the pod's life, so a pod holds the owners of its creation. A launch with no
+// owners — a controller whose project has no GitHub owner to mint for, and the Sandbox's first
+// template (sandboxManifest), which never runs — gets an empty directory instead: a Secret
+// projection with no items would project every key of the Secret, the launcher token among them.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
 	roleVolumes := make([]corev1.Volume, 0, len(l.roles)*4)
+	ghItems := make([]corev1.KeyToPath, 0, 2*len(l.gitHubOwners))
+	for _, owner := range l.gitHubOwners {
+		ghItems = append(ghItems,
+			corev1.KeyToPath{Key: GitHubHostsKey(owner), Path: owner + "/" + ghconfig.HostsFile},
+			corev1.KeyToPath{Key: GitHubConfigKey(owner), Path: owner + "/" + ghconfig.ConfigFile},
+		)
+	}
 	for _, role := range l.roles {
 		roleVolumes = append(roleVolumes,
 			corev1.Volume{Name: roleVolume("launcher", role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
@@ -485,14 +506,15 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			corev1.Volume{Name: roleVolume("private", role), VolumeSource: memory},
 			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
 		)
-		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName: roleSecretName(l.name, role),
-			Items: []corev1.KeyToPath{
-				{Key: GitHubHostsKey, Path: ghconfig.HostsFile},
-				{Key: GitHubConfigKey, Path: ghconfig.ConfigFile},
-			},
-			DefaultMode: new(int32(0o440)),
-		}}})
+		gh := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
+		if len(ghItems) > 0 {
+			gh = corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName:  roleSecretName(l.name, role),
+				Items:       slices.Clone(ghItems),
+				DefaultMode: new(int32(0o440)),
+			}}
+		}
+		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: gh})
 	}
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: corev1.VolumeSource{
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: IssueClaimName(l.spec.Claim)},

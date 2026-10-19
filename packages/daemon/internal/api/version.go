@@ -208,4 +208,18 @@ package api
 // which cites the controller skill's Slack reference. A plugin from before 29 subscribes to no
 // channel and ships neither `slack_post` nor the reference, so the boot gate and
 // `legion probe-image` refuse the mixed pair. The controller secret's answer is unchanged.
-const DaemonAPIVersion = 29
+//
+// 30: sjawhar/legion#1986 (per-owner credentials) -- every pane and pod holds a gh bundle, one
+// directory per GitHub owner of the project under LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR its issue's
+// owner's (write) and every other owner's read-only, with LEGION_GH_PATH the real gh the `gh`
+// wrapper first on PATH (`legion gh`; `/opt/legion/bin/gh` in the image) runs; every shared
+// clone's credential helper is `legion git-credential` with `credential.useHttpPath` on. A role
+// Secret's gh keys are per owner (`github-hosts-<owner>`, `github-config-<owner>`,
+// `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
+// `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
+// `expiresAt` in place of one `hosts` and `config`. An image built before 30 has neither the
+// wrapper nor the two commands, so the image probe refuses it. (This branch took 28, then 29 when
+// sjawhar/legion#1999 landed at 28; main then landed sjawhar/legion#2003 at 29 and released
+// pi-legion v10.5.0 declaring it without these shapes, so this branch takes the number above it,
+// as the collision note says.)
+const DaemonAPIVersion = 30

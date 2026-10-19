@@ -59,6 +59,16 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+  tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
+  issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
+  first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
+  owner a command names, and git answers from that owner's directory through `legion git-credential`.
+  The controller's credential answer is per owner. An image built before it is refused by the
+  daemon's image probe. (This change took 28, then 29 once LEGION-694 landed at 28; pi-legion
+  v10.5.0 was released declaring 29 for sjawhar/legion#1998 without these shapes, so it takes 30,
+  the number above the released one.) Install this release with a `legion` built from the same
+  commit.
 - The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
   `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no
   userinfo, a host that is a plain DNS name, a dotted-quad IPv4 or a bracketed IPv6 address, a

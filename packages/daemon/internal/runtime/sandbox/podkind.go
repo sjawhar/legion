@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -161,7 +162,7 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 	}
 }
 
-// agentEnv tells each agent its tree, issue and workspace, where its gh reads its credential, and
+// agentEnv tells each agent its tree, issue and workspace, where its gh reads its credentials, and
 // uv's directories on the issue's volume.
 func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 	return slices.Concat(
@@ -170,7 +171,7 @@ func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 			{Name: "LEGION_ISSUE", Value: l.spec.Issue},
 			{Name: "LEGION_WORKSPACE", Value: l.workspace},
 		},
-		ghAgentEnv(),
+		ghAgentEnv(l),
 		[]corev1.EnvVar{
 			{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},
 			{Name: "UV_CACHE_DIR", Value: uvCacheDir},
@@ -179,20 +180,24 @@ func (issuePod) agentEnv(l launch) []corev1.EnvVar {
 	)
 }
 
-// ghAgentEnv is the four variables that point an agent's gh at its own gh volume (GHConfigDir), so
-// its plain `gh` and the clone's `gh auth git-credential` helper (workspace.GitHubCredentialHelper)
-// read the role's App token from the files there. GH_TOKEN, GITHUB_TOKEN and GH_HOST are set to
-// the empty string, which gh ignores, so no value the image or an operator's rc file could leave in
-// the environment outranks the file: a non-empty GH_TOKEN would. No tool path or helper is told:
-// the agent's gh, git and jj are the image's on PATH, and the helper is the clone's own
-// configuration. Every launcher role's container, the controller's included, holds its App's gh
-// files, so this is appended once for every kind.
-func ghAgentEnv() []corev1.EnvVar {
+// ghAgentEnv is the six variables that point an agent's gh at its own gh volume (GHConfigDir), so
+// its gh — the image's `legion gh`, first on PATH, which runs the real gh at LEGION_GH_PATH — and
+// the clone's `legion git-credential` helper (workspace.GitHubCredentialHelper) read the token of
+// the owner a command names from the owner's directory under LEGION_GH_OWNERS_DIR, and every other
+// command's from GH_CONFIG_DIR, the launch's default owner's (gitHubDefault). GH_TOKEN,
+// GITHUB_TOKEN and GH_HOST are set to the empty string, which gh ignores, so no value the image or
+// an operator's rc file could leave in the environment outranks the files: a non-empty GH_TOKEN
+// would. No other tool path or helper is told: the agent's git and jj are the image's on PATH, and
+// the helper is the clone's own configuration. Every launcher role's container, the controller's
+// included, holds its App's gh bundle, so this is appended once for every kind.
+func ghAgentEnv(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
-		{Name: "GH_CONFIG_DIR", Value: GHConfigDir},
+		{Name: "GH_CONFIG_DIR", Value: ghconfig.OwnerDir(GHConfigDir, l.gitHubDefault)},
 		{Name: "GH_TOKEN", Value: ""},
 		{Name: "GITHUB_TOKEN", Value: ""},
 		{Name: "GH_HOST", Value: ""},
+		{Name: "LEGION_GH_OWNERS_DIR", Value: GHConfigDir},
+		{Name: "LEGION_GH_PATH", Value: l.gh},
 	}
 }
 
@@ -281,11 +286,11 @@ func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
 func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 
 // agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, where its gh reads its
-// credential (ghAgentEnv), and nothing a tree agent alone needs: no tree, issue or workspace, and
+// credentials (ghAgentEnv), and nothing a tree agent alone needs: no tree, issue or workspace, and
 // none of uv's directories on an issue's volume.
-func (controllerPod) agentEnv(launch) []corev1.EnvVar {
+func (controllerPod) agentEnv(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
-	return append(env, ghAgentEnv()...)
+	return append(env, ghAgentEnv(l)...)
 }
 
 // provision readies nothing: the controller's pod provisions no workspace and mints no token.

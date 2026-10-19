@@ -76,7 +76,10 @@
 # default) the port the harness binds for the worker stream; LEGION_E2E_SESSION_DB_PORT (required)
 # a port the run's scratch Postgres listens on, reachable everywhere the worker-stream port is
 # (under aws-private-ip, a port the devbox's security group admits from the Legion nodes; under
-# bridge, forwarded through the same tunnel); STAGE4A_FROM a development entry point, which is
+# bridge, forwarded through the same tunnel); LEGION_E2E_REPO_SECOND_OWNER (required) `<owner>/<name>`,
+# a repository under an owner other than sjawhar on which both Legion Apps are installed, where
+# second-owner provisions an issue and proves its pod's gh and git read sjawhar/legion-smoke with
+# read-only tokens (nothing is pushed to it); STAGE4A_FROM a development entry point, which is
 # never the proof; STAGE4A_EVIDENCE_DIR where the transcript and the runtime's log go (default a
 # fresh /tmp directory, kept and printed).
 #
@@ -103,6 +106,7 @@ namespace=legion
 # repository's infrastructure, not this one.
 port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
+second_owner_repo=${LEGION_E2E_REPO_SECOND_OWNER:-}
 app_id=3202636
 app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
 # The scratch session database's image: the pinned Postgres the repository's CI tests against.
@@ -228,6 +232,11 @@ case "$session_db_port" in
 *[!0-9]*) fail "LEGION_E2E_SESSION_DB_PORT must be a port number, not '$session_db_port'" ;;
 esac
 [ "$session_db_port" != "$port" ] || fail "LEGION_E2E_SESSION_DB_PORT is the worker stream's port $port"
+[ -n "$second_owner_repo" ] ||
+  fail "LEGION_E2E_REPO_SECOND_OWNER is unset: the second-owner check provisions an issue on a repository of another owner (owner/name, never a literal here)"
+[[ $second_owner_repo =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] || fail "LEGION_E2E_REPO_SECOND_OWNER must be <owner>/<name>, not '$second_owner_repo'"
+[ "$(tr '[:upper:]' '[:lower:]' <<<"${second_owner_repo%%/*}")" != "$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")" ] ||
+  fail "LEGION_E2E_REPO_SECOND_OWNER $second_owner_repo is under ${repo%%/*}, $repo's owner: the check needs a repository of another owner"
 for taken in "$port" "$session_db_port"; do
   if [ -n "$(ss -Hltn "sport = :$taken")" ]; then
     fail "port $taken is taken on the devbox: $(ss -Hltnp "sport = :$taken")"
@@ -414,6 +423,7 @@ env \
   LEGION_E2E_PROJECT="$project" \
   LEGION_E2E_IMAGE="$image" \
   LEGION_E2E_REPO="$repo" \
+  LEGION_E2E_REPO_SECOND_OWNER="$second_owner_repo" \
   LEGION_E2E_STREAM_HOST="$bind_host" \
   LEGION_E2E_STREAM_ADVERTISE_HOST="$advertise_host" \
   LEGION_E2E_STREAM_PORT="$port" \

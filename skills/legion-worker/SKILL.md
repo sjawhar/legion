@@ -198,21 +198,21 @@ Your pane's `gh` and `git` already carry your role's GitHub identity; invoke Git
 gh <gh args…>
 ```
 
-How `gh` works in a worker pane. `GH_CONFIG_DIR` names a read-only directory holding gh's own
-`hosts.yml` (your role's GitHub App installation token, user `x-access-token`) and `config.yml`,
-which the daemon rewrites in place from its cached lease so it never expires under you; the `gh`
-on your `PATH` is the ordinary binary and reads it on every call, `git` reads the same file
-through the clone's `credential.helper` (`!gh auth git-credential`), and `GH_TOKEN`,
-`GITHUB_TOKEN` and `GH_HOST` are set empty so nothing outranks it. Never run `gh auth login`,
-`gh auth setup-git`, `gh config set` or `gh alias set`: there is no login state to create, and the
-directory is read-only. One rule nothing enforces: **Legion's issues live on Dispatch, never on
+How `gh` works in a worker pane. `LEGION_GH_OWNERS_DIR` holds one read-only gh directory per
+GitHub owner of the project (`hosts.yml`, an App installation token, and `config.yml`), which the
+daemon rewrites in place so no token expires under you: your issue's owner's, which `GH_CONFIG_DIR`
+names, holds your role's App token; every other owner's the same App's, read-only. Your `gh` picks
+the directory of the owner a command names (`-R owner/repo`, `repos/owner/repo` in `gh api`, a
+GitHub URL), your issue's owner's otherwise, so name the repository whenever it is not your
+issue's; `git` picks by the remote URL's owner (`!legion git-credential`). `GH_TOKEN`,
+`GITHUB_TOKEN` and `GH_HOST` are empty so nothing outranks the files. Never run `gh auth login`,
+`gh auth switch`, `gh auth setup-git`, `gh config set` or `gh alias set`: there is no login state
+to create. One rule nothing enforces: **Legion's issues live on Dispatch, never on
 GitHub issues** — no `gh issue` write and no non-GET `gh api` call to an `/issues` path
 (pull-request conversation comments live on that path too; edit them with `gh pr comment`); use
 `dispatch message` or `dispatch comment` on your `LEGION_ISSUE`. The `legion` tool's own daemon
 calls carry a credential of their own, minted in-process; `gh` and `git` never see it, and you
-never `cat`, `echo`, copy, or `export` a token. A `task` subagent, an `eval` subprocess, or a
-background job in your pane inherits the same `GH_CONFIG_DIR` and so the same credential, for as
-long as it runs.
+never `cat`, `echo`, copy, or `export` a token; a `task` subagent or background job inherits them.
 
 **Other credentials your pod may already carry.** Before reporting that a read is unreachable,
 check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
@@ -265,8 +265,8 @@ The implementer opens the pull request. After its implementation commit and veri
 pushes the issue branch under this exact name with the one push procedure every role uses
 (*Every role pushes its own commits*, below).
 
-The shared clone's `credential.helper` is `!gh auth git-credential`, so `jj git push`
-authenticates as your role's App from the same file your `gh` reads. Never handle a token.
+`jj git push` authenticates as your role's App through the clone's `!legion git-credential`, from
+the file your `gh` reads for your issue's repository. Never handle a token.
 
 Then open the pull request with `gh pr create`. The PR body **must** contain the
 line `Dispatch: <KEY>` — the daemon's fallback link from a PR to its Dispatch issue when the

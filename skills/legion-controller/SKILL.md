@@ -16,13 +16,15 @@ The Legion extension registers this session with the daemon as the controller an
 `legion-<project>-controller` during session startup. Do not handle a wake unless that startup
 succeeded.
 
-The session's `gh` acts as the review App's bot account (`gh api graphql -f query='{viewer{login}}'` names it) from
-`GH_CONFIG_DIR`, a directory Legion keeps current: in the pod the daemon launches, through the
-controller's role Secret the daemon refreshes every minute; in `legion controller start`'s session,
-through that command's own refresh loop. `gh pr view`, `gh api` and the rest read and write GitHub
-as that App. Against a daemon with no GitHub App, `legion controller start` says so when it starts
-(`[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody`), and `gh`
-acts as nobody. The controller reads Dispatch and the daemon's state, and applies its controller
+The session's `gh` acts as the review App's bot account (`gh api graphql -f query='{viewer{login}}'`
+names it) from `LEGION_GH_OWNERS_DIR`, one read-only directory per GitHub owner of the project,
+which Legion refreshes every minute (the daemon through the controller pod's role Secret, `legion
+controller start` through its own loop). That `gh` is Legion's wrapper: it reads with the token of
+the owner a command names (`-R owner/repo`, `repos/owner/repo` in `gh api`, a GitHub URL) and with
+the first owner's (`GH_CONFIG_DIR`) otherwise, so name the repository. Against a daemon with no
+GitHub App, `legion controller start` says so when it starts (`[legion] the daemon has no GitHub
+App to act as; the controller's gh acts as nobody`), and `gh` acts as nobody. The controller reads
+Dispatch and the daemon's state, and applies its controller
 capability, through the `legion` tool alone: `op: "read_state"` returns the daemon's whole state
 (`issues.<KEY>.phase`, `issues.<KEY>.holdReason`, `issues.<KEY>.architect`, `admission.cap`,
 `admission.active`, `admission.waiting`, `capabilities[]`, `daemon.project`), and `op: "set_status"`
@@ -58,7 +60,7 @@ The command checks that `LEGION_PROJECT` is the daemon's project, registers this
 daemon, and claims the Envoy role for it; the `legion` tool's controller operations then work in
 this session, each `set_status` minting its grant in-process from the registration's secret. A
 takeover session gets no token file from Legion: `legion controller start` and the pod write
-`GH_CONFIG_DIR`'s token, but a hand-started session's `gh` is whatever its own environment gives it.
+`LEGION_GH_OWNERS_DIR`'s tokens, but a hand-started session's `gh` is what its environment gives it.
 The takeover moves the role and the daemon's recorded session id to this session. Never pass a
 secret as a command argument or copy it into a transcript. The Envoy
 registration heartbeat keeps the role afterwards, so `/legion-claim-controller` is the manual

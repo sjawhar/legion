@@ -19,6 +19,7 @@ import (
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
 	"github.com/sjawhar/legion/daemon/internal/prompts"
@@ -147,6 +148,10 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	}
 	controllerDir := filepath.Join(stateDir, "controller")
 	token := string(legionclaim.ControllerToken(cfg.Project))
+	gh, err := controllerRealGH(stateDir)
+	if err != nil {
+		return 0, err
+	}
 	// One environment, probed and then launched: the operator's own with the controller's set on
 	// top, later pairs replacing inherited values of the same name. The controller is pane-side, so
 	// the daemon's own NATS seed, which an operator shell that also runs a daemon may export, is
@@ -154,14 +159,17 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	// token, which a start from inside a Legion pane inherits, is dropped too: the plugin takes a
 	// controller carrying one for a controller the daemon launched (`controller: daemon`). So are
 	// the Slack channels the daemon tells its own controller (LEGION_SLACK_CHANNELS): only that
-	// controller can reply in Slack, and an inherited list is no project's word for this one.
+	// controller can reply in Slack, and an inherited list is no project's word for this one. The
+	// one difference between the probed and the launched environment is GH_CONFIG_DIR, which names
+	// the default owner's directory only once the credential fetch after the mint has named that
+	// owner.
 	env := processEnvironment()
 	delete(env, natsauth.DaemonSeedVariable)
 	delete(env, natsauth.DaemonSeedFileVariable)
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
 	delete(env, "LEGION_SLACK_CHANNELS")
-	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token)) {
+	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token), gh) {
 		env[pair[0]] = pair[1]
 	}
 	created, err := makeDirs(controllerDir)
@@ -182,11 +190,14 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
-	stopGitHubRefresh, err := controllerStartGitHubCredential(ctx, cfg.DaemonURL, secret, stateDir, stderr)
+	stopGitHubRefresh, defaultOwner, err := controllerStartGitHubCredential(ctx, cfg.DaemonURL, secret, stateDir, stderr)
 	if err != nil {
 		return 0, err
 	}
 	defer stopGitHubRefresh()
+	if defaultOwner != "" {
+		env["GH_CONFIG_DIR"] = ghconfig.OwnerDir(controllerGHDir(stateDir), defaultOwner)
+	}
 	composer, err := prompts.New(stateDir)
 	if err != nil {
 		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
@@ -246,14 +257,17 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // controllerEnvironment is what the controller's Oh My Pi is told on top of the operator's own
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
-// directory's legion launcher first in the agent's bash tool as on every pane, and
+// directory's legion launcher and gh wrapper first in the agent's bash tool as on every pane, and
 // LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
-// once its claim succeeds (daemon.ControllerStartMessage). GH_CONFIG_DIR names
-// `<state_dir>/gh`, the directory controllerStartGitHubCredential writes and keeps fresh, with
-// GH_TOKEN, GITHUB_TOKEN and GH_HOST blanked so gh and git read that directory's hosts.yml rather
-// than an inherited pointer of the operator's own. Secrets travel as `<NAME>_FILE`
-// pointers only. Later pairs replace any inherited value of the same name.
-func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile string) [][2]string {
+// once its claim succeeds (daemon.ControllerStartMessage). LEGION_GH_OWNERS_DIR names
+// `<state_dir>/gh`, the gh bundle controllerStartGitHubCredential writes and keeps fresh, and
+// LEGION_GH_PATH gh, the real gh the wrapper runs; GH_CONFIG_DIR names the bundle's root here, an
+// empty directory when the daemon has no GitHub App, and controllerStart points it at the default
+// owner's directory once the fetch names one; GH_TOKEN, GITHUB_TOKEN and GH_HOST are blanked so gh
+// and git read the bundle's hosts.yml rather than an inherited pointer of the operator's own.
+// Secrets travel as `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the
+// same name.
+func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh string) [][2]string {
 	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
@@ -271,6 +285,8 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile str
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
+		{"LEGION_GH_OWNERS_DIR", controllerGHDir(stateDir)},
+		{"LEGION_GH_PATH", gh},
 		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {
@@ -284,6 +300,45 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile str
 		env = append(env, [2]string{natsauth.SeedFileVariable, cfg.NatsNkeySeedFile})
 	}
 	return env
+}
+
+// controllerRealGH is the real gh the controller's `legion gh` runs, its LEGION_GH_PATH: the
+// operator's own LEGION_GH_PATH when set, which a start from inside a Legion pane inherits from
+// that pane, and otherwise the first gh on the operator's PATH that is not this state directory's
+// own wrapper (workerbin.LauncherDir), which would run itself. Either is an executable file; a
+// LEGION_GH_PATH that is relative, absent or not executable, and no gh at all, are refused before
+// the daemon is asked for anything, since the mint that follows replaces the running controller's
+// capability.
+func controllerRealGH(stateDir string) (string, error) {
+	if gh := os.Getenv("LEGION_GH_PATH"); gh != "" {
+		if !filepath.IsAbs(gh) {
+			return "", fmt.Errorf("LEGION_GH_PATH %q is not an absolute path: the controller's gh wrapper (legion gh) runs it", gh)
+		}
+		info, err := os.Stat(gh)
+		if err != nil {
+			return "", fmt.Errorf("LEGION_GH_PATH %q: %w; the controller's gh wrapper (legion gh) runs it", gh, err)
+		}
+		if !executableFile(info) {
+			return "", fmt.Errorf("LEGION_GH_PATH %q is not an executable file: the controller's gh wrapper (legion gh) runs it", gh)
+		}
+		return gh, nil
+	}
+	wrapper := workerbin.LauncherDir(stateDir)
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if !filepath.IsAbs(dir) || filepath.Clean(dir) == wrapper {
+			continue
+		}
+		gh := filepath.Join(dir, "gh")
+		if info, err := os.Stat(gh); err == nil && executableFile(info) {
+			return gh, nil
+		}
+	}
+	return "", errors.New("gh is not on PATH: the controller's gh wrapper (legion gh) runs it; install gh or set LEGION_GH_PATH to an absolute executable path")
+}
+
+// executableFile says whether info is a regular file someone may execute.
+func executableFile(info os.FileInfo) bool {
+	return info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
 }
 
 // probeAndMint is the controller probe and then the one daemon call, which mints the capability:

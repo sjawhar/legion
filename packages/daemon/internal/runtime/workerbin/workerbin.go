@@ -1,10 +1,11 @@
 // Package workerbin installs the directory at the head of a host-run Legion agent's PATH, under a
 // root directory: bin, whose legion launcher execs the legion that installed it — the daemon's,
 // for a tmux daemon's panes, and the operator's, for the controller `legion controller start`
-// runs — so an agent under root never reaches another `legion` on the PATH it inherits. Nothing
-// here intercepts gh: an agent's gh, git and jj are whatever its PATH resolves (a pane's the
-// daemon's PATH, a pod's the image's), and its GitHub credential is the gh files under its
-// GH_CONFIG_DIR (internal/ghconfig). A pod installs nothing: its PATH names the image's legion.
+// runs — so an agent under root never reaches another `legion` on the PATH it inherits, and whose
+// gh execs that legion's `legion gh`, which runs the real gh (LEGION_GH_PATH) with the gh directory
+// of the owner the command names (internal/ghconfig's bundle). An agent's git and jj are whatever
+// its PATH resolves. A pod installs nothing: the image carries the same two scripts in
+// /opt/legion/bin, which its PATH names first.
 package workerbin
 
 import (
@@ -16,17 +17,22 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
-// LauncherDir is root's bin, the directory of the legion launcher.
+// LauncherDir is root's bin, the directory of the legion launcher and the gh wrapper.
 func LauncherDir(root string) string { return filepath.Join(root, "bin") }
 
-// Install installs bin's legion launcher, which execs legionExecutable (the shipped daemon's
-// legionCliLauncherScript). Its two callers pass their own executable: a tmux daemon's boot
-// (internal/daemon) and `legion controller start` on the operator's machine (cmd/legion).
+// Install installs bin's legion launcher, which execs legionExecutable, and its gh, which execs
+// legionExecutable's `legion gh`, the path absolute and single-quoted (shellprefix.Literal) in
+// both. Its two callers pass their own executable: a tmux daemon's boot (internal/daemon) and
+// `legion controller start` on the operator's machine (cmd/legion).
 func Install(root, legionExecutable string) error {
 	if !filepath.IsAbs(legionExecutable) {
 		return fmt.Errorf("legion launcher target %q is not an absolute path", legionExecutable)
 	}
-	return installScript(LauncherDir(root), "legion", "#!/bin/sh\nexec "+shellprefix.Literal(legionExecutable)+" \"$@\"\n")
+	legion := shellprefix.Literal(legionExecutable)
+	if err := installScript(LauncherDir(root), "legion", "#!/bin/sh\nexec "+legion+" \"$@\"\n"); err != nil {
+		return err
+	}
+	return installScript(LauncherDir(root), "gh", "#!/bin/sh\nexec "+legion+" gh \"$@\"\n")
 }
 
 // Path makes root's bin the first entry of path, exactly once. A daemon started from an agent's

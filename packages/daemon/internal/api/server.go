@@ -80,9 +80,9 @@ type Options struct {
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
 	Tokens appauth.Tokens
-	// GitHubOwner is the configured repository's owner: the account both Apps are installed on,
-	// whose installation every credential route mints for.
-	GitHubOwner string
+	// GitHubOwners are the GitHub owners of the project's repositories, every one of which the
+	// controller's gh bundle holds a read-only token for (appauth.GitHubCredential).
+	GitHubOwners func() []string
 	// Releaser releases what the runtime holds for a tree whose operator close reserved and
 	// finished its cleanup: the daemon's runtime.
 	Releaser store.TreeReleaser
@@ -150,7 +150,7 @@ type server struct {
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
 	tokens       appauth.Tokens
-	githubOwner  string
+	githubOwners func() []string
 	githubAPI    string
 	repository   func(project string) (ghrepo.Repository, bool)
 	mergeRules   func(project string) config.MergeRules
@@ -192,7 +192,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,
-		githubOwner:        opts.GitHubOwner,
+		githubOwners:       opts.GitHubOwners,
 		githubAPI:          opts.GitHubAPI,
 		repository:         opts.Repository,
 		mergeRules:         opts.MergeRules,

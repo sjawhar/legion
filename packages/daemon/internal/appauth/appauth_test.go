@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -206,6 +207,71 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 	defer mu.Unlock()
 	if exchanges != 2 || discoveries != 1 || identities != 1 {
 		t.Fatalf("exchanges=%d discoveries=%d identities=%d, want 2, 1, 1", exchanges, discoveries, identities)
+	}
+}
+
+// ReadToken is the same App's installation token for an owner, narrowed to reading: its exchange
+// posts the read permissions, it caches under its own key beside Token's (one mint each for one
+// owner, a second ReadToken served from the cache), and it carries the same bot identity.
+func TestReadTokenMintsANarrowedTokenCachedApartFromToken(t *testing.T) {
+	key, privatePEM := testAppKey(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	var bodies []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jwt := r.Header.Get("Authorization")
+		switch r.URL.Path {
+		case "/app/installations":
+			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+		case "/app/installations/77/access_tokens":
+			verifyAppJWT(t, jwt[len("Bearer "):], &key.PublicKey, now, "12345")
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			bodies = append(bodies, string(body))
+			exchange := len(bodies)
+			mu.Unlock()
+			fmt.Fprintf(w, `{"token":"installation-%d","expires_at":%q}`, exchange, now.Add(time.Hour).Format(time.RFC3339))
+		case "/app":
+			fmt.Fprint(w, `{"slug":"legion-implementer"}`)
+		case "/users/legion-implementer[bot]":
+			fmt.Fprint(w, `{"id":271566630}`)
+		default:
+			t.Fatalf("unexpected GitHub path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	tokens := New(config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "12345", PrivateKey: privatePEM},
+		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
+	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
+
+	read, err := tokens.ReadToken(context.Background(), Implement, "acme")
+	if err != nil {
+		t.Fatalf("read token: %v", err)
+	}
+	write, err := tokens.Token(context.Background(), Implement, "Acme")
+	if err != nil {
+		t.Fatalf("write token: %v", err)
+	}
+	again, err := tokens.ReadToken(context.Background(), Implement, "ACME")
+	if err != nil {
+		t.Fatalf("cached read token: %v", err)
+	}
+	if read.Token != "installation-1" || write.Token != "installation-2" || again.Token != "installation-1" {
+		t.Fatalf("read=%q write=%q again=%q, want installation-1, installation-2, installation-1", read.Token, write.Token, again.Token)
+	}
+	if read.Identity != write.Identity || read.Identity.Name != "legion-implementer[bot]" {
+		t.Fatalf("read identity = %+v, write identity = %+v, want the same bot", read.Identity, write.Identity)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{`{"permissions":{"contents":"read","metadata":"read","pull_requests":"read"}}`, ""}
+	if len(bodies) != len(want) || bodies[0] != want[0] || bodies[1] != want[1] {
+		t.Fatalf("exchange bodies = %q, want %q", bodies, want)
 	}
 }
 

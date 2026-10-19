@@ -174,16 +174,15 @@ func TestWriteBringsTheDirectoryToTheRender(t *testing.T) {
 	assertMode(t, looseDir)
 }
 
-// ghBinary is the real GitHub CLI to prove the rendered files against: the `gh` on PATH, unless
-// it is a Legion worker pane's shim (`<state_dir>/worker-bin/gh`, which runs `legion gh`), in
-// which case the CLI it stands in front of at /usr/local/bin/gh. A machine with neither skips.
+// ghBinary is the real GitHub CLI to prove the rendered files against: LEGION_GH_PATH when the test
+// runs in a Legion pane or pod, whose `gh` on PATH is the `legion gh` wrapper in front of it, and
+// otherwise the `gh` on PATH. A machine with neither skips.
 func ghBinary(t *testing.T) string {
 	t.Helper()
-	path, err := exec.LookPath("gh")
-	if err == nil && filepath.Base(filepath.Dir(path)) != "worker-bin" {
+	if path := os.Getenv("LEGION_GH_PATH"); path != "" {
 		return path
 	}
-	if path, err := exec.LookPath("/usr/local/bin/gh"); err == nil {
+	if path, err := exec.LookPath("gh"); err == nil {
 		return path
 	}
 	t.Skip("no real gh on this machine: the gh-backed test needs one to prove the rendered files against")
