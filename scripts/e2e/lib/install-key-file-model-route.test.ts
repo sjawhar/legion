@@ -1,5 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -153,7 +161,10 @@ describe("the key-file model route installer", () => {
 
   test("models.yml's !exec names the key command under --key-dir, not --dest", () => {
     const { home, keyDir } = install();
-    const modelsYml = readFileSync(join(home, ".omp/profiles/legion-e2e-test/agent/models.yml"), "utf8");
+    const modelsYml = readFileSync(
+      join(home, ".omp/profiles/legion-e2e-test/agent/models.yml"),
+      "utf8"
+    );
     expect(modelsYml).toContain(join(keyDir, "anthropic-key"));
   });
 });
