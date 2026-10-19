@@ -32,8 +32,7 @@ type setter struct {
 
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
-// store's two variables named apart, since they are Legion's under either store, the controller's
-// Slack channel list, which the runtime sets in the controller's pod alone, and the name the
+// store's two variables named apart, since they are Legion's under either store, and the name the
 // providers volume mounts the session database's URL under, sessionDSNFile), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
@@ -49,7 +48,6 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 		add(name, "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)", false)
 	}
 	add(sessionDSNFile, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
-	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}

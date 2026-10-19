@@ -8,7 +8,8 @@
 #     and list `slack` in its ENVOY_WEBHOOKS;
 #   - store the Bot User OAuth Token (xoxb-…) in the secrets broker as LEGION_SLACK_BOT_TOKEN, owner
 #     legion-daemon, tier agent;
-#   - invite the app to every channel a project's slack_channels names (`/invite @Legion`).
+#   - invite the app to a channel (`/invite @Legion`) and ask that project's controller, in
+#     Dispatch or Slack, to watch it: a channel opts in on request, not through a legion.yaml list.
 display_information:
   name: Legion
   description: Ask the project's Legion controller from its Slack channel.

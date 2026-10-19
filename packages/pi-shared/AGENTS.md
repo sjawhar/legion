@@ -27,11 +27,7 @@ otherwise. A second Envoy entry at the same version joins; one at another versio
 publishes nothing, so the first publisher wins. The object carries:
 
 - `roleClaim` — the role-claim bridge (`src/role-claim-bridge.ts`): Envoy's bound instances, the
-  sessions Legion drives, the one `regained` hook slot, and `slackRoleOwned`, which the Legion
-  entry's factory sets to true in the daemon-launched controller's process alone and the Envoy
-  entry reads when it restores a resumed session's registered interests: while it is true, every
-  registered Slack topic is unregistered and never restored, since only the subscriptions the
-  controller role owns may carry Slack mentions.
+  sessions Legion drives, and the one `regained` hook slot.
 - `injectedUserTurns` — the turns Envoy sent into each session
   (`src/injected-user-turns.ts`). A `sendUserMessage` turn is found by its text; a typed
   `sendUserInput` turn is found by the tag the host kept. Both entries match user messages and
@@ -55,13 +51,19 @@ exact `Symbol.for` strings, so renaming one is a daemon change too):
 it, bumps `ENVOY_PLUGIN_INTERFACE_VERSION`; both plugins release from the same commit, and the
 daemon's gate refuses a pair whose versions differ.
 
-**The current version, 3.** Version 2 told the two separately bundled plugins that typed turns are
+**The current version, 4.** Version 2 told the two separately bundled plugins that typed turns are
 tag-matched rather than text-matched and that a tagged `skill-prompt` is the person's turn;
-version 3 adds `roleClaim.slackRoleOwned`. The real readers are the Legion load marker
-(`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's mismatch refusal and
-the daemon probe (`packages/daemon/probe.mjs`), which take `ENVOY_PLUGIN_INTERFACE_VERSION`, and
-the real-plugin OMP test (`packages/daemon/internal/daemon/promptreferences_omp_test.go`), which
-spells the number and is changed with it. The stage 1/2 shell stubs and fake Go probes
+version 3 added `roleClaim.slackRoleOwned`, set by the daemon-launched controller's process alone
+so the Envoy entry would drop a resumed session's registered Slack topics and let the controller
+hear its channels only through subscriptions its role owned. Version 4 removes
+`roleClaim.slackRoleOwned`: the daemon no longer builds Slack-channel subscriptions into a role,
+and the controller subscribes to Slack channels itself with the ordinary `envoy_subscribe`, so no
+special-cased resume-filtering of Slack topics exists any more. The real readers are the Legion
+load marker (`extensions/legion.ts`), `readEnvoyPluginInterface`, the Envoy publisher's mismatch
+refusal and the daemon probe (`packages/daemon/probe.mjs`), which take
+`ENVOY_PLUGIN_INTERFACE_VERSION`, and the real-plugin OMP test
+(`packages/daemon/internal/daemon/promptreferences_omp_test.go`), which spells the number and is
+changed with it. The stage 1/2 shell stubs and fake Go probes
 deliberately print 1 for **both** plugins: the boot gate compares their numbers with each other,
 so they test matching/mismatching fixtures rather than a release value. A real pair at different
 versions refuses before a Legion pane runs.

@@ -2,7 +2,6 @@ import {
   controllerToken,
   legionControllerNoticeSubject,
   legionProjectToken,
-  slackMentionTopic,
 } from "@legion/contracts";
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
@@ -17,7 +16,7 @@ import {
   requiredSecret,
 } from "./classify";
 import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
-import { daemonControllerSlackChannels, daemonLaunchedController } from "./slack-channels";
+import { daemonLaunchedController } from "./slack-channels";
 
 type PersistedTranscript = (
   context: CommandContext | SessionContext
@@ -91,9 +90,8 @@ export function createControllerSession(deps: {
    *
    * A controller the daemon launched itself (`controller: daemon`) is the controller's own session
    * (`LEGION_CONTROLLER=1`) carrying its launch's boot token (`LEGION_BOOT_TOKEN_FILE`) in place of
-   * a capability: it registers with that token, as every pane does, subscribes to each Slack
-   * channel its launch names (`daemonControllerSlackChannels`) for as long as it holds the role,
-   * and once it holds the role and the topics it reports ready on `claims/ready`, which is when the
+   * a capability: it registers with that token, as every pane does, and once it holds the role it
+   * reports ready on `claims/ready`, which is when the
    * daemon hands it the start message. Any step of its claim that fails exits Oh My Pi, so the
    * daemon relaunches it, as a pane's failed boot does. A root architect's or phase worker's pane
    * carries a boot token too, its own claim's: `/legion-claim-controller` run there is a takeover
@@ -140,9 +138,6 @@ export function createControllerSession(deps: {
     if (launched) recordBootstrappedSession(sessionFile);
 
     const project = requiredEnvironment(process.env, "LEGION_PROJECT");
-    // Only the controller the daemon launched can reply in Slack, so only it hears the project's
-    // channels; any other ignores whatever LEGION_SLACK_CHANNELS it inherited.
-    const slackChannels = supervised ? daemonControllerSlackChannels(process.env) : [];
     const client = daemon();
     const { daemon: served } = await client.state();
     const servedRole = controllerToken(legionProjectToken(served.project, "the daemon's project"));
@@ -189,17 +184,6 @@ export function createControllerSession(deps: {
       envoyContext,
       registration.claimToken
     );
-    // The project's Slack channels, as the daemon that launched this controller names them: each
-    // channel's app mentions, for as long as this session holds the controller role, never
-    // registered with the listener, so a resume hears the list it is launched with and no other.
-    for (const channel of slackChannels) {
-      await subscribeLegionNotice(
-        sessionID,
-        slackMentionTopic(channel),
-        envoyContext,
-        registration.claimToken
-      );
-    }
     if (supervised) {
       await client.ready({
         claimToken: registration.claimToken,

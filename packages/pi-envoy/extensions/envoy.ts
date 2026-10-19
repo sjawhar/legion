@@ -13,7 +13,6 @@ import {
   type OpenAsk,
   type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
-  slackTopicChannel,
   zodSchemaApi,
 } from "@legion/contracts";
 import {
@@ -1503,48 +1502,45 @@ export default function envoyExtension(pi: PiApi): void {
     // entry, and a listener outage must not fail session start.
     // Role topics are not subscriptions (role deliveries arrive on the agent
     // subject); they are re-claimed by reclaimHeldRoles once registered.
-    // In the daemon-launched controller (the bridge's `slackRoleOwned`), every registered Slack
-    // topic is unsubscribed from the listener and never restored: a restored topic would be a plain
-    // subscription, which outlives the controller role, and the controller hears its listed
-    // channels through the subscriptions its role owns (pi-legion's controller-session.ts).
     const { client } = requireEnvoy();
     const registry = await client.getInterest(sessionID).catch(() => undefined);
     if (registry === undefined) return;
-    const retired =
-      publishedInterface?.roleClaim.slackRoleOwned === true
-        ? registry.topics.filter((topic) => slackTopicChannel(topic) !== undefined)
-        : [];
-    if (retired.length > 0) {
-      await client.unsubscribe({ sessionID, topics: retired }).catch((error: unknown) => {
-        logger.warn("envoy: could not unregister a resumed controller's retired Slack topics", {
-          sessionID,
-          topics: retired,
-          error: messageFor(error),
-        });
-      });
-    }
     for (const topic of registry.topics) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
-      if (retired.includes(topic)) continue;
       await subscribe(topic);
     }
   };
 
   /**
    * Claim `role` for this session. A hard claim (the default; what
-   * envoy_role_set does) is last-claim-wins. A soft claim is what automatic
+   * envoy_role_set does) is last-claim-wins over another session's claim of
+   * the SAME role, but never implicitly replaces a DIFFERENT role this
+   * session already holds: `endRole()` (below) closes every subscription the
+   * held role opened `whileHolding` it, so a silent replacement would leave
+   * this session deaf to the role it just lost without a trace of why. Only
+   * `allowReplace: true` — the internal Legion claim path, a deliberate
+   * takeover like `/legion-claim-controller` — may replace a held role; the
+   * `envoy_role_set` tool never passes it, so a model that reaches for a
+   * second role while this session already holds one (its own Legion role,
+   * say) is refused loudly, naming the role it already holds, rather than
+   * losing that role without being told. A soft claim is what automatic
    * recovery uses: the listener grants it only when the role is unheld, its
    * holder is no longer live, or its holder is the id this session continues
-   * (`previousSessionID` — a fork's parent is still heartbeating), and answers
-   * with the live holder otherwise — atomically, so two resumers cannot both
-   * believe they won. Returns whether the claim landed.
+   * (`previousSessionID` — a fork's parent is still heartbeating), and
+   * answers with the live holder otherwise — atomically, so two resumers
+   * cannot both believe they won. Returns whether the claim landed.
    */
   const setEnvoyRole = async (
     role: string,
-    options: { soft?: boolean; previousSessionID?: string } = {}
+    options: { soft?: boolean; previousSessionID?: string; allowReplace?: boolean } = {}
   ): Promise<boolean> => {
     const topic = ROLE_TOPIC_PREFIX + role;
     const previousTopic = claimedRoleTopic;
+    if (previousTopic !== undefined && previousTopic !== topic && options.allowReplace !== true) {
+      throw new Error(
+        `this session already holds role ${previousTopic.slice(ROLE_TOPIC_PREFIX.length)}; envoy_role_set never replaces a held role implicitly`
+      );
+    }
     const { client } = requireEnvoy();
     const result = await client.setRole({
       sessionID,
@@ -1647,7 +1643,11 @@ export default function envoyExtension(pi: PiApi): void {
       carryPreviousSessionRole && previousSessionID !== "" && previousSessionID !== sessionID
         ? previousSessionID
         : undefined;
-    await setEnvoyRole(role, { soft: true, previousSessionID: continued }).catch((error) => {
+    await setEnvoyRole(role, {
+      soft: true,
+      previousSessionID: continued,
+      allowReplace: true,
+    }).catch((error) => {
       logger.warn("envoy: role reclaim failed", { role, sessionID, error: messageFor(error) });
     });
   };
@@ -1722,7 +1722,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    await setEnvoyRole(role);
+    await setEnvoyRole(role, { allowReplace: true });
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (

@@ -67,9 +67,10 @@ notifications.slack.<team>.<channel>.thread.<root ts>.mention  a mention inside 
 ```
 
 Its payload carries `channel_id`, `user_id`, `text`, `ts`, `thread_ts` (inside a thread) and
-`bot_id` (when a bot posted it). The controller the Legion daemon launches
-(`controller: daemon`) subscribes to `notifications.slack.*.<channel>.mention` for each channel its
-project's `slack_channels` names, for as long as it holds the controller role.
+`bot_id` (when a bot posted it). A controller subscribes itself to a channel's mentions with its
+own `envoy_subscribe` once a person asks it, in Dispatch or Slack, to watch that channel; see
+`skill://legion-controller/references/slack-mentions.md` for how it subscribes and keeps two
+controllers from answering the same channel.
 
 An agent replies in a thread with the `slack_post` tool, as the same Slack app. The listener holds
 no Slack token: the tool asks the [Secrets Broker](/legion/broker/) for the agent secret

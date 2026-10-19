@@ -48,15 +48,14 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 		return "provider_keys names " + name + ", whose pointer " + name + "_FILE " + who + ": the shim skips a key whose pointer the pod sets"
 	}
 	const (
-		byRuntime    = "Legion's runtime sets in every pod"
-		byImage      = "the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)"
-		byIdentity   = "every launch sets (the git identity the role's GitHub App commits as)"
-		byEnvoy      = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
-		bySessions   = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
-		byStore      = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
-		byBaseline   = "the pod baseline sets (internal/podsafety)"
-		byOperator   = "runtime.kubernetes.pod.env sets"
-		byController = "Legion's runtime sets for the controller it launches, from the project's slack_channels alone"
+		byRuntime  = "Legion's runtime sets in every pod"
+		byImage    = "the worker image sets (packages/daemon/docker/worker.Dockerfile ENV)"
+		byIdentity = "every launch sets (the git identity the role's GitHub App commits as)"
+		byEnvoy    = "every launch sets (the pointer to the launch secret ENVOY_TOKEN)"
+		bySessions = "the pod baseline sets, and it decides where Oh My Pi keeps the session a resume reads"
+		byStore    = "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)"
+		byBaseline = "the pod baseline sets (internal/podsafety)"
+		byOperator = "runtime.kubernetes.pod.env sets"
 	)
 	// The operator route with its token audience filled in, as an operator and each live harness run
 	// fill in their gateway's: config.ReadPodFile refuses the placeholder itself.
@@ -90,11 +89,6 @@ func TestCheckPodRefusesWhatCollidesWithLegionsOwn(t *testing.T) {
 			want: envSets("OMP_SESSION_SQL_DSN", "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)")},
 		{name: "a variable of the App's git identity", pod: env("JJ_USER", "operator"), want: envSets("JJ_USER", byIdentity)},
 		{name: "a variable pointing at a launch secret", pod: env("ENVOY_TOKEN_FILE", "/etc/envoy"), want: envSets("ENVOY_TOKEN_FILE", byEnvoy)},
-		// The daemon names its controller's Slack channels from the project's slack_channels alone: an
-		// operator's value would have the controller hear another project's mentions.
-		{name: "the controller's Slack channels", pod: env("LEGION_SLACK_CHANNELS", "C00000001"), want: envSets("LEGION_SLACK_CHANNELS", byController)},
-		{name: "a provider key for the controller's Slack channels", keys: map[string]string{"LEGION_SLACK_CHANNELS": "channels"},
-			want: keyNames("LEGION_SLACK_CHANNELS", byController)},
 		{name: "a volume Legion names", pod: Pod{Volumes: []corev1.Volume{
 			{Name: "creds", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "legion-creds"}}},
 			{Name: "launcher-tester", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "a"}}},

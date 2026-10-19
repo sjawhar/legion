@@ -1,25 +1,44 @@
 # Slack mentions
 
-A person who mentions the Legion Slack app in one of the project's Slack channels is talking to
-you, and you answer in that thread. The `Slack channels:` line of your system prompt names each
-channel `legion.yaml` gives the project (`projects.<KEY>.slack_channels`). Only the controller the
-daemon launches has one: the Slack bot token is the Legion daemon service's, which the secrets
-broker grants to that service's own pods alone. With no such line the project has no channel, and
-nothing here applies.
+A person who mentions the Legion Slack app in a Slack channel is talking to you, and you answer in
+that thread, but only once your session itself watches that channel: there is no deployment-wide
+`slack_channels` list any more, and no daemon-side subscription. You watch a channel because a
+person asked you to (in Dispatch or in a thread of a channel you already watch), and you hold that
+watch for as long as your session stays live.
 
-## Your session subscribes for you
+## Watching a channel
 
-Your session hears each listed channel's mentions by itself, on
-`notifications.slack.*.<channel>.mention`, for as long as it holds the controller role: a resumed or
-relaunched session hears the channels its launch names and no others, and drops every Slack topic an
-earlier session subscribed to by hand. Never `envoy_subscribe` a Slack topic yourself.
+The channel is its Slack id (e.g. `C01234567`), which the person names or you resolve yourself.
+Subscribe yourself: `envoy_subscribe(["notifications.slack.*.<channel>.mention"])` — the team
+segment is a wildcard, matching the deleted daemon helper's own convention, so a mention from any
+Slack team on that channel id reaches you. Confirm to the requester that you are now watching the
+channel.
 
-A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it.
+A channel is watched by the controller of the project whose people asked for it — there is no
+lock and no registry of who watches what. If a person reports two Legion replies in one channel,
+the controller that should not be watching it unsubscribes (below); a collision is visible the
+moment it happens, never silent.
+
+`envoy_role_set` is never the mechanism for this: it refuses outright when your session already
+holds a different role (yours is `legion-<project>-controller`), naming it, rather than silently
+giving it up.
+
+## Stopping a channel
+
+`envoy_unsubscribe(["notifications.slack.*.<channel>.mention"])` — this is always safe: unlike a
+role, an ordinary subscription is not a one-per-session singleton, and dropping one never touches
+your controller role or its topic.
+
+## What happened before you started
 
 A mention published while no controller ran never arrives: Envoy hands a session no copy of an
-event from before it subscribed. Nothing tells you about one, so there is nothing to catch up. When
-the project's `slack_channels` change, the daemon relaunches you into this session with the new
-line.
+event from before it subscribed, so there is nothing to catch up on. A resumed or relaunched
+session keeps every channel it was subscribed to when it last ran — the subscription is recorded
+on your session, not reconstructed from a deployment setting — so resuming after a restart needs
+no re-run of the watch procedure above. Only an explicit `envoy_unsubscribe` by you drops a
+channel.
+
+A delivery whose `channel_id` you do not currently watch is not yours: do nothing with it.
 
 ## What a mention carries
 
@@ -88,6 +107,7 @@ answering. Then take the first of these that fits.
   and `thread_ts` you reply on, and reply in the thread that you passed it to the architect that
   owns `<ROOT>`, which answers on the issue. When the architect is not running (no locator), say
   that in the thread instead and what `read_state` shows for the tree. Never invent a role token.
+- **A request to watch another channel.** Follow [Watching a channel](#watching-a-channel) above.
 - **Anything else** (a greeting, a question about Legion itself): answer it briefly in the thread.
 
 A request to approve a design is answered as the skill's "Mentions" section says: a person

@@ -10,9 +10,6 @@
   clears).
 - `SLACK_POST_TEXT_MAX` (4,000), the longest reply in UTF-16 units the `slack_post` tool posts
   (sjawhar/legion#1998).
-- `SLACK_CHANNEL_ID_PATTERN` and `slackMentionTopic(channel)`, a project's Slack channel id and the
-  Envoy topic of its app mentions (`notifications.slack.*.<channel>.mention`), which the
-  daemon-launched controller subscribes to (sjawhar/legion#1998).
 - `Agent.host`: the session's real machine, as its own Envoy plugin reported it, kept separate
   from `machine_id` (the listener that owns the session's delivery). The Envoy listener falls
   back to `machine_id` for a session whose plugin predates the field, so `host` is never empty.
