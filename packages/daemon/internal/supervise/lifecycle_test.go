@@ -144,13 +144,21 @@ func (r *unansweredSuspend) Suspend(ctx context.Context, loc runtime.Locator) er
 	return r.Runtime.Suspend(ctx, loc)
 }
 
+// refuseLate is the agent answering its acknowledged prompt a failure with no turn of its own
+// running, which charges the prompt (lateRefused).
+func refuseLate(h *harness) error {
+	h.t.Helper()
+	return h.handle(StreamLateRefusal{Claim: h.token, DeliveryID: h.pending().ID, Error: "No API key found for anthropic."})
+}
+
 // A retirement whose relaunch the tree lifecycle refuses — the registration deadline's, or a prompt
-// retirement's — never leaves a live claim with no process for the rows that act on one. A
-// lifecycle that already refuses retires nothing: the claim keeps its process and is charged
-// nothing more. One that begins to refuse while the stop waits out its grace refuses a relaunch
-// whose process is gone: the claim is left suspended by the daemon, running nothing. Either way the
-// operator's suspend, the root's exit, and a stale plugin found once launches are allowed again are
-// handled as on any claim in that state.
+// retirement's, whichever of the prompt's outcomes reached the limit: a turn that never started, a
+// refusal of the prompt, or a late refusal of it — never leaves a live claim with no process for the
+// rows that act on one. A lifecycle that already refuses retires nothing: the claim keeps its process
+// and is charged nothing more. One that begins to refuse while the stop waits out its grace refuses
+// a relaunch whose process is gone: the claim is left suspended by the daemon, running nothing.
+// Either way the operator's suspend, the root's exit, and a stale plugin found once launches are
+// allowed again are handled as on any claim in that state.
 func TestARetirementWhoseRelaunchTheTreeLifecycleRefusesLeavesNoLiveClaimWithoutAProcess(t *testing.T) {
 	retirements := []struct {
 		name string
@@ -179,6 +187,36 @@ func TestARetirementWhoseRelaunchTheTreeLifecycleRefusesLeavesNoLiveClaimWithout
 			},
 			retire: func(h *harness) { h.advance(testRPC) },
 			state:  StateReady, kept: Budgets{PromptFailures: 2}, retired: Budgets{PromptRetires: 1},
+		},
+		{
+			name: "a refused prompt's retirement",
+			reach: func(h *harness) {
+				h.reach(StateReady)
+				h.conn.RefusePrompt("agent busy")
+				h.must(RequestDeliver{Claim: h.token, Task: "the task"})
+				h.observe(runtime.Alive)
+			},
+			retire: func(h *harness) { h.observe(runtime.Alive) },
+			state:  StateReady, kept: Budgets{PromptFailures: 2}, retired: Budgets{PromptRetires: 1},
+		},
+		{
+			name: "a late refusal's retirement",
+			reach: func(h *harness) {
+				h.reach(StateReady)
+				h.must(RequestDeliver{Claim: h.token, Task: "the task"})
+				for range testLimits().PromptFailures - 1 {
+					if err := refuseLate(h); err != nil {
+						h.t.Fatalf("refuse the acknowledged prompt: %v", err)
+					}
+					h.observe(runtime.Alive)
+				}
+			},
+			retire: func(h *harness) {
+				if err := refuseLate(h); err != nil && strings.Contains(err.Error(), "outside") {
+					h.t.Errorf("the late refusal's retirement: %v", err)
+				}
+			},
+			state: StateReady, kept: Budgets{PromptFailures: 2}, retired: Budgets{PromptRetires: 1},
 		},
 	}
 	refusals := []struct {
@@ -220,6 +258,9 @@ func TestARetirementWhoseRelaunchTheTreeLifecycleRefusesLeavesNoLiveClaimWithout
 					launched := h.locator()
 					refusal.refuse(h, store)
 					retirement.retire(h)
+					if lines := h.logs.lines("moved", "outside"); len(lines) != 0 {
+						t.Errorf("the retirement moved the claim outside its row's states: %v", lines)
+					}
 					left := h.claim()
 					suspends := len(h.calls("Suspend"))
 
@@ -387,6 +428,119 @@ func TestASuspensionOfARelaunchWaitingForTheStoreSuspendsTheClaimAtItsRetry(t *t
 	}
 	h.wantCalls("Suspend", 1)
 	h.wantCalls("Resume", 0)
+}
+
+// A daemon's suspension that reaches a retirement's relaunch while it waits for the store ends the
+// wait in that suspension at the retry, as the operator's does, and ends the claim's phase with
+// it: the phase's task is retired, in memory as in the store, so the next start hands the session
+// its new phase's task. Nothing is launched.
+func TestADaemonSuspensionOfARelaunchWaitingForTheStoreRetiresThePhasesTask(t *testing.T) {
+	store := &epochStore{epoch: 1}
+	h := lifecycleHarness(t, store, queuedClaim())
+	h.reach(StateRegistered)
+	h.must(RequestDeliver{Claim: h.token, Task: "the task", Phase: phase.Implementing})
+	h.m.deps.Runtime = &unansweredSuspend{Runtime: h.rt, store: store, checks: 1}
+	h.advance(deadline)
+	h.wantState(StateLaunching)
+
+	if err := h.handleWithoutPanic(RequestSuspend{Claim: h.token, Reason: "the issue left the workflow", By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the daemon's suspend of the waiting relaunch = %v, want it held", err)
+	}
+	h.advance(testProbe)
+
+	c := h.claim()
+	if c.State != StateSuspended || c.SuspendedBy != SuspendedByDaemon || c.Locator != nil {
+		t.Fatalf("after the retry the claim is %s by %q with locator %+v, want suspended by the daemon with none", c.State, c.SuspendedBy, c.Locator)
+	}
+	if c.Pending != nil {
+		t.Errorf("the daemon's suspension left the pending task %+v, want the phase's task retired", c.Pending)
+	}
+	if stored := h.store.load(h.token); stored.State != StateSuspended || stored.SuspendedBy != SuspendedByDaemon || stored.Pending != nil {
+		t.Errorf("stored %s by %q with pending %+v, want suspended by the daemon with the phase's task retired", stored.State, stored.SuspendedBy, stored.Pending)
+	}
+	h.wantCalls("Suspend", 1)
+	h.wantCalls("Resume", 0)
+}
+
+// A retirement whose relaunch is checked once the stop has landed, but whose launch the store does
+// not write, has started nothing: the process it let go is stopped, and the claim records none. It
+// keeps the claim's task and tries the same launch again at the probe interval, as an unchecked
+// relaunch does, until the write lands: nothing else would launch a claim that records no process
+// before a restart. The relaunched agent is handed the task once it is ready.
+func TestARetirementWhoseRelaunchTheStoreDoesNotWriteKeepsItsTaskAndRelaunchesAtTheProbeInterval(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateRegistered)
+	h.must(RequestDeliver{Claim: h.token, Task: "the task", Phase: phase.Implementing})
+	retired := h.locator()
+	// The stop lands, and from then on the store takes no claim write.
+	h.m.deps.Runtime = &failingWritesSuspend{Runtime: h.rt, store: h.store}
+
+	h.advance(deadline)
+
+	c := h.claim()
+	if c.State != StateLaunching || c.Locator != nil {
+		t.Fatalf("the unwritten launch left the claim %s with locator %+v, want launching with no process", c.State, c.Locator)
+	}
+	if p := c.Pending; p == nil || p.Task != "the task" || p.Phase != phase.Implementing {
+		t.Fatalf("the unwritten launch left the pending task %+v, want the phase's task kept", p)
+	}
+	if _, ok := h.m.timers[TimerRelaunch]; !ok {
+		t.Fatalf("the unwritten launch armed %v, want the relaunch's retry", h.m.timers)
+	}
+	if stops := h.calls("Suspend"); len(stops) != 2 || stops[0].Locator != retired || stops[1].Locator != retired {
+		t.Errorf("stopped %+v, want the retired process stopped by the retirement and again by the launch that let it go", stops)
+	}
+	if lines := h.logs.lines("the launch could not be written; trying it again at the probe interval"); len(lines) != 1 {
+		t.Errorf("logged %v, want the unwritten launch named once", lines)
+	}
+	h.wantCalls("Resume", 0)
+
+	h.store.fail("PutClaim", nil)
+	h.advance(testProbe)
+
+	resumed := h.wantCalls("Resume", 1)[0]
+	if c := h.claim(); c.State != StateLaunching || c.Locator == nil || resumed.Spec.ResumeSessionFile != sessionFile {
+		t.Fatalf("after the retry the claim is %s with locator %+v, resuming %q; want the same session launching with a process", c.State, c.Locator, resumed.Spec.ResumeSessionFile)
+	}
+	h.wantBudgets(Budgets{LaunchFailures: 1})
+	if stored := h.store.load(h.token); stored.State != StateLaunching || stored.Locator == nil || stored.Pending == nil || stored.Pending.Phase != phase.Implementing {
+		t.Fatalf("stored %s with locator %+v and pending %+v, want the relaunch's process and the phase's task", stored.State, stored.Locator, stored.Pending)
+	}
+	h.relaunched()
+	if prompts := h.prompts(); len(prompts) == 0 || !strings.Contains(prompts[len(prompts)-1].Message, "the task") {
+		t.Errorf("the relaunched agent was prompted %+v, want the phase's task", prompts)
+	}
+}
+
+// failingWritesSuspend is a stop that lands, after which the store refuses every claim write.
+type failingWritesSuspend struct {
+	*fake.Runtime
+	store *memStore
+}
+
+func (r *failingWritesSuspend) Suspend(ctx context.Context, loc runtime.Locator) error {
+	r.store.fail("PutClaim", errBoom)
+	return r.Runtime.Suspend(ctx, loc)
+}
+
+// A waiting relaunch lives exactly as long as its timer: whatever lets the claim's process go
+// disarms the retry and drops the relaunch with it, so nothing can run it afterwards.
+func TestWhatLetsAWaitingRelaunchsClaimGoDropsTheRelaunchWithItsTimer(t *testing.T) {
+	store := &epochStore{epoch: 1}
+	h := lifecycleHarness(t, store, queuedClaim())
+	h.reach(StateRegistered)
+	h.m.deps.Runtime = &unansweredSuspend{Runtime: h.rt, store: store, checks: 1}
+	h.advance(deadline)
+	if _, ok := h.m.timers[TimerRelaunch]; !ok || h.m.relaunch == nil {
+		t.Fatalf("the unchecked relaunch armed %v with relaunch %t, want its retry waiting", h.m.timers, h.m.relaunch != nil)
+	}
+
+	h.must(RequestStop{Claim: h.token})
+
+	h.wantState(StateRetired)
+	if _, ok := h.m.timers[TimerRelaunch]; ok || h.m.relaunch != nil {
+		t.Errorf("after the stop the timers are %v with relaunch %t, want the retry and its relaunch both gone", h.m.timers, h.m.relaunch != nil)
+	}
 }
 
 // A prompt retirement whose relaunch the tree lifecycle refuses keeps the process and leaves its

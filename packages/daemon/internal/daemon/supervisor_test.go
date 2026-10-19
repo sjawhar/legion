@@ -419,3 +419,72 @@ func TestARegistrationInFlightWhenTheStopCutsItsLaunchShortIsRestoredAsAnUnfinis
 		t.Fatalf("the next boot restored %+v, want launch_uncertain with no process", restored.Claim())
 	}
 }
+
+// A claim a daemon stored live past launching with no process recorded — registered, say, by a
+// daemon whose fence let a registration through at a launch that recorded none — is an unfinished
+// launch too: no process is known for it, so nothing could probe, retire or relaunch it. The boot's
+// restore puts it back to launch_uncertain, in the store and in the claims the boot's later passes
+// read, logs it with the state it was stored in, and the boot relaunches its session once its
+// orphan reconciliation has run.
+func TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunched(t *testing.T) {
+	project, _ := claim.ProjectToken("legion")
+	token, _ := claim.NewToken(project, "LEGION-1", claim.RoleImplementer)
+	for _, state := range []supervise.ClaimState{supervise.StateShimConnected, supervise.StateRegistered, supervise.StateReady,
+		supervise.StateWorking, supervise.StateIdle} {
+		t.Run(string(state), func(t *testing.T) {
+			store := &outboxClaimStore{}
+			logs := &syncBuffer{}
+			sup := newSupervisor(context.Background(), nil, "legion", t.TempDir(), slog.New(slog.NewTextHandler(logs, nil)))
+			rt := fake.NewRuntime()
+			sup.deps = supervise.Deps{
+				Runtime: rt, Conns: fake.NewConns(), Store: store, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+				Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+				Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
+				PluginContract: api.DaemonAPIVersion,
+			}
+			t.Cleanup(sup.stop)
+			stored := supervise.Claim{Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleImplementer,
+				Generation: 1, State: state, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl", PluginContract: api.DaemonAPIVersion}
+			claims := []supervise.Claim{stored}
+
+			unfinished, err := sup.restore(context.Background(), claims)
+			if err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+
+			if len(unfinished) != 1 || unfinished[0] != token {
+				t.Fatalf("the unfinished launches = %v, want %s", unfinished, token)
+			}
+			m, _ := sup.Machine(token)
+			if c := m.Claim(); c.State != supervise.StateLaunchUncertain || c.Locator != nil {
+				t.Fatalf("restored %s with locator %+v, want launch_uncertain with no process", c.State, c.Locator)
+			}
+			store.mu.Lock()
+			written := store.claims[token]
+			store.mu.Unlock()
+			if written.State != supervise.StateLaunchUncertain {
+				t.Fatalf("the store holds %s, want launch_uncertain", written.State)
+			}
+			if claims[0].State != supervise.StateLaunchUncertain {
+				t.Fatalf("the boot's claims hold %s, want launch_uncertain for its later passes", claims[0].State)
+			}
+			if got := logs.String(); !strings.Contains(got, "restoring a launch the previous daemon did not finish as launch_uncertain") ||
+				!strings.Contains(got, "stored="+string(state)) {
+				t.Errorf("logged %q, want the repair named with the state it was stored in", got)
+			}
+
+			s := &supervision{log: quietLogger(), supervisor: sup}
+			if refused := s.launchUnfinished(unfinished); len(refused) != 0 {
+				t.Fatalf("the relaunch refused %v", refused)
+			}
+
+			resumes := rt.CallsOf("Resume")
+			if len(resumes) != 1 || resumes[0].Spec.Generation != 2 || resumes[0].Spec.ResumeSessionFile != "/sessions/impl.jsonl" {
+				t.Fatalf("resumes = %+v, want the same session relaunched once at generation 2", resumes)
+			}
+			if c := m.Claim(); c.State != supervise.StateLaunching || c.Locator == nil || c.Generation != 2 {
+				t.Fatalf("after the relaunch the claim is %s at generation %d with locator %+v, want launching at 2 with a process", c.State, c.Generation, c.Locator)
+			}
+		})
+	}
+}
