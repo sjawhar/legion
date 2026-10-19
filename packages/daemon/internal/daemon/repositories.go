@@ -616,16 +616,19 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 // default branch is read when the read Legion holds is older than its TTL. An unrecorded issue's
 // event in any other status asks GitHub nothing.
 //
-// A redelivered event (its preparation or apply failed, or its acknowledgement window ran out) comes
-// after the issue's newer events, and an unrecorded issue has no sequence to fence a stale one
-// with. So a redelivered admission event is prepared as Dispatch's issue detail now shows the
-// issue, at the sequence Dispatch has run to (intake.ObservedIssue), not as the event says: a
-// person who withdrew the issue meanwhile is not overruled, and an issue whose repository changed
-// with no event of its own (an ancestor's, or the project's default) is admitted on the one it
-// resolves to now. Once the issue is recorded, a stale event below that sequence is fenced as any
-// is.
-func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue, redelivered bool) (intake.DispatchIssue, error) {
-	return w.prepareIssue(ctx, issue, true, redelivered)
+// An unrecorded issue has no sequence to fence a stale event with, and its admission event may come
+// after the issue's newer events: redelivered after its preparation or apply failed or its
+// acknowledgement window ran out, or put off by Dispatch's outbox, which publishes the events behind
+// a failed publish first. So an admission event of an unrecorded issue is prepared as Dispatch's
+// issue detail now shows the issue, at the sequence Dispatch has run to (intake.ObservedIssue),
+// not as the event says: a person who withdrew the issue meanwhile is not overruled, and an issue
+// whose repository changed with no event of its own (an ancestor's, or the project's default) is
+// admitted on the one it resolves to now. That view applies only while the issue stays unrecorded
+// (intake.DispatchIssue.Observed): once release_children records it first, the event applies as
+// it was delivered, and once the issue is recorded, a stale event below its sequence is fenced as
+// any is.
+func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
+	return w.prepareIssue(ctx, issue, true, true)
 }
 
 // prepareObserved readies release_children's todo child, already observed as Dispatch's issue
@@ -635,10 +638,11 @@ func (w *workflowRuntime) prepareObserved(ctx context.Context, issue intake.Disp
 }
 
 // prepareIssue is prepareRepository, holding back an admission event on a repository not served
-// for a read of the mapping, and preparing a redelivered one from Dispatch's current view, only
-// when await is set: reconcile's boot read prepares on the mapping the boot has just read, from a
-// listing it has just read.
-func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.DispatchIssue, await, redelivered bool) (intake.DispatchIssue, error) {
+// for a read of the mapping only when await is set, and preparing an admission event from
+// Dispatch's current view only when observe is set: reconcile's boot read prepares on the mapping
+// the boot has just read, from a listing it has just read, and release_children's child is that
+// view already.
+func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.DispatchIssue, await, observe bool) (intake.DispatchIssue, error) {
 	recorded, err := w.recordOf(ctx, issue.Key)
 	if err != nil {
 		return issue, err
@@ -654,13 +658,14 @@ func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.Dispatc
 		return w.prepareUnrecorded(ctx, issue, false, 0)
 	}
 	delivered := issue.Seq
-	if redelivered {
+	if observe {
 		now, err := w.dispatch.GetIssue(ctx, issue.Key)
 		if err != nil {
-			return issue, fmt.Errorf("read %s from Dispatch before applying its event %d, delivered again: %w", issue.Key, delivered, err)
+			return issue, fmt.Errorf("read %s from Dispatch before applying its admission event %d: %w", issue.Key, delivered, err)
 		}
+		event := issue
 		issue = intake.ObservedIssue(now)
-		issue.Seq = max(delivered, issue.Seq)
+		issue.Seq, issue.Delivered = max(delivered, issue.Seq), &event
 	}
 	prepared, err := w.prepareUnrecorded(ctx, issue, true, delivered)
 	if err != nil {

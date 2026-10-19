@@ -110,7 +110,7 @@ launcher and its `gh`, a script that runs `legion gh`. Nothing else of Legion's 
 `git` and `jj` a pane runs are whatever the daemon's `PATH` resolves. The daemon resolves at boot a
 jj of 0.38 or later — the jj bound it refuses to boot below (`resolveTools`, naming
 `LEGION_JJ_PATH`, its own override for the jj it runs) — and the real `gh` (`LEGION_GH_PATH`, or the
-first `gh` on its `PATH`), which every pane is told as `LEGION_GH_PATH`. A pane's GitHub identity is
+first `gh` on its `PATH`, refused when that is a script), which every pane is told as `LEGION_GH_PATH`. A pane's GitHub identity is
 a set of files that binary reads, one directory per GitHub owner of the project: the daemon writes
 gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
 `<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
@@ -157,9 +157,13 @@ regenerates it when that pin moves; `.github/scripts/check-gh-version.sh` fails 
 the saved help is the pin's).
 The shared clone's `credential.helper` is `!legion git-credential` with `credential.useHttpPath`
 on, so a pane's `git` and `jj git push` read the hosts.yml of the owner in the path git asks about
-and nothing else. A box whose login `PATH` heads with a `gh` wrapper of its own, as the devbox's
-does, needs the real `gh` ahead of it in the shell that starts the daemon, or `LEGION_GH_PATH`
-naming it, or every pane's `gh` acts as whoever the wrapper routes to.
+and nothing else. The real gh is a compiled program, so when the first `gh` on the daemon's `PATH`
+is a script (a `gh` wrapper of the box's own, as the devbox's login `PATH` heads with, or asdf's
+shim), boot refuses it, naming it and `LEGION_GH_PATH` (`RefuseScriptGH`): run as the real gh, a
+wrapper would answer in place of the owner's App token. Set `LEGION_GH_PATH` to the real gh's
+install path (`mise which gh` or `asdf which gh` prints it). The check reads scripts only: mise's
+shim is compiled and passes, and where mise has no gh for the directory it runs the next `gh` on
+`PATH`, which in a pane is the pane's own `legion gh`, so a shims directory is no real gh either.
 
 ## Rotating the App keys
 

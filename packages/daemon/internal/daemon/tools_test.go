@@ -16,6 +16,17 @@ func executable(t *testing.T, dir, name string) string {
 	return path
 }
 
+// binary is an executable in dir that reads as a compiled program, as the real gh is: an ELF
+// header, no `#!` line.
+func binary(t *testing.T, dir, name string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("\x7fELF\x02\x01\x01\x00"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // currentJJ is what the worker image's jj prints for `jj --version`.
 const currentJJ = "jj 0.45.1-sami.20260910-043938-bb5ffc8f23b1e2a9dac6fdf05b0540058a3a21d0"
 
@@ -60,6 +71,38 @@ func TestResolveToolsPrefersTheOverrideAndNamesEveryMissingTool(t *testing.T) {
 	}
 }
 
+// The gh boot finds on PATH is every pane's real gh (LEGION_GH_PATH), which `legion gh` runs with
+// the owner's gh directory. The real gh is a compiled program, so a script heading PATH is a
+// wrapper — a machine's own gh shim, which routes to a token of its own, or Legion's own `legion
+// gh` wrapper, which would run `legion gh` again — and boot refuses it, naming it and
+// LEGION_GH_PATH, rather than taking the compiled gh behind it. LEGION_GH_PATH is the operator's
+// own word, so a script it names is taken.
+func TestResolveToolsRefusesAScriptAsTheRealGh(t *testing.T) {
+	shims, bin := t.TempDir(), t.TempDir()
+	binary(t, bin, "git")
+	fakeJJ(t, bin, currentJJ)
+	real := binary(t, bin, "gh")
+	shim := filepath.Join(shims, "gh")
+	if err := os.WriteFile(shim, []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"PATH": shims + ":" + bin}
+	lookup := func(name string) (string, bool) { v, ok := env[name]; return v, ok }
+
+	_, err := resolveTools(lookup)
+	if err == nil || !strings.Contains(err.Error(), "the first gh on PATH, "+shim+", is a script") || !strings.Contains(err.Error(), "LEGION_GH_PATH") {
+		t.Fatalf("resolveTools with a script first on PATH = %v, want it refused naming %s and LEGION_GH_PATH", err, shim)
+	}
+	env["PATH"] = bin + ":" + shims
+	if tools, err := resolveTools(lookup); err != nil || tools["gh"] != real {
+		t.Fatalf("resolveTools with the compiled gh first on PATH = %v, %v; want %s", tools, err, real)
+	}
+	env["PATH"], env["LEGION_GH_PATH"] = shims+":"+bin, shim
+	if tools, err := resolveTools(lookup); err != nil || tools["gh"] != shim {
+		t.Fatalf("resolveTools with LEGION_GH_PATH naming a script = %v, %v; want %s", tools, err, shim)
+	}
+}
+
 // Provisioning relies on jj 0.38's configuration layout (minimumJJ), so boot refuses a jj older
 // than 0.38, or one whose version it cannot read, naming what it found and LEGION_JJ_PATH, whether
 // the jj came from the override or from PATH; 0.38 itself and later releases, a build's suffix
@@ -80,7 +123,7 @@ func TestResolveToolsRefusesAJJOlderThanTheLayoutProvisioningReliesOn(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			onPath, elsewhere := t.TempDir(), t.TempDir()
 			executable(t, onPath, "git")
-			executable(t, onPath, "gh")
+			binary(t, onPath, "gh")
 			env := map[string]string{"PATH": onPath}
 			if tc.override {
 				env["LEGION_JJ_PATH"] = fakeJJ(t, elsewhere, tc.version)

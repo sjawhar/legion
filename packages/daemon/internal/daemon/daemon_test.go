@@ -980,6 +980,16 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 		if servedMapping(t, w, r, cfg.Project) {
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues/"+key {
+			// The admission event of an issue not yet recorded is prepared as Dispatch's detail
+			// shows the issue now: as the move left it.
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{"key": key, "project": cfg.Project, "title": "Captured workflow issue",
+				"status": "todo", "rank": "UUU", "labels": []string{"legion"}, "last_seq": 2, "resolved_repo": "acme/widgets"}); err != nil {
+				t.Errorf("write Dispatch issue: %v", err)
+			}
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
 			// Once the move is admitted, the outbox reads and writes this project's issue; those
 			// calls are not what this test is about. Another project's issue is never this daemon's.
@@ -1189,6 +1199,13 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 		}
 	}))
 	t.Cleanup(dispatchServer.Close)
+	// Boot reads this process's environment, so the real gh is named here: the first gh on a
+	// machine's PATH may be a script, which boot refuses (RefuseScriptGH).
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_GH_PATH", executable)
 	cfg.DispatchURL = dispatchServer.URL
 	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {

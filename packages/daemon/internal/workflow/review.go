@@ -429,13 +429,13 @@ func (r round) stuckAs(other round) bool {
 // from reviewing as from any phase before READY, on the fact that makes the red stand (decideChecks,
 // standingRed), and the reviewer reads the code commit's checks on GitHub before it approves. A
 // round whose reviewer never completes is not ended by the decision alone: the reviewer's pane gets
-// one follow-up turn when a turn ends with its phase open (pi-legion's phase-stall check), and past
-// that the issue stays in reviewing, as a tester's that never completes stays in testing. A
-// completed round that nothing on its way would end is stuck, its reason naming the head, since the
-// decision it needs is of the head: no review decided it (stuckUndecided), or its approval is of
-// other code than the head's (stuckApprovedOtherCode). An approval of the head a push that may
-// change code is still on its way from (classify.CodeOnItsWay) keeps the round open: the push's new
-// head decides whether the approval stands.
+// a follow-up turn when a turn ends with its phase open (pi-legion's phase-stall check, at most two
+// a stall), and past that the issue stays in reviewing, as a tester's that never completes stays
+// in testing. A completed round that nothing on its way would end is stuck, its reason naming the
+// head, since the decision it needs is of the head: no review decided it (stuckUndecided), or its
+// approval is of other code than the head's (stuckApprovedOtherCode). An approval of the head a
+// push that may change code is still on its way from (classify.CodeOnItsWay) keeps the round open:
+// the push's new head decides whether the approval stands.
 func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}

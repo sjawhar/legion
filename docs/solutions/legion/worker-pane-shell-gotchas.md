@@ -13,7 +13,7 @@ tags:
   - jq
   - jaq
 date: 2026-09-12
-status: superseded by LEGION-631 — the grant file, `LEGION_GRANT`, `legion gh`, `legion credential`, `legion push` (with its `pushTTL`), `legion handoff write|read|complete` and an agent's `legion state` are all gone; a pane's `gh` and `git` are plain and act as the role's App from `GH_CONFIG_DIR`, a push is plain `jj git push --bookmark legion/<KEY>`, a handoff is a file the worker writes, commits and pushes whose carrying commit the `legion` tool's `handoff_complete` finds in the pane and reports (the daemon reads no handoff file), and an issue record is read with its `read_record`, while the jj, jq/jaq, bun-test and Envoy sections stand
+status: superseded by LEGION-631 — the grant file, `LEGION_GRANT`, the grant-redeeming `legion gh --`, `legion credential`, `legion push` (with its `pushTTL`), `legion handoff write|read|complete` and an agent's `legion state` are all gone; a pane's `gh` is the `legion gh` wrapper, which runs the real gh as the role's App from the gh directory of the owner the command names, its clones' git credential helper is `legion git-credential`, a push is plain `jj git push --bookmark legion/<KEY>`, a handoff is a file the worker writes, commits and pushes whose carrying commit the `legion` tool's `handoff_complete` finds in the pane and reports (the daemon reads no handoff file), and an issue record is read with its `read_record`, while the jj, jq/jaq, bun-test and Envoy sections stand
 module: legion
 related_issues:
   - "LEGION-9"
@@ -404,12 +404,14 @@ first and the 409 as the expected daemon answer — do not wait for it to say 20
 **The "exact released version" a doc states is a moving target while the tree is open.** LEGION-54's docs named the
 pi-envoy release it would ship as; `main` released 1.17.3, 1.18.0, and 1.18.1 during its five rounds, and the number
 was edited three times (1.17.3 → 1.17.4 → 1.18.2), one of them a tester FAIL, and the change then shipped as 1.20.1 anyway (two more releases landed before the merge queue reached it), corrected by this fast-follow. The workable rule: compute the number at
-commit time from the latest tag with the release workflow's own script —
-`.github/scripts/release-bump.sh <prev> pi-legion-envoy-v<prev>..<head> --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/`
-(arguments from `.github/workflows/release.yaml`) — the merger recomputes it at READY, and a drift that appears after
+commit time from the latest tag the way the release workflow does, with the `Determine next version` step of the
+package's job in `.github/workflows/release.yaml` (`.github/scripts/release-push.sh version pi-legion-v …` for
+`@sjawhar/pi-legion`, `… version pi-envoy-v …` for `@sjawhar/pi-envoy`; copy its arguments from there, and it runs
+locally) — the merger recomputes it at READY, and a drift that appears after
 approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
 branch's commit subjects, so only the PR title's conventional-commit type classifies the bump, except that a change
-under `skills/` bumps at least the patch version whatever that type.
+under one of the package's `--patch-path` paths (its own skills among them) bumps at least the patch version
+whatever that type.
 
 **"Diff against `main`" is not the branch's diff once `main` has moved.** A fresh-eyes review of this branch reported
 that it "reverted" LEGION-11's `reconnectWorkers`-after-`api` fix and "deleted" its regression test. It had diffed the
@@ -423,84 +425,68 @@ has the same rule for the symmetric case; check `jj log -r '::main@origin ~ ::<b
 **Already recorded, so read these rather than re-deriving:** the 409 after a daemon restart and the architect's
 re-derived status write are §11 above and
 [external-red-and-phase-ownership](../daemon/external-red-and-phase-ownership.md) §2 (LEGION-37); who pushed before
-LEGION-285, and the implementer resolving the threads the reviewer accepted with
-`legion threads resolve --pr <n> --repo <owner>/<repo>` (LEGION-34, sjawhar/legion#1003 — until that release is
-deployed the pane's `legion` has no `threads` subcommand, see §13; a worker on LEGION-54 was told to run it before it
-existed on any branch), is §3 of that same note; the tester completion's status write is
-verdict-blind (`phaseCompleteStatus` in `api/routes/workers.ts` returns `needs_review` for a tester whatever it
-found), so a FAIL is carried by the tester's comment and the architect's own `set_status in_progress` seconds later —
-a sibling architect reading Dispatch status alone will see `needs_review` flash by. The daemon-provisioned
+LEGION-285 is §3 of that same note. The implementer resolves the threads the reviewer accepted, one
+`resolveReviewThread` call per thread with its own `gh` (`skills/legion-worker/references/review-threads.md`). A tester's
+FAIL moves the issue back to `implementing` and its Dispatch status to `in_progress` in the same transition
+(`TriggerTesterFailed` in `packages/daemon/internal/workflow/table.go`), so a sibling architect reading Dispatch
+status never sees `needs_review` for a failed test. The daemon-provisioned
 `.omp/config.yml` that every path-scoped commit once had to leave out is gone since LEGION-58 (provisioning no longer
 writes it; OMP needed nothing from it — absent and empty parse the same, `{}`) for every workspace provisioned after
 the daemon that carries it was deployed; a tree provisioned before that keeps its copy until it closes, and its workers keep the path-scoped habit.
 
-## 13. The pane's `legion` is the deployed daemon's build: a new CLI subcommand is exercised live from the workspace (from LEGION-34)
+## 13. The pane's `legion` and `gh` are the running daemon's build: a branch's `legion` is built and run by path (from LEGION-34)
 
-`legion` on a worker pane's PATH is `<state_dir>/bin/legion`, a launcher that re-execs the **running daemon's** own
-checkout (`legionCliLauncherScript` in `packages/daemon/src/daemon/environment.ts`), and the `gh` beside it is a shim
-that execs `legion gh --`. Neither knows anything on your branch. A CLI subcommand added by the PR under test does not
-exist there until the release lands on `main` and the operator restarts the daemon — on LEGION-34 `legion threads
-resolve` answered `Unknown command` from the pane for the whole tree. Every live run is the branch's own entry point,
-from the workspace, with the same grant delivery the pane gives any command:
+`legion` first on a tmux pane's PATH is `<state_dir>/bin/legion`, a launcher script whose one command execs the
+executable the running daemon was started from, and the `gh` beside it execs that same executable's `legion gh`
+(`Install` in `packages/daemon/internal/runtime/workerbin/workerbin.go`, which the daemon's boot calls with its own
+`os.Executable()` in `packages/daemon/internal/daemon/daemon.go`; `workerbin.Path` puts that directory first on the
+pane's PATH and `PI_SHELL_PREFIX` keeps it first in the bash tool, `packages/daemon/internal/runtime/tmux/spawn.go`).
+An issue pod's `legion` is the worker image's `/opt/legion/bin/legion` and its `gh` the image's
+`/opt/legion/bin/gh`, which execs that binary's `legion gh` (`packages/daemon/docker/gh`). So every `gh` a pane runs
+goes through the deployed release's `legion gh`, and every git fetch or push through its `legion git-credential`:
+neither knows anything on your branch. A pane runs whatever file sits at the path the daemon resolved for itself at
+boot (`os.Executable()`, symlinks resolved): a change reaches it when the daemon restarts from the new release's
+binary, or as soon as the file at that resolved path is replaced in place (re-pointing a symlink to it is not
+enough), and a pod only when it runs the worker image of that release; the merge alone changes nothing. No pane runs
+`legion` from bash otherwise: the `legion` tool makes its daemon calls in-process
+(`packages/daemon/internal/prompts/roles/mechanics/headless.md`, `controller-root.md`).
+
+To exercise the branch's build live, build it in the workspace and run it by path, in the pane's own environment
+(§17 has the Go to use when `go` is not on the pane's PATH):
 
 ```bash
-cd -- "$LEGION_WORKSPACE" && bun packages/daemon/src/cli/index.ts threads resolve --pr <n> --repo sjawhar/legion
+cd -- "$LEGION_WORKSPACE/packages/daemon" && go build -o /tmp/<issue>-legion ./cmd/legion
+/tmp/<issue>-legion gh pr view <n> -R sjawhar/legion --json url --jq .url
 ```
 
-(`bun install --frozen-lockfile` once in the workspace; `bun packages/daemon/src/cli/index.ts --help` lists the
-branch's commands.) That is a real production-like proof, not a stand-in: the process reads `LEGION_GRANT_FILE` /
-`LEGION_GRANT` from the pane, redeems it at the real daemon's `/legion/v1/gh-token`, and acts on real GitHub as the
-App of your role. Name the `bun …` form in the PR body's `E2E` line and in every role's instructions for the tree,
-and record in the handoff that the deployed `legion` form is exercised only after the merge (LEGION-34's deployment
-note: the first review round on any later issue runs the plain `legion threads resolve` and quotes it on that PR).
+That is the branch's `legion gh` reading the command and picking the owner's directory under the pane's
+`LEGION_GH_OWNERS_DIR`, then running the real gh at `LEGION_GH_PATH` against real GitHub as your role's App. It still
+requires the pane's first `gh` on PATH to be a Legion wrapper (`ghWrapperPath` in `packages/daemon/cmd/legion/gh.go`),
+and the git that gh runs itself (a clone, `pr checkout`) still asks that wrapper, the deployed build's
+`legion gh auth git-credential`; a change to the credential helper is proved by feeding git's request to
+`/tmp/<issue>-legion git-credential get` on stdin. Name the branch-build form in the PR body's `E2E` line, and record
+in the handoff that the deployed form is exercised only after the release is deployed.
 
-Two things that bit the same runs. First, §1's copied credential block: a command whose text carries an imitated
-`export LEGION_GRANT='…'` line ahead of the real one answers `Unable to redeem LEGION_GRANT (403)` on every `legion …`
-call — and a `jj git push` through the credential helper fails as `could not read Username for
-'https://github.com'`, which looks like a broken helper and is not. Running the command from the eval kernel's
-`tool.bash` bridge, with the shell in a script file (`bash /tmp/<issue>-step.sh`), keeps the model's own transcript
-out of the command text; the bridge attaches the grant exactly as the bash tool does. Second, a body-only
-or title-only PR edit re-runs only the `PR Title` workflow. The Tests workflow does not subscribe to `edited`.
+A body-only or title-only PR edit re-runs only the `PR Title` workflow. The Tests workflow does not subscribe to
+`edited`.
 Retargeting a pull request to a new base does not re-run Tests; after a retarget, merge the bookmark onto the new base (`jj new legion/<KEY> <new base>`) and
 push — the new head runs Tests against the new merge result — and cite that run in the PR body. The `CI:` line
 cites the distinct Tests and PR Title run ids at the head
 ([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md), §6).
 
-**Two corrections from LEGION-78 (sjawhar/legion#1015), where the branch made `legion gh` refuse a command the
-deployed build still forwarded.** First, the stale build is not always harmless. §13's example is a subcommand that
-answers `Unknown command`; when the change is a *refusal*, the pane's old build does the thing instead of refusing it.
-The tester ran `legion gh -- issue comment 1015 --repo sjawhar/legion --body smoke` once through the pane's `legion`
-and it posted a real comment on the PR (id 5652558869, deleted with `pr comment --delete-last --yes` through the
-branch entry). Prove a refusal only through `bun packages/daemon/src/cli/index.ts gh -- …` from the workspace, and
-run the positive control (a forwarded `pr view`) through the same entry so the `E2E` line names one code path.
-Second, "the operator restarts the daemon" is one release too many for a CLI-only change: the launcher re-execs
-`bun <daemon checkout>/packages/daemon/src/cli/index.ts` on every call, so a change that touches only
-`packages/daemon/src/cli/` is live in every pane the moment the daemon checkout carries the merge — no restart. What
-needs updating is that checkout (on this box `/home/ubuntu/legion-ws-RunDaemon`, at `main`); the architect raises it
-after the merge. A change to the daemon process itself still needs the restart.
-
-**The same skew on a schema refusal (LEGION-131, #1106).** The branch tightened the handoff schema in
-`@legion/contracts`: the pane's `legion` (execs the daemon checkout at `main`) accepted a test handoff with
-`implementerProof.verdict: "rejected"` and no `failures`, and a proof whose field was whitespace, while the branch's
-`bun packages/daemon/src/cli/index.ts handoff write` refused both, naming `failures` and `proof.0.<field>` — the
-tester recorded the live contrast in its handoff, the clearest form of a rule proving itself. Two consequences.
-The `legion` tool's `handoff_write` runs the pane's `legion`, so on a schema-tightening issue the PR's own ledger is
-written by the deployed build: run each phase's own payload through the branch CLI into a scratch workspace
-(`bun packages/daemon/src/cli/index.ts handoff write --phase <p> --workspace "$(mktemp -d)" --data …`), quote its
-answer in the handoff, and write the real handoff with the tool. A read-back is weaker: the committed `test.json` above
-was written by the deployed build and only *read* back under the branch schema, and a read never runs the write-time
-rules. And the deployed refusal arrives only when the operator advances the daemon
-checkout — record that as the pending production check, exactly as the paragraph above says.
+**A stale build does what the branch refuses (LEGION-78, sjawhar/legion#1015).** The branch made `legion gh` refuse
+a command the deployed build still forwarded. The tester ran the command once through the pane's `legion`, and it posted
+a real comment on the PR (id 5652558869, deleted afterwards). Prove a refusal only through the branch's build, and
+run the positive control (a forwarded `pr view`) through the same binary, so the `E2E` line names one code path.
 
 **The same indirection holds for skills, through a different surface.** A pane's `skill://legion-<name>` is not the
-branch's `skills/legion-<name>/SKILL.md` and not the daemon checkout's either: OMP loads it from the installed
-`@sjawhar/pi-legion-envoy` plugin release (`~/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/skills/`,
-the `skills` entry of its `package.json` `omp` manifest). During LEGION-78's own retro, `skill://legion-retro`
+branch's `skills/legion-<name>/SKILL.md`: OMP loads it from the installed `@sjawhar/pi-legion` plugin release (the
+`skills` entry, `dist/skills`, of its `package.json` `omp` manifest). During LEGION-78's own retro, `skill://legion-retro`
 served the pre-change template (`legion gh -- issue comment <issue-number>`, the exact hazard the branch fixed)
-from plugin 1.21.0 while `$LEGION_WORKSPACE/skills/legion-retro/SKILL.md` carried the `dispatch_message` call. So a
+from `@sjawhar/pi-legion-envoy` 1.21.0 while `$LEGION_WORKSPACE/skills/legion-retro/SKILL.md` carried the `dispatch_message` call. So a
 worker on an issue that changes a skill reads the branch file, not `skill://`, for the rest of that tree, and the
 architect's task for each later phase says which template to follow. A skill fix reaches other trees only after the
-plugin release built from the merged commit is installed — a release step, unlike the CLI's checkout advance above.
+plugin release built from the merged commit is installed: a release step, as the `legion` binary's is.
 
 ## 14. The bash tool's `jq` is jaq, a shell builtin; every script you write runs mise's jq (from LEGION-40)
 
