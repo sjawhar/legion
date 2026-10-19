@@ -165,6 +165,30 @@ func TestListenerAndCredentialFreeSessionsOnRealServers(t *testing.T) {
 	}
 }
 
+// A user holding SessionPermissions alone, as sessions that share one user hold it, receives its
+// notifications and publishes a reply, and the server refuses it a subscribe to the reply inboxes,
+// on the 2.10 image and on the hub's: request/reply from such a session is refused by design.
+func TestSessionPermissionsOnRealServers(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			t.Parallel()
+			seed, server, uri := startHostServer(t, image.Ref, core.SessionPermissions())
+			conn, errs := connect(t, uri, seed)
+			_, err := conn.SubscribeSync(contracts.AgentSubject(liveSession))
+			require.NoError(t, err)
+			require.NoError(t, conn.Publish(natsgo.InboxPrefix+"example.1", nil))
+			_, err = conn.SubscribeSync(natsgo.InboxPrefix + ">")
+			require.NoError(t, err)
+			requireViolation(t, conn, errs, `Subscription to "_INBOX.>"`)
+			// The inbox subscribe is all the server refused: the notification subscribe and the reply
+			// came first and were allowed.
+			for _, v := range violationsOnceLogged(t, server, "_INBOX.>") {
+				require.Equal(t, []string{"Subscription", "_INBOX.>"}, v[1:], "the server refused what the set allows: %s", v[0])
+			}
+		})
+	}
+}
+
 // startSplitServer runs image with two users: the listener's, holding ListenerPermissions for
 // liveMachineID with a seed, and the session user, holding SessionPermissions with no seed, as the
 // server's no_auth_user. It returns the listener's seed, the server and its client URL.

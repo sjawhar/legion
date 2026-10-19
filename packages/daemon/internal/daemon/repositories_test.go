@@ -11,25 +11,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // installations answers each App's installation on each repository, by "<role> <owner/name>";
-// a repository it does not name is installed for both Apps, and fail answers an error.
+// a repository it does not name is installed for both Apps, and fail answers an error. delay is
+// how long each read takes, as a GitHub that answers slowly; reads wait it out side by side.
 type installations struct {
 	mu      sync.Mutex
 	missing map[string]bool
 	fail    error
 	asked   []string
+	delay   time.Duration
 }
 
-func (i *installations) InstalledOn(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
+func (i *installations) InstalledOn(ctx context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
+	if i.delay > 0 {
+		select {
+		case <-time.After(i.delay):
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	key := string(role) + " " + repo.String()
@@ -221,5 +235,67 @@ func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
 	}
 	if !reflect.DeepEqual(view, want) {
 		t.Fatalf("view = %+v\nwant %+v", view, want)
+	}
+}
+
+// An issue the workflow does not record, such as an operator's claim, works the project's default
+// repository, as Dispatch resolves an issue that names none, at its default branch as GitHub names
+// it: a pod provisions its workspace from it, and the claim's commit identity is minted for its
+// owner. A project serving no default repository refuses the launch, naming the fix.
+func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@release/v7.1", "zeta/tools": "zeta/tools@main"})
+	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION"),
+		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}, {Repo: ghrepo.MustParse("zeta/tools")}}, nil)
+	if repo, branch, err := w.issueRepository(ctx, "LEGION-9"); err != nil || repo.String() != "Acme/Widgets" || branch != "release/v7.1" {
+		t.Fatalf("an unrecorded issue works %s@%s, %v; want the default Acme/Widgets@release/v7.1", repo, branch, err)
+	}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("zeta/tools")}}, []refusedRepository{{Repo: "acme/widgets", Reason: "the review App is not installed on acme/widgets"}})
+	want := "LEGION-9 is not recorded, so it works the project's default repository, and project LEGION serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on"
+	if repo, _, err := w.issueRepository(ctx, "LEGION-9"); err == nil || err.Error() != want {
+		t.Fatalf("an unrecorded issue with no default served works %s, %v; want %q", repo, err, want)
+	}
+}
+
+// A tmux pane adopted after a restart holds its write token for the owner of the repository its
+// claim's issue works, the owner its launch was minted for: its record's repository's, or, for an
+// issue the workflow does not record, the project's default's. A token no claim holds is refused.
+func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
+	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION"),
+		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		return w.records.PutIssue(ctx, tx, record.Issue{Key: "LEGION-2", Tree: "LEGION-2", Project: "LEGION", Title: "root", Phase: phase.Implementing,
+			Generation: 1, Status: "in_progress", Rank: "A", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issues := map[claim.Token]string{}
+	for _, issue := range []string{"LEGION-2", "LEGION-9"} {
+		token, err := claim.NewToken("legion", issue, claim.RoleImplementer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		issues[token] = issue
+	}
+	issueOf := func(_ context.Context, token claim.Token) (string, error) {
+		issue, ok := issues[token]
+		if !ok {
+			return "", errors.New("no claim holds token " + string(token))
+		}
+		return issue, nil
+	}
+	owner := claimRepositoryOwner(issueOf, w.issueRepository)
+	want := map[string]string{"LEGION-2": "zeta", "LEGION-9": "Acme"}
+	for token, issue := range issues {
+		if got, err := owner(ctx, token); err != nil || got != want[issue] {
+			t.Errorf("the write owner of %s = %q, %v; want %q", token, got, err, want[issue])
+		}
+	}
+	if got, err := owner(ctx, claim.ControllerToken("legion")); err == nil {
+		t.Errorf("the write owner of a token no claim holds = %q, want a refusal", got)
 	}
 }

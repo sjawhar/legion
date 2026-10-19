@@ -54,16 +54,11 @@ func (r *liveRig) checkRepositoryCache() error {
 	if want := "Sandbox/" + name + ` {"` + sandboxNameHashLabel + `":"` + sandboxNameHash(name) + `"} clusterIP=None externalName=`; strings.TrimSpace(service) != want {
 		return fmt.Errorf("the cluster holds the cache's Service as %q, want %q", strings.TrimSpace(service), want)
 	}
-	curl := fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d`, repocache.Port)
-	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", curl+"/healthz")
+	health, body, err := r.cacheHealth(name)
 	if err != nil {
 		return err
 	}
-	body, code, _ := strings.Cut(strings.TrimSpace(out), " ")
-	var health repocache.Health
-	if err := json.Unmarshal([]byte(body), &health); err != nil || code != "200" {
-		return fmt.Errorf("the cache's /healthz with no token answered %q, not 200 and its JSON: %v", strings.TrimSpace(out), err)
-	}
+	curl := fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d`, repocache.Port)
 	head, err := r.githubHead(r.defaultBranch)
 	if err != nil {
 		return err
@@ -90,6 +85,21 @@ func (r *liveRig) checkRepositoryCache() error {
 	note("runtime", "RepositoryCache(%s): %s at %s; its Service %s", r.env.repo, status.State, status.Address, strings.TrimSpace(service))
 	note("operator", "exec %s -c %s -- curl localhost:%d: /healthz with no token %s; /tar 401 without its token, %s with it on stdin; GitHub's %s is %s", name, cacheContainer, repocache.Port, body, strings.TrimSpace(served), r.defaultBranch, head)
 	return nil
+}
+
+// cacheHealth is the cache name's /healthz, asked inside its own pod with no token, decoded, with
+// the body as it answered: an error unless it answered 200 and its JSON.
+func (r *liveRig) cacheHealth(name string) (repocache.Health, string, error) {
+	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", fmt.Sprintf(`curl -s -w ' %%{http_code}' localhost:%d/healthz`, repocache.Port))
+	if err != nil {
+		return repocache.Health{}, "", err
+	}
+	body, code, _ := strings.Cut(strings.TrimSpace(out), " ")
+	var health repocache.Health
+	if err := json.Unmarshal([]byte(body), &health); err != nil || code != "200" {
+		return repocache.Health{}, "", fmt.Errorf("the cache %s's /healthz with no token answered %q, not 200 and its JSON: %v", name, strings.TrimSpace(out), err)
+	}
+	return health, body, nil
 }
 
 // cache-second-pod: another issue pod of the run's repository (cache-b), launched while the cache
@@ -147,11 +157,13 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if err != nil {
 		return err
 	}
-	cached := ""
-	for _, read := range r.rt.RepositoryCaches() {
-		if read.Sandbox == status.Sandbox && read.Health != nil {
-			cached = read.Health.Head
-		}
+	health, _, err := r.cacheHealth(status.Sandbox)
+	if err != nil {
+		return err
+	}
+	cached := health.Head
+	if cached == "" {
+		return fmt.Errorf("the cache %s's /healthz names no head: %+v", status.Sandbox, health)
 	}
 	marker, content := ".legion-e2e/"+c.issue+".txt", fmt.Sprintf("the commit only %s holds, pushed at %s\n", dir.Bookmark, time.Now().UTC().Format(time.RFC3339Nano))
 	branchHead, err := r.pushRunCommit(dir.Bookmark, base, marker, content)

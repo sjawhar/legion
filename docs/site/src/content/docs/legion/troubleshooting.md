@@ -49,6 +49,12 @@ cluster and the image:
   release records each issue it already runs on the repository Dispatch resolves for it, and these
   resolve to none. Set the project's default repository in Dispatch, or each issue's own, and start
   the daemon again.
+- **A record whose pull request is elsewhere.** `fill the repository of <KEY>: Dispatch resolves it
+  to <owner/name>, but its pull request #<n> is on <owner/name>: set the issue's repository in
+  Dispatch to … and restart`: the issue worked in its pull request's repository, but its own
+  repository or an ancestor's, set in Dispatch since, resolves it elsewhere. Set the issue's
+  repository in Dispatch to the pull request's, with the command the message names, and start the
+  daemon again.
 - **Agent Sandbox is missing.** The refusal names `the Sandbox CRD sandboxes.agents.x-k8s.io` or
   `the Agent Sandbox controller Deployment agent-sandbox-system/agent-sandbox-controller`, and
   whether the API answered 404 or 403. A 403 means the daemon's identity lacks the get the

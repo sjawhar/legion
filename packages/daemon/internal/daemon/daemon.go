@@ -699,7 +699,11 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, log)
+		// The workflow sets p.repository after the runtime's factory is made and before it runs.
+		repository := func(ctx context.Context, issue string) (ghrepo.Repository, string, error) {
+			return p.repository(ctx, issue)
+		}
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools["gh"], p.repositories.Owners, repository, log)
 	}
 	return nil
 }
@@ -709,17 +713,18 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
 // the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), one directory
 // for each of owners (the project's mapping's), with gh, the real gh boot resolved (daemonTools),
-// the one each pane's `legion gh` runs, and the owner of each claim's repository the issue's record
-// names (store.ClaimRepositoryOwner), which a pane adopted after a restart holds its write token
-// for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh files. The
-// private server's environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
+// the one each pane's `legion gh` runs, and the owner of the repository each claim's issue works
+// (claimRepositoryOwner over repository), which a pane adopted after a restart holds its write
+// token for; a daemon with no GitHub Apps hands the runtime none, and its panes hold no gh files.
+// The private server's environment is scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, owners func() []string,
+	repository func(context.Context, string) (ghrepo.Repository, string, error), log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, st *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
 			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, owners), gh
-			opts.RepositoryOwner = st.ClaimRepositoryOwner
+			opts.RepositoryOwner = claimRepositoryOwner(st.ClaimIssue, repository)
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -733,6 +738,27 @@ func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatc
 			log.Info("tmux runtime: removed variables the pane environment does not carry", "removed", removed)
 		}
 		return rt, nil
+	}
+}
+
+// claimRepositoryOwner is the owner of the repository a claim's issue works: the claim's issue
+// (issueOf, the daemon's own claims; a token spells its issue lowercased), then the repository it
+// works (repository, the workflow's issueRepository: its record's, or the project's default for
+// an issue the workflow does not record). It is what a tmux pane adopted after a restart holds its
+// write token for (tmux.Options.RepositoryOwner), the owner its launch was minted for, read from
+// the daemon's own state and nothing a pane can write.
+func claimRepositoryOwner(issueOf func(context.Context, claim.Token) (string, error),
+	repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Token) (string, error) {
+	return func(ctx context.Context, token claim.Token) (string, error) {
+		issue, err := issueOf(ctx, token)
+		if err != nil {
+			return "", err
+		}
+		repo, _, err := repository(ctx, issue)
+		if err != nil {
+			return "", err
+		}
+		return repo.Owner(), nil
 	}
 }
 
@@ -788,13 +814,7 @@ func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools ma
 // with the repository as the clone's path spells it, in path order. A directory of the layout that
 // holds no git checkout is not one.
 func sharedClones(stateDir string) ([]workspace.Workspace, error) {
-	// Location lays every repository's clone out as <root>/<owner>/<name>; a probe repository
-	// names the root without restating that layout here.
-	probe, err := workspace.Location(stateDir, ghrepo.MustParse("owner/name"), "probe")
-	if err != nil {
-		return nil, err
-	}
-	paths, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(probe.Clone)), "*", "*"))
+	paths, err := filepath.Glob(filepath.Join(workspace.CloneRoot(stateDir), "*", "*"))
 	if err != nil {
 		return nil, fmt.Errorf("list the shared clones: %w", err)
 	}
@@ -1584,8 +1604,8 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 }
 
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
-// over identity, minted for the owner of the repository the claim's issue's record names
-// (repository): an issue the workflow does not record works no repository and adopts nothing. nil
+// over identity, minted for the owner of the repository the claim's issue works (repository): its
+// record's, or the project's default repository for an issue the workflow does not record. nil
 // without a workflow.
 func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), repository func(context.Context, string) (ghrepo.Repository, string, error)) func(context.Context, claim.Role, string) (runtime.GitIdentity, bool, error) {
 	if identity == nil || repository == nil {

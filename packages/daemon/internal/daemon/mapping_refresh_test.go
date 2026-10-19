@@ -166,7 +166,7 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 
 // A refresh that unmaps a repository and an admission recording an issue on it are serialized: an
 // admission that resolved the repository before the refresh commits before the refresh reads the
-// live records, so the repository it recorded stays heard. A refresh never unsubscribes a
+// records, so the repository it recorded stays heard. A refresh never unsubscribes a
 // repository an admission is about to commit an issue on.
 func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing.T) {
 	ctx := context.Background()
@@ -221,9 +221,53 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 	}
 }
 
+// GitHub intake hears every repository a record of the project names, whatever its tree's state:
+// a root that closed on a repository the mapping no longer serves is heard across the refresh
+// that unmaps it and across a restart, so a person moving it back to todo re-admits it on a
+// repository whose pull request facts still arrive.
+func TestAClosedTreesRepositoryStaysHeardAfterItIsUnmapped(t *testing.T) {
+	ctx := context.Background()
+	w, client, _, stream := mappingRig(t, map[string]bool{})
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		return w.records.PutIssue(ctx, tx, record.Issue{Key: "LEGION-300", Tree: "LEGION-300", Project: "LEGION", Title: "root", Phase: phase.Done,
+			Generation: 1, Status: "done", Rank: "A", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client.set(dispatch.RepoProject{Repo: "acme/widgets", Project: "LEGION", Default: true})
+	if err := w.refreshMapping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
+		t.Fatalf("GitHub filters = %v after unmapping zeta/tools, want it heard: a closed root is recorded on it", filters)
+	}
+	heard, err := w.heardAtBoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := repositoryNames(heard), []string{"acme/widgets", "zeta/tools"}; !slices.Equal(got, want) {
+		t.Fatalf("a restart hears %v, want %v", got, want)
+	}
+	reopened := intake.DispatchIssue{Key: "LEGION-300", Seq: 2, Status: "todo", Title: "root", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
+	if reopened, err = w.prepareRepository(ctx, reopened); err != nil {
+		t.Fatal(err)
+	}
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
+	if _, err := intake.ApplyFact(ctx, w.pool, "test", "reopen", reopened, engine, admission); err != nil {
+		t.Fatal(err)
+	}
+	if got := recordedIssue(t, w, "LEGION-300"); got == nil || got.Phase != phase.Admitted || got.Repo != "zeta/tools" {
+		t.Fatalf("LEGION-300 = %+v, want it re-admitted on zeta/tools", got)
+	}
+	if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
+		t.Fatalf("GitHub filters = %v, want zeta/tools heard for the re-admitted root", filters)
+	}
+}
+
 // GitHub intake hears a repository as GitHub spells it, which Envoy's subjects carry, whatever
 // spelling an issue's record keeps for its workspace: a record the backfill filled with a clone's
-// spelling is heard once, under the served repository's GitHub spelling, and a live record on a
+// spelling is heard once, under the served repository's GitHub spelling, and a record on a
 // repository the mapping no longer serves is heard under the GitHub spelling its record keeps, with
 // no read of GitHub.
 func TestGitHubIntakeHearsEachRepositoryAsGitHubSpellsIt(t *testing.T) {

@@ -268,7 +268,9 @@ same user receives, and the server refuses nothing the set allows; without the d
 create, the listener never reaches `"status":"healthy"`; and, as a hub with a listener renders its
 users, the listener reaches `"status":"healthy"` as a user holding `ListenerPermissions` while a
 session with no credential, the server's `no_auth_user` holding `SessionPermissions`, registers,
-receives a send and a role message, and is refused a publish to another session's subject). The
+receives a send and a role message, and is refused a publish to another session's subject; and a
+user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
+The
 `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 

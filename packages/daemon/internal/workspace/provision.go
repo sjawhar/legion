@@ -138,6 +138,12 @@ func Bookmark(issue string) string { return "legion/" + issue }
 // each sit (Location): repos/<host>/<owner>/<name>, and workspaces/<owner>/<name>/<issue>.
 const layoutDepth = 4
 
+// CloneRoot is the directory under stateDir that holds every repository's shared clone, each at
+// <owner>/<name> below it (Location).
+func CloneRoot(stateDir string) string {
+	return filepath.Join(stateDir, "repos", "github.com")
+}
+
 // Location is the deterministic workspace location Provision creates for one issue, and the shared
 // clone it is a jj workspace of. The repository arrives parsed (ghrepo.Parse); a `.` or `..`
 // issue is refused: joined under the repository's workspaces directory it names that directory,
@@ -158,7 +164,7 @@ func Location(stateDir string, repository ghrepo.Repository, issue string) (Work
 	return Workspace{
 		Dir:      filepath.Join(stateDir, "workspaces", repository.Owner(), repository.Name(), strings.ToLower(issue)),
 		Bookmark: Bookmark(issue),
-		Clone:    filepath.Join(stateDir, "repos", "github.com", repository.Owner(), repository.Name()),
+		Clone:    filepath.Join(CloneRoot(stateDir), repository.Owner(), repository.Name()),
 		Repo:     repository,
 	}, nil
 }

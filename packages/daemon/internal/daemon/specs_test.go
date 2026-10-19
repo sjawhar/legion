@@ -306,11 +306,11 @@ func TestTheControllersAddressingGainsTheProjectsRepositories(t *testing.T) {
 	}
 }
 
-// A worker's launch is on the repository its issue's record names, at the default branch the record
-// names, whatever its name, which each runtime provisions the issue's workspace at; two issues on
-// two owners' repositories each launch on their own. A record that cannot be read refuses the
-// launch, naming the issue, and an issue the workflow does not record (an operator's claim)
-// launches on no repository.
+// A worker's launch is on the repository its issue works, at the default branch the runtime
+// answers, whatever its name, which each runtime provisions the issue's workspace at; two issues on
+// two owners' repositories each launch on their own. A repository that cannot be read refuses the
+// launch, naming the issue. What an issue works, its record's repository or, unrecorded, the
+// project's default, is the workflow's (TestAnUnrecordedIssueWorksTheProjectsDefaultRepository).
 func TestAWorkerLaunchIsOnItsIssuesRecordedRepository(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
@@ -324,10 +324,7 @@ func TestAWorkerLaunchIsOnItsIssuesRecordedRepository(t *testing.T) {
 			if issue == "S1-9" {
 				return ghrepo.Repository{}, "", errors.New("read the record of S1-9: the database refused")
 			}
-			named, ok := recorded[issue]
-			if !ok {
-				return ghrepo.Repository{}, "", nil
-			}
+			named := recorded[issue]
 			return ghrepo.MustParse(named[0]), named[1], nil
 		}}
 	for issue, want := range recorded {
@@ -349,16 +346,7 @@ func TestAWorkerLaunchIsOnItsIssuesRecordedRepository(t *testing.T) {
 		!strings.Contains(err.Error(), "the repository of "+string(refused)) || !strings.Contains(err.Error(), "the database refused") {
 		t.Fatalf("SpawnSpec with an unreadable record = %v, want the refusal naming the claim and the read", err)
 	}
-
-	operator, err := claim.NewToken("s1", "S1-5", claim.RoleImplementer)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: operator, Issue: "S1-5", Tree: "S1-5", Role: claim.RoleImplementer}); err != nil ||
-		!spec.Repository.IsZero() || spec.DefaultBranch != "" {
-		t.Fatalf("SpawnSpec of an unrecorded issue = %s at %q, %v; want no repository", spec.Repository, spec.DefaultBranch, err)
-	}
-	if len(asked) != 4 {
+	if len(asked) != 3 {
 		t.Fatalf("asked for the repositories of %v, want each launch's issue once", asked)
 	}
 }

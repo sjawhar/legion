@@ -151,7 +151,7 @@ func (r *outbox) graphQL(ctx context.Context, issue string) (githubrest.Client, 
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, err
 	}
-	repo, err := issueRepository(recorded)
+	repo, err := recorded.Repository()
 	if err != nil {
 		return githubrest.Client{}, ghrepo.Repository{}, err
 	}

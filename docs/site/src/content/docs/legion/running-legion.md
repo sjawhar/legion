@@ -32,7 +32,8 @@ repository Dispatch resolves for it: its own (the issue header's Repository pick
 The daemon records an issue on that repository, and its default branch as GitHub names it, when it
 first records the issue, and keeps both: a later change of the issue's repository in Dispatch is
 not applied, and the daemon says so on the issue. An issue whose repository resolves to none, or to
-one the daemon does not serve, is not admitted, and the daemon says why on the issue.
+one the daemon does not serve, is not admitted, and the daemon says why on the issue. A claim an
+operator starts on an issue the workflow does not record works the project's default repository.
 
 The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
 mapped repository both the implement and the review App are installed on, and leaves out one either
