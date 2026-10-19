@@ -13,7 +13,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -181,7 +180,7 @@ func byHandShare(mergeNote string) string {
 // The reads are made as the implement App, minted for the repository's owner, whose token never
 // leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
-	repository, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+	repository, err := issue.Repository()
 	if err != nil {
 		s.log.Error("api: read the repository of a completing issue", "issue", issue.Key, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", fmt.Sprintf("the record of %s names no repository its pull request can be read in", issue.Key))

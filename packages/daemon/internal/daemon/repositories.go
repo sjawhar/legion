@@ -9,10 +9,10 @@ import (
 	"sync"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
-	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -97,7 +97,7 @@ func (r *repositories) Owners() []string {
 }
 
 // Accepted is every served repository, as GitHub names it, sorted by name: what GitHub intake
-// hears, beside the repositories a live record names.
+// hears, beside the repositories the project's records name.
 func (r *repositories) Accepted() []ghrepo.Repository {
 	mapped := r.Mapped()
 	repos := make([]ghrepo.Repository, 0, len(mapped))
@@ -194,58 +194,97 @@ func cacheView(cache sandbox.CacheStatus) api.CacheView {
 // installation on an owner may cover only some of its repositories). A repository an App is not
 // installed on is refused, naming the App; any read that fails is an error that fails the whole
 // read, so nothing is left out on a guess. Accepted repositories carry Dispatch's spelling until
-// nameAccepted reads GitHub's.
+// nameAccepted reads GitHub's. The installation reads run at once, mappingReads at a time, so a
+// read of the mapping takes about as long as its slowest read rather than the sum of them.
 func readMapping(ctx context.Context, client dispatch.Client, project string, installs appauth.Installations) ([]mappedRepository, []refusedRepository, error) {
 	mappings, err := client.ListRepoProjects(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read the repository mapping from Dispatch: %w", err)
 	}
-	var accepted []mappedRepository
-	var refused []refusedRepository
+	type mapped struct {
+		mapping dispatch.RepoProject
+		repo    ghrepo.Repository
+		parse   error
+		// installed is each App's answer, in appauth.Roles order.
+		installed []bool
+	}
+	var entries []mapped
 	for _, mapping := range mappings {
 		if mapping.Project != project {
 			continue
 		}
 		repo, err := ghrepo.Parse("the repository Dispatch maps to "+project, mapping.Repo)
-		if err != nil {
-			refused = append(refused, refusedRepository{Repo: mapping.Repo, Reason: err.Error()})
+		entries = append(entries, mapped{mapping: mapping, repo: repo, parse: err, installed: make([]bool, len(appauth.Roles))})
+	}
+	group, read := errgroup.WithContext(ctx)
+	group.SetLimit(mappingReads)
+	for _, m := range entries {
+		if m.parse != nil {
+			continue
+		}
+		for index, role := range appauth.Roles {
+			group.Go(func() error {
+				installed, err := installs.InstalledOn(read, role, m.repo)
+				if err != nil {
+					return fmt.Errorf("check the %s App's installation on %s: %w", role, m.repo, err)
+				}
+				m.installed[index] = installed
+				return nil
+			})
+		}
+	}
+	if err := group.Wait(); err != nil {
+		return nil, nil, err
+	}
+	var accepted []mappedRepository
+	var refused []refusedRepository
+	for _, m := range entries {
+		if m.parse != nil {
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: m.parse.Error()})
 			continue
 		}
 		var missing []string
-		for _, role := range appauth.Roles {
-			installed, err := installs.InstalledOn(ctx, role, repo)
-			if err != nil {
-				return nil, nil, fmt.Errorf("check the %s App's installation on %s: %w", role, repo, err)
-			}
-			if !installed {
+		for index, role := range appauth.Roles {
+			if !m.installed[index] {
 				missing = append(missing, string(role))
 			}
 		}
 		switch len(missing) {
 		case 0:
 		case 1:
-			refused = append(refused, refusedRepository{Repo: mapping.Repo, Reason: fmt.Sprintf("the %s App is not installed on %s", missing[0], repo)})
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: fmt.Sprintf("the %s App is not installed on %s", missing[0], m.repo)})
 			continue
 		default:
-			refused = append(refused, refusedRepository{Repo: mapping.Repo, Reason: fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), repo)})
+			refused = append(refused, refusedRepository{Repo: m.mapping.Repo, Reason: fmt.Sprintf("the %s Apps are not installed on %s", strings.Join(missing, " and "), m.repo)})
 			continue
 		}
-		accepted = append(accepted, mappedRepository{Repo: repo, Default: mapping.Default})
+		accepted = append(accepted, mappedRepository{Repo: m.repo, Default: m.mapping.Default})
 	}
 	return accepted, refused, nil
 }
 
+// mappingReads is how many of a mapping read's GitHub reads run at once.
+const mappingReads = 8
+
 // nameAccepted is accepted as GitHub names each repository (named: its own spelling of owner and
 // name, which its events and the subjects Envoy publishes them on carry), each read with its
-// default branch as the implement App.
+// default branch as the implement App, mappingReads at a time.
 func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defaultBranches) ([]mappedRepository, error) {
-	out := make([]mappedRepository, 0, len(accepted))
-	for _, mapped := range accepted {
-		read, err := named.Named(ctx, mapped.Repo)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, mappedRepository{Repo: read.Name, Default: mapped.Default})
+	out := make([]mappedRepository, len(accepted))
+	group, read := errgroup.WithContext(ctx)
+	group.SetLimit(mappingReads)
+	for index, mapped := range accepted {
+		group.Go(func() error {
+			repo, err := named.Named(read, mapped.Repo)
+			if err != nil {
+				return err
+			}
+			out[index] = mappedRepository{Repo: repo.Name, Default: mapped.Default}
+			return nil
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -260,20 +299,12 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var accepted []mappedRepository
 	var refused []refusedRepository
-	err := bootprobe.Run(ctx, "repository mapping read", appMintRetry, w.log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
-		var err error
-		accepted, refused, err = readMapping(attempt, w.dispatch, w.dispatchProject, w.installs)
-		if err == nil {
-			return bootprobe.Outcome{Passed: true}
-		}
-		var transient *appauth.TransientError
-		if errors.As(err, &transient) || dispatch.Unreachable(err) {
-			return bootprobe.Outcome{Detail: err.Error()}
-		}
-		return bootprobe.Outcome{Refusal: err}
-	})
+	err := onAppSchedule(ctx, "repository mapping read", appMintRetry, w.log, func(err error) bool { return appTransient(err) || dispatch.Unreachable(err) },
+		func(ctx context.Context) error {
+			var err error
+			accepted, refused, err = readMapping(ctx, w.dispatch, w.dispatchProject, w.installs)
+			return err
+		})
 	if err != nil {
 		return err
 	}
@@ -288,19 +319,13 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 // retry, and logs the mapping the daemon serves.
 func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 	var named []mappedRepository
-	err := bootprobe.Run(ctx, "repository read", appMintRetry, w.log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
-		var err error
-		if named, err = nameAccepted(attempt, w.repositories.Mapped(), w.defaultBranches); err == nil {
-			return bootprobe.Outcome{Passed: true}
-		}
-		var transient *appauth.TransientError
+	err := onAppSchedule(ctx, "repository read", appMintRetry, w.log, func(err error) bool {
 		var answer *githubrest.Answer
-		if errors.As(err, &transient) || errors.As(err, &answer) && answer.Status >= 500 {
-			return bootprobe.Outcome{Detail: err.Error()}
-		}
-		return bootprobe.Outcome{Refusal: err}
+		return appTransient(err) || errors.As(err, &answer) && answer.Status >= 500
+	}, func(ctx context.Context) error {
+		var err error
+		named, err = nameAccepted(ctx, w.repositories.Mapped(), w.defaultBranches)
+		return err
 	})
 	if err != nil {
 		return err
@@ -311,12 +336,13 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 }
 
 // refreshMapping reads the repository mapping again, for Dispatch's settings.repo_project.updated
-// on the project and for an issue on a left-out repository coming up for admission. It has GitHub
-// intake hear every repository the new mapping serves and every repository a live record names,
-// so a repository unmapped while its issues run is still heard, and only then publishes the new
-// mapping: a refresh that fails before the subscription took publishes nothing, so a repository
-// is never served, and an issue never recorded on it, while GitHub intake does not hear it, and
-// the issue's next admission recheck refreshes again.
+// on the project (refreshOnMappingChange) and for an issue on a left-out repository coming up for
+// admission. It has GitHub intake hear every repository the new mapping serves and every
+// repository a record of the project names, so a repository unmapped while an issue is recorded
+// on it is still heard, and only then publishes the new mapping: a refresh that fails before the
+// subscription took publishes nothing, so a repository is never served, and an issue never
+// recorded on it, while GitHub intake does not hear it, and the issue's next admission recheck
+// refreshes again.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -331,8 +357,8 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	for _, mapped := range accepted {
 		served = append(served, mapped.Repo)
 	}
-	// The live-record snapshot, the subscription update and the publication run under the lock
-	// every fact applies under (intake.SerializeFacts), which an admission holds from resolving an
+	// The record snapshot, the subscription update and the publication run under the lock every
+	// fact applies under (intake.SerializeFacts), which an admission holds from resolving an
 	// issue's repository through committing its record: one that resolved a repository of the old
 	// mapping commits before the snapshot reads it, so the repository it recorded stays heard, and
 	// one that resolves after resolves against the new mapping.
@@ -359,8 +385,42 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	return nil
 }
 
+// mappingChange is Dispatch's consumer's RepositoryMapping: the project's
+// settings.repo_project.updated asks refreshOnMappingChange to read the mapping again, and its
+// event is acknowledged at once. A refresh reads Dispatch and GitHub and can take longer than the
+// event's acknowledgement window (AckWait), and one run inside that window would be cut off and
+// its event delivered again, never finishing. A change that arrives while one waits is read by
+// the same refresh, since a refresh reads the whole mapping.
+func (w *workflowRuntime) mappingChange(context.Context) error {
+	select {
+	case w.mappingChanged <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// refreshOnMappingChange refreshes the mapping (refreshMapping) on each change mappingChange
+// signals, until ctx ends, each attempt bounded by appMintAttempt and retried on the App mint's
+// backoff, with no limit on attempts, until it applies: a refresh reads the whole mapping, so
+// retrying it loses no change, and a daemon stopped before one applies reads the mapping at boot.
+func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
+	retry := appMintRetry
+	retry.Attempts = 0
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-w.mappingChanged:
+		}
+		everyFailure := func(error) bool { return true }
+		if err := onAppSchedule(ctx, "repository mapping refresh", retry, w.log, everyFailure, w.refreshMapping); err != nil {
+			return
+		}
+	}
+}
+
 // heardAtBoot is what GitHub intake hears when the boot opens it: the served repositories of the
-// mapping the boot read and every repository a live record names.
+// mapping the boot read and every repository a record of the project names.
 func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository, error) {
 	var heard []ghrepo.Repository
 	err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
@@ -372,12 +432,15 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 }
 
 // heardRepositories is what GitHub intake hears: every repository of served and every repository
-// a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
-// GitHub spells it, which Envoy's subjects carry and NATS matches case-sensitively, whatever
-// spelling a record keeps for its workspace (a backfilled record keeps its clone's): a served
-// repository as GitHub names it (nameAccepted), and any other as its record keeps GitHub's
-// spelling (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub. A record
-// whose tree root is not recorded is an error, never a set that leaves its repository unheard.
+// a record of the project names, as tx reads the records, once each, sorted. A record is heard
+// whatever its tree's state, since a root that lingers or closed comes back, by re-admission, a
+// hand-over or an orphan's carry, on the repository it keeps, with no refresh between; a fact
+// from a repository an issue is recorded on reaches only that issue (workflow's issueForBranch
+// and ownPullRequest). Each is spelled as GitHub spells it, which Envoy's subjects carry and NATS
+// matches case-sensitively, whatever spelling a record keeps for its workspace (a backfilled
+// record keeps its clone's): a served repository as GitHub names it (nameAccepted), and any other
+// as its record keeps GitHub's spelling (record.Issue.GitHubRepo), so a restart subscribes with
+// no read of GitHub.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -385,29 +448,10 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 	}
 	issues, err := w.records.Issues(ctx, tx)
 	if err != nil {
-		return nil, fmt.Errorf("read the repositories live records name: %w", err)
+		return nil, fmt.Errorf("read the repositories the project's records name: %w", err)
 	}
-	// Each tree's liveness, read once: a tree's issues all share its root.
-	liveTrees := map[string]bool{}
 	for _, issue := range issues {
 		if _, ok := heard[strings.ToLower(issue.GitHubRepo)]; ok {
-			continue
-		}
-		live, read := liveTrees[issue.Tree]
-		if !read {
-			root, err := w.records.Issue(ctx, tx, issue.Tree)
-			if err != nil {
-				return nil, err
-			}
-			if root == nil {
-				return nil, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
-			}
-			if live, err = record.TreeLive(ctx, w.records, tx, *root); err != nil {
-				return nil, err
-			}
-			liveTrees[issue.Tree] = live
-		}
-		if !live {
 			continue
 		}
 		repo, err := ghrepo.Parse("GitHub's spelling of the repository of "+issue.Key, issue.GitHubRepo)
@@ -429,13 +473,29 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 // issueRepository is the repository issue's record names and its recorded default branch: what
 // every launch of the issue's claims works (specs.repository) and the owner its commit identity is
 // minted for (adoptIdentity). An issue the workflow does not record, such as an operator's claim,
-// works no repository: the zero repository and no error.
+// works the project's default repository, as Dispatch resolves an issue that names none, at its
+// default branch as GitHub names it (defaultBranches): a pod provisions its workspace from one, so
+// a launch on none would be refused. A project that serves no default repository refuses that
+// launch, naming the fix.
 func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghrepo.Repository, string, error) {
 	issue, err := w.recordOf(ctx, key)
-	if err != nil || issue == nil {
+	if err != nil {
 		return ghrepo.Repository{}, "", err
 	}
-	repo, err := ghrepo.Parse("the repository of "+key, issue.Repo)
+	if issue == nil {
+		for _, mapped := range w.repositories.Mapped() {
+			if mapped.Default {
+				read, err := w.defaultBranches.Named(ctx, mapped.Repo)
+				if err != nil {
+					return ghrepo.Repository{}, "", fmt.Errorf("the default repository of project %s, which %s works since it is not recorded: %w", w.dispatchProject, key, err)
+				}
+				return read.Name, read.DefaultBranch, nil
+			}
+		}
+		return ghrepo.Repository{}, "", fmt.Errorf("%s is not recorded, so it works the project's default repository, and project %s serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on",
+			key, w.dispatchProject)
+	}
+	repo, err := issue.Repository()
 	if err != nil {
 		return ghrepo.Repository{}, "", err
 	}

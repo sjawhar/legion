@@ -32,7 +32,10 @@ func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records recor
 // spelling of it, both from one read of GitHub per repository. One read of Dispatch's listing
 // serves every record. A record Dispatch resolves to no repository, or does not list, refuses the
 // boot, naming each one, before any is filled: the operator sets the project's default repository
-// in Dispatch and restarts.
+// in Dispatch and restarts. So does a record whose pull request is on another repository than the
+// one Dispatch resolves, as GitHub names either: the pull request names the repository the issue
+// worked in, and a record on another would create its branch there and disarm a stranger's pull
+// request; the operator sets the issue's repository in Dispatch to the pull request's.
 //
 // The record keeps the spelling of the shared clone under stateDir that spells the repository
 // case-insensitively, since the issue's workspace and its sessions were made under that spelling
@@ -45,10 +48,22 @@ func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records recor
 // clone.
 func fillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.Store, client dispatch.Client, project, stateDir string, named *defaultBranches, log *slog.Logger) error {
 	var unfilled []record.Issue
+	pulls := map[string]record.PullRequest{}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		var err error
-		unfilled, err = records.UnfilledIssues(ctx, tx, project)
-		return err
+		if unfilled, err = records.UnfilledIssues(ctx, tx, project); err != nil {
+			return err
+		}
+		for _, issue := range unfilled {
+			pull, err := records.PullRequest(ctx, tx, issue.Key)
+			if err != nil {
+				return err
+			}
+			if pull != nil {
+				pulls[issue.Key] = *pull
+			}
+		}
+		return nil
 	}); err != nil {
 		return fmt.Errorf("read the records with no repository: %w", err)
 	}
@@ -79,6 +94,7 @@ func fillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 	}
 	type filled struct{ key, repo, branch, github string }
 	fills := make([]filled, 0, len(unfilled))
+	var elsewhere []string
 	for _, issue := range unfilled {
 		repo, err := ghrepo.Parse("the repository Dispatch resolves "+issue.Key+" to", resolved[issue.Key])
 		if err != nil {
@@ -104,7 +120,15 @@ func fillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 			return fmt.Errorf("fill the repository of %s: GitHub renamed %s to %s, and the shared clone %s still has the old name: map %s in Dispatch (Settings → Repositories → Projects), or remove that clone if no issue works in it, and restart",
 				issue.Key, repo, read.Name, spelled[0], read.Name)
 		}
+		if pull, ok := pulls[issue.Key]; ok && !strings.EqualFold(pull.Repo, repo.String()) && !strings.EqualFold(pull.Repo, read.Name.String()) {
+			elsewhere = append(elsewhere, fmt.Sprintf("%s: Dispatch resolves it to %s, but its pull request #%d is on %s: set the issue's repository in Dispatch to %s (dispatch issue-update --issue %s --repo %s)",
+				issue.Key, repo, pull.Number, pull.Repo, pull.Repo, issue.Key, pull.Repo))
+			continue
+		}
 		fills = append(fills, filled{issue.Key, spelling, read.DefaultBranch, read.Name.String()})
+	}
+	if len(elsewhere) > 0 {
+		return fmt.Errorf("fill the repository of %s and restart", strings.Join(elsewhere, "; "))
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, fill := range fills {
@@ -141,7 +165,7 @@ func nameRepositories(ctx context.Context, pool *pgxpool.Pool, records record.St
 	}
 	names := make(map[string]string, len(unnamed))
 	for _, issue := range unnamed {
-		repo, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+		repo, err := issue.Repository()
 		if err != nil {
 			return err
 		}
