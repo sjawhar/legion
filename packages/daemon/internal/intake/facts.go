@@ -630,9 +630,10 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 }
 
 // settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it
-// applies one: an Observed issue fact as it is while the workflow records no issue of its key, and
-// once one is recorded the event it was prepared in place of (Delivered), or nothing when it was
-// prepared in place of none. Every other fact applies as it is.
+// applies one: an Observed issue fact's view, as a plain observation, while the workflow records no
+// issue of its key, and once one is recorded the event it was prepared in place of (Delivered), or
+// nothing when it was prepared in place of none. Every other fact applies as it is, so no handler
+// sees Observed or Delivered.
 func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, error) {
 	issue, ok := fact.(DispatchIssue)
 	if !ok || !issue.Observed {
@@ -644,6 +645,7 @@ func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, erro
 	}
 	switch {
 	case recorded == nil:
+		issue.Observed, issue.Delivered = false, nil
 		return issue, true, nil
 	case issue.Delivered == nil:
 		return nil, false, nil
