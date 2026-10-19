@@ -222,6 +222,10 @@ func (m *Manager) lease(ctx context.Context, role AppRole, owner, prefix string,
 	return lease, err
 }
 
+// mint mints role's installation token for owner. An installation the daemon found that answers
+// the exchange 404 was removed since (errInstallationGone): it is forgotten and looked for once
+// more, so a removed App answers ErrNotInstalled and an App installed there again mints on its new
+// installation. A configured installation answering 404 is not installed either.
 func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissions map[string]string) (Lease, error) {
 	app, err := m.app(role)
 	if err != nil {
@@ -236,6 +240,17 @@ func (m *Manager) mint(ctx context.Context, role AppRole, owner string, permissi
 		return Lease{}, err
 	}
 	lease, err := m.exchange(ctx, jwt, installation, permissions)
+	if errors.Is(err, errInstallationGone) && configuredInstallation(app, owner) == "" {
+		m.forgetInstallation(role, owner)
+		if installation, err = m.installation(ctx, role, app, owner); err != nil {
+			return Lease{}, err
+		}
+		lease, err = m.exchange(ctx, jwt, installation, permissions)
+	}
+	if errors.Is(err, errInstallationGone) {
+		m.forgetInstallation(role, owner)
+		return Lease{}, fmt.Errorf("%w: %s's installation %s on %s answers %w", ErrNotInstalled, role, installation, owner, err)
+	}
 	if err != nil {
 		return Lease{}, err
 	}
@@ -260,10 +275,8 @@ func (m *Manager) app(role AppRole) (config.GitHubApp, error) {
 
 func (m *Manager) installation(ctx context.Context, role AppRole, app config.GitHubApp, owner string) (string, error) {
 	ownerKey := strings.ToLower(owner)
-	for configuredOwner, installation := range app.Installations {
-		if strings.EqualFold(configuredOwner, owner) && installation != "" {
-			return installation, nil
-		}
+	if installation := configuredInstallation(app, owner); installation != "" {
+		return installation, nil
 	}
 	m.mu.Lock()
 	if installations := m.installations[role]; installations != nil {
@@ -292,6 +305,27 @@ func (m *Manager) installation(ctx context.Context, role AppRole, app config.Git
 	}
 	return installation, nil
 }
+
+// configuredInstallation is the installation app's configuration names for owner, if any.
+func configuredInstallation(app config.GitHubApp, owner string) string {
+	for configuredOwner, installation := range app.Installations {
+		if strings.EqualFold(configuredOwner, owner) && installation != "" {
+			return installation
+		}
+	}
+	return ""
+}
+
+// forgetInstallation drops the installation found for role on owner, for the next mint to look
+// for it again.
+func (m *Manager) forgetInstallation(role AppRole, owner string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.installations[role], strings.ToLower(owner))
+}
+
+// errInstallationGone is a token exchange GitHub answers 404: the installation is no longer there.
+var errInstallationGone = errors.New("the installation is gone")
 
 // ErrNotInstalled is a mint refused because the App has no installation on the owner: an answer
 // about the owner, not GitHub's trouble, which a retry would only repeat.
@@ -386,7 +420,11 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		body := refusalBody(response)
-		return Lease{}, transient(response, body, fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body))))
+		failed := fmt.Errorf("GitHub App token exchange failed (%d): %s", response.StatusCode, strings.TrimSpace(string(body)))
+		if response.StatusCode == http.StatusNotFound {
+			return Lease{}, fmt.Errorf("%w: %w", errInstallationGone, failed)
+		}
+		return Lease{}, transient(response, body, failed)
 	}
 	body, err := readBody(response, "GitHub App token exchange")
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -25,8 +26,9 @@ import (
 // restore. While GitHub's rate limit stands, the read is answered with the wait left and no call
 // is made, as reviewerCanWrite's permission read is; the limit is held the same way (holdIfLimited)
 // whichever of the mint or the read itself meets it. A review App with no installation on the
-// repository's owner (appauth.ErrNotInstalled) cannot read it: the review is restored as it was
-// delivered, logged, since a retry would only mint again on every redelivery.
+// repository's owner (appauth.ErrNotInstalled), or whose token GitHub no longer accepts (401, as
+// for an installation removed since the token was minted), cannot read it: the review is restored
+// as it was delivered, logged, since a retry would only mint or read again on every redelivery.
 func (w *workflowRuntime) reviewBody(ctx context.Context, review intake.PullRequestReview) (string, error) {
 	if review.Author != w.reviewAppLogin {
 		return review.Body, nil
@@ -58,6 +60,11 @@ func (w *workflowRuntime) reviewBody(ctx context.Context, review intake.PullRequ
 		if errors.As(err, &refused) && refused.RateLimited {
 			return "", w.holdIfLimited(&intake.RetryLater{After: refused.RetryAfter,
 				Err: fmt.Errorf("read review %d's body on %s#%d: GitHub's rate limit, retry in %s: %w", review.ID, repository.String(), review.Number, refused.RetryAfter, err)})
+		}
+		if errors.As(err, &refused) && refused.Status == http.StatusUnauthorized {
+			w.log.Error("workflow: GitHub refuses the review App's token for its review's repository, as for an installation removed since the token was minted, so its review's body is read as delivered",
+				"app", appauth.Review, "installation_owner", repository.Owner(), "repo", repository.String(), "review", review.ID, "status", refused.Status)
+			return review.Body, nil
 		}
 		return "", fmt.Errorf("read review %d's body on %s#%d: %w", review.ID, repository.String(), review.Number, err)
 	}
