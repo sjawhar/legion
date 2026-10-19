@@ -404,9 +404,10 @@ first and the 409 as the expected daemon answer — do not wait for it to say 20
 **The "exact released version" a doc states is a moving target while the tree is open.** LEGION-54's docs named the
 pi-envoy release it would ship as; `main` released 1.17.3, 1.18.0, and 1.18.1 during its five rounds, and the number
 was edited three times (1.17.3 → 1.17.4 → 1.18.2), one of them a tester FAIL, and the change then shipped as 1.20.1 anyway (two more releases landed before the merge queue reached it), corrected by this fast-follow. The workable rule: compute the number at
-commit time from the latest tag with the release workflow's own script —
-`.github/scripts/release-bump.sh <prev> pi-legion-envoy-v<prev>..<head> --patch-path skills/ -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/`
-(arguments from `.github/workflows/release.yaml`) — the merger recomputes it at READY, and a drift that appears after
+commit time from the latest tag the way the release workflow does, with the `Determine next version` step of the
+package's job in `.github/workflows/release.yaml` (`.github/scripts/release-push.sh version pi-legion-v …` for
+`@sjawhar/pi-legion`, `… version pi-envoy-v …` for `@sjawhar/pi-envoy`; copy its arguments from there, and it runs
+locally) — the merger recomputes it at READY, and a drift that appears after
 approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
 branch's commit subjects, so only the PR title's conventional-commit type classifies the bump, except that a change
 under `skills/` bumps at least the patch version whatever that type.
@@ -442,9 +443,11 @@ pane's PATH and `PI_SHELL_PREFIX` keeps it first in the bash tool, `packages/dae
 An issue pod's `legion` is the worker image's `/opt/legion/bin/legion` and its `gh` the image's
 `/opt/legion/bin/gh`, which execs that binary's `legion gh` (`packages/daemon/docker/gh`). So every `gh` a pane runs
 goes through the deployed release's `legion gh`, and every git fetch or push through its `legion git-credential`:
-neither knows anything on your branch. A change to either reaches a pane only when the daemon restarts on the new
-release's binary, and a pod only when it runs the worker image of that release; the merge alone changes nothing.
-No pane runs `legion` from bash otherwise: the `legion` tool makes its daemon calls in-process.
+neither knows anything on your branch. A pane runs whatever file sits at the path the running daemon was started
+from: a change reaches it when the daemon restarts from the new release's path, or as soon as the file at that path
+is replaced in place, and a pod only when it runs the worker image of that release; the merge alone changes nothing.
+No worker pane runs `legion` from bash otherwise: the `legion` tool makes its daemon calls in-process (the
+controller's own session runs `legion status` and `legion claims`, through the operator's `legion`).
 
 To exercise the branch's build live, build it in the workspace and run it by path, in the pane's own environment
 (§17 has the Go to use when `go` is not on the pane's PATH):
@@ -478,7 +481,7 @@ run the positive control (a forwarded `pr view`) through the same binary, so the
 branch's `skills/legion-<name>/SKILL.md`: OMP loads it from the installed `@sjawhar/pi-legion` plugin release (the
 `skills` entry, `dist/skills`, of its `package.json` `omp` manifest). During LEGION-78's own retro, `skill://legion-retro`
 served the pre-change template (`legion gh -- issue comment <issue-number>`, the exact hazard the branch fixed)
-from plugin 1.21.0 while `$LEGION_WORKSPACE/skills/legion-retro/SKILL.md` carried the `dispatch_message` call. So a
+from `@sjawhar/pi-legion-envoy` 1.21.0 while `$LEGION_WORKSPACE/skills/legion-retro/SKILL.md` carried the `dispatch_message` call. So a
 worker on an issue that changes a skill reads the branch file, not `skill://`, for the rest of that tree, and the
 architect's task for each later phase says which template to follow. A skill fix reaches other trees only after the
 plugin release built from the merged commit is installed: a release step, as the `legion` binary's is.

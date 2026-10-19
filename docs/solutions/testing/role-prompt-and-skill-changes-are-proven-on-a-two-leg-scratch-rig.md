@@ -135,12 +135,14 @@ Three rules, in the order that would have caught it cheapest:
 
 ## 5. The branch CLI from inside a pane
 
-The rig's daemon writes `<state_dir>/bin/legion` re-execing *its own* checkout, so a
-`handoff_write` the tester pane makes runs the branch's CLI, resolved the way a production pane
-resolves it (`which legion` → `/tmp/<rig>/daemon/bin/legion`). That is the second observation for a
-CLI criterion — the first being `bun packages/daemon/src/cli/index.ts …` from the workspace
-([worker-pane-shell-gotchas](../legion/worker-pane-shell-gotchas.md) §13) — and on leg A the same
-call succeeds, which is the before half of the before/after pair.
+A rig daemon started from the branch's build gives its panes that build: its `<state_dir>/bin/legion`
+launcher and the `gh` beside it exec the executable the rig's daemon was started from, so a pane's
+`gh` runs the branch's `legion gh`, resolved the way a production pane resolves it
+(`command -v gh` → `/tmp/<rig>/daemon/bin/gh`). That is the second observation for a CLI criterion —
+the first being the branch's build run by path from the workspace
+([worker-pane-shell-gotchas](../legion/worker-pane-shell-gotchas.md) §13) — and on leg A, whose daemon
+runs the release, the same call answers as the release does, which is the before half of the
+before/after pair.
 
 ## Checklist before reporting the proof
 
