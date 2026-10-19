@@ -211,13 +211,19 @@ func (c *Consumers) DispatchTarget(ctx context.Context) (int64, error) {
 }
 
 // DispatchPosition is the Dispatch consumer's own current position, read fresh from JetStream:
-// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached).
+// the measurement Reconcile holds against DispatchTarget (DispatchConsumerPosition.Reached). It
+// reads through a handle of its own (stream.Consumer: one CONSUMER.INFO request, the handle's
+// cached info that answer) rather than c.dispatch.Info: nats.go's Info writes the handle's cached
+// info under no lock and Run's Consume reads it as it starts, so a position read while Run starts
+// raced on the shared handle (the race detector's find in the daemon's retained-event test), and a
+// fresh handle shares nothing with the one Run consumes. Nothing here may wait for Run instead:
+// the boot's reconcile reads the position before Run starts, and pollHoldRelease beside it.
 func (c *Consumers) DispatchPosition(ctx context.Context) (DispatchConsumerPosition, error) {
-	info, err := c.dispatch.Info(ctx)
+	consumer, err := c.stream.Consumer(ctx, dispatchConsumerName(c.spec.Project))
 	if err != nil {
 		return DispatchConsumerPosition{}, fmt.Errorf("read Dispatch consumer info: %w", err)
 	}
-	return positionOf(info), nil
+	return positionOf(consumer.CachedInfo()), nil
 }
 
 func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
