@@ -14,8 +14,9 @@ import (
 )
 
 // defaultBranchTTL is how long a repository's default branch, as GitHub named it, stands before the
-// next read of it asks GitHub again: a repository whose default branch is renamed is followed
-// within it.
+// next read of it asks GitHub again: an issue recorded after a repository's default branch is
+// renamed takes the new name within it. An issue already recorded keeps the default branch it was
+// recorded with (record.Issue.DefaultBranch), so a rename mid-issue is not followed.
 const defaultBranchTTL = 10 * time.Minute
 
 // defaultBranches is each repository as GitHub names it (ghbranch.Read: its own spelling of owner

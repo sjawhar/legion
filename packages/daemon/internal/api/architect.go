@@ -333,7 +333,7 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	if s.prepare != nil {
 		prepared, err := s.prepare(r.Context(), observed)
 		if err != nil {
-			writeFailure(w, http.StatusBadGateway, "GITHUB_READ_FAILED", fmt.Sprintf("could not read the repository of %s; retry release_children", child.Key))
+			writeFailure(w, http.StatusBadGateway, "REPOSITORY_READ_FAILED", fmt.Sprintf("could not read the repository of %s: %v; retry release_children", child.Key, err))
 			return false
 		}
 		observed = prepared
