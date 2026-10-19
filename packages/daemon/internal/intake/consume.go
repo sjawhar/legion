@@ -63,8 +63,10 @@ type ConsumerSpec struct {
 	// AckWait, and returns the fact to apply: the workflow performs no I/O, and takes the repository
 	// and its default branch when it first records an issue, so a retained event's missing
 	// repository (ResolvedRepoMissing) is filled here. A failed preparation is retried after
-	// NakDelay rather than applied without it. No preparer (a test) applies the fact as decoded.
-	PrepareRepository func(ctx context.Context, issue DispatchIssue) (DispatchIssue, error)
+	// NakDelay rather than applied without it. redelivered is whether JetStream delivered the event
+	// before, after a failed preparation or apply, or its acknowledgement window ran out, behind the
+	// issue's newer events. No preparer (a test) applies the fact as decoded.
+	PrepareRepository func(ctx context.Context, issue DispatchIssue, redelivered bool) (DispatchIssue, error)
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -270,7 +272,7 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		ackMessage(spec.Logger, message)
 		return
 	}
-	prepared, err := prepareRepository(ctx, spec, decoded.Fact)
+	prepared, err := prepareRepository(ctx, spec, decoded.Fact, message)
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "prepare the issue's repository", "nak the repository preparation", err)
 		return
@@ -318,15 +320,24 @@ func readMapping(ctx context.Context, spec ConsumerSpec) error {
 }
 
 // prepareRepository runs ConsumerSpec.PrepareRepository for a Dispatch issue fact, within AckWait,
-// and is the fact to apply. Every other fact passes through untouched.
-func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
+// and is the fact to apply, telling it whether message was delivered before (redelivered). Every
+// other fact passes through untouched.
+func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact, message jetstream.Msg) (Fact, error) {
 	issue, ok := fact.(DispatchIssue)
 	if !ok || spec.PrepareRepository == nil {
 		return fact, nil
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	return spec.PrepareRepository(read, issue)
+	return spec.PrepareRepository(read, issue, redelivered(message))
+}
+
+// redelivered is whether JetStream delivered message before: its preparation or apply failed, or
+// its acknowledgement window ran out. A message whose metadata cannot be read is counted as
+// redelivered, the reading that costs only a Dispatch read.
+func redelivered(message jetstream.Msg) bool {
+	metadata, err := message.Metadata()
+	return err != nil || metadata.NumDelivered > 1
 }
 
 // resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission

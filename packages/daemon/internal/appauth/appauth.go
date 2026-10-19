@@ -43,11 +43,14 @@ var Roles = []AppRole{Implement, Review}
 // GitIdentity is the bot identity that jj and git must use for work a role performs.
 type GitIdentity = runtime.GitIdentity
 
-// Lease is one installation-token lease, including its expiry and the App bot identity.
+// Lease is one installation-token lease, including its expiry, when it was minted and the App bot
+// identity.
 type Lease struct {
 	Token     string
 	ExpiresAt time.Time
-	Identity  GitIdentity
+	// Minted is when GitHub issued the token: one moments old may not be accepted yet.
+	Minted   time.Time
+	Identity GitIdentity
 }
 
 // TransientError is a GitHub answer that says nothing about the App or its installation, so the
@@ -189,11 +192,16 @@ type Forgetter interface {
 
 // Forget drops every lease cached for role and owner, the write token's and the read token's.
 func (m *Manager) Forget(role AppRole, owner string) {
-	owner = strings.ToLower(strings.TrimSpace(owner))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.leases, string(role)+":"+owner)
-	delete(m.leases, "read:"+string(role)+":"+owner)
+	delete(m.leases, leaseKey("", role, owner))
+	delete(m.leases, leaseKey("read:", role, owner))
+}
+
+// leaseKey is the cache key of role's lease for owner under prefix: the write token's under "",
+// the read token's under "read:".
+func leaseKey(prefix string, role AppRole, owner string) string {
+	return prefix + string(role) + ":" + strings.ToLower(strings.TrimSpace(owner))
 }
 
 // lease serves the cached lease under prefix+role+owner while more than refreshWindow remains, and
@@ -204,7 +212,7 @@ func (m *Manager) lease(ctx context.Context, role AppRole, owner, prefix string,
 	if owner == "" {
 		return Lease{}, fmt.Errorf("GitHub App owner must not be empty")
 	}
-	cacheKey := prefix + string(role) + ":" + strings.ToLower(owner)
+	cacheKey := leaseKey(prefix, role, owner)
 	now := m.now()
 
 	m.mu.Lock()
@@ -456,7 +464,7 @@ func (m *Manager) exchange(ctx context.Context, jwt, installation string, permis
 	if err != nil || payload.Token == "" {
 		return Lease{}, fmt.Errorf("GitHub App token exchange returned an invalid response")
 	}
-	return Lease{Token: payload.Token, ExpiresAt: expiresAt}, nil
+	return Lease{Token: payload.Token, ExpiresAt: expiresAt, Minted: m.now()}, nil
 }
 
 func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken string) (GitIdentity, error) {
