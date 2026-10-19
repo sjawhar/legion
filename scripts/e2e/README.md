@@ -294,7 +294,11 @@ NATS the GitHub bridge subscribes on by its fully-qualified name on the operator
 (`nats://envoy-nats.<tailnet>.ts.net:4222`), never a bare alias, which only a resolver's search
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
 `prerequisites` refuses a run without it, and refuses a value that is not one NATS URL naming a
-host with a dot. The script prints
+host with a dot. `STAGE3_PRODUCTION_ENVOY_URL` (default `http://127.0.0.1:9020`, a standing local
+port-forward's own address) names the operator's Envoy listener directly instead
+(`production-untouched`'s own documentation below has the check), for a devbox with no such
+forward running; the operator's own `envoy.json` names the production Envoy's real address
+(`envoy.url`). The script prints
 neither value. The bridge connects to that upstream as the nkey user a command run from the
 operator's shell resolves for it (`lib/operator-nats-seed.ts`, `envoySettings` with
 `ENVOY_NATS_URL` set to that upstream): `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the
