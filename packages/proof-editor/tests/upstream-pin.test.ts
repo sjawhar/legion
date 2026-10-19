@@ -9,8 +9,9 @@
  * running the pinned modules: each mark rendered from the schema the headless engine builds, and
  * the marks plugin drawing a replacement in a real (happy-dom) view. The split-mark actions and
  * the overlapping record marks are checked the same way, through the marks plugin's own actions
- * on a headless state. The Dark Reader fix has no exported seam a unit test could call, so it is
- * read where it lives. A cut that loses one passes every other check in the repository.
+ * on a headless state, and the Mermaid diagram types fix by rendering one diagram of each type.
+ * The Dark Reader fix has no exported seam a unit test could call, so it is read where it lives.
+ * A cut that loses one passes every other check in the repository.
  */
 
 import { expect, test } from "bun:test";
@@ -28,6 +29,7 @@ import {
   marksPluginKey,
   reject,
 } from "proof-sdk-upstream/src/editor/plugins/marks";
+import { renderProofMermaidSvg } from "proof-sdk-upstream/src/editor/plugins/mermaid-diagrams";
 import type { StoredMark } from "proof-sdk-upstream/src/formats/marks";
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { withDomWindow } from "./dom-window";
@@ -221,6 +223,30 @@ test("the pinned dependency lets two people's comments and suggestions cover the
   expect(deleteMark(view, alice.id)).toBe(true);
   expect(markedText(view.state.doc, alice.id)).toBe("");
   expect(markedText(view.state.doc, bob.id)).toBe("quick brown");
+});
+
+test("the pinned dependency renders every Mermaid diagram type with its own renderer", () => {
+  const diagrams = {
+    sequence: [
+      "sequenceDiagram",
+      "  participant A as Machine A",
+      "  participant B as Bucket",
+      "  A->>B: create builds/M if absent",
+      "  B-->>A: created",
+      "  Note over A: build module M",
+    ],
+    class: ["classDiagram", "  Animal <|-- Duck"],
+    er: ["erDiagram", "  CUSTOMER ||--o{ ORDER : places"],
+    xychart: ["xychart-beta", "  x-axis [a, b, c]", "  bar [1, 2, 3]"],
+    state: ["stateDiagram-v2", "  [*] --> Idle", "  Idle --> [*]"],
+    flowchart: ["flowchart TD", "  A --> B"],
+  };
+  for (const lines of Object.values(diagrams)) {
+    expect(renderProofMermaidSvg(lines.join("\n"))).toStartWith("<svg");
+  }
+  expect(() => renderProofMermaidSvg(["flowchart TD", "  A --> B", "  B -->"].join("\n"))).toThrow(
+    "Dangling Mermaid edge"
+  );
 });
 
 // The timeout is explicit because the case spawns tsc over the whole upstream closure — two

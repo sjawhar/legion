@@ -109,6 +109,70 @@ test("a project's default repository moves with its Default radio, and a mapping
   }
 });
 
+// A mapping write's answer describes one row, not the project's mappings when it arrives. Here the
+// server saves the pick of acme/gadgets at once, another browser makes acme/widgets the default
+// again (which this page hears and shows), and only then does the first answer reach the page: the
+// page reads the mappings again rather than put acme/gadgets back.
+test("a late answer to a Default pick does not undo a default another browser set since", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const radio = (repo: string) =>
+    page.getByRole("radio", { name: `Default repository of CORE: ${repo}` });
+
+  try {
+    let answer: () => void = () => {};
+    const answerHeld = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+    let saved: () => void = () => {};
+    const savedOnServer = new Promise<void>((resolve) => {
+      saved = resolve;
+    });
+    await page.route("**/api/v1/settings/repo-projects/acme/gadgets", async (route) => {
+      if (route.request().method() !== "PUT") {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      saved();
+      await answerHeld;
+      await route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    await expect(radio("acme/widgets")).toBeChecked();
+
+    await radio("acme/gadgets").click();
+    await savedOnServer;
+    await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+    await expect(radio("acme/widgets")).toBeChecked();
+
+    const answered = page.waitForResponse(
+      (response) =>
+        response.url().endsWith("/api/v1/settings/repo-projects/acme/gadgets") &&
+        response.request().method() === "PUT"
+    );
+    const readAgain = answered.then(() =>
+      page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/v1/settings/repo-projects" &&
+          response.request().method() === "GET"
+      )
+    );
+    answer();
+    await answered;
+    await readAgain;
+    await expect(radio("acme/widgets")).toBeChecked();
+    await expect(radio("acme/gadgets")).not.toBeChecked();
+  } finally {
+    await context.close();
+  }
+});
+
 test("a human creates a project from Settings and immediately creates an issue under it", async ({
   browser,
 }, testInfo) => {

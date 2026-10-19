@@ -14519,6 +14519,8 @@ function agentSubject(session) {
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
 }
+// ../contracts/src/slack.ts
+var SLACK_POST_TEXT_MAX = 4000;
 // ../contracts/src/tool-schema.ts
 function overCapMessage(length, max) {
   return `is ${length - max} characters over the ${max}-character limit (${length}/${max})`;
@@ -16630,14 +16632,14 @@ function toolSchema(tool) {
   toolSchemas.set(tool, schema);
   return schema;
 }
-async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, problems) {
+async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls, problems) {
   if (issueFreeTools[tool] === true)
     return { args: input, ref: null, owner: null };
   const refArgument = input.ref;
   let ref = null;
   let args = input;
   if (typeof refArgument === "string") {
-    const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
+    const refText = dashboardUrls.map((dashboard) => dispatchRefFromUrl(refArgument, dashboard)).find((ref2) => ref2 !== undefined) ?? refArgument;
     if (refText !== refArgument)
       args = { ...input, ref: refText };
     const agentArtifact = parseAgentArtifactRef(refText);
@@ -16900,15 +16902,15 @@ function progressText(progress, sep) {
   return parts.join(sep);
 }
 function repositoryLine(issue2) {
-  if (issue2.resolved_repo === undefined)
-    return `Repository: ${REPOSITORY_UNKNOWN}`;
+  if (issue2.resolved_repo === undefined) {
+    return "Repository: unknown (this Dispatch server predates repository fields; upgrade it)";
+  }
   if (issue2.resolved_repo === null)
     return "Repository: none";
   if (issue2.repo !== null && issue2.repo !== undefined)
     return `Repository: ${issue2.repo} (own)`;
   return `Repository: ${issue2.resolved_repo} (inherited or project default)`;
 }
-var REPOSITORY_UNKNOWN = "unknown (this Dispatch server predates repository fields; upgrade it)";
 function repositoryFieldsWarnings(issue2) {
   if (issue2.resolved_repo !== undefined)
     return {};
@@ -16924,7 +16926,7 @@ function refuseUnsavedRepository(verb, issue2, repo2) {
   const lost = repo2 === "" ? "the repository was not cleared" : `${repo2} was not saved`;
   throw new Error(`Dispatch ${verb} ${issue2.key} without its repository: this Dispatch server predates repository fields, so ${lost}; upgrade the server`);
 }
-function issueSummary(issue2, events, references, graph, titles) {
+function issueSummary(issue2, events, references, graph, linkBase, titles) {
   const asks = issue2.open_asks;
   const spec = issue2.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
@@ -16942,6 +16944,7 @@ function issueSummary(issue2, events, references, graph, titles) {
   return [
     `Title: ${issue2.title}`,
     `Key: ${issue2.key}`,
+    `Link: ${new URL(`/issues/${encodeURIComponent(issue2.key)}`, linkBase).toString()}`,
     `Status: ${issue2.status}`,
     `Assignee: ${issue2.assignee ?? "unassigned"}`,
     `Claimed by: ${issue2.claim === null ? "nobody" : claimText(issue2.claim, titles)}`,
@@ -17407,6 +17410,7 @@ function withAccount(error48, account) {
 }
 async function executeDispatchTool(input) {
   const { url: configUrl, token: configToken } = input.config;
+  const linkBase = input.config.publicUrl ?? configUrl;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(async (...args2) => {
     try {
@@ -17421,7 +17425,7 @@ async function executeDispatchTool(input) {
   const env = input.env ?? process.env;
   const exec = input.exec ?? defaultExec;
   const problems = [];
-  const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec, configUrl, problems);
+  const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec, input.config.publicUrl === undefined ? [configUrl] : [configUrl, input.config.publicUrl], problems);
   const ownerMissing = issueFreeTools[input.tool] !== true && ownerArguments.owner === null;
   const schema = toolSchema(input.tool);
   const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
@@ -17439,13 +17443,13 @@ async function executeDispatchTool(input) {
     const project = optionalString(ownerArguments.args, "project");
     if (project !== undefined) {
       const response2 = await client2.openAsksForProject(project);
-      return { text: formatOpenAsksSummary(response2, configUrl), details: { ...response2 } };
+      return { text: formatOpenAsksSummary(response2, linkBase), details: { ...response2 } };
     }
     const sessionId = input.sessionId?.trim();
     if (!sessionId)
       throw new Error("host session id is required for dispatch open-asks");
     const response = await client2.openAsks(sessionId);
-    return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
+    return { text: formatOpenAsksSummary(response, linkBase), details: { ...response } };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
@@ -17530,11 +17534,13 @@ async function executeDispatchTool(input) {
             isPrimarySpec: spec !== undefined
           }),
           ...componentGuidance === undefined ? [] : [componentGuidance],
-          ...renderSuggestions(created.advice?.suggestions, configUrl)
+          ...renderSuggestions(created.advice?.suggestions, linkBase)
         ];
+        const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
+        const assigned = created.assignee === undefined ? "" : created.assignee === null ? "; unassigned" : `; assigned to ${created.assignee}`;
         return {
           text: [
-            `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} \u2192 ${href}${assigned} ${notSubscribed(issueTopic(created.key))}`,
             ...adviceLines
           ].join(`
 `),
@@ -17552,7 +17558,7 @@ async function executeDispatchTool(input) {
           text: [
             `Not created: "${title}" looks like a duplicate.`,
             ...candidates.map((candidate) => {
-              const href = new URL(candidate.href, configUrl).toString();
+              const href = new URL(candidate.href, linkBase).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} \u2192 ${href}`;
             }),
             "Reference the existing issue, or run dispatch issue again with --force after reading it."
@@ -17699,7 +17705,7 @@ async function executeDispatchTool(input) {
         ...limit === undefined ? {} : { limit },
         ...offset === undefined ? {} : { offset }
       });
-      return searchAnswer(search, query, offset, configUrl);
+      return searchAnswer(search, query, offset, linkBase);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -17763,7 +17769,7 @@ async function executeDispatchTool(input) {
       } catch (error48) {
         throw refusalWithCode(error48);
       }
-      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, linkBase).toString();
       return {
         text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
         details: { project: project.key, name: project.name, created_at: project.created_at }
@@ -17856,7 +17862,7 @@ async function executeDispatchTool(input) {
       const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue2()) : documentTopic(resolved.artifact);
       const adviceLines = [
         ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
-        ...renderSuggestions(ask.advice?.suggestions, configUrl)
+        ...renderSuggestions(ask.advice?.suggestions, linkBase)
       ];
       return {
         text: [
@@ -18337,7 +18343,7 @@ ${trailer.join(`
         ])
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
+        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], linkBase, titles),
         details: { issue: read.issue.key },
         ...showImages(pictures2),
         ...repositoryFieldsWarnings(read.issue)
@@ -19102,7 +19108,17 @@ function dispatchSettings(env, config2) {
     }
     const url2 = (explicitUrl ?? (source.kind === "file" ? source.server : own.serverUrl ?? DEFAULT_SERVER_URL)).replace(/\/+$/, "");
     const token = source.kind === "variable" ? source.token : fileBearer(source, url2, "DISPATCH", env);
-    return { enabled: true, url: url2, token };
+    const publicUrl = nonEmpty(env.DISPATCH_PUBLIC_URL);
+    const publicParsed = publicUrl === undefined ? undefined : httpUrl2(publicUrl);
+    if (publicUrl !== undefined && (publicParsed === undefined || publicParsed.port === "0")) {
+      return offWithError("DISPATCH_PUBLIC_URL must be an http or https URL");
+    }
+    return {
+      enabled: true,
+      url: url2,
+      token,
+      ...publicUrl === undefined ? {} : { publicUrl: publicUrl.replace(/\/+$/, "") }
+    };
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
@@ -19459,9 +19475,17 @@ async function runDispatchCli(argv, rawEnv, io) {
 
 // ../envoy-client/bin/dispatch.ts
 var readText = (path2) => readFileSync4(path2 === "-" ? 0 : path2, "utf-8");
-process.exit(await runDispatchCli(Bun.argv.slice(2), process.env, {
-  stdout: (text) => process.stdout.write(text),
-  stderr: (text) => process.stderr.write(text),
+var pending = [];
+var writeTo = (stream) => (text) => {
+  const { promise: promise2, resolve: resolve2 } = Promise.withResolvers();
+  stream.write(text, () => resolve2());
+  pending.push(promise2);
+};
+var code = await runDispatchCli(Bun.argv.slice(2), process.env, {
+  stdout: writeTo(process.stdout),
+  stderr: writeTo(process.stderr),
   readText,
   cwd: process.cwd()
-}));
+});
+await Promise.all(pending);
+process.exit(code);

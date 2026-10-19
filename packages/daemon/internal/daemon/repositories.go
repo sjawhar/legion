@@ -375,8 +375,9 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 // a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
 // GitHub spells it, which Envoy's subjects carry and NATS matches case-sensitively, whatever
 // spelling a record keeps for its workspace (a backfilled record keeps its clone's): a served
-// repository as the mapping names it, and any other as its record keeps GitHub's spelling
-// (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub.
+// repository as GitHub names it (nameAccepted), and any other as its record keeps GitHub's
+// spelling (record.Issue.GitHubRepo), so a restart subscribes with no read of GitHub. A record
+// whose tree root is not recorded is an error, never a set that leaves its repository unheard.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -386,17 +387,25 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 	if err != nil {
 		return nil, fmt.Errorf("read the repositories live records name: %w", err)
 	}
+	// Each tree's liveness, read once: a tree's issues all share its root.
+	liveTrees := map[string]bool{}
 	for _, issue := range issues {
 		if _, ok := heard[strings.ToLower(issue.GitHubRepo)]; ok {
 			continue
 		}
-		root, err := w.records.Issue(ctx, tx, issue.Tree)
-		if err != nil || root == nil {
-			return nil, err
-		}
-		live, err := record.TreeLive(ctx, w.records, tx, *root)
-		if err != nil {
-			return nil, err
+		live, read := liveTrees[issue.Tree]
+		if !read {
+			root, err := w.records.Issue(ctx, tx, issue.Tree)
+			if err != nil {
+				return nil, err
+			}
+			if root == nil {
+				return nil, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
+			}
+			if live, err = record.TreeLive(ctx, w.records, tx, *root); err != nil {
+				return nil, err
+			}
+			liveTrees[issue.Tree] = live
 		}
 		if !live {
 			continue

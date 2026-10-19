@@ -124,12 +124,11 @@ func Render(token, app string, expiresAt time.Time) Rendered {
 	return Rendered{Hosts: Hosts(token), Config: Config, App: app, ExpiresAt: expiresAt}
 }
 
-// Write brings dir, a role's GH_CONFIG_DIR, to rendered: the directory made 0700 if it is gone,
-// config.yml written once when absent or different, and hosts.yml replaced — a temporary file in
-// the directory (0600, as os.CreateTemp makes it) renamed over it, so the gh reading it never sees
-// a half-written file — only when its content differs. It reports whether hosts.yml changed. It is
-// the one writer of a role's gh directory: the tmux runtime calls it at spawn and at each refresh
-// tick, and `legion controller start` calls it for the operator-launched controller's directory.
+// Write brings dir, one owner's directory of a gh bundle, to rendered: the directory made 0700 if
+// it is gone, config.yml written once when absent or different, and hosts.yml replaced — a
+// temporary file in the directory (0600, as os.CreateTemp makes it) renamed over it, so the gh
+// reading it never sees a half-written file — only when its content differs. It reports whether
+// hosts.yml changed. WriteBundle calls it for each owner of a bundle.
 func Write(dir string, rendered Rendered) (changed bool, err error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return false, err

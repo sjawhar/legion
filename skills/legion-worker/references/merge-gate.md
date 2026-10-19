@@ -12,8 +12,8 @@ the default branch and nothing there reads a handoff, and READY refuses a head t
 carries them. After the approval, only retro's commits leave it standing on their own: those that
 change only `docs/solutions/`, and that removal (*Retro*, below). A conflict-forced merge goes back
 to the reviewer for a confirmation or a new round, as the fingerprint decides (*The reviewer*,
-below, and `skill://legion-worker/references/conflicts-and-rewrites.md`), and any other change to
-the head voids it.
+below, and `skill://legion-worker/references/conflicts-and-rewrites.md`), unless READY refused
+it, and any other change to the head voids it.
 
 ## The reviewer
 
@@ -71,7 +71,10 @@ the head voids it.
   and the fingerprint — a confirmation, not a round; no thermo pass, no thread pass. Equal and
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
   nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
-  one review.
+  one review. A return whose task's `Reason:` names a READY refusal is never a confirmation, even
+  after a rebase, and a no-fix `REQUEST_CHANGES` that answered one is never continued: the round
+  after it reviews the refused change in full from the last `APPROVE` (*Retro's commits do not
+  void the reviewer's approval* below).
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.
@@ -95,9 +98,14 @@ reviewing until you finish.
   head, its `docs/solutions/` learnings and its last commit removing `.legion/<issue>/`
   (`skill://legion-retro` gives the steps), leave the approval standing, and the tree goes to the
   merger — never back to the tester or reviewer. Anything else above the approved head does void
-  it, and the merger tells the architect the head must return to review instead of completing. A
-  conflict-forced rebase after retro moves those commits with the branch. Every approval moves the
-  issue to retro again, so each retro ends with the removal again.
+  it: READY is refused `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the
+  architect, who has it send the head back to review instead of completing, the move's reason
+  naming the refusal's code and what it found. A conflict merge pushed above the approved head
+  with no review round after it brings the base's paths above that head, so READY refuses it the
+  same way; one sent back through `implementing` by the conflict procedure gets its confirmation
+  before READY runs. A READY refusal's return reaches the reviewer as a new round, never a
+  fingerprint confirmation. Every approval moves the issue to
+  retro again, so each retro ends with the removal again.
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
@@ -108,11 +116,12 @@ reviewing until you finish.
 ## The merger
 
 - The merger resolves no review thread: the reviewer's approval already judged them, and READY
-  requires no thread state beyond it. It proves the head is the approved head plus retro's commits
-  with two commands. First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
-  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
-  in READY; then the same with the one fileset `'~(docs/solutions | .legion/<issue>)'` appended,
-  which must print nothing (jj unions separate path arguments, so two of them leave nothing out).
+  requires no thread state beyond it. It quotes what sits above the approved head with
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
+  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon,
+  not the merger, holds those commits to retro's: READY reads GitHub's compare of the round's
+  approved head with READY's head and refuses any other path (`READY_UNREVIEWED_CHANGE`), and a
+  round with no recorded approval (`READY_NOT_APPROVED`).
   *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
@@ -137,23 +146,36 @@ reviewing until you finish.
 - **The daemon submits the merge the moment READY is accepted, unless the answer says a person
   merges it.** It queues a `ready_merge` outbox row for the head READY named, and the row, as the
   implement App, reads GitHub and then the record: while the issue still awaits that READY head, a
-  base with a merge queue gets the pull request enqueued; otherwise a pull request GitHub reports
-  mergeable now (`CLEAN`, `UNSTABLE` or `HAS_HOOKS`) is squash-merged, and one in a repository that
-  allows auto-merge is armed. Every request carries READY's head as GitHub's expected head, so
-  GitHub refuses it once the head has moved. In a repository that allows neither, the row waits,
-  reading GitHub again on the outbox's backoff, until GitHub reports the pull request mergeable —
-  a required check finishing, a required review a person gives — and then merges it. An arm or a
-  queue entry is not the end: the row keeps reading GitHub until GitHub reports the pull request
-  merged at READY's head, and submits again when the arm or entry is gone while the record still
-  awaits READY (a disarm sent before READY that GitHub applied late). GitHub's
-  rules decide each answer: the daemon bypasses none, and a person may merge it first. A refusal a
-  retry would meet again (squash merges disabled, a permission the App lacks) ends the row and is
-  told to the architect once (`merge-refused`), with GitHub's message. While the record still
-  awaits READY's head, GitHub showing the pull request closed or at another head is a webhook not
-  yet applied, so the row waits for the two to agree. Only once GitHub's last change to the pull
-  request is more than 10 minutes old, however long the row waited before, does the row end and
-  tell the architect once (`merge-stalled`). A reopen at READY's head reuses the row and takes it
-  from a run that read the record before the reopen. Any other failure retries.
+  base with a merge queue gets the pull request enqueued once GitHub reports it mergeable now
+  (`CLEAN`, `UNSTABLE` or `HAS_HOOKS`); otherwise a pull request GitHub reports mergeable now is
+  squash-merged, and one in a repository that allows auto-merge is armed. Every request carries
+  READY's head as GitHub's expected head, so GitHub refuses it once the head has moved. On a
+  merge-queue base the row never arms auto-merge: while a required check still runs, or anything
+  else keeps GitHub from reporting the pull request mergeable, it waits, reading GitHub again on
+  the outbox's backoff, and enters the queue once GitHub does. In a repository that allows neither a
+  merge queue nor auto-merge, the row waits the same way until GitHub reports the pull request
+  mergeable — a required check finishing, a required review a person gives — and then merges it. An
+  arm or a queue entry is not the end: the row keeps reading GitHub until GitHub reports the pull
+  request merged at READY's head. Once it has seen the arm or entry, it never submits that head
+  again after someone else removes it: the merge queue taking the pull request out because the merge
+  failed (GitHub's reason `failed_checks`, or an unexplained reason with a check that failed, timed
+  out, failed to start, needed action or went stale on the commit the queue built for its
+  `merge_group` CI) sends the issue back to `implementing`, the implementer's task naming each
+  failing check and its run, as a red head does; any other removal (a person dequeues it,
+  cancelling its runs, or turns auto-merge off, GitHub turns it off, the queue finds a conflict)
+  ends the row and is told to the architect once
+  (`merge-removed`). Two removals are submitted again: the implement App's own disarm sent before
+  READY that GitHub applied late (auto-merge `manually_disabled`, or a `manual` dequeue, by that
+  App), and auto-merge a close turned off, which the reopen at READY's head undid. GitHub's
+  rules decide each answer: the daemon bypasses
+  none, and a person may merge it first. A refusal a retry would meet again (squash merges disabled,
+  a permission the App lacks) ends the row and is told to the architect once (`merge-refused`), with
+  GitHub's message. While the record still awaits READY's head, GitHub showing the pull request
+  closed or at another head is a webhook not yet applied, so the row waits for the two to agree.
+  Only once GitHub's last change to the pull request is more than 10 minutes old, however long the
+  row waited before, does the row end and tell the architect once (`merge-stalled`). A reopen at
+  READY's head reuses the row, starts it over as though nothing had been armed, and takes it from a
+  run that read the record before the reopen. Any other failure retries.
   No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull
   request touches a path the project's `merge.by_hand` names), READY stands but the daemon submits
   nothing: the merger tells the architect the note and the head, and a person merges under the

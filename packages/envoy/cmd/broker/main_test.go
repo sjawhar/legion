@@ -382,3 +382,44 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 		t.Fatalf("reread SERVICE_KEY = status %d, %+v, %v; want served, its owner a service BROKER_SERVICES registers", reread.StatusCode, answer, err)
 	}
 }
+
+// TestFakeSecretsFileServesUnderTheGCPStore pins that the local stand-in serves its secrets with the
+// GCP store selected: the file's kms_key_id names the agent-secrets key as that store configures
+// it (BROKER_SECRETS_KMS_KEY_NAME), and its names sit under the GCP prefix.
+func TestFakeSecretsFileServesUnderTheGCPStore(t *testing.T) {
+	const (
+		prefix = "projects/000000000000/secrets/agent-secrets-"
+		key    = "projects/example-project/locations/global/keyRings/agent-secrets/cryptoKeys/agent-secrets"
+	)
+	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
+	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": [
+		{"name": "`+prefix+`demo-key", "kms_key_id": "`+key+`", "tags": {"owner": "shared", "tier": "agent"}, "value": "demo"}
+	]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addr, boot := startBroker(t,
+		"BROKER_DATABASE_URL="+storetest.URL(t),
+		"BROKER_LISTEN_ADDR=127.0.0.1:0",
+		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
+		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
+		"BROKER_SECRETS_STORE=gcp-secret-manager",
+		"BROKER_SECRETS_PREFIX="+prefix,
+		"BROKER_SECRETS_KMS_KEY_ARN=",
+		"BROKER_SECRETS_KMS_KEY_NAME="+key,
+	)
+	if strings.Contains(boot, "agent secret policy refused") {
+		t.Fatalf("boot log refuses a fake secret on the configured key:\n%s", boot)
+	}
+	reread, err := http.Post("http://"+addr+"/v1/secrets/DEMO_KEY/reread", "application/json", nil)
+	if err != nil {
+		t.Fatalf("POST /v1/secrets/DEMO_KEY/reread: %v", err)
+	}
+	defer reread.Body.Close()
+	var answer struct {
+		Served bool   `json:"served"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(reread.Body).Decode(&answer); err != nil || reread.StatusCode != http.StatusOK || !answer.Served {
+		t.Fatalf("reread DEMO_KEY = status %d, %+v, %v; want served under the GCP store's key", reread.StatusCode, answer, err)
+	}
+}

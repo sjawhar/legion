@@ -1003,6 +1003,10 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
 		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, token_file: /var/run/legion/agent-secrets-token/token}\n", ""},
 		{"secrets decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n", ""},
+		{"a role requesting less memory than its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 8Gi}}\n",
+			secretsGap + "resources: Burstable roles (a request below the limit): implementer, so every issue pod is Burstable; every other pod is Guaranteed\n"},
+		{"the controller requesting less cpu than its limit", "    resources: {controller: {cpu: 2, cpu_request: 500m}}\ncontroller: daemon\n",
+			secretsGap + "resources: Burstable roles (a request below the limit): controller, so the controller's pod is Burstable; every other pod is Guaranteed\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -1012,6 +1016,29 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 
 			if want := "Config OK: project=DEMO\n" + tc.want + defaultCacheLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+			}
+		})
+	}
+}
+
+// --check-config refuses a cpu or memory request above its limit and a request that is no
+// quantity, naming the key, with exit 1 and no Config OK.
+func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
+	legionState(t)
+	for _, tc := range []struct{ name, extra, want string }{
+		{"a memory request past its limit", "    resources: {implementer: {memory: 32Gi, memory_request: 40Gi}}\n",
+			"legion start: runtime.kubernetes.resources.implementer.memory_request 40Gi exceeds memory 32Gi\n"},
+		{"a cpu request past the default limit", "    resources: {tester: {cpu_request: 2}}\n",
+			"legion start: runtime.kubernetes.resources.tester.cpu_request 2 exceeds cpu 750m\n"},
+		{"a request that is no quantity", "    resources: {implementer: {memory_request: lots}}\n",
+			"legion start: runtime.kubernetes.resources.implementer.memory_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			config := kubernetesCheckConfig(t, tc.extra)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+			if code != 1 || out.Len() != 0 || errb.String() != tc.want {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 1, nothing, and %q", code, out.String(), errb.String(), tc.want)
 			}
 		})
 	}
@@ -1101,15 +1128,16 @@ func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
 const defaultCacheLine = "repository cache: a 20Gi volume per mapped repository, fetched from GitHub every 10 minutes, kept 168 hours after its repository leaves the mapping; its container reserves cpu 1, memory 4Gi, ephemeral storage 1Gi under 2Gi\n"
 
 // --check-config names the repository cache each mapped repository gets, as the file settles it:
-// the defaults, or the file's own members over them.
+// the defaults, or the file's own members over them, a raised limit alone requested in full and a
+// lower request named under its limit, as a role's.
 func TestStartCheckConfigNamesTheRepositoryCache(t *testing.T) {
 	legionState(t)
 	secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
 	pluginsGap := "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
-	config := kubernetesCheckConfig(t, "    repository_cache: {volume: 50Gi, refresh_minutes: 5, retain_hours: 24, resources: {cpu: \"2\"}}\n")
+	config := kubernetesCheckConfig(t, "    repository_cache: {volume: 50Gi, refresh_minutes: 5, retain_hours: 24, resources: {cpu: \"2\", memory: 8Gi, memory_request: 4Gi}}\n")
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
-	cache := "repository cache: a 50Gi volume per mapped repository, fetched from GitHub every 5 minutes, kept 24 hours after its repository leaves the mapping; its container reserves cpu 2, memory 4Gi, ephemeral storage 1Gi under 2Gi\n"
+	cache := "repository cache: a 50Gi volume per mapped repository, fetched from GitHub every 5 minutes, kept 24 hours after its repository leaves the mapping; its container reserves cpu 2, memory 4Gi under 8Gi, ephemeral storage 1Gi under 2Gi\n"
 	if want := "Config OK: project=DEMO\n" + secretsGap + cache + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
 		t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 	}

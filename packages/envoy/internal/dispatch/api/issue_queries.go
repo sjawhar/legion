@@ -88,7 +88,7 @@ var issueSummaryTail = `
 	  and ((cardinality($7::smallint[]) = 0 and not $8::boolean)
 	       or i.priority = any($7::smallint[])
 	       or ($8::boolean and i.priority is null))
-	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `, repo.resolved, repo.looped
+	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `, repo.resolved, repo.too_deep
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc, i.key asc
 `
 

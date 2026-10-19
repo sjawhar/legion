@@ -20,10 +20,11 @@ import (
 )
 
 // Deployment is the deployment's capabilities as the configuration alone states them
-// (capabilities.Deployment): the decisions, the runtime, whether a broker is configured, and the
-// roles whose pods reserve no CPU and memory (config.RoleResources.Reserved) — every workflow
-// role, and the controller's when the daemon launches it. What boot learns (the broker login, the
-// probe, model fallback) is the supervision's to add (supervision.deployment); `legion start
+// (capabilities.Deployment): the decisions, the runtime, whether a broker is configured, the roles
+// whose pods reserve no CPU and memory (config.RoleResources.Reserved) and the roles that request
+// less cpu or memory than their limit (config.RoleResources.Burstable) — every workflow role, and
+// the controller's when the daemon launches it. What boot learns (the broker login, the probe,
+// model fallback) is the supervision's to add (supervision.deployment); `legion start
 // --check-config` reports from this alone.
 func Deployment(cfg config.Config) capabilities.Deployment {
 	d := capabilities.Deployment{Decided: cfg.Capabilities.Decided, Runtime: cfg.Runtime.Name}
@@ -37,8 +38,11 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 		roles = append(slices.Clone(roles), claim.RoleController)
 	}
 	for _, role := range roles {
-		if !k.Resources[role].Reserved() {
+		switch reservation := k.Resources[role]; {
+		case !reservation.Reserved():
 			d.RolesWithoutResources = append(d.RolesWithoutResources, role)
+		case reservation.Burstable():
+			d.BurstableRoles = append(d.BurstableRoles, role)
 		}
 	}
 	return d

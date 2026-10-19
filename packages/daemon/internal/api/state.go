@@ -66,7 +66,7 @@ type State struct {
 
 // RepositoriesView is the project's repository mapping as the daemon serves it. Owners, Mapped,
 // Refused and Caches are sorted, and never null. Caches are the repository caches of repositories
-// the mapping no longer names, each kept until its RetainedUntil (contract 31).
+// the mapping no longer names, each kept until its RetainedUntil (contract 32).
 type RepositoriesView struct {
 	Owners  []string                `json:"owners"`
 	Mapped  []MappedRepositoryView  `json:"mapped"`
@@ -88,7 +88,7 @@ type MappedRepositoryView struct {
 // Service of its name that is not its own and why — and, while its pod is Ready behind its own
 // Service, its address; from its last health read (the runtime's minute tick) the default
 // branch's head, when it last fetched GitHub and the bytes it serves, or why its /healthz could not
-// be read; and, for a repository the mapping no longer names, until when it is kept (contract 31).
+// be read; and, for a repository the mapping no longer names, until when it is kept (contract 32).
 type CacheView struct {
 	Repo          string    `json:"repo"`
 	Sandbox       string    `json:"sandbox"`

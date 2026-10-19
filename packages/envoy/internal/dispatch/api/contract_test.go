@@ -97,7 +97,7 @@ func newContractRig(t *testing.T) *contractRig {
 	}
 	enr.Chain = enroll.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
-		Store: brokerStore, Policy: cur, Secrets: secrets.AWS{Client: local},
+		Store: brokerStore, Policy: cur, Secrets: policytest.Store(local),
 		PendingTTL: 12 * time.Hour,
 		Audience:   brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
@@ -111,7 +111,7 @@ func newContractRig(t *testing.T) *contractRig {
 		PublicURL: brokerServer.URL, UIToken: contractUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
 
 	dispatchDB := storetest.Open(t)

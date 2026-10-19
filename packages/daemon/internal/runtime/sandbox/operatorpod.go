@@ -3,7 +3,10 @@ package sandbox
 import (
 	"fmt"
 	"maps"
+	"net/netip"
+	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
@@ -29,7 +32,8 @@ type setter struct {
 
 // podVariables maps every variable a worker's Oh My Pi finds set before the shim exports a
 // provider key (shim.ReadProviderEnv) to who sets it: the runtime (runtimeOwned, the session
-// store's two variables named apart, since they are Legion's under either store, and the name the
+// store's two variables named apart, since they are Legion's under either store, the controller's
+// Slack channel list, which the runtime sets in the controller's pod alone, and the name the
 // providers volume mounts the session database's URL under, sessionDSNFile), the worker image
 // (imageEnv), every launch's spec (the role App's git identity, and each launch secret's
 // `<NAME>_FILE` pointer), the pod baseline, and the operator's own pod env. The first setter of a
@@ -45,6 +49,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 		add(name, "Legion sets to place the sessions a resume reads (runtime.kubernetes.session_store)", false)
 	}
 	add(sessionDSNFile, "is the name the providers volume mounts the session database's URL under (runtime.kubernetes.session_store)", false)
+	add(slackChannelsVariable, "Legion's runtime sets for the controller it launches, from the project's slack_channels alone", false)
 	for _, name := range slices.Sorted(maps.Keys(runtimeOwned)) {
 		add(name, "Legion's runtime sets in every pod", false)
 	}
@@ -100,6 +105,14 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 			return fmt.Errorf("runtime.kubernetes.pod.env sets %s, which %s", name, s.who)
 		}
 	}
+	// DISPATCH_PUBLIC_URL is Dispatch's dashboard as people open it, which every agent's dispatch
+	// command links to; it turns Dispatch off over a value the URL standard's parser refuses, so
+	// boot accepts only a value that parser takes (dashboardURL), where one typo would otherwise
+	// stop every agent's Dispatch writes. Both sides hold to
+	// packages/contracts/fixtures/dispatch-public-url.json.
+	if value, set := pod.Env["DISPATCH_PUBLIC_URL"]; set && !dashboardURL(value) {
+		return fmt.Errorf("runtime.kubernetes.pod.env sets DISPATCH_PUBLIC_URL to %q, which is not an http or https URL with no userinfo, a host that is a DNS name of letters, digits and hyphens, a dotted-quad IPv4 address or a bracketed IPv6 address, and any port from 1 to 65535: boot accepts only a dashboard address every agent's dispatch command reads", value)
+	}
 	volumes := legionVolumeNames()
 	for i, volume := range pod.Volumes {
 		if slices.Contains(volumes, volume.Name) {
@@ -154,4 +167,56 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 func overlaps(a, b string) bool {
 	under := func(child, parent string) bool { return parent == "/" || strings.HasPrefix(child, parent+"/") }
 	return a == b || under(a, b) || under(b, a)
+}
+
+// dashboardURL is whether value is a DISPATCH_PUBLIC_URL boot lets through: a rule narrower than
+// the URL standard's parser the agents' dispatch command reads the value with (envoy-client's
+// dispatchSettings), so boot accepts only values the agents accept, and refuses some they would
+// take (userinfo, a trailing dot, IPv4 shorthand, an internationalized name). It is http or https
+// with no userinfo; a plain host, which is a DNS name of letters, digits and hyphens (no label
+// empty, longer than 63 or starting `xn--`, and a last label neither all digits nor `0x`, which
+// the agents read as an IPv4 address), a four-octet dotted IPv4 address, or a bracketed IPv6
+// address with no zone; and, when it names one, a port from 1 to 65535.
+func dashboardURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Opaque != "" || parsed.User != nil {
+		return false
+	}
+	if port := parsed.Port(); port != "" {
+		number, err := strconv.Atoi(port)
+		if err != nil || number < 1 || number > 65535 {
+			return false
+		}
+	}
+	host := parsed.Hostname()
+	if strings.HasPrefix(parsed.Host, "[") {
+		address, err := netip.ParseAddr(host)
+		return err == nil && address.Is6() && address.Zone() == ""
+	}
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.Is4() && address.String() == host
+	}
+	return dashboardDNSName(host)
+}
+
+// dashboardDNSName is whether host is a DNS name dashboardURL takes: labels of ASCII letters,
+// digits and hyphens, none empty, longer than 63 or starting `xn--`, at most 253 characters in all,
+// and a last label that is neither all digits nor starts `0x`.
+func dashboardDNSName(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(strings.ToLower(host), ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "xn--") {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	last := labels[len(labels)-1]
+	return strings.Trim(last, "0123456789") != "" && !strings.HasPrefix(last, "0x")
 }

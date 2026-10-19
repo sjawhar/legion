@@ -79,11 +79,7 @@ export function SettingsPage(): ReactNode {
     MappingInput,
     { previous: RepoProject[] | undefined }
   >({
-    mutationFn: ({ repo, project, default: isDefault }) =>
-      api.putRepoProject(
-        repo,
-        isDefault === undefined ? { project } : { project, default: isDefault }
-      ),
+    mutationFn: ({ repo, ...input }) => api.putRepoProject(repo, input),
     onError: (error, variables, context) => {
       queryClient.setQueryData(["repo-projects"], context?.previous);
       setFailedAction({
@@ -121,6 +117,11 @@ export function SettingsPage(): ReactNode {
         setProject("");
       }
     },
+    // A write's answer is one row as the server saved it, not the project's mappings when the
+    // answer arrives: another write (another browser's default pick, read through a mapping event
+    // while this one was on the way) may have changed them since. Reading them again once the
+    // write settles leaves the page on the server's state, as useIssueFieldWrite does an issue's.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["repo-projects"] }),
   });
   const deleteMapping = useMutation<void, Error, string, { previous: RepoProject[] | undefined }>({
     mutationFn: (repo: string) => api.deleteRepoProject(repo),
@@ -141,6 +142,7 @@ export function SettingsPage(): ReactNode {
       return { previous };
     },
     onSuccess: () => setFailedAction(undefined),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["repo-projects"] }),
   });
 
   const retry = () => {

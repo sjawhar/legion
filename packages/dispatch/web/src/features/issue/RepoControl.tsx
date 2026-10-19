@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useId, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
@@ -18,7 +18,10 @@ import { useIssueRepo } from "./useIssueRepo";
  * to none, they are read at once, because the item shows only when the project maps a repository:
  * until the read answers nothing shows, a project that maps none has nothing to pick and gets no
  * item, and a read that fails shows `Repository:` with the failure and a Retry, never a hidden
- * item. A failed read beside a resolved repository shows the same failure next to the picker.
+ * item. A failed read beside a resolved repository shows the same failure next to the picker. The
+ * badge is hidden from assistive technology; the select's description names what it shows: the
+ * repository, `, inherited or the project's default` when it is not the issue's own, or
+ * `No repository`.
  */
 export function RepoControl({
   disabled = false,
@@ -40,6 +43,7 @@ export function RepoControl({
     queryFn: () => api.listRepoProjects(),
   });
   const want = () => setWanted(true);
+  const descriptionId = useId();
   const write = useIssueRepo(issueKey);
   const mapped = (mappings.data ?? [])
     .filter((mapping) => mapping.project === project)
@@ -62,6 +66,12 @@ export function RepoControl({
   // shows a value its options lack.
   const options = repo === null || mapped.includes(repo) ? mapped : [repo, ...mapped];
   const tone = repo === null ? badgeLow : badgePrimary;
+  const description =
+    resolvedRepo === null
+      ? "No repository"
+      : repo === null
+        ? `${resolvedRepo}, inherited or the project's default`
+        : resolvedRepo;
   // Nothing resolved and no list to pick from: the failure is all there is to show.
   const picker =
     resolvedRepo === null && mappings.isError ? null : (
@@ -78,6 +88,7 @@ export function RepoControl({
           {resolvedRepo ?? "No repository"}
         </span>
         <select
+          aria-describedby={descriptionId}
           aria-label={`Repository of ${issueKey}`}
           className={badgeSelectOverlay}
           disabled={disabled}
@@ -102,6 +113,9 @@ export function RepoControl({
             </option>
           ))}
         </select>
+        <span className="sr-only" id={descriptionId}>
+          {description}
+        </span>
       </span>
     );
   return (

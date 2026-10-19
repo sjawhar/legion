@@ -15,7 +15,7 @@ Three facts govern every thread, whoever opened it.
 - **Resolve each thread you have answered, one thread per call, never in bulk, never a thread you
   have not read.** GitHub grants `resolveReviewThread` to the pull request's author, and the
   implementer opens every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`,
-  "The two GitHub Apps"), so the implementer resolves every thread, its own and the ones the
+  "The GitHub Apps"), so the implementer resolves every thread, its own and the ones the
   reviewer accepted:
   - The **implementer**, after every push that answers a review and before its `handoff_complete`,
     resolves each thread it answered with its own `gh`, one thread per call:

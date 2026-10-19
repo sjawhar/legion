@@ -227,9 +227,12 @@ func pluginsSourceWords(source string) string {
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
-// Under kubernetes, when the image probe's attempt budget is derived above
-// slow_command_timeout_seconds (daemon.ProbeBudget), one plain line names the derived bound and
-// why; then one names the repository cache every mapped repository gets, as the file settles it;
+// Under kubernetes, when a role requests less cpu or memory than its limit, one plain `resources:`
+// line names those roles and the pods they make Burstable (capabilities.Deployment.BurstableLine);
+// a file that sets no lower request prints none, its pods all Guaranteed. Then, when the image
+// probe's attempt budget is derived above slow_command_timeout_seconds (daemon.ProbeBudget), one
+// plain line names the derived bound and why; then one names the repository cache every mapped
+// repository gets, as the file settles it;
 // then a last plain line names the plugin pair this daemon would install for a stale-plugin
 // relaunch — the file's or the binary's — or, with neither, the gap; it is its own line rather
 // than a capability row, since it would otherwise be open on every unreleased build. All of them
@@ -255,16 +258,21 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
-	for _, gap := range daemon.Deployment(cfg).OpenFromConfiguration() {
+	deployment := daemon.Deployment(cfg)
+	for _, gap := range deployment.OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
 	}
 	if cfg.Runtime.Name == "kubernetes" {
+		if line := deployment.BurstableLine(); line != "" {
+			fmt.Fprintln(stdout, "resources: "+line)
+		}
 		if line, derived := daemon.ProbeBudgetLine(cfg); derived {
 			fmt.Fprintln(stdout, line)
 		}
 		cache := cfg.Runtime.Kubernetes.RepositoryCache
 		fmt.Fprintf(stdout, "repository cache: a %s volume per mapped repository, fetched from GitHub every %d minutes, kept %d hours after its repository leaves the mapping; its container reserves cpu %s, memory %s, ephemeral storage %s under %s\n",
-			cache.Volume, cache.RefreshMinutes, cache.RetainHours, cache.Resources.CPU, cache.Resources.Memory, cache.Resources.EphemeralStorageRequest, cache.Resources.EphemeralStorage)
+			cache.Volume, cache.RefreshMinutes, cache.RetainHours, reservedUnder(cache.Resources.CPURequest, cache.Resources.CPU),
+			reservedUnder(cache.Resources.MemoryRequest, cache.Resources.Memory), cache.Resources.EphemeralStorageRequest, cache.Resources.EphemeralStorage)
 		if pair, source := daemon.ResolvedPlugins(cfg); pair != nil {
 			fmt.Fprintf(stdout, "plugins: @sjawhar/pi-legion %s @sjawhar/pi-envoy %s (from %s)\n", pair.PiLegion, pair.PiEnvoy, pluginsSourceWords(source))
 		} else {
@@ -272,6 +280,16 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// reservedUnder is a cpu or memory reservation as --check-config names it: the one quantity when
+// the request is the limit, as at the defaults, and `<request> under <limit>` when the file set a
+// lower request.
+func reservedUnder(request, limit string) string {
+	if request == limit {
+		return limit
+	}
+	return request + " under " + limit
 }
 
 // start runs a legion in this process until its context is done. The registry entry is this

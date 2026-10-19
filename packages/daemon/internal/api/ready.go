@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/classify"
@@ -72,7 +73,11 @@ func githubReadFailed(err error) *refusal {
 // would refuse a lagging record's READY until the webhook arrived. A pull request closed without
 // merging is refused by GitHub's own state, since its close's webhook can arrive after the READY's
 // advance of the record, which would then drop it as older (READY_PULL_REQUEST_CLOSED).
-func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest, disarmPending bool) (readyAnswer, *refusal) {
+//
+// Before the head's handoffs are read, the head must be the approved code plus retro's commits
+// alone (unreviewedChange). Nothing else holds those commits to retro's: the merger only quotes
+// them, and a READY a person merges is held to it too.
+func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead, approvedHead string, pr *record.PullRequest, disarmPending bool) (readyAnswer, *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return readyAnswer{}, &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}
 	}
@@ -111,6 +116,9 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 	if pr.HeadSHA != pull.Head.SHA && !pr.HeadUpdatedAt.IsZero() && !pull.UpdatedAt.After(pr.HeadUpdatedAt) {
 		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("the daemon recorded pull request #%d at head %s, at %s, no earlier than GitHub's answer of %s, at %s, which may not have caught up with that push: build a new packet once GitHub shows the new head, and complete again",
 			number, pr.HeadSHA, pr.HeadUpdatedAt.UTC().Format(time.RFC3339), pull.Head.SHA, pull.UpdatedAt.UTC().Format(time.RFC3339))}
+	}
+	if refused := unreviewedChange(ctx, github, issue, number, approvedHead, pull.Head.SHA); refused != nil {
+		return readyAnswer{}, refused
 	}
 	dir := handoffDir(issue)
 	switch carries, err := headCarries(ctx, github, dir, pull.Head.SHA); {
@@ -231,16 +239,24 @@ func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules confi
 }
 
 // pullRequestPaths is every path pull request number's change touches, both names of a renamed
-// file among them, and how many files GitHub listed.
+// file among them (changedPaths), and how many files GitHub listed.
 func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, int, error) {
-	type file struct {
-		Filename         string `json:"filename"`
-		PreviousFilename string `json:"previous_filename"`
-	}
-	files, err := githubrest.GetPages[file](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
+	files, err := githubrest.GetPages[changedFile](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
 	if err != nil {
 		return nil, 0, err
 	}
+	return changedPaths(files), len(files), nil
+}
+
+// changedFile is one file GitHub lists in a change, a pull request's or a compare's.
+type changedFile struct {
+	Filename         string `json:"filename"`
+	PreviousFilename string `json:"previous_filename"`
+}
+
+// changedPaths is every path files touch: each file's name, and a renamed file's old name too,
+// since moving a file out of a path changes that path.
+func changedPaths(files []changedFile) []string {
 	paths := make([]string, 0, len(files))
 	for _, file := range files {
 		paths = append(paths, file.Filename)
@@ -248,7 +264,7 @@ func pullRequestPaths(ctx context.Context, github githubrest.Client, number int)
 			paths = append(paths, file.PreviousFilename)
 		}
 	}
-	return paths, len(files), nil
+	return paths
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.
@@ -277,6 +293,78 @@ func headCarries(ctx context.Context, github githubrest.Client, dir, head string
 // (dispatch://LEGION-605). READY reads whether the head still carries it (headCarries); the daemon
 // reads nothing inside it.
 func handoffDir(issue string) string { return ".legion/" + issue }
+
+// compareFilesLimit is the most changed files GitHub's compare of two commits lists: "it includes
+// up to 300 changed files for the entire comparison" (REST API, Compare two commits,
+// https://docs.github.com/en/rest/commits/commits#compare-two-commits). A comparison that reaches
+// it may change a path the list never shows.
+const compareFilesLimit = 300
+
+// unreviewedChangeNamed is how many paths READY_UNREVIEWED_CHANGE names before it counts the rest.
+const unreviewedChangeNamed = 10
+
+// unreviewedChange is READY's refusal of head, pull request number's, when it carries a change no
+// review approved, nil when it carries none. approved is the head issue's review round approved
+// (record.ApprovedHead), and only retro's commits may sit above it: its learnings under
+// docs/solutions/, and its last commit's removal of the issue's handoffs, .legion/<issue>/
+// (handoffDir). A round with no approval has no head to hold READY to (READY_NOT_APPROVED).
+// Otherwise GitHub's compare of approved with head, as the implement App, must show approved to be
+// head's ancestor ("ahead", or "identical" for a READY at the approved head itself; "diverged" or
+// "behind" is not the approved code plus anything), list its files, and list fewer than
+// compareFilesLimit; every path it lists, a rename's old name included, must be retro's. Anything
+// else is refused READY_UNREVIEWED_CHANGE, naming what it found, and the remedy for each is the
+// same: the reviewer reviews this head as a new round. An approved head
+// GitHub does not know is refused the same way; any other failure of the read is GitHub's, to
+// retry. The compare asks for one commit a page: the file list and status cover the whole
+// comparison on its first page whatever the page size, and a smaller page reads less.
+func unreviewedChange(ctx context.Context, github githubrest.Client, issue string, number int, approved, head string) *refusal {
+	const remedy = "the head goes back to reviewing, so the reviewer reviews it; tell the architect"
+	if approved == "" {
+		return &refusal{http.StatusConflict, "READY_NOT_APPROVED", fmt.Sprintf("%s's review round recorded no approval, so READY has no approved head to hold head %s of pull request #%d to: %s", issue, shortSHA(head), number, remedy)}
+	}
+	unreviewed := func(format string, args ...any) *refusal {
+		return &refusal{http.StatusConflict, "READY_UNREVIEWED_CHANGE", fmt.Sprintf(format, args...) + "; " + remedy}
+	}
+	var compare struct {
+		Status string         `json:"status"`
+		Files  *[]changedFile `json:"files"`
+	}
+	err := github.Get(ctx, "/compare/"+approved+"..."+head+"?per_page=1", &compare)
+	approvedAt := fmt.Sprintf("%s, the head %s's review round approved", shortSHA(approved), issue)
+	var answer *githubrest.Answer
+	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
+		return unreviewed("GitHub does not know %s, or cannot compare it with head %s of pull request #%d", approvedAt, shortSHA(head), number)
+	}
+	if err != nil {
+		return githubReadFailed(err)
+	}
+	compared := fmt.Sprintf("GitHub's compare of %s, with head %s of pull request #%d", approvedAt, shortSHA(head), number)
+	if compare.Status != "ahead" && compare.Status != "identical" {
+		return unreviewed("%s is %q: the approved head is not an ancestor of the head, so the head is not the approved code plus retro's commits", compared, compare.Status)
+	}
+	if compare.Files == nil {
+		return unreviewed("%s answered no file list, so what changed above the approved head is unknown", compared)
+	}
+	files := *compare.Files
+	handoffs := handoffDir(issue) + "/"
+	var outside []string
+	for _, path := range changedPaths(files) {
+		if !strings.HasPrefix(path, "docs/solutions/") && !strings.HasPrefix(path, handoffs) {
+			outside = append(outside, path)
+		}
+	}
+	if len(outside) > 0 {
+		named := strings.Join(outside[:min(len(outside), unreviewedChangeNamed)], ", ")
+		if len(outside) > unreviewedChangeNamed {
+			named += fmt.Sprintf(" and %d more", len(outside)-unreviewedChangeNamed)
+		}
+		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/ and %s, may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt, handoffs)
+	}
+	if len(files) >= compareFilesLimit {
+		return unreviewed("%s lists %d changed files, the most it lists, so a path past them is unread and may be one no review approved", compared, len(files))
+	}
+	return nil
+}
 
 // headCheckResults is each check and commit status reported on sha, by name: success, pending, or
 // the failing conclusion or state (classify.Judge's results). A check run that ended neutral or

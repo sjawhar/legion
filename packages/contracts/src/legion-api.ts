@@ -148,7 +148,7 @@ const legionPhaseView = z.strictObject({
  * testing, and an approval through retro and every phase after it; absent until a review in a
  * round decides. */
 const legionPullRequestView = z.strictObject({
-  /** The repository (`owner/name`) the pull request is in, its issue's (contract 30). */
+  /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
   number: z.number().int().positive(),
   head: nonEmptyString,
@@ -219,7 +219,7 @@ const legionIssue = z.strictObject({
   status: nonEmptyString,
   /** The repository (`owner/name`) the issue targets and that repository's default branch, taken
    * when the daemon first recorded the issue and never changed after; absent on an issue the
-   * workflow does not record (phase `unrecorded`, an operator's claim) (contract 30). */
+   * workflow does not record (phase `unrecorded`, an operator's claim) (contract 31). */
   repo: nonEmptyString.optional(),
   defaultBranch: nonEmptyString.optional(),
   /** Why a held issue is held, when its hold has one: `escalated` once its architect sent it to
@@ -296,7 +296,7 @@ const legionCapabilityState = z.strictObject({
  * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
  * whether its pod is Ready behind its own Service and its address then, from its last health read
  * the default branch's `head`, `lastFetchAt` and the `bytes` it serves or the read's
- * `healthError`, and, for a repository the mapping no longer names, `retainedUntil` (contract 31). */
+ * `healthError`, and, for a repository the mapping no longer names, `retainedUntil` (contract 32). */
 const legionCacheView = z.strictObject({
   repo: nonEmptyString,
   sandbox: nonEmptyString,
@@ -315,8 +315,8 @@ const legionCacheView = z.strictObject({
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
  * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
  * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
- * of repositories the mapping no longer names. Every list sorted and never null (contracts 30,
- * 31). */
+ * of repositories the mapping no longer names. Every list sorted and never null (contracts 31,
+ * 32). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
   mapped: z.array(
@@ -338,7 +338,7 @@ const legionRepositories = z.strictObject({
  * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
  * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
  * id, never null (contract 28); `repositories` is the project's repository mapping as the daemon
- * serves it (contract 30). */
+ * serves it (contract 31). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,

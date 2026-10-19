@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -121,28 +123,37 @@ func TestIssueRepoResolvesToNoneWithoutADefault(t *testing.T) {
 	}
 }
 
-// The walk up the parent chain has no depth limit: an issue 33 or 34 links below the one that names
-// a repository still resolves to it, in its detail, every list row and its creation event, never to
-// the project's default.
-func TestIssueRepoResolvesThroughAChainDeeperThanThirtyTwoLinks(t *testing.T) {
+// createChain creates issues under parent, each the parent of the next, and returns their keys:
+// keys[i] is i+1 links below parent.
+func createChain(t *testing.T, handler http.Handler, project, parent string, length int) []string {
+	t.Helper()
+	keys := make([]string, 0, length)
+	for index := range length {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": project, "title": fmt.Sprintf("%s link %d", parent, index+1), "parent": parent, "force": true}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create link %d under %s: status=%d body=%s", index+1, parent, response.Code, response.Body.String())
+		}
+		parent = decodeBody[model.Issue](t, response).Key
+		keys = append(keys, parent)
+	}
+	return keys
+}
+
+// An issue may sit at most parentDepthCap (32) links below its root. At that depth it still
+// resolves to the repository its root names, in its detail, every list row and its creation
+// event; an issue one link deeper is refused, 409 PARENT_INPUT.
+func TestIssueCreateRefusesAParentPastTheDepthCap(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "CORE", "name": "Core"}, "alice")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "CORE", "default": true}, "alice")
 	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/gadgets", map[string]any{"project": "CORE"}, "alice")
 	root := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Root", "repo": "acme/gadgets"}, "alice"))
-	keys := []string{root.Key} // keys[d] is the issue d links below the root
-	for depth := 1; depth <= 34; depth++ {
-		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": fmt.Sprintf("Depth %d", depth), "parent": keys[depth-1], "force": true}, "alice")
-		if response.Code != http.StatusCreated {
-			t.Fatalf("create depth %d: status=%d body=%s", depth, response.Code, response.Body.String())
-		}
-		keys = append(keys, decodeBody[model.Issue](t, response).Key)
-	}
+	keys := append([]string{root.Key}, createChain(t, handler, "CORE", root.Key, parentDepthCap)...) // keys[d] is d links below the root
 	listed := map[string]model.IssueSummary{}
 	for _, issue := range decodeBody[[]model.IssueSummary](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=CORE", nil, "alice")) {
 		listed[issue.Key] = issue
 	}
-	for _, depth := range []int{32, 33, 34} {
+	for _, depth := range []int{parentDepthCap - 1, parentDepthCap} {
 		key := keys[depth]
 		detail := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice"))
 		if detail.ResolvedRepo == nil || *detail.ResolvedRepo != "acme/gadgets" {
@@ -155,6 +166,122 @@ func TestIssueRepoResolvesThroughAChainDeeperThanThirtyTwoLinks(t *testing.T) {
 			t.Errorf("depth %d issue.created resolved_repo=%v, want acme/gadgets", depth, created["resolved_repo"])
 		}
 	}
+	deeper := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "One link too deep", "parent": keys[parentDepthCap], "force": true}, "alice")
+	if deeper.Code != http.StatusConflict || !strings.Contains(deeper.Body.String(), "PARENT_INPUT") || !strings.Contains(deeper.Body.String(), "at most 32 links") {
+		t.Fatalf("create %d links below the root: status=%d body=%s, want 409 PARENT_INPUT naming the 32-link limit", parentDepthCap+1, deeper.Code, deeper.Body.String())
+	}
+}
+
+// A reparent counts the moved issue's subtree: it is refused when the subtree's deepest issue
+// would sit more than 32 links below its new root, even though neither chain alone is that deep.
+func TestIssuePatchRefusesAReparentPastTheDepthCap(t *testing.T) {
+	handler := newTestHandler(t)
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "CORE", "name": "Core"}, "alice")
+	top := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Top"}, "alice"))
+	upper := append([]string{top.Key}, createChain(t, handler, "CORE", top.Key, 20)...) // upper[d] is d links below Top
+	moved := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CORE", "title": "Moved", "force": true}, "alice"))
+	createChain(t, handler, "CORE", moved.Key, 12) // Moved's subtree is 12 links deep
+	refused := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moved.Key, map[string]any{"parent": upper[20]}, "alice")
+	if refused.Code != http.StatusConflict || !strings.Contains(refused.Body.String(), "PARENT_INPUT") || !strings.Contains(refused.Body.String(), "at most 32 links") {
+		t.Fatalf("move a 12-deep subtree 21 links below Top: status=%d body=%s, want 409 PARENT_INPUT naming the 32-link limit", refused.Code, refused.Body.String())
+	}
+	if accepted := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+moved.Key, map[string]any{"parent": upper[19]}, "alice"); accepted.Code != http.StatusOK {
+		t.Fatalf("move a 12-deep subtree 20 links below Top, its deepest issue 32 links down: status=%d body=%s, want 200", accepted.Code, accepted.Body.String())
+	}
+}
+
+// A parent already past the cap is past the walk's bound too, so the refusal says "more than 32
+// links" rather than the bound's number. An earlier release's API could build such a chain;
+// migration 0113 refuses to apply while one exists, so after it only a direct database write, or an
+// earlier release left serving against the rollout rule, makes one. This test writes one directly.
+func TestIssueParentRefusalPastTheCapSaysMoreThan32Links(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "LEG", "name": "Legacy"}, "alice")
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into issues (key, project_key, number, title, parent_key, created_by, rank)
+		select 'LEG-' || n, 'LEG', n, 'Legacy ' || n, case when n = 1 then null else 'LEG-' || (n - 1) end,
+		       '{"kind":"user","id":"alice"}', lpad(n::text, 8, '0')
+		from generate_series(1, 41) n
+		order by n;
+		update projects set next_number = 42 where key = 'LEG'
+	`); err != nil {
+		t.Fatalf("insert a 41-issue chain: %v", err)
+	}
+	loose := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "LEG", "title": "Loose", "force": true}, "alice"))
+	for name, response := range map[string]*httptest.ResponseRecorder{
+		"create under LEG-41, 40 links down":     dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "LEG", "title": "Under", "parent": "LEG-41", "force": true}, "alice"),
+		"move Loose under LEG-36, 35 links down": dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+loose.Key, map[string]any{"parent": "LEG-36"}, "alice"),
+	} {
+		body := response.Body.String()
+		if response.Code != http.StatusConflict || !strings.Contains(body, "more than 32 links below its root") || strings.Contains(body, "33 links") {
+			t.Errorf("%s: status=%d body=%s, want 409 saying more than 32 links and no bound's number", name, response.Code, body)
+		}
+	}
+}
+
+// The repository walk stops at the depth cap, so a list costs at most parentDepthCap+1 steps per
+// issue however deep a chain is. A chain past the cap fails its issues' reads by name, never giving
+// the project's default, and fails them fast. An earlier release's API could build one; migration
+// 0113 refuses to apply while one exists, so after it only a direct database write, or an earlier
+// release left serving against the rollout rule, makes one. This test writes one directly.
+func TestIssueRepoWalkStopsAtTheDepthCap(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "DEEP", "name": "Deep"}, "alice")
+	dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/acme/widgets", map[string]any{"project": "DEEP", "default": true}, "alice")
+	const length = 2000 // DEEP-1 is the root; DEEP-n is n-1 links below it
+	if _, err := database.Pool.Exec(ctx, `
+		insert into issues (key, project_key, number, title, parent_key, created_by, rank)
+		select 'DEEP-' || n, 'DEEP', n, 'Deep ' || n, case when n = 1 then null else 'DEEP-' || (n - 1) end,
+		       '{"kind":"user","id":"alice"}', lpad(n::text, 8, '0')
+		from generate_series(1, $1::int) n
+		order by n
+	`, length); err != nil {
+		t.Fatalf("insert a %d-issue chain: %v", length, err)
+	}
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `set local statement_timeout = '10s'`); err != nil {
+		t.Fatalf("set statement_timeout: %v", err)
+	}
+	started := time.Now()
+	rows, err := tx.Query(ctx, `select i.key, `+issueRepoColumns+` from issues i `+issueRepoLateral+` where i.project_key = 'DEEP'`)
+	if err != nil {
+		t.Fatalf("walk %d issues: %v", length, err)
+	}
+	resolved, refused := 0, 0
+	for rows.Next() {
+		var key string
+		var repo repoScan
+		if err := rows.Scan(append([]any{&key}, repo.targets()...)...); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if _, resolvedRepo, err := repo.resolve(key); err != nil {
+			if !strings.Contains(err.Error(), "deeper than 32 links") {
+				t.Fatalf("%s: %v, want a refusal naming the 32-link limit", key, err)
+			}
+			refused++
+		} else if resolvedRepo == nil || *resolvedRepo != "acme/widgets" {
+			t.Fatalf("%s resolved_repo=%v, want the project's default acme/widgets", key, resolvedRepo)
+		} else {
+			resolved++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("walk %d issues in a %d-link chain within 10s: %v", length, length-1, err)
+	}
+	t.Logf("walked %d issues of a %d-link chain in %s", length, length-1, time.Since(started))
+	if resolved != parentDepthCap+1 || refused != length-parentDepthCap-1 {
+		t.Fatalf("resolved %d and refused %d, want the %d issues within 32 links of the root resolved and the other %d refused", resolved, refused, parentDepthCap+1, length-parentDepthCap-1)
+	}
+	started = time.Now()
+	if listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=DEEP", nil, "alice"); listed.Code != http.StatusInternalServerError {
+		t.Fatalf("list a project with a chain past the cap: status=%d, want 500", listed.Code)
+	}
+	t.Logf("listed DEEP (refused) in %s", time.Since(started))
 }
 
 // A parent chain that loops (which no API write can make) has no answer: the read fails loudly

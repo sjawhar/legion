@@ -5,8 +5,8 @@
 // enrollment only, through the local helper — see cmdEnrollHelper below), requests and reads
 // back secret grants, and — in its most common shape — requests one or more secrets and execs a
 // command with them in its environment. A person manages the agent secrets themselves with the
-// secret forms (secret.go), which call AWS Secrets Manager under the person's own AWS sign-in
-// and then ask the broker to reread what they wrote.
+// secret forms (secret.go), which call the broker's own store (AWS Secrets Manager or GCP Secret
+// Manager) under the person's own cloud sign-in and then ask the broker to reread what they wrote.
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -43,7 +43,8 @@
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
 // that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
-// the person's AWS sign-in and need no session identity at all. The machine and grant forms act
+// the person's AWS sign-in against an AWS broker, or their Application Default Credentials
+// against a GCP one, and need no session identity at all. The machine and grant forms act
 // under this machine's login: the helper signs each call with its launcher credential (sign-launcher)
 // for a process it can show is outside every registered session's process tree, the operator's
 // own shell, and only for the broker's four operator routes.

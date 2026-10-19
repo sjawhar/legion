@@ -85,9 +85,10 @@ type workflowRuntime struct {
 	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
-	// defaultBranches is each repository's default branch as GitHub names it, read under githubAPI
-	// and kept defaultBranchTTL: the base the outbox creates an issue's branch at and provisions
-	// its workspace from, and the one every launch names (specs.defaultBranch).
+	// defaultBranches is each repository as GitHub names it and its default branch, read under
+	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
+	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
+	// repository as (nameAccepted).
 	defaultBranches *defaultBranches
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a

@@ -933,7 +933,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, prompts: p.prompts,
-			identity: p.identity, repository: p.repository, designGate: cfg.Gates.Design,
+			identity: p.identity, repository: p.repository, designGate: cfg.Gates.Design, slackChannels: cfg.Projects[cfg.Project].SlackChannels,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     adoptIdentity(p.identity, p.repository),
@@ -1308,11 +1308,10 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var claimReady func(supervise.Claim)
 	var prepare func(context.Context, intake.DispatchIssue) (intake.DispatchIssue, error)
 	var githubAPI string
-	var repos *repositories
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady, prepare = workflow.claimReady, workflow.prepareRepository
-		githubAPI, repos = workflow.githubAPI, workflow.repositories
+		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1332,7 +1331,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
-			repositories: repos,
+			repositories: p.repositories,
 			caches:       repositoryCachesOf(s.runtime),
 		},
 		StateTransactions:  st,
@@ -1354,7 +1353,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwners:       s.plan.repositories.Owners,
+		GitHubOwners:       p.repositories.Owners,
 		GitHubAPI:          githubAPI,
 		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
@@ -1449,8 +1448,8 @@ type source struct {
 	// reports is each claim's latest capability report (supervision.capabilityReports), which the
 	// projection shows on the claim's view whatever process reported it.
 	reports func() map[claim.Token]capabilities.Report
-	// repositories is the project's repository mapping as the workflow serves it; nil without a
-	// workflow, whose state serves no repository.
+	// repositories is the project's repository mapping as the workflow serves it, empty for a
+	// daemon with no workflow, whose state serves no repository.
 	repositories *repositories
 	// caches is the Kubernetes runtime's repository caches with their last health reads
 	// (sandbox.Runtime.RepositoryCaches); nil under a runtime that keeps none.

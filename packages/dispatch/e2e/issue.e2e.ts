@@ -1049,10 +1049,16 @@ test("issue header picks the issue's repository from its project's mappings, and
   try {
     await page.goto(`/issues/${parent.key}`);
     const header = page.getByTestId("issue-header");
+    // The visible badge; the select's description repeats its text in a span of its own.
+    const badge = (text: RegExp) => header.locator('span[aria-hidden="true"]', { hasText: text });
     const control = page.getByLabel(`Repository of ${parent.key}`);
-    // The badge names the project's default, which the issue inherits.
+    // The badge names the project's default, which the issue inherits, and so does the select's
+    // description, which is what a screen reader hears beside Inherit.
     await expect(control).toHaveValue("");
-    await expect(header.locator("span", { hasText: /^acme\/widgets$/ })).toBeVisible();
+    await expect(badge(/^acme\/widgets$/)).toBeVisible();
+    await expect(control).toHaveAccessibleDescription(
+      "acme/widgets, inherited or the project's default"
+    );
     // The project's mappings are read once the reader reaches for the control; another project's
     // are not offered.
     await control.focus();
@@ -1065,7 +1071,8 @@ test("issue header picks the issue's repository from its project's mappings, and
     );
     await control.selectOption("acme/gadgets");
     expect((await patch).postDataJSON()).toEqual({ repo: "acme/gadgets" });
-    await expect(header.locator("span", { hasText: /^acme\/gadgets$/ })).toBeVisible();
+    await expect(badge(/^acme\/gadgets$/)).toBeVisible();
+    await expect(control).toHaveAccessibleDescription("acme/gadgets");
     // The child names no repository of its own, so it resolves to its parent's.
     await expect
       .poll(() => getIssue(child.key))
@@ -1089,7 +1096,7 @@ test("issue header picks the issue's repository from its project's mappings, and
       .toMatchObject({ repo: null, resolved_repo: "acme/widgets" });
     await page.reload();
     await expect(page.getByLabel(`Repository of ${parent.key}`)).toHaveValue("");
-    await expect(header.locator("span", { hasText: /^acme\/widgets$/ })).toBeVisible();
+    await expect(badge(/^acme\/widgets$/)).toBeVisible();
 
     // A project that maps no repository has nothing to pick: once the page has read the mappings,
     // its issues' rail has no item for the repository.
@@ -1125,7 +1132,7 @@ test("an open issue's header follows its project's default repository as the map
   try {
     await page.goto(`/issues/${issue.key}`);
     const header = page.getByTestId("issue-header");
-    const badge = (text: RegExp) => header.locator("span", { hasText: text });
+    const badge = (text: RegExp) => header.locator('span[aria-hidden="true"]', { hasText: text });
     await expect(badge(/^acme\/widgets$/)).toBeVisible();
 
     // A new default: the page shows it without a reload.
@@ -1135,6 +1142,9 @@ test("an open issue's header follows its project's default repository as the map
     // The default removed: nothing resolves, and the project still maps acme/widgets to pick.
     await deleteRepoProject("acme/gadgets");
     await expect(badge(/^No repository$/)).toBeVisible();
+    await expect(page.getByLabel(`Repository of ${issue.key}`)).toHaveAccessibleDescription(
+      "No repository"
+    );
 
     // The default again, then moved to another project: CORE maps nothing left to pick, so the
     // rail drops the item.

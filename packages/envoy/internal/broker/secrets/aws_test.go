@@ -15,13 +15,37 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
 
+// stubSMAPI answers GetSecretValue with out and err; its other Secrets Manager calls are an empty
+// Local's, which a Read never makes.
 type stubSMAPI struct {
+	*Local
 	out *secretsmanager.GetSecretValueOutput
 	err error
 }
 
 func (s stubSMAPI) GetSecretValue(_ context.Context, _ *secretsmanager.GetSecretValueInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error) {
 	return s.out, s.err
+}
+
+// TestHasCurrentVersionIsTheRuleListServesBy pins the exported rule both the AWS store's
+// HasCurrentValue and the agent-secrets CLI's VALUE column read: a secret has a value while one of
+// its versions carries AWSCURRENT, and not otherwise.
+func TestHasCurrentVersionIsTheRuleListServesBy(t *testing.T) {
+	for _, tc := range []struct {
+		stages map[string][]string
+		want   bool
+	}{
+		{map[string][]string{"v1": {"AWSCURRENT"}}, true},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}, true},
+		{nil, false},
+		{map[string][]string{}, false},
+		{map[string][]string{"v1": {"AWSPENDING"}}, false},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
+	} {
+		if got := HasCurrentVersion(tc.stages); got != tc.want {
+			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
+		}
+	}
 }
 
 func TestAWSReadReturnsErrNotFoundOnResourceNotFoundException(t *testing.T) {
