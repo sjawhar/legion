@@ -418,8 +418,7 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		if summary.Status != "todo" {
 			continue
 		}
-		if _, err := w.prepareIssue(ctx, intake.DispatchIssue{Key: summary.Key, Status: summary.Status, Parent: deref(summary.Parent),
-			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}, false, false); err != nil {
+		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
 	}

@@ -65,6 +65,17 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
 }
 
+// ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
+// no event's type or actor: what a boot's reconcile records or prepares from.
+func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
+	parent := ""
+	if issue.Parent != nil {
+		parent = *issue.Parent
+	}
+	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+}
+
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
 // with the legion label, so PATCH would make no event. Admission validates the durable fence.
 type Handover struct {
