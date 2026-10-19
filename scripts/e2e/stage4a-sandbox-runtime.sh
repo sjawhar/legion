@@ -66,7 +66,8 @@
 # `kubernetes-service-account`) what shape that identity's `identity` check expects — an assumed
 # IAM role mapped to RBAC group legion-daemon, or a plain system:serviceaccount:<namespace>:
 # legion-daemon with no such mapping; LEGION_E2E_IMAGE (required) the worker image by digest;
-# LEGION_E2E_POD_REACHABILITY and LEGION_E2E_MODEL_ROUTE (both required, above);
+# LEGION_E2E_PLATFORM (required, `gke-autopilot` or `eks`, above), LEGION_E2E_POD_REACHABILITY and
+# LEGION_E2E_MODEL_ROUTE (both required, above);
 # LEGION_E2E_STORAGE_CLASS (required) the issue volumes' StorageClass — AWS's gp2, GKE's
 # standard-rwo, or whatever else the cluster under test defaults to; LEGION_E2E_MODEL_GATEWAY_URL
 # and LEGION_E2E_MODEL_GATEWAY_AUDIENCE (both required under LEGION_E2E_MODEL_ROUTE=gateway, unused

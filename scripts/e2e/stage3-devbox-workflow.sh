@@ -1228,7 +1228,7 @@ begin production-untouched
 every_launch_checked
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") launched panes endpoint-checked when their OMP started, before registration"
 if ! production_audit; then
-  fail "the rig touched production; see $evidence/production-dispatch-audit.json and $evidence/production-envoy-rig-sessions.json"
+  fail "the rig touched production, or the audit could not check it; the reason is above (see $evidence/production-dispatch-audit.json and $evidence/production-envoy-rig-sessions.json, when the audit got far enough to write either)"
 fi
 pass
 

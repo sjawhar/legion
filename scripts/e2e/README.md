@@ -603,6 +603,7 @@ each on its own pair with nothing shared; a fourth needs the admitted range wide
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role \
+LEGION_E2E_PLATFORM=eks \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_POD_REACHABILITY=aws-private-ip \
 LEGION_E2E_MODEL_ROUTE=gateway \
@@ -610,11 +611,13 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
 LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
 LEGION_E2E_STORAGE_CLASS=gp2 \
 LEGION_E2E_SESSION_DB_PORT=<port> \
+LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
   bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
 
 # A cluster whose pods cannot reach the devbox at all (GKE's shape), with no model gateway:
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> \
 LEGION_E2E_RUNTIME_IDENTITY_KIND=kubernetes-service-account \
+LEGION_E2E_PLATFORM=gke-autopilot \
 LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
 LEGION_E2E_POD_REACHABILITY=bridge \
 LEGION_E2E_MODEL_ROUTE=key-file \
@@ -626,14 +629,18 @@ LEGION_E2E_REPO_SECOND_OWNER=<owner>/<name> \
 
 **Devbox only, against a real cluster; CI compiles the harness (`go vet -tags e2e ./...`
 in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
-Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. Two pairs of
-explicit inputs — never auto-detected from one another or from each other — pick the cluster's
-shape: `LEGION_E2E_POD_REACHABILITY` (`aws-private-ip`, today's shape, or `bridge`, for a cluster
-whose pods cannot reach the devbox at all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge))
-and `LEGION_E2E_MODEL_ROUTE` (`gateway`, today's shape, or `key-file`, for a cluster with no model
+Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. Four
+independent inputs — never auto-detected from one another — pick the cluster's shape:
+`LEGION_E2E_RUNTIME_IDENTITY_KIND` (`aws-iam-role` or `kubernetes-service-account`, how the
+runtime authenticates), `LEGION_E2E_PLATFORM` (`eks` or `gke-autopilot`, which platform-specific
+Go-harness relaxations apply — the gVisor cpu floor, the ephemeral-storage clamp, the
+extended-duration affinity, the cgroup cpu quota in place of `nproc`), `LEGION_E2E_POD_REACHABILITY`
+(`aws-private-ip`, today's shape, or `bridge`, for a cluster whose pods cannot reach the devbox at
+all — GKE's shape; [below](#the-bridge-legion_e2e_pod_reachabilitybridge)) and
+`LEGION_E2E_MODEL_ROUTE` (`gateway`, today's shape, or `key-file`, for a cluster with no model
 gateway in front of Anthropic). The script needs `go`, `kubectl`, `curl`, `ss`,
 `diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
-`aws` only under `LEGION_E2E_POD_REACHABILITY=aws-private-ip` (the runtime kubeconfig's `aws eks
+`aws` only under `LEGION_E2E_RUNTIME_IDENTITY_KIND=aws-iam-role` (the runtime kubeconfig's `aws eks
 get-token`), and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
 YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
@@ -742,6 +749,7 @@ that reachability with a reverse tunnel, entirely of the run's own:
 | `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity |
 | `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
 | `LEGION_E2E_RUNTIME_IDENTITY_KIND` | required | `aws-iam-role` (an assumed IAM role mapped to RBAC group `legion-daemon`, EKS's shape) or `kubernetes-service-account` (a plain `system:serviceaccount:<namespace>:legion-daemon` with no such mapping, GKE's shape); `identity`'s assertions and a `network path` failure's diagnostics branch on it |
+| `LEGION_E2E_PLATFORM` | required | `eks` or `gke-autopilot`: the cluster's own platform, independent of identity and pod reachability. Every platform-specific relaxation in the Go harness (the gVisor cpu floor, the ephemeral-storage clamp, the extended-duration-pods affinity, the cgroup cpu quota check in place of `nproc`) keys off this field alone |
 | `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_POD_REACHABILITY` | required | `aws-private-ip` (the devbox's private address, directly routable) or `bridge` (a reverse tunnel through a scratch pod+Service of the run's own, for a cluster whose pods cannot reach the devbox at all; [above](#the-bridge-legion_e2e_pod_reachabilitybridge)) |
