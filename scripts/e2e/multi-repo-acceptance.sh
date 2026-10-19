@@ -56,14 +56,15 @@
 #   DISPATCH_TOKEN_FILE     the Dispatch bearer token file
 #   MULTIREPO_EVIDENCE_DIR  where each observation's evidence file is kept
 #
-# Optional, a test seam only: MULTIREPO_PROC_ROOT overrides the `/proc`-shaped directory
-# `second-owner`'s `as_role` scans for the role's own process. Production never sets it — the pod
-# always scans its own real `/proc` — but it lets a hermetic test build a fake proc tree instead of
-# scanning the host's, which a shared devbox's own live Legion panes would otherwise pollute.
-# Refused unless MULTIREPO_TEST_SEAM=1 is set alongside it (an operator shell never sets either),
-# and named in second-owner's own evidence whenever it is set, so an accidental or malicious
-# MULTIREPO_PROC_ROOT in a live run cannot quietly redirect the scan and is never mistaken for a
-# real result.
+# Optional, test seams only: `second-owner` takes three inputs a hermetic test replaces.
+# MULTIREPO_PROC_ROOT is the `/proc`-shaped directory `as-role.py` scans for the role's own process
+# (a pod always scans its own real `/proc`; a test builds a fake tree, since a shared devbox's own
+# live panes would pollute the host's); MULTIREPO_TRUSTED_ROOT is the directory the image's
+# absolute paths (`/opt/legion/bin/legion`, `/opt/legion/bin/gh`, `/var/run/legion/gh`) resolve
+# under (empty in a pod); MULTIREPO_GITHUB_URL is GitHub's base URL (https://github.com in a pod).
+# Each is refused unless MULTIREPO_TEST_SEAM=1 is set alongside it (an operator shell never sets
+# any), and `second-owner`'s evidence names the value used, so a stray or malicious variable in a
+# live run can neither redirect a probe nor be mistaken for a real result.
 set -Eeuo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
@@ -628,7 +629,9 @@ merged (GitHub, repos/$LEGION_E2E_REPO_O/pulls/$pr_number): $merged
 proc root: $proc_root
 role pid: $pid
 role cmdline: argv0=$argv0 argc=$argc sha256=$sha256
-role env: LEGION_GH_OWNERS_DIR/GH_CONFIG_DIR name the issue's own owner directory: $env_match
+role env: the agent's LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR and LEGION_GH_PATH are the image's: $env_match
+trusted root: ${trusted_root:-<the image>}
+GitHub: $github_url
 as role: gh api repos/$LEGION_E2E_REPO_T --jq .full_name = $read_out (exit $read_status)
 positive control: GET $LEGION_E2E_REPO_O.git/info/refs?service=git-receive-pack as role: HTTP $push_o_status, $push_o_type
 negative probe: the same request for $LEGION_E2E_REPO_T as role: HTTP $push_t_status

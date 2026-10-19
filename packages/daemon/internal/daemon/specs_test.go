@@ -175,7 +175,7 @@ func TestAWorkersAddressingNamesItsRepositoryAndTheProjects(t *testing.T) {
 	}
 
 	s.repositories = func() api.RepositoriesView { return view }
-	s.repository = func(context.Context, string) (ghrepo.Repository, string, error) { return ghrepo.Repository{}, "", nil }
+	s.repository = nil
 	if got := launch(); strings.Contains(got, "repositories are") || strings.Contains(got, "repository is") {
 		t.Fatalf("addressing with no repository resolved (a daemon with no workflow) = %q, want no repository sentence", got)
 	}

@@ -15,6 +15,7 @@ import {
   nextRun,
   run,
   script,
+  servers,
   spawnScript,
   stateBody,
 } from "./multi-repo-acceptance-harness";
@@ -23,14 +24,7 @@ import {
 // run; this file covers every observation but second-owner (multi-repo-second-owner.test.ts) and
 // the `negative` ones (multi-repo-negative.test.ts). The stubs and fakes it runs against are in
 // multi-repo-acceptance-harness.ts.
-let daemonServer: Server | undefined;
-let dispatchServer: Server | undefined;
-
 afterEach(() => {
-  daemonServer?.stop(true);
-  dispatchServer?.stop(true);
-  daemonServer = undefined;
-  dispatchServer = undefined;
   closeServers();
 });
 
@@ -106,7 +100,9 @@ describe("repository shape and collisions", () => {
 
 describe("the daemon health refusal", () => {
   test("a stub whose /healthz answers 404 is refused, naming the status", async () => {
-    daemonServer = Bun.serve({ port: 0, fetch: () => new Response("not found", { status: 404 }) });
+    const daemonServer = servers.track(
+      Bun.serve({ port: 0, fetch: () => new Response("not found", { status: 404 }) })
+    );
     const env = fullInputs(`http://127.0.0.1:${daemonServer.port}`, "http://127.0.0.1:1");
     const { status, stderr } = await run(["done", "X-1"], env);
     expect(status).not.toBe(0);
@@ -118,8 +114,8 @@ describe("the daemon health refusal", () => {
 
 describe("children: structured Dispatch + state agreement, with raw evidence", () => {
   test("one child resolves to T and one to C in both Dispatch and the daemon's state: PASS, with raw reads kept", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({
       "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
       "ACME-2": JSON.stringify({
         key: "ACME-2",
@@ -152,8 +148,8 @@ describe("children: structured Dispatch + state agreement, with raw evidence", (
   });
 
   test("a child Dispatch and the daemon's state disagree on: FAIL", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({
       "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
       "ACME-2": JSON.stringify({
         key: "ACME-2",
@@ -178,8 +174,8 @@ describe("children: structured Dispatch + state agreement, with raw evidence", (
 
 describe("done: Dispatch's structured .status field", () => {
   test("every named issue reading status done is a PASS", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({
       "ACME-2": JSON.stringify({ key: "ACME-2", status: "done" }),
       "ACME-3": JSON.stringify({ key: "ACME-3", status: "done" }),
     });
@@ -193,8 +189,10 @@ describe("done: Dispatch's structured .status field", () => {
   });
 
   test("one issue still todo is a FAIL", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({ "ACME-2": JSON.stringify({ key: "ACME-2", status: "todo" }) });
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({
+      "ACME-2": JSON.stringify({ key: "ACME-2", status: "todo" }),
+    });
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -207,8 +205,8 @@ describe("done: Dispatch's structured .status field", () => {
 
 describe("a failed Dispatch read never prints the bearer", () => {
   test("done against a 404'd issue fails without the Dispatch token anywhere in stdout or stderr", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -236,19 +234,21 @@ describe("a failed Dispatch read never prints the bearer", () => {
 // response to hold that window open, are the only way to exercise this.
 describe("an interrupted run cleans up and actually stops", () => {
   test("a SIGTERM to the observer's own pid stops it immediately with exit 143, not a later failure", async () => {
-    daemonServer = Bun.serve({
-      port: 0,
-      async fetch(req) {
-        const url = new URL(req.url);
-        if (url.pathname === "/healthz") return Response.json({ status: "ok" });
-        if (url.pathname === "/legion/v1/state") {
-          await Bun.sleep(3000);
-          return new Response(stateBody, { headers: { "content-type": "application/json" } });
-        }
-        return new Response("not found", { status: 404 });
-      },
-    });
-    dispatchServer = dispatchStub({
+    const daemonServer = servers.track(
+      Bun.serve({
+        port: 0,
+        async fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+          if (url.pathname === "/legion/v1/state") {
+            await Bun.sleep(3000);
+            return new Response(stateBody, { headers: { "content-type": "application/json" } });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      })
+    );
+    const dispatchServer = dispatchStub({
       "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }] }),
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
     });
@@ -269,19 +269,21 @@ describe("an interrupted run cleans up and actually stops", () => {
   });
 
   test("a group SIGINT removes a raw_fetch temp file created inside a $(...) subshell", async () => {
-    daemonServer = Bun.serve({
-      port: 0,
-      async fetch(req) {
-        const url = new URL(req.url);
-        if (url.pathname === "/healthz") return Response.json({ status: "ok" });
-        if (url.pathname === "/legion/v1/state") {
-          await Bun.sleep(3000);
-          return new Response(stateBody, { headers: { "content-type": "application/json" } });
-        }
-        return new Response("not found", { status: 404 });
-      },
-    });
-    dispatchServer = dispatchStub({
+    const daemonServer = servers.track(
+      Bun.serve({
+        port: 0,
+        async fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+          if (url.pathname === "/legion/v1/state") {
+            await Bun.sleep(3000);
+            return new Response(stateBody, { headers: { "content-type": "application/json" } });
+          }
+          return new Response("not found", { status: 404 });
+        },
+      })
+    );
+    const dispatchServer = dispatchStub({
       "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }] }),
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
     });
@@ -306,7 +308,7 @@ describe("an interrupted run cleans up and actually stops", () => {
 
 describe("raw evidence is named per observation, never overwritten by a later one", () => {
   test("children's state.raw survives a later, different observation's own state read", async () => {
-    const { server, setBody } = mutableDaemonStub(
+    const { server: daemonServer, setBody } = mutableDaemonStub(
       makeStateBody({
         issues: {
           "ACME-2": {
@@ -326,8 +328,7 @@ describe("raw evidence is named per observation, never overwritten by a later on
         },
       })
     );
-    daemonServer = server;
-    dispatchServer = dispatchStub({
+    const dispatchServer = dispatchStub({
       "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
       "ACME-2": JSON.stringify({
         key: "ACME-2",
@@ -379,27 +380,29 @@ describe("raw evidence is named per observation, never overwritten by a later on
   // children reads state exactly once, before any child's judgment.
   test("children reads state exactly once for a multi-child parent, never once per child", async () => {
     let stateRequests = 0;
-    daemonServer = Bun.serve({
-      port: 0,
-      fetch(req) {
-        const url = new URL(req.url);
-        if (url.pathname === "/healthz") return Response.json({ status: "ok" });
-        if (url.pathname === "/legion/v1/state") {
-          stateRequests += 1;
-          return new Response(
-            makeStateBody({
-              issues: {
-                "ACME-2": { key: "ACME-2", repo: "acme/widgets" },
-                "ACME-3": { key: "ACME-3", repo: "acme/gadgets" },
-              },
-            }),
-            { headers: { "content-type": "application/json" } }
-          );
-        }
-        return new Response("not found", { status: 404 });
-      },
-    });
-    dispatchServer = dispatchStub({
+    const daemonServer = servers.track(
+      Bun.serve({
+        port: 0,
+        fetch(req) {
+          const url = new URL(req.url);
+          if (url.pathname === "/healthz") return Response.json({ status: "ok" });
+          if (url.pathname === "/legion/v1/state") {
+            stateRequests += 1;
+            return new Response(
+              makeStateBody({
+                issues: {
+                  "ACME-2": { key: "ACME-2", repo: "acme/widgets" },
+                  "ACME-3": { key: "ACME-3", repo: "acme/gadgets" },
+                },
+              }),
+              { headers: { "content-type": "application/json" } }
+            );
+          }
+          return new Response("not found", { status: 404 });
+        },
+      })
+    );
+    const dispatchServer = dispatchStub({
       "ACME-1": JSON.stringify({ key: "ACME-1", children: [{ key: "ACME-2" }, { key: "ACME-3" }] }),
       "ACME-2": JSON.stringify({
         key: "ACME-2",
@@ -425,8 +428,8 @@ describe("raw evidence is named per observation, never overwritten by a later on
 
 describe("record-head and pin: empty/invalid values never pass, trailing bytes kept", () => {
   test("record-head refuses a repository argument that is not T", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -437,8 +440,8 @@ describe("record-head and pin: empty/invalid values never pass, trailing bytes k
   });
 
   test("an empty commit sha from GitHub is never recorded as the head: FAIL, not PASS", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -455,8 +458,8 @@ esac`;
   });
 
   test("a well-formed record-head is a PASS", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -475,8 +478,8 @@ esac`;
   });
 
   test("pin refuses an empty merge-sha argument", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -488,8 +491,8 @@ esac`;
 
   // A pin file ending in two newlines must keep both in evidence/pin.txt.
   test("the pin file's trailing bytes (two trailing newlines) are kept exactly in evidence", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -522,8 +525,8 @@ esac`;
   // The pin is the one commit id the file holds. The sha in a comment beside a pin naming another
   // commit, or inside a longer hex string, is not the pin.
   test("a pin file naming another commit, with the sha only in a comment, is a FAIL", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -536,8 +539,8 @@ esac`;
   });
 
   test("a pin file whose only hex string is longer than the sha (one containing it) is a FAIL", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -550,8 +553,8 @@ esac`;
   });
 
   test("the same commit id spelled in capitals, named once or twice, is the pin: PASS", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -565,8 +568,8 @@ esac`;
 
   // A default branch is whatever GitHub says: a `?` or `#` in it must not end or change the request.
   test("a default branch with a ? and a # is percent-encoded in the request, its slash kept", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -624,8 +627,8 @@ describe("cache: pod binding and the producer's exact, anchored success line", (
   });
 
   test("an unrelated pod is refused, not read as the issue's", async () => {
-    daemonServer = daemonStub(stateWithCache);
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub(stateWithCache);
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -643,8 +646,8 @@ esac`;
   // The anchored form rejects a near-miss line an unanchored `.*`-heavy regex would accept:
   // an error line that happens to contain the same two keywords (cache, GitHub) in another shape.
   test("an error line mentioning cache and github in another shape is a FAIL, not a PASS", async () => {
-    daemonServer = daemonStub(stateWithCache);
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub(stateWithCache);
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -661,8 +664,8 @@ esac`;
   });
 
   test("the producer's exact anchored success line, on the right pod, with cache.ready true: PASS", async () => {
-    daemonServer = daemonStub(stateWithCache);
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub(stateWithCache);
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -686,8 +689,8 @@ esac`;
   // The duration class was [0-9.]+(µs|ms|s), which a duration of a minute or more (Go's
   // time.Duration.String(), e.g. "1m2.345s") never matches: a slow fetch would FAIL a real PASS.
   test("a fetch slower than a minute (Go's 1m2.345s duration form) is still a PASS", async () => {
-    daemonServer = daemonStub(stateWithCache);
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub(stateWithCache);
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`

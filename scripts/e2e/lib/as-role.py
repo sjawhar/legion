@@ -17,9 +17,9 @@ is the install wrapper `/bin/sh -c <script> legion-plugins <agent argv...>`
 (packages/daemon/internal/runtime/sandbox/plugins.go, installArgv), the argv after the wrapper's
 four leading elements, since the wrapper's `exec "$@"` replaces its image with the agent. A
 secrets-broker pod's shim also parents an `agent-secrets renew` process and briefly a `codegraph`
-warm-up, so parentage alone is ambiguous. The agent's /proc/<pid>/environ is read once, for one
-purpose: to compare what the agent was told (LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH)
-with the values the image fixes; a difference fails the check.
+warm-up, so parentage alone is ambiguous. The agent's /proc/<pid>/environ is read for two things: to
+compare what the agent was told (LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH) with the
+values the image fixes, a difference failing the check, and for the proxy variables (below).
 
 What the prober runs and trusts is the image's, never the agent's. The agent's own code runs in its
 process (the workspace's .omp/extensions, the profile plugins), and a process can rewrite its own
@@ -179,16 +179,19 @@ def run(argv, env, stdin=None):
     return {"status": done.returncode, "output": done.stdout.decode("utf-8", "replace").rstrip("\n")}
 
 
-def trusted_environment(root, environ):
-    """The environment `legion git-credential` and `gh` run under: the image's own constants, never
-    values read from the agent's environment, which its own code can rewrite in place. Only the
-    proxy comes from the role's environment: TLS is verified against the root-owned CA store, so a
-    rewritten proxy can drop a request and cannot answer one."""
+def trusted_environment(root, environ, owner):
+    """The environment `legion git-credential` and `gh` run under, and whose proxy the GitHub
+    requests use: the image's own constants, with GH_CONFIG_DIR at the issue owner's directory,
+    never values read from the agent's environment, which its own code can rewrite in place. Only
+    the proxy variables come from the role's environment: TLS is verified against the root-owned CA
+    store, so a rewritten proxy can drop a request and cannot answer one."""
+    owners_dir = root + OWNERS_DIR
     env = {
         "HOME": "/nonexistent",
         "PATH": ":".join(root + directory for directory in IMAGE_PATH),
-        "LEGION_GH_OWNERS_DIR": root + OWNERS_DIR,
+        "LEGION_GH_OWNERS_DIR": owners_dir,
         "LEGION_GH_PATH": root + REAL_GH,
+        "GH_CONFIG_DIR": owners_dir + "/" + owner,
     }
     for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
         if name in environ:
@@ -196,11 +199,9 @@ def trusted_environment(root, environ):
     return env
 
 
-def credential_for(root, repo, environ, owner_dir_name):
+def credential_for(root, repo, env):
     """What the image's own `legion git-credential get` answers for github.com/<repo>: a
     (username, password) pair, or None and why not."""
-    env = trusted_environment(root, environ)
-    env["GH_CONFIG_DIR"] = env["LEGION_GH_OWNERS_DIR"] + "/" + owner_dir_name
     asked = run(
         [root + LEGION_BINARY, "git-credential", "get"],
         env,
@@ -214,15 +215,15 @@ def credential_for(root, repo, environ, owner_dir_name):
     return (answer.get("username", ""), answer["password"]), ""
 
 
-def advertisement_of(root, base_url, repo, environ, o_owner):
+def advertisement_of(root, base_url, repo, env):
     """GitHub's answer to the request a `git push` of <repo> opens with, made with the credential
     the image's own helper hands out: 200 and the receive-pack advertisement for a token that can
     push, 403 for one that cannot."""
-    pair, why = credential_for(root, repo, environ, o_owner)
+    pair, why = credential_for(root, repo, env)
     if pair is None:
         return {"status": 0, "content_type": "", "output": why}
     username, password = pair
-    proxy = environ.get("https_proxy") or environ.get("HTTPS_PROXY")
+    proxy = env.get("https_proxy") or env.get("HTTPS_PROXY")
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({"https": proxy} if proxy else {})
     )
@@ -267,8 +268,7 @@ def main():
         and environ.get("GH_CONFIG_DIR") == OWNERS_DIR + "/" + o_owner
         and environ.get("LEGION_GH_PATH") == REAL_GH
     )
-    read_env = trusted_environment(root, environ)
-    read_env["GH_CONFIG_DIR"] = read_env["LEGION_GH_OWNERS_DIR"] + "/" + o_owner
+    env = trusted_environment(root, environ, o_owner)
 
     print(
         json.dumps(
@@ -278,9 +278,9 @@ def main():
                 "argc": len(argv),
                 "sha256": hashlib.sha256(cmdline).hexdigest(),
                 "env_match": env_match,
-                "read": run([root + GH_WRAPPER, "api", "repos/" + t_repo, "--jq", ".full_name"], read_env),
-                "push_o": advertisement_of(root, base_url, o_repo, environ, o_owner),
-                "push_t": advertisement_of(root, base_url, t_repo, environ, o_owner),
+                "read": run([root + GH_WRAPPER, "api", "repos/" + t_repo, "--jq", ".full_name"], env),
+                "push_o": advertisement_of(root, base_url, o_repo, env),
+                "push_t": advertisement_of(root, base_url, t_repo, env),
             }
         )
     )

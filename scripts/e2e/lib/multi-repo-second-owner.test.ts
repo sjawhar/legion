@@ -18,12 +18,18 @@ import {
   dir,
   dispatchStub,
   fakeBin,
+  fakeRoleGh,
+  fakeRoleLegion,
   fullInputs,
+  imageBin,
+  imageEnv,
   makeStateBody,
   newTrustedRoot,
   newWork,
   nextRun,
+  OWNERS_DIR,
   realKubectl,
+  recordedCalls,
   run,
   servers,
 } from "./multi-repo-acceptance-harness";
@@ -189,56 +195,10 @@ function roleBin(): string {
   return bin;
 }
 
-const imageBin = (root: string) => join(root, "opt", "legion", "bin");
-
-// Appends the environment and arguments of each call to `<base>.env` and `<base>.args`.
-const recordCall = (base: string) =>
-  `{ env; echo --; } >>'${base}.env'\nprintf '%s\\n' "$*" >>'${base}.args'`;
-
-// The `gh api repos/<T> --jq .full_name` read the prober makes as the role.
-function fakeRoleGh(bin: string, answer: string, record: string): void {
-  fakeBin(
-    bin,
-    "gh",
-    `
-${recordCall(record)}
-case "$*" in
-  "api repos/${T} --jq .full_name") printf '${answer}' ;;
-  *) echo "gh: unexpected call (role): $*" >&2; exit 1 ;;
-esac`
-  );
-}
-
-// The credential helper: for `git-credential get` with `path=<repo>` on stdin it prints that
-// repository's own token, or nothing (exit 1) for a repository in `silent`.
-function fakeRoleLegion(bin: string, silent: string[], record: string): void {
-  fakeBin(
-    bin,
-    "legion",
-    `
-${recordCall(record)}
-if [ "$1 $2" != "git-credential get" ]; then
-  echo "legion: unexpected call (role): $*" >&2
-  exit 1
-fi
-repo=
-while IFS= read -r line; do
-  case "$line" in path=*) repo=\${line#path=} ;; esac
-done
-case "$repo" in
-${silent.map((repo) => `  ${repo}) exit 1 ;;`).join("\n")}
-esac
-printf 'username=x-access-token\\npassword=TOKEN-%s\\n' "\${repo//\\//_}"`
-  );
-}
-
 // git is never run by the probes: this one records its arguments and fails.
 function fakeRoleGit(bin: string, record: string): void {
   fakeBin(bin, "git", `printf '%s\\n' "$*" >>'${record}'\nexit 1`);
 }
-
-// The environment an agent is told in a real pod: the image's paths, not root-prefixed.
-const OWNERS_DIR = "/var/run/legion/gh";
 
 function roleEnviron(bin: string, home: string, pathPrefix?: string): Record<string, string> {
   return {
@@ -282,7 +242,7 @@ async function scenario(options: Scenario = {}): Promise<Outcome> {
   const legionRecord = join(records, "legion-calls");
   const ghRecord = join(records, "gh-calls");
   const gitRecord = join(records, "git-calls");
-  fakeRoleGh(imageBin(root), options.readOutput ?? T, ghRecord);
+  fakeRoleGh(imageBin(root), T, options.readOutput ?? T, ghRecord);
   fakeRoleLegion(imageBin(root), options.silent ?? [], legionRecord);
   fakeRoleGit(bin, gitRecord);
   const home = join(newWork(), "home");
@@ -347,50 +307,6 @@ interface Outcome {
   ghRecord: string;
   probe: () => ProbeAnswer;
   summary: () => string;
-}
-
-const IMAGE_PATH = [
-  "/opt/legion/bin",
-  "/opt/omp/bin",
-  "/opt/codegraph/bin",
-  "/usr/local/bin",
-  "/usr/bin",
-  "/bin",
-];
-
-// The environment the image's constants give `legion` and `gh` under a trusted root.
-const imageEnv = (root: string): Record<string, string> => ({
-  HOME: "/nonexistent",
-  PATH: IMAGE_PATH.map((directory) => root + directory).join(":"),
-  LEGION_GH_OWNERS_DIR: `${root}${OWNERS_DIR}`,
-  LEGION_GH_PATH: `${root}/usr/local/bin/gh`,
-  GH_CONFIG_DIR: `${root}${OWNERS_DIR}/zeta`,
-});
-
-// What a recording fake saw: one environment per call (without the variables bash adds itself),
-// and the arguments of each call.
-function recordedCalls(base: string): { envs: Array<Record<string, string>>; args: string[] } {
-  const read = (suffix: string) =>
-    existsSync(base + suffix) ? readFileSync(base + suffix, "utf8") : "";
-  const bashOwn = new Set(["PWD", "SHLVL", "_", "OLDPWD"]);
-  const envs = read(".env")
-    .split("--\n")
-    .filter((block) => block !== "")
-    .map((block) =>
-      Object.fromEntries(
-        block
-          .split("\n")
-          .filter((line) => line.includes("="))
-          .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)])
-          .filter(([name]) => !bashOwn.has(name as string))
-      )
-    );
-  return {
-    envs,
-    args: read(".args")
-      .split("\n")
-      .filter((line) => line !== ""),
-  };
 }
 
 function expectPass(result: Outcome): void {

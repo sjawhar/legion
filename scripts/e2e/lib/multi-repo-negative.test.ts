@@ -21,21 +21,14 @@ import {
 // The `negative` observations of scripts/e2e/multi-repo-acceptance.sh (no-repo, pr-in-x,
 // repo-edit); the other observations are in multi-repo-acceptance.test.ts. The stubs and fakes
 // they run against are in multi-repo-acceptance-harness.ts.
-let daemonServer: Server | undefined;
-let dispatchServer: Server | undefined;
-
 afterEach(() => {
-  daemonServer?.stop(true);
-  dispatchServer?.stop(true);
-  daemonServer = undefined;
-  dispatchServer = undefined;
   closeServers();
 });
 
 describe("negative no-repo: exact daemon actor, outbox marker, resolved_repo, and the issues-type guard", () => {
   test("the exact none-note from the daemon's own actor, Dispatch still resolving to none: PASS", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub(
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub(
       { "ACME-9": JSON.stringify({ key: "ACME-9", resolved_repo: null }) },
       {
         "ACME-9": JSON.stringify([
@@ -53,8 +46,8 @@ describe("negative no-repo: exact daemon actor, outbox marker, resolved_repo, an
   });
 
   test("a human message quoting the exact none-note is a FAIL: the actor must be the daemon's own session", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub(
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub(
       { "ACME-9": JSON.stringify({ key: "ACME-9", resolved_repo: null }) },
       { "ACME-9": JSON.stringify([humanActorEvent(`FYI the daemon said: ${noneNote}`)]) }
     );
@@ -68,8 +61,8 @@ describe("negative no-repo: exact daemon actor, outbox marker, resolved_repo, an
   });
 
   test("Dispatch now resolves the issue to a real repository (a stale none-note from before): FAIL", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub(
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub(
       { "ACME-9": JSON.stringify({ key: "ACME-9", resolved_repo: "acme/gadgets" }) },
       {
         "ACME-9": JSON.stringify([
@@ -87,10 +80,10 @@ describe("negative no-repo: exact daemon actor, outbox marker, resolved_repo, an
   });
 
   test("the daemon's latest repository note is a different one (App not installed), not the none-note: FAIL", async () => {
-    daemonServer = daemonStub();
+    const daemonServer = daemonStub();
     const laterNote =
       "Legion did not admit this issue: the review App is not installed on acme/gadgets. Install it on acme/gadgets, or set another repository (the issue header's Repository picker, or dispatch issue-update --repo owner/name), and move the issue to todo again.";
-    dispatchServer = dispatchStub(
+    const dispatchServer = dispatchStub(
       { "ACME-9": JSON.stringify({ key: "ACME-9", resolved_repo: null }) },
       {
         "ACME-9": JSON.stringify([
@@ -109,8 +102,8 @@ describe("negative no-repo: exact daemon actor, outbox marker, resolved_repo, an
   });
 
   test("a state body of {} or null never satisfies `.issues has(key)` vacuously: FAIL", async () => {
-    daemonServer = daemonStub("{}");
-    dispatchServer = dispatchStub(
+    const daemonServer = daemonStub("{}");
+    const dispatchServer = dispatchStub(
       { "ACME-9": JSON.stringify({ key: "ACME-9", resolved_repo: null }) },
       {
         "ACME-9": JSON.stringify([
@@ -153,8 +146,8 @@ function baselineRunId(stdout: string): string {
 
 describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   test("before prints BASELINE, never PASS, for a recorded child", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -167,8 +160,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   });
 
   test("before on an unrecorded issue is refused: no recorded child, nothing to baseline", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -179,8 +172,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   });
 
   test("after with an unknown run id is refused", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -196,8 +189,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   // A run id with a path-traversal shape is refused outright, never used to open a
   // baseline file outside this run's own evidence directory.
   test("a run id containing '..' is refused as unsafe, never read as a path", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -211,8 +204,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   });
 
   test("after immediately (no PR opened yet) with highest-PR 0 in X: FAIL", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -244,8 +237,7 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   // enough; the daemon side must be unaffected too.
   test("a closed PR exists in X, but the daemon's own pullRequest now names X too: FAIL", async () => {
     const { server, setBody } = mutableDaemonStub(stateBody); // ACME-2 starts as acme/widgets, no PR
-    daemonServer = server;
-    dispatchServer = dispatchStub({});
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${server.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -294,8 +286,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   });
 
   test("a closed PR numbered above the baseline's cursor, daemon side unaffected: PASS", async () => {
-    daemonServer = daemonStub(stateBody);
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub(stateBody);
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -333,8 +325,7 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   // foreign baseline, refused outright rather than compared across two different issue lifetimes.
   test("the issue's generation moved since the baseline: refused as foreign", async () => {
     const { server, setBody } = mutableDaemonStub(stateBody);
-    daemonServer = server;
-    dispatchServer = dispatchStub({});
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${server.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -375,8 +366,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
   });
 
   test("two overlapping before calls for the same issue never collide: each gets its own run id and baseline", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({});
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({});
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -396,8 +387,8 @@ describe("negative pr-in-x: PR-number cursor and the daemon-side check", () => {
 
 describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repository message", () => {
   test("before refuses when Dispatch already resolves to X", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "other/outside" }),
     });
     const env = fullInputs(
@@ -410,8 +401,8 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
   });
 
   test("before on an unrecorded issue is refused", async () => {
-    daemonServer = daemonStub();
-    dispatchServer = dispatchStub({ "ACME-404": JSON.stringify({ key: "ACME-404" }) });
+    const daemonServer = daemonStub();
+    const dispatchServer = dispatchStub({ "ACME-404": JSON.stringify({ key: "ACME-404" }) });
     const env = fullInputs(
       `http://127.0.0.1:${daemonServer.port}`,
       `http://127.0.0.1:${dispatchServer.port}`
@@ -428,8 +419,8 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
   // only post-baseline event is the daemon's own routine status write (also issue.updated) — this
   // must never satisfy the seq-cursor check, which requires payload.repo == X on that event.
   test("the only issue.updated after the baseline is a routine status write (payload.repo unset): FAIL", async () => {
-    daemonServer = daemonStub(stateBody); // ACME-2: acme/widgets
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub(stateBody); // ACME-2: acme/widgets
+    const dispatchServer = dispatchStub({
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
     });
     const env = fullInputs(
@@ -446,8 +437,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
     );
     expect(before.status).toBe(0);
     const runId = baselineRunId(before.stdout);
-    dispatchServer.stop(true);
-    dispatchServer = dispatchStub(
+    const laterDispatchServer = dispatchStub(
       { "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }) },
       {
         "ACME-2": JSON.stringify([
@@ -456,7 +446,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
         ]),
       }
     );
-    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${dispatchServer.port}` };
+    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${laterDispatchServer.port}` };
     const after = await spawnScript(
       ["negative", "repo-edit", "after", runId, "ACME-2"],
       path,
@@ -468,8 +458,8 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
   });
 
   test("an issue.updated after the baseline naming X, with the exact kept-repository message from the daemon: PASS", async () => {
-    daemonServer = daemonStub(stateBody);
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub(stateBody);
+    const dispatchServer = dispatchStub({
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
     });
     const env = fullInputs(
@@ -486,8 +476,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
     );
     expect(before.status).toBe(0);
     const runId = baselineRunId(before.stdout);
-    dispatchServer.stop(true);
-    dispatchServer = dispatchStub(
+    const laterDispatchServer = dispatchStub(
       { "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }) },
       {
         "ACME-2": JSON.stringify([
@@ -496,7 +485,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
         ]),
       }
     );
-    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${dispatchServer.port}` };
+    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${laterDispatchServer.port}` };
     const after = await spawnScript(
       ["negative", "repo-edit", "after", runId, "ACME-2"],
       path,
@@ -513,8 +502,8 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
   // come from Dispatch's resolved spelling (dispatch_repo_now), never the operator's literal
   // LEGION_E2E_REPO_X, or this would wrongly FAIL on a mere case difference.
   test("the operator's case for X differs from Dispatch's own resolved spelling: still PASS", async () => {
-    daemonServer = daemonStub(stateBody);
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub(stateBody);
+    const dispatchServer = dispatchStub({
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
     });
     const env = fullInputs(
@@ -532,8 +521,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
     );
     expect(before.status).toBe(0);
     const runId = baselineRunId(before.stdout);
-    dispatchServer.stop(true);
-    dispatchServer = dispatchStub(
+    const laterDispatchServer = dispatchStub(
       { "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }) },
       {
         "ACME-2": JSON.stringify([
@@ -542,7 +530,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
         ]),
       }
     );
-    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${dispatchServer.port}` };
+    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${laterDispatchServer.port}` };
     const after = await spawnScript(
       ["negative", "repo-edit", "after", runId, "ACME-2"],
       path,
@@ -557,8 +545,8 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
   // message must still PASS as long as the seq-bound issue.updated and the daemon's repo are
   // right, since the message check only verifies the format, never requiring a brand-new one.
   test("no fresh message after the baseline, but the seq-bound issue.updated and an already-present matching note both exist: PASS", async () => {
-    daemonServer = daemonStub(stateBody);
-    dispatchServer = dispatchStub({
+    const daemonServer = daemonStub(stateBody);
+    const dispatchServer = dispatchStub({
       "ACME-2": JSON.stringify({ key: "ACME-2", resolved_repo: "acme/widgets" }),
     });
     const env = fullInputs(
@@ -575,8 +563,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
     );
     expect(before.status).toBe(0);
     const runId = baselineRunId(before.stdout);
-    dispatchServer.stop(true);
-    dispatchServer = dispatchStub(
+    const laterDispatchServer = dispatchStub(
       { "ACME-2": JSON.stringify({ key: "ACME-2", repo: "other/outside" }) },
       {
         "ACME-2": JSON.stringify([
@@ -585,7 +572,7 @@ describe("negative repo-edit: Dispatch's seq cursor and the exact kept-repositor
         ]),
       }
     );
-    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${dispatchServer.port}` };
+    const env2 = { ...env, DISPATCH_URL: `http://127.0.0.1:${laterDispatchServer.port}` };
     const after = await spawnScript(
       ["negative", "repo-edit", "after", runId, "ACME-2"],
       path,
