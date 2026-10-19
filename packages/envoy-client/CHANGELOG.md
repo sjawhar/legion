@@ -11,6 +11,12 @@
 - A `dispatch` command that takes `--issue`, given a bare issue key in its place
   (`dispatch read ACME-12`), names the fix in its refusal: `use --issue <KEY>, as in: dispatch
   read --issue ACME-12`. The command still refuses a positional value.
+- `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse an ask, comment or message link
+  as `--ref`, before any request. They take `--ref` as the issue or document they act on, so such
+  a link used to post or read on its owner and drop the item: a comment meant for an ask's thread
+  landed loose on the issue. The refusal names what acts on the item: `reply_to_ask` or `reply_to`
+  (`--reply-to-ask`, `--reply-to`) under `dispatch comment`, otherwise `dispatch read`. `dispatch read` and
+  `dispatch ask` still take such a link.
 
 ### Changed
 
