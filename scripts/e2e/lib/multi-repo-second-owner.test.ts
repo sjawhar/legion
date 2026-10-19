@@ -17,19 +17,22 @@ import {
   daemonStub,
   dir,
   dispatchStub,
-  type FakeProcTreeOptions,
   fakeBin,
-  fakeProcTree,
   fullInputs,
-  LEGION_BINARY,
   makeStateBody,
+  newTrustedRoot,
   newWork,
   nextRun,
   realKubectl,
   run,
   servers,
-  writeProcEntry,
 } from "./multi-repo-acceptance-harness";
+import {
+  type FakeProcTreeOptions,
+  fakeProcTree,
+  LEGION_BINARY,
+  writeProcEntry,
+} from "./multi-repo-proc-tree";
 
 // second-owner proves, from inside the issue's pod and as the role's own agent process, that the
 // role's GitHub credential reads T, can push to O (the positive control) and cannot push to T.
@@ -37,8 +40,9 @@ import {
 // fake /proc tree. It runs no git: it asks the role's own `legion git-credential get` for each
 // repository's credential and sends GitHub the request a `git push` opens with
 // (`GET <repo>.git/info/refs?service=git-receive-pack`) itself, here to a local stub that stands
-// in for github.com through MULTIREPO_GITHUB_URL. The role's PATH carries a fake `legion` (the
-// credential helper), a fake `gh` (the read of T) and a fake `git` that records every call and
+// in for github.com through MULTIREPO_GITHUB_URL. The probes run the image's own `legion` (the
+// credential helper) and `gh` (the read of T) by absolute path under a trusted root, as a pod's
+// `/opt/legion/bin/...`; the agent's PATH carries only a fake `git` that records every call and
 // fails, so a run that reached git would show.
 
 afterEach(() => {
@@ -178,19 +182,26 @@ case "$*" in
     ;;
 esac`;
 
-// The role's own PATH: the fakes the probes run under the agent's environment.
+// The agent's own PATH carries only the git recorder: the probes never run it.
 function roleBin(): string {
   const bin = join(newWork(), "role-bin");
   mkdirSync(bin, { recursive: true });
   return bin;
 }
 
+const imageBin = (root: string) => join(root, "opt", "legion", "bin");
+
+// Appends the environment and arguments of each call to `<base>.env` and `<base>.args`.
+const recordCall = (base: string) =>
+  `{ env; echo --; } >>'${base}.env'\nprintf '%s\\n' "$*" >>'${base}.args'`;
+
 // The `gh api repos/<T> --jq .full_name` read the prober makes as the role.
-function fakeRoleGh(bin: string, answer: string): void {
+function fakeRoleGh(bin: string, answer: string, record: string): void {
   fakeBin(
     bin,
     "gh",
     `
+${recordCall(record)}
 case "$*" in
   "api repos/${T} --jq .full_name") printf '${answer}' ;;
   *) echo "gh: unexpected call (role): $*" >&2; exit 1 ;;
@@ -200,11 +211,12 @@ esac`
 
 // The credential helper: for `git-credential get` with `path=<repo>` on stdin it prints that
 // repository's own token, or nothing (exit 1) for a repository in `silent`.
-function fakeRoleLegion(bin: string, silent: string[]): void {
+function fakeRoleLegion(bin: string, silent: string[], record: string): void {
   fakeBin(
     bin,
     "legion",
     `
+${recordCall(record)}
 if [ "$1 $2" != "git-credential get" ]; then
   echo "legion: unexpected call (role): $*" >&2
   exit 1
@@ -225,14 +237,17 @@ function fakeRoleGit(bin: string, record: string): void {
   fakeBin(bin, "git", `printf '%s\\n' "$*" >>'${record}'\nexit 1`);
 }
 
-function roleEnviron(bin: string, home: string): Record<string, string> {
+// The environment an agent is told in a real pod: the image's paths, not root-prefixed.
+const OWNERS_DIR = "/var/run/legion/gh";
+
+function roleEnviron(bin: string, home: string, pathPrefix?: string): Record<string, string> {
   return {
-    PATH: `${bin}:/usr/bin:/bin`,
+    PATH: `${pathPrefix ? `${pathPrefix}:` : ""}${bin}:/usr/bin:/bin`,
     HOME: home,
     POD_UID: "test-pod-uid",
-    LEGION_GH_PATH: "/opt/legion/bin/gh",
-    LEGION_GH_OWNERS_DIR: "/gh",
-    GH_CONFIG_DIR: "/gh/zeta",
+    LEGION_GH_PATH: "/usr/local/bin/gh",
+    LEGION_GH_OWNERS_DIR: OWNERS_DIR,
+    GH_CONFIG_DIR: `${OWNERS_DIR}/zeta`,
     LEGION_WORKSPACE: "/workspace",
   };
 }
@@ -243,6 +258,8 @@ interface Scenario {
   silent?: string[];
   readOutput?: string;
   environ?: Record<string, string>;
+  // A directory put first on the agent's PATH.
+  agentPathPrefix?: string;
   tree?: FakeProcTreeOptions;
   // Builds the proc tree itself, from the role's environment.
   buildTree?: (environ: Record<string, string>) => string;
@@ -259,14 +276,19 @@ async function scenario(options: Scenario = {}): Promise<Outcome> {
   const env = fullInputs(`http://127.0.0.1:${daemon.port}`, `http://127.0.0.1:${dispatch.port}`);
   const github = await githubStub(options.github);
   const bin = roleBin();
-  fakeRoleGh(bin, options.readOutput ?? T);
-  fakeRoleLegion(bin, options.silent ?? []);
-  const gitRecord = join(newWork(), "git-calls");
+  const root = newTrustedRoot();
+  const records = newWork();
+  mkdirSync(records, { recursive: true });
+  const legionRecord = join(records, "legion-calls");
+  const ghRecord = join(records, "gh-calls");
+  const gitRecord = join(records, "git-calls");
+  fakeRoleGh(imageBin(root), options.readOutput ?? T, ghRecord);
+  fakeRoleLegion(imageBin(root), options.silent ?? [], legionRecord);
   fakeRoleGit(bin, gitRecord);
   const home = join(newWork(), "home");
   mkdirSync(home, { recursive: true });
   options.prepareHome?.(home);
-  const environ = { ...roleEnviron(bin, home), ...options.environ };
+  const environ = { ...roleEnviron(bin, home, options.agentPathPrefix), ...options.environ };
   const procRoot = options.buildTree
     ? options.buildTree(environ)
     : fakeProcTree(environ, options.tree);
@@ -276,6 +298,7 @@ async function scenario(options: Scenario = {}): Promise<Outcome> {
       ...env,
       ...options.hostEnv,
       MULTIREPO_PROC_ROOT: procRoot,
+      MULTIREPO_TRUSTED_ROOT: root,
       MULTIREPO_TEST_SEAM: "1",
       MULTIREPO_GITHUB_URL: github.url,
     },
@@ -288,7 +311,10 @@ async function scenario(options: Scenario = {}): Promise<Outcome> {
     ...result,
     github,
     procRoot,
+    root,
     gitRecord,
+    legionRecord,
+    ghRecord,
     probe: () => JSON.parse(readFileSync(probePath, "utf8")),
     summary: () => readFileSync(join(result.evidence, "second-owner.txt"), "utf8"),
   };
@@ -315,9 +341,56 @@ interface Outcome {
   evidence: string;
   github: GithubStub;
   procRoot: string;
+  root: string;
   gitRecord: string;
+  legionRecord: string;
+  ghRecord: string;
   probe: () => ProbeAnswer;
   summary: () => string;
+}
+
+const IMAGE_PATH = [
+  "/opt/legion/bin",
+  "/opt/omp/bin",
+  "/opt/codegraph/bin",
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+];
+
+// The environment the image's constants give `legion` and `gh` under a trusted root.
+const imageEnv = (root: string): Record<string, string> => ({
+  HOME: "/nonexistent",
+  PATH: IMAGE_PATH.map((directory) => root + directory).join(":"),
+  LEGION_GH_OWNERS_DIR: `${root}${OWNERS_DIR}`,
+  LEGION_GH_PATH: `${root}/usr/local/bin/gh`,
+  GH_CONFIG_DIR: `${root}${OWNERS_DIR}/zeta`,
+});
+
+// What a recording fake saw: one environment per call (without the variables bash adds itself),
+// and the arguments of each call.
+function recordedCalls(base: string): { envs: Array<Record<string, string>>; args: string[] } {
+  const read = (suffix: string) =>
+    existsSync(base + suffix) ? readFileSync(base + suffix, "utf8") : "";
+  const bashOwn = new Set(["PWD", "SHLVL", "_", "OLDPWD"]);
+  const envs = read(".env")
+    .split("--\n")
+    .filter((block) => block !== "")
+    .map((block) =>
+      Object.fromEntries(
+        block
+          .split("\n")
+          .filter((line) => line.includes("="))
+          .map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)])
+          .filter(([name]) => !bashOwn.has(name as string))
+      )
+    );
+  return {
+    envs,
+    args: read(".args")
+      .split("\n")
+      .filter((line) => line !== ""),
+  };
 }
 
 function expectPass(result: Outcome): void {
@@ -473,11 +546,21 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
         },
       ],
       ["the role's read of T names another repository", { readOutput: "other/outside" }],
-      [
-        "GH_CONFIG_DIR does not name the issue's own owner directory",
-        { environ: { GH_CONFIG_DIR: "/gh/other-owner" } },
-        (result) => expect(result.probe().env_match).toBe(false),
-      ],
+      ...[
+        ["LEGION_GH_OWNERS_DIR names another directory", { LEGION_GH_OWNERS_DIR: "/elsewhere/gh" }],
+        [
+          "GH_CONFIG_DIR does not name the issue's own owner directory",
+          { GH_CONFIG_DIR: `${OWNERS_DIR}/other-owner` },
+        ],
+        ["LEGION_GH_PATH names another path", { LEGION_GH_PATH: "/opt/legion/bin/gh" }],
+      ].map(
+        ([name, environ]) =>
+          [
+            `${name as string}: the environment does not match the image's`,
+            { environ: environ as Record<string, string> },
+            (result: Outcome) => expect(result.probe().env_match).toBe(false),
+          ] as [string, Scenario, (result: Outcome) => void]
+      ),
     ];
     for (const [name, options, extra] of cases) {
       test(`${name}: FAIL`, async () => {
@@ -523,6 +606,69 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
     expectPass(result);
     expectGitNeverRun(result);
     expect(result.github.requests.map((request) => request.repo)).toEqual([O, T]);
+  });
+
+  // The prober runs the image's own `legion` and `gh` by absolute path, with constants of its own
+  // and none of the agent's environment: the agent's code can rewrite its own /proc/<pid>/environ
+  // in place, so nothing read from there may choose a binary, a search path or a credential
+  // directory.
+  describe("the image's own binaries run under the image's own constants", () => {
+    test("a legion and a gh planted first on the agent's PATH are never run: the honest verdict is FAIL", async () => {
+      const planted = join(newWork(), "planted");
+      mkdirSync(planted, { recursive: true });
+      const marker = join(newWork(), "planted-ran");
+      const record = `echo "$0" >>'${marker}'`;
+      // These would make every probe pass: O's token for any repository, and T's name for any read.
+      fakeBin(
+        planted,
+        "legion",
+        `${record}\nprintf 'username=x-access-token\\npassword=${tokenFor(O)}\\n'`
+      );
+      fakeBin(planted, "gh", `${record}\nprintf '${T}'`);
+      const result = await scenario({
+        agentPathPrefix: planted,
+        readOutput: "other/outside",
+        github: answers({ t: advertisement }),
+      });
+      expectVerdictFail(result);
+      expect(existsSync(marker)).toBe(false);
+      expect(result.probe().push_t.status).toBe(200);
+      expect(result.probe().read.output).toBe("other/outside");
+    });
+
+    test("the helper and gh get exactly the image's constants, and nothing of the agent's environment", async () => {
+      const result = await scenario({
+        environ: {
+          GIT_ASKPASS: "/agent/askpass",
+          GIT_SSH_COMMAND: "agent-ssh",
+          SSL_CERT_FILE: "/agent/ca.pem",
+          GH_TOKEN: "agent-token",
+        },
+      });
+      expectPass(result);
+      const legion = recordedCalls(result.legionRecord);
+      expect(legion.args).toEqual(["git-credential get", "git-credential get"]);
+      expect(legion.envs).toEqual([imageEnv(result.root), imageEnv(result.root)]);
+      const gh = recordedCalls(result.ghRecord);
+      expect(gh.args).toEqual([`api repos/${T} --jq .full_name`]);
+      expect(gh.envs).toEqual([imageEnv(result.root)]);
+    });
+
+    test("only the role's proxy variables are passed on, when it has them", async () => {
+      const proxies = {
+        https_proxy: "http://127.0.0.1:9",
+        HTTPS_PROXY: "http://127.0.0.1:9",
+        no_proxy: "internal.example",
+        NO_PROXY: "internal.example",
+      };
+      const result = await scenario({
+        environ: { ...proxies, http_proxy: "http://agent.example" },
+      });
+      expectPass(result);
+      const expected = { ...imageEnv(result.root), ...proxies };
+      expect(recordedCalls(result.legionRecord).envs).toEqual([expected, expected]);
+      expect(recordedCalls(result.ghRecord).envs).toEqual([expected]);
+    });
   });
 
   describe("the worker shim and the agent are found without guessing", () => {
@@ -719,13 +865,10 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
         "--append-system-prompt",
         prompt,
       ];
-      const ownersDirMarker = "/gh/owners-dir-marker-xyz";
+      const environMarker = "/agent/environment-marker-xyz";
       const result = await scenario({
         tree: { agentArgv },
-        environ: {
-          LEGION_GH_OWNERS_DIR: ownersDirMarker,
-          GH_CONFIG_DIR: `${ownersDirMarker}/zeta`,
-        },
+        environ: { GIT_ASKPASS: environMarker },
         github: answers({
           t: {
             status: 403,
@@ -742,7 +885,7 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
           promptMarker,
           instructionMarker,
           resumeMarker,
-          ownersDirMarker,
+          environMarker,
           tokenFor(O),
           tokenFor(T),
           "TOKEN-",
@@ -822,6 +965,14 @@ describe("second-owner: the role's credential, resolved once, with a positive pu
       expect(status).not.toBe(0);
       expect(stderr).toContain(
         "MULTIREPO_PROC_ROOT is set without MULTIREPO_TEST_SEAM=1: this is a test-only seam, never a production input"
+      );
+    });
+
+    test("MULTIREPO_TRUSTED_ROOT without MULTIREPO_TEST_SEAM=1 is refused", async () => {
+      const { status, stderr } = await seamRun({ MULTIREPO_TRUSTED_ROOT: newTrustedRoot() });
+      expect(status).not.toBe(0);
+      expect(stderr).toContain(
+        "MULTIREPO_TRUSTED_ROOT is set without MULTIREPO_TEST_SEAM=1: this is a test-only seam, never a production input"
       );
     });
 

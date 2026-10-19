@@ -1,41 +1,46 @@
-"""Resolve the role's agent process in this pod and run second-owner's credential probes as it.
+"""Resolve the role's agent process in this pod and run second-owner's credential probes.
 
 scripts/e2e/multi-repo-acceptance.sh streams this file to `python3 -I -` over `kubectl exec -i`:
 
-    python3 -I - <proc root> <T repo> <O repo> <O owner> <GitHub base URL>
+    python3 -I - <proc root> <T repo> <O repo> <O owner> <GitHub base URL> <trusted root>
 
 and reads the one JSON object it prints. `-I` (isolated mode: no cwd or user site on sys.path, no
 PYTHON* variables) matters because the exec's working directory is the issue's workspace and its
 HOME is one the agent writes to: a planted `hashlib.py` or `.pth` would otherwise run before this
-file and forge the answer.
-
-`kubectl exec` carries none of a role's own variables (only PATH, HOME and POD_UID); the role's
-LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH and LEGION_WORKSPACE are plain variables its
-own process was started with. So the probes run under exactly that process's /proc/<pid>/environ.
+file and forge the answer. <trusted root> is empty in a pod; a test points it at a directory laid out
+like the image so the prober's absolute paths below resolve to fakes.
 
 Which process is the role's agent: the one child of the one `worker-shim` (own parent PID 1,
-executing the image's root-owned /opt/legion/bin/legion, so a process the agent names or copies
-itself is no shim) whose
-argv equals the shim's own argv after its first `--`, or, when that argv is the install wrapper
-`/bin/sh -c <script> legion-plugins <agent argv...>` (packages/daemon/internal/runtime/sandbox/
-plugins.go, installArgv), the argv after the wrapper's four leading elements, since the wrapper's
-`exec "$@"` replaces its image with the agent. A secrets-broker pod's shim also parents an
-`agent-secrets renew` process and briefly a `codegraph` warm-up, so parentage alone is ambiguous.
+executing the image's root-owned /opt/legion/bin/legion, which rules out a renamed process or a
+copy of the binary) whose argv equals the shim's own argv after its first `--`, or, when that argv
+is the install wrapper `/bin/sh -c <script> legion-plugins <agent argv...>`
+(packages/daemon/internal/runtime/sandbox/plugins.go, installArgv), the argv after the wrapper's
+four leading elements, since the wrapper's `exec "$@"` replaces its image with the agent. A
+secrets-broker pod's shim also parents an `agent-secrets renew` process and briefly a `codegraph`
+warm-up, so parentage alone is ambiguous. The agent's /proc/<pid>/environ is read once, for one
+purpose: to compare what the agent was told (LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR, LEGION_GH_PATH)
+with the values the image fixes; a difference fails the check.
+
+What the prober runs and trusts is the image's, never the agent's. The agent's own code runs in its
+process (the workspace's .omp/extensions, the profile plugins), and a process can rewrite its own
+/proc/<pid>/environ in place, so no executable, search path or credential directory is taken from
+it. `legion git-credential get` and `gh` run by absolute path, root-owned under /opt/legion/bin,
+with PATH, LEGION_GH_OWNERS_DIR (the role's read-only gh Secret projection) and LEGION_GH_PATH set
+to the image's constants and a HOME that does not exist. Only the proxy variables come from the
+role's environment: TLS is verified against the root-owned CA store, so a rewritten proxy can drop a
+request and cannot answer one.
 
 What goes back is facts, never values: the pid, argv[0], the argument count and a sha256 of the
 whole /proc/<pid>/cmdline (the agent runs with `--append-system-prompt <the composed prompt, the
-deployment's own instructions>`), whether LEGION_GH_OWNERS_DIR/GH_CONFIG_DIR name the issue's own
-owner directory, the `gh` read of T, and, for each of O and T, the HTTP status, content type and
-body (never the token) GitHub answers to the receive-pack advertisement request a `git push` opens
-with. A token that can push to a repository gets 200 and the advertisement; one that cannot gets 403.
+deployment's own instructions>`), whether the agent's gh variables are the image's, the `gh` read of
+T, and, for each of O and T, the HTTP status, content type and body (never the token) GitHub answers
+to the receive-pack advertisement request a `git push` opens with. A token that can push to a
+repository gets 200 and the advertisement; one that cannot gets 403.
 
-Nothing the agent can write decides what those two requests report. They are not made by git: git
-reads ~/.netrc and ~/.gitconfig, the repository's own .git/config (which lives wherever the agent's
-uid can write, a temporary directory included), and the GIT_* variables of the role's environment,
-any of which can supply a credential or redirect a URL. The credential comes from the role's own
-`legion git-credential get`, run with a minimal environment (PATH, the gh directories, and a HOME
-that does not exist), and the request is Python's urllib, which reads no netrc and no git config,
-with default TLS verification and only the proxy the role was started with.
+No git runs: git reads ~/.netrc and ~/.gitconfig, the repository's own .git/config and the GIT_*
+variables, any of which can supply a credential or redirect a URL and all of which the agent's uid
+can write. The request is Python's urllib, which reads no netrc and no git config, with default TLS
+verification.
 """
 
 import base64
@@ -49,6 +54,10 @@ import urllib.request
 
 PROBE_TIMEOUT_SECONDS = 120
 LEGION_BINARY = "/opt/legion/bin/legion"
+GH_WRAPPER = "/opt/legion/bin/gh"
+REAL_GH = "/usr/local/bin/gh"
+OWNERS_DIR = "/var/run/legion/gh"
+IMAGE_PATH = ("/opt/legion/bin", "/opt/omp/bin", "/opt/codegraph/bin", "/usr/local/bin", "/usr/bin", "/bin")
 
 
 def fail(message):
@@ -170,17 +179,31 @@ def run(argv, env, stdin=None):
     return {"status": done.returncode, "output": done.stdout.decode("utf-8", "replace").rstrip("\n")}
 
 
-def credential_for(repo, environ):
-    """What the role's own `legion git-credential get` answers for github.com/<repo>: a
-    (username, password) pair, or None and why not. The helper runs with a minimal environment:
-    the gh directories it reads, PATH, and a HOME that does not exist."""
-    helper_env = {"HOME": "/nonexistent"}
-    for name in ("PATH", "LEGION_GH_OWNERS_DIR", "GH_CONFIG_DIR", "LEGION_GH_PATH"):
+def trusted_environment(root, environ):
+    """The environment `legion git-credential` and `gh` run under: the image's own constants, never
+    values read from the agent's environment, which its own code can rewrite in place. Only the
+    proxy comes from the role's environment: TLS is verified against the root-owned CA store, so a
+    rewritten proxy can drop a request and cannot answer one."""
+    env = {
+        "HOME": "/nonexistent",
+        "PATH": ":".join(root + directory for directory in IMAGE_PATH),
+        "LEGION_GH_OWNERS_DIR": root + OWNERS_DIR,
+        "LEGION_GH_PATH": root + REAL_GH,
+    }
+    for name in ("https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
         if name in environ:
-            helper_env[name] = environ[name]
+            env[name] = environ[name]
+    return env
+
+
+def credential_for(root, repo, environ, owner_dir_name):
+    """What the image's own `legion git-credential get` answers for github.com/<repo>: a
+    (username, password) pair, or None and why not."""
+    env = trusted_environment(root, environ)
+    env["GH_CONFIG_DIR"] = env["LEGION_GH_OWNERS_DIR"] + "/" + owner_dir_name
     asked = run(
-        ["legion", "git-credential", "get"],
-        helper_env,
+        [root + LEGION_BINARY, "git-credential", "get"],
+        env,
         stdin=("protocol=https\nhost=github.com\npath=%s\n\n" % repo).encode(),
     )
     answer = dict(
@@ -191,11 +214,11 @@ def credential_for(repo, environ):
     return (answer.get("username", ""), answer["password"]), ""
 
 
-def advertisement_of(base_url, repo, environ):
-    """GitHub's answer to the request a `git push` of <repo> opens with, made with the role's own
-    credential: 200 and the receive-pack advertisement for a token that can push, 403 for one that
-    cannot."""
-    pair, why = credential_for(repo, environ)
+def advertisement_of(root, base_url, repo, environ, o_owner):
+    """GitHub's answer to the request a `git push` of <repo> opens with, made with the credential
+    the image's own helper hands out: 200 and the receive-pack advertisement for a token that can
+    push, 403 for one that cannot."""
+    pair, why = credential_for(root, repo, environ, o_owner)
     if pair is None:
         return {"status": 0, "content_type": "", "output": why}
     username, password = pair
@@ -228,15 +251,24 @@ def advertisement_of(base_url, repo, environ):
 
 
 def main():
-    if len(sys.argv) != 6:
-        fail("usage: as-role.py <proc root> <T repo> <O repo> <O owner> <GitHub base URL>")
-    proc_root, t_repo, o_repo, o_owner, base_url = sys.argv[1:]
+    if len(sys.argv) != 7:
+        fail("usage: as-role.py <proc root> <T repo> <O repo> <O owner> <GitHub base URL> <trusted root>")
+    proc_root, t_repo, o_repo, o_owner, base_url, root = sys.argv[1:]
 
     pid = resolve_agent(proc_root)
     cmdline = read_file(proc_root, pid, "cmdline")
     argv = argv_of(cmdline)
     environ = environment_of(proc_root, pid)
-    owners_dir = environ.get("LEGION_GH_OWNERS_DIR", "")
+
+    # What the agent was told, compared with what the image fixes. A difference fails the check:
+    # either the pod is not the shape the check is about, or the agent rewrote its environment.
+    env_match = (
+        environ.get("LEGION_GH_OWNERS_DIR") == OWNERS_DIR
+        and environ.get("GH_CONFIG_DIR") == OWNERS_DIR + "/" + o_owner
+        and environ.get("LEGION_GH_PATH") == REAL_GH
+    )
+    read_env = trusted_environment(root, environ)
+    read_env["GH_CONFIG_DIR"] = read_env["LEGION_GH_OWNERS_DIR"] + "/" + o_owner
 
     print(
         json.dumps(
@@ -245,11 +277,10 @@ def main():
                 "argv0": os.fsdecode(argv[0]) if argv else "",
                 "argc": len(argv),
                 "sha256": hashlib.sha256(cmdline).hexdigest(),
-                "env_match": owners_dir != ""
-                and environ.get("GH_CONFIG_DIR") == owners_dir + "/" + o_owner,
-                "read": run(["gh", "api", "repos/" + t_repo, "--jq", ".full_name"], environ),
-                "push_o": advertisement_of(base_url, o_repo, environ),
-                "push_t": advertisement_of(base_url, t_repo, environ),
+                "env_match": env_match,
+                "read": run([root + GH_WRAPPER, "api", "repos/" + t_repo, "--jq", ".full_name"], read_env),
+                "push_o": advertisement_of(root, base_url, o_repo, environ, o_owner),
+                "push_t": advertisement_of(root, base_url, t_repo, environ, o_owner),
             }
         )
     )

@@ -116,9 +116,9 @@ func TestAMergerIsToldItsProjectsMergeRules(t *testing.T) {
 }
 
 // A worker's addressing ends naming its issue's repository and default branch, then the project's
-// repositories in the order the daemon serves them. A claim whose issue the workflow does not
-// record (the zero repository) is told neither: the whole sentence is left off, not just the
-// issue's own repository. A recorded issue keeps its repository after a refresh unmaps or refuses
+// repositories in the order the daemon serves them. A daemon that runs no workflow resolves no
+// repository for its claims: the whole sentence is left off, not just the issue's own repository.
+// A recorded issue keeps its repository after a refresh unmaps or refuses
 // every one, so the clause then says the daemon maps none, as the controller's does, and never
 // ends in "are .".
 func TestAWorkersAddressingNamesItsRepositoryAndTheProjects(t *testing.T) {
@@ -177,7 +177,7 @@ func TestAWorkersAddressingNamesItsRepositoryAndTheProjects(t *testing.T) {
 	s.repositories = func() api.RepositoriesView { return view }
 	s.repository = func(context.Context, string) (ghrepo.Repository, string, error) { return ghrepo.Repository{}, "", nil }
 	if got := launch(); strings.Contains(got, "repositories are") || strings.Contains(got, "repository is") {
-		t.Fatalf("addressing of an unrecorded issue = %q, want no repository sentence", got)
+		t.Fatalf("addressing with no repository resolved (a daemon with no workflow) = %q, want no repository sentence", got)
 	}
 }
 

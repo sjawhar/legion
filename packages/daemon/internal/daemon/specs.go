@@ -206,9 +206,9 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
 // the model never hand-encodes one; then, when repo is not the zero repository, the issue's own
 // repository and default branch and the project's repositories (RepositoriesClause) — left off
-// entirely for a claim whose issue the workflow does not record. The clause names the project's
-// mapping as it is now, which may hold none: a recorded issue keeps its repository after a refresh
-// unmaps or refuses it. The daemon posts every READY packet and publishes it to
+// entirely for a daemon that runs no workflow, whose claims name no repository. The clause names
+// the project's mapping as it is now, which may hold none: a recorded issue keeps its repository
+// after a refresh unmaps or refuses it. The daemon posts every READY packet and publishes it to
 // `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready). It is exported for the rigs
 // under packages/pi-legion/scripts, which tell a worker what a pane is told.
 func AddressingFragment(project string, c supervise.Claim, repo ghrepo.Repository, defaultBranch string, repositories api.RepositoriesView) (string, error) {

@@ -516,12 +516,23 @@ resolve_github_url() {
   printf '%s' https://github.com
 }
 
-# as_role_probe <pod> <container> <proc root> <github url> runs lib/as-role.py in the role's
-# container with that file as stdin, and prints its JSON object.
+# resolve_trusted_root prints the directory the image's absolute paths (/opt/legion/bin/legion,
+# /opt/legion/bin/gh, /usr/local/bin/gh, /var/run/legion/gh) resolve under in as-role.py: empty in a
+# pod; a test lays out fakes under MULTIREPO_TRUSTED_ROOT (refused without MULTIREPO_TEST_SEAM=1).
+resolve_trusted_root() {
+  if [ -n "${MULTIREPO_TRUSTED_ROOT:-}" ]; then
+    [ "${MULTIREPO_TEST_SEAM:-}" = 1 ] ||
+      fail "MULTIREPO_TRUSTED_ROOT is set without MULTIREPO_TEST_SEAM=1: this is a test-only seam, never a production input"
+    printf '%s' "$MULTIREPO_TRUSTED_ROOT"
+  fi
+}
+
+# as_role_probe <pod> <container> <proc root> <github url> <trusted root> runs lib/as-role.py in the
+# role's container with that file as stdin, and prints its JSON object.
 as_role_probe() {
-  local pod=$1 container=$2 proc_root=$3 github_url=$4
+  local pod=$1 container=$2 proc_root=$3 github_url=$4 trusted_root=$5
   kubectl exec -i "$pod" -c "$container" -- python3 -I - \
-    "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$github_url" <"$as_role_script"
+    "$proc_root" "$LEGION_E2E_REPO_T" "$LEGION_E2E_REPO_O" "$o_owner" "$github_url" "$trusted_root" <"$as_role_script"
 }
 
 # second-owner <O child KEY> <pod> [container]: its pull request is in O (structurally,
@@ -529,14 +540,18 @@ as_role_probe() {
 # daemon's `done` phase is accepted only beside `production_check`, never alone, since the phase is
 # not merge proof by itself); the pod is bound to the issue by its legion.dev/issue label, as
 # `cache` binds it. The credential evidence is lib/as-role.py's, run once under one resolved agent
-# process: the role's own LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR name the issue's owner directory;
-# `gh api repos/<T> --jq .full_name` reads T and says T; and GitHub's answer, with the credential
-# the role's own `legion git-credential` hands out, to the request a `git push` opens with
-# (`GET <repo>.git/info/refs?service=git-receive-pack`): for O, 200 and a receive-pack
+# process: the agent's LEGION_GH_OWNERS_DIR, GH_CONFIG_DIR and LEGION_GH_PATH are the image's own
+# (a difference fails: the pod is not the shape this check is about, or the agent rewrote its
+# environment); `gh api repos/<T> --jq .full_name` reads T and says T; and GitHub's answer, with the
+# credential the image's own `legion git-credential` hands out, to the request a `git push` opens
+# with (`GET <repo>.git/info/refs?service=git-receive-pack`): for O, 200 and a receive-pack
 # advertisement (the positive control: the network, the helper and the token are sound); for T, 403
-# with GitHub's own refusal body, never merely a failure, which an unreachable network or an
-# unanswered helper would also give. No git runs: git reads ~/.netrc, config files and a scratch
-# repository, every one of which the agent's uid can write while the check runs.
+# with GitHub's own whole-body refusal. That proves the credential the helper hands out for T
+# cannot push T, which is the property; it is not a failure of some other kind, which an
+# unreachable network or an unanswered helper would also give. The prober runs no git (git reads
+# ~/.netrc, config files and the GIT_* variables, all of which the agent's uid can write) and takes
+# no executable, search path or credential directory from the agent's environment, which its own
+# code can rewrite in place: see the prober's header.
 second_owner() {
   local child=$1 pod=$2 container=${3:-implementer} pr_repo pr_number phase merged ok=1
   command -v kubectl >/dev/null || fail "second-owner: kubectl is required and is not on PATH"
@@ -558,12 +573,13 @@ second_owner() {
   fi
   [ "$merged" = true ] || ok=0
 
-  local proc_root github_url probe_file
+  local proc_root github_url trusted_root probe_file
   proc_root=$(resolve_proc_root)
   github_url=$(resolve_github_url)
+  trusted_root=$(resolve_trusted_root)
   probe_file="$MULTIREPO_EVIDENCE_DIR/second-owner-probe.raw"
   raw_fetch "$probe_file" "second-owner: the credential probes in $pod ($container)" \
-    as_role_probe "$pod" "$container" "$proc_root" "$github_url"
+    as_role_probe "$pod" "$container" "$proc_root" "$github_url" "$trusted_root"
   jq -e '
     (.pid | type == "string") and (.argv0 | type == "string") and (.argc | type == "number")
     and (.sha256 | type == "string") and (.env_match | type == "boolean")
