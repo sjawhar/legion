@@ -867,9 +867,11 @@ function innerRefProblem(
   if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message") return undefined;
   if (tool === "dispatch_read" || tool === "dispatch_ask") return undefined;
   const owner = refOwnerName(ref);
+  // suggest and doc-edit act on a document, so naming an issue alone would be refused in turn.
+  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
   const ownerArguments =
     ref.owner.kind === "issue"
-      ? `issue ${ref.owner.issue}`
+      ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}`
       : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix =
     tool === "dispatch_comment" && ref.kind === "ask"

@@ -560,6 +560,16 @@ describe("executeDispatchTool", () => {
     expect(await problemsOf("dispatch_doc_read", { ref: documentAsk })).toEqual([
       `ref ${documentAsk} names an ask on CORE/runbook-md; dispatch doc-read would act on CORE/runbook-md and drop the ask: read it with dispatch read, or name CORE/runbook-md with project CORE and artifact runbook-md`,
     ]);
+    // suggest and doc-edit act on a document, so an issue-owned link's hint names one.
+    expect(
+      await problemsOf("dispatch_suggest", {
+        ref: ask,
+        quote: "old line",
+        replace_with: "new line",
+      })
+    ).toEqual([
+      `ref ${ask} names an ask on DSP-42; dispatch suggest would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42 and artifact <the document's slug>`,
+    ]);
   });
 
   test("names every bad option element and the unknown field in one refusal", async () => {
