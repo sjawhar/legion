@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
+  `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the end of any
+  output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
+
 ### Changed
 
+- The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions an
+  Oh My Pi session keeps; OpenCode holds none, so the tools behave as before.
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
   `$OPENCODE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and

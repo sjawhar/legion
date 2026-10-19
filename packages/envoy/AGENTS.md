@@ -840,6 +840,21 @@ one in the second answers `200` with `lost: true` (`null` when no verdict was re
 That path stamps no block ids, because `EnsureBlockIDs` would also repair a repeat the live
 document carries, which is settlement's to repair and a write's to leave as it found it.
 
+A block's new text is written as one span of its old text replaced, the characters between the two
+texts' shared prefix and suffix (`pmdoc.simpleDiff`), with its index and length counted in the UTF-16
+units Yjs counts in (`units16`). The span is of whole characters, so an emoji that shares one half
+of its UTF-16 pair with the one it replaces (U+1F4CA and U+1F4CB share a high surrogate) is replaced
+whole; a span placed by comparing units would begin or end inside a pair, and ygo would store each
+half as U+FFFD. Every writer that rewrites a block's text goes through it: an edit (`POST
+/api/v1/artifacts/{id}/edits`), an uploaded new version of a live document (`docs.ReplaceText`), an
+accepted or rejected suggestion (`applySuggestion`) and an ask edit (`SetAskBlockText`). Since
+`BlocksGainingText` reads the same span, a replacement whose old and new characters shared a
+surrogate now counts as writing text (its span inserts the new character), where a span cut inside
+the pair could insert nothing, so the lost-edit check above covers it. A splice cuts a text node only
+where a range's edge falls between characters: `slice16` answers an edge inside a pair with an error
+of the package's own (a `500`, never the `ErrSchema` verdict on the write), and a quote's ambiguity
+context rounds outward to whole characters (`context16`).
+
 Accepting a suggestion (`POST /api/v1/comments/{id}/accept`, `docs/marks.go` `applySuggestion`)
 splices its `replace_with`, which unlike an edit's `with` may be blocks, with ProseMirror's range
 fitting (`pmdoc.Splice`). A non-empty replacement fitted into a typed block stays inside it, and a
@@ -1285,8 +1300,12 @@ reparent moved in between releases the attempt's locks (a savepoint) and is lock
 order, and one that moves at both attempts is `409 PARENT_CONTENDED`, with nothing applied. The
 bounded dependency walk uses plain
 reads rather than contending on unrelated issue rows. Status-only, title, labels and rank writes
-take no dependency lock. Creation takes it only with non-empty `blocked_by`, before allocating
-the issue number or rank; creation without blockers takes no explicit parent-row lock.
+take no dependency lock. Creation takes it with non-empty `blocked_by` or a `parent`, before
+allocating the issue number or rank; creation without either takes no dependency lock, and no
+creation takes an explicit parent-row lock. An issue sits at most `parentDepthCap` (32) links
+below its root: a create under a parent, or a reparent whose subtree's deepest issue would sit
+deeper, is `409 PARENT_INPUT` (`refuseParentTooDeep`, under the dependency lock, so two writes
+cannot each pass alone and together pass it), and every recursive issue walk stops at that depth.
 `blocked_by` inputs are limited to
 `contracts.MaxIssueBlockers` entries before deduplication on both create and PATCH; excess
 entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue-row lock is acquired, and a
@@ -1770,10 +1789,10 @@ from and that ask's document.
 - `packages/contracts` defines the TypeScript event schemas consumed by Dispatch clients. The Go Dispatch server maintains its emitted event names and wire payloads separately; `bun run gen:go` generates Envoy envelope validation only.
 - `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more; alone it pages `contracts.DefaultIssuePageLimit`, 50): `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it. `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter; so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406: the route ignored all three and answered every row). The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match. The order ends on the key, the one column no two issues share: nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still. A walk of the pages is exact only on an unchanged listing: an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never. The unpaged array is the only exact set one read gives. The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page. So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal; the SPA and both daemons send neither parameter and keep reading the array.
 - Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project; it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
-- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes take the project's dependency advisory lock, serializing with blocker writes, and then lock the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, a reopening `status` — any status but `done` — and an `external_links` write that adds no new URL, so a link can move to the issue that replaced it; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
+- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`) and leaves the new issue at most `parentDepthCap` (32) links below its root (`409 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes, and creates with a parent, take the project's dependency advisory lock, serializing with blocker writes; a parent change then locks the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), a parent that would put the deepest issue under the moved one more than 32 links below its root (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, a reopening `status` — any status but `done` — and an `external_links` write that adds no new URL, so a link can move to the issue that replaced it; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `model.CanonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
 - Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, repo, resolved_repo, claim, previous_claim?, reason}` (`repo` and `resolved_repo` as on every issue event); the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
-- Every issue has a nullable `repo`: its own repository, `owner/name` (`issues.repo`, migration `0113`), which must be a mapping of its project — the composite foreign key `issues_repo_mapped_to_project` to `repo_projects (repo, project)` makes that a database invariant. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` take it (`api/issue_repo.go`: absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is; not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits; a closed issue refuses it, `409 ISSUE_CLOSED`). Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoLateral`: the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null. A mapping's `PUT` takes `default` and moves the project's default in one transaction; a mapping that issues name is neither deleted nor moved to another project (`409 REPO_PROJECT_IN_USE`, counted under the mapping's row lock); and a moved mapping emits `settings.repo_project.updated` on the project it left (`deleted: true`) as well as the one it joined.
+- Every issue has a nullable `repo`: its own repository, `owner/name` (`issues.repo`, migration `0113`), which must be a mapping of its project; the composite foreign key `issues_repo_mapped_to_project` to `repo_projects (repo, project)` makes that a database invariant. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` take it (`api/issue_repo.go`: absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is; not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits; a closed issue refuses it, `409 ISSUE_CLOSED`). Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoLateral`: the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null. The walk keeps a depth counter and stops at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 steps per issue; a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default. An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop: its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running). Only this release's API holds the cap after that, under the project's dependency lock; nothing in the database does. So no server of the earlier release may serve once `0113` applies, whether left serving or started again by a rollback: stop it, or scale it to zero, before this release boots (a Recreate rollout, never a rolling one), and recover a failed deploy forward (`cmd/dispatch/README.md`, "Database migrations"; the auto-deployer refuses such a rollback, `deploy/README.md`). A chain built anyway, by an earlier release or by direct SQL, fails every read of its issues (500). The API repairs an acyclic one: `PATCH` an ancestor that still reads (its `GET` answers 200) with `{"parent": null}`. The `PATCH` reads the issue it changes first (`issue_patch.go`), so a parent loop none of whose members reads, which only direct SQL can write, needs a database repair (`update issues set parent_key = null` on one member). A mapping's `PUT` takes `default` and moves the project's default in one transaction; a mapping that issues name is neither deleted nor moved to another project (`409 REPO_PROJECT_IN_USE`, counted under the mapping's row lock); and a moved mapping emits `settings.repo_project.updated` on the project it left (`deleted: true`) as well as the one it joined. Every writer of a mapping, the `PUT`, the `DELETE` and the boot seed of `DISPATCH_REPO_PROJECTS` (`api.SeedRepoProjects`), takes `lockRepoProjectWrite`'s locks in one order: an advisory lock on the repository, the event owners of every project it touches, then the row. So two writes to one repository serialize, even while it has no row yet, and the seed's own additions are announced like any other.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`), and `answers`, every user-authored answer read back from `ask.answered` events oldest first, with settlement's restoration of the same `answer.at` collapsed. A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask. The answerer changes an answered question with `expected_answer_at` naming the current answer's `at`: a stale value or an open ask is `409 ASK_ANSWER_CHANGED`, another person is `403 NOT_ANSWERER`, and an approval is `409 ASK_APPROVAL_REVIEW`. The change appends another `ask.answered` whose payload adds `previous_answer`, so its asker and followers receive it through the first answer's route. `GET /api/v1/me/answers` lists the caller's answer events and ask replies, newest first, through migration 0082's partial indexes.
 - Every document version or transactional live mutation refreshes each open anchored ask and comment from the current tree, once per tree: a version written in the transaction whose own live mutation produced that tree inherits that mutation's refresh rather than repeating it, and a version with no live mutation of its own - settlement, a standalone named version - refreshes for itself. A changed persisted anchor emits its own full `ask.anchor_refreshed` or `comment.anchor_refreshed` event in that same transaction; an unchanged row emits none. Refresh events are retained and sequenced on the row's owner topic but never notify or author/follower-route a session: the mutation is a side effect, not an interaction addressed to someone. The refresh writes only the two fields it owns, the quote and the orphan flag, never the whole `anchor` column: it reads every open row up front and writes each one back after the lookups and event appends the rows before it cost, so a whole-column write would erase what another writer put in that anchor in between - the block id `BackfillAnchorBlocks` pins (LEGION-149).
@@ -1858,6 +1877,17 @@ The deployed server's `DISPATCH_SERVER_URL` is separate: it overrides the merged
 Every `/v1` request with a body must set `Content-Type: application/json`; parameters such as
 `charset=utf-8` are accepted, and every other type receives a JSON 415 error. Webhook routes
 keep their own signature and content handling.
+
+A listener with no bearer configured (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1`
+only to a request whose `Host` names it: `localhost`, a loopback address (`127.0.0.0/8`,
+`::1`) or one of `ENVOY_ALLOWED_HOSTS`, comma-separated names or addresses with no port. The
+`Host` is compared with its port stripped, its IPv6 brackets off, case folded and one trailing dot
+dropped, and any other `Host`, an empty one included, receives a JSON 421 naming it and
+`ENVOY_ALLOWED_HOSTS`, logged `listener: request for a host it does not serve`. That keeps a page
+that rebinds its own name to an address reaching the listener (a loopback port, or a forward such
+as a tailnet one) from using its bearer-free API. A listener that requires a bearer checks no
+`Host`, since such a page holds no bearer. The boot log's `listener API hosts:` line names what is
+served. `/healthz`, `/metrics` and the webhook routes are served to any `Host`.
 
 | Endpoint | Method | Contract |
 | --- | --- | --- |
@@ -2156,8 +2186,8 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
-Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in the
+broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
 revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
@@ -2250,27 +2280,51 @@ secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
 credential; `internal/broker/machine` decides typed-code machine logins, logs services in with
 their Kubernetes tokens, and mints the launcher credentials both issue; and
-`internal/broker/secrets` reads the granted value from AWS Secrets
-Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
+`internal/broker/secrets` is the secret store: `secrets.Store`, the one interface the policy lists
+and describes agent secrets through and a grant's value is read through (`List`, `Describe`,
+`Read`, `ValidName`), with `secrets.AWS` over AWS Secrets Manager and KMS, `secrets.GCP` over
+Google Cloud Secret Manager, and, for local development, `secrets.Local`, an in-memory stand-in
+for the AWS calls.
 
-`internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
-`Set.Evaluate` decides each requested name from the secret's `owner` and `tier` tags alone. What
+`internal/broker/policy` reads the policy from the secret store (`policy.Loader` over a
+`secrets.Store`), and `Set.Evaluate` decides each requested name from the secret's `owner` and
+`tier` tags alone (Secret Manager: annotations, since a label's value cannot hold an email). What
 the tags mean, the evaluation table and whose session counts as an owner's own are the docs site's
 concepts page (`docs/site/src/content/docs/broker/concepts.md`, "Owner and tier"); the IAM the
 broker needs, its log lines and every refusal reason are the operate page beside it
 (`operate.md`); the refresh interval and `BROKER_FAKE_SECRETS_FILE`'s format are the generated
 configuration reference (the comments on `config.Config` and in `cmd/broker/main.go`). What the
-code relies on: `Load` lists with `ListSecrets`' `name` filter, a case-sensitive prefix match, on
-`BROKER_SECRETS_PREFIX` and keeps only the names `strings.CutPrefix` finds under it, so a lister
-that answers more serves and logs nothing outside the namespace (`secrets.Local` filters as Secrets
-Manager does); a name under the prefix maps one-to-one to a request name (`slugPattern`); an alias
-on a secret's `KmsKeyId` is resolved through `kms:ListAliases` lazily, at most once per load;
-whether a secret has a value is read from the same listing's `SecretVersionsToStages` (a version
-labelled `AWSCURRENT`, the one `GetSecretValue` reads), with no call per secret, and checked after
-every other reason, so a secret refused for a tag or its key is logged for that (`secrets.Local`
-gives a secret created without a value no version, as Secrets Manager does); and
+code relies on: `Load` calls `Store.List` on `BROKER_SECRETS_PREFIX` and keeps only the names
+`strings.CutPrefix` finds under it, so a lister that answers more serves and logs nothing outside
+the namespace (`secrets.AWS` lists with `ListSecrets`' `name` filter, a case-sensitive prefix
+match, which `secrets.Local` reproduces; `secrets.GCP` with `ListSecrets`' `name:<id prefix>`
+filter, a case-insensitive substring match, then drops every listed name that does not start with
+the prefix byte for byte before any call for it); a name under the prefix
+maps one-to-one to a request name (`slugPattern`); each store answers one `secrets.Listing` per
+secret with `OnKey`, a function the policy calls only after every name and tag check, so a secret
+refused for those costs no key lookup (AWS: the secret's `KmsKeyId`, an alias on it resolved
+through `kms:ListAliases` at most once per `List` or `Describe`, and a failed lookup fails the
+load; GCP: the latest version's
+`kms_key_version_name`, or the replication policy's key for a secret with no version, already read),
+`HasCurrentValue` (AWS: a version labelled `AWSCURRENT` in the same listing's
+`SecretVersionsToStages`, with no call per secret; GCP: `versions/latest` is `ENABLED`, one
+`GetSecretVersion` per listed secret); a secret scheduled for deletion (AWS `DeletedDate`, GCP
+`expire_time`) is one the store does not hold, left out of `List` and `ErrNotFound` from
+`Describe` and `Read`; and the
+value check comes after every other reason, so a secret refused for a tag or its key is logged for
+that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
 an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
-`cmd/broker` fills with `BROKER_SERVICES`' names. A session's `policy.Requester.Service` is the
+`cmd/broker` fills with `BROKER_SERVICES`' names; and `Loader.secretName` asks `Store.ValidName`
+whether a name can exist in the store at all (Secrets Manager's 512-character limit; Secret
+Manager's 255-character `[A-Za-z0-9_-]` id), so no lookup is made for one that cannot.
+`secrets.GCP` counts against Secret Manager's 600-a-minute per-project read quota for every call but
+`AccessSecretVersion` (`TestGCPReadQuotaCost` pins a `List` at 1+N, a `Describe` at 2, a `Read` at 1), so
+`Current.RefreshOne` anchors a reread only when it changed the live answer, and `NewGCPClient` retries
+`UNAVAILABLE` (not `RESOURCE_EXHAUSTED`) on `ListSecrets`, `GetSecret` and `GetSecretVersion`.
+`secrets.GCP` opens Secret Manager under Application Default Credentials (`NewGCPClient`: on GKE,
+Workload Identity for the pod's ServiceAccount, no key file), with the client library's logger
+off, since at debug it prints response bodies, a value among them, and logs a failed call's gRPC
+status code alone, never its message, which can quote a request. A session's `policy.Requester.Service` is the
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
@@ -2282,49 +2336,68 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and ARN, is recorded on every request, and a
+SHA-256 of every served secret's name, owner, tier and source (its ARN, or its Secret Manager
+resource name: `policy.Secret.Source`), is recorded on every request, and a
 live grant is re-checked once it has moved, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
 by slug (not by request name, which orders `A0` and `A_B` the other way), for a full load and a
 single-name merge alike, so an unchanged namespace keeps its version (`TestGoldenDigest` pins the
-bytes). `Loader.LoadOne` reads one name with `DescribeSecret` under the same rules and the same
-refusal line, and
+bytes). `Loader.LoadOne` reads one name with `Store.Describe` (`DescribeSecret`, or `GetSecret` and
+`GetSecretVersion`) under the same rules and the same refusal line, and
 `Current.RefreshOne` merges it into the live set; `Refresh` and `RefreshOne` hold one writer lock
 from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
 so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's
 deadline, and each ticker reload is given the refresh interval before it fails. Each full reload
-that begins (its clock read before its listing is fetched) within five minutes of an anchor
-(`listLag`, how far AWS documents `ListSecrets` may lag) reads that name again alone, so a lagging
+that begins (its clock read before its listing is fetched) within the store's `ListLag` of an anchor
+(five minutes for `secrets.AWS`, how far AWS documents `ListSecrets` may lag; six hours for
+`secrets.GCP`, the bound Google documents for Secret Manager's eventually consistent metadata) reads that name again alone, so a lagging
 listing neither drops a secret the reread served nor brings back one it found gone; a name is
-anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
-the answer differed from what the live set held, so a change no reread caught (a console delete, a
-tag that now refuses the secret) is kept for `listLag` from the reload that caught it rather than
-flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
-a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
-invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no
-secret under the prefix can carry - not `namePattern`'s form, or one whose name under the prefix
-would pass Secrets Manager's 512-character limit - is `policy.ErrNameInvalid` before any AWS call,
+anchored by a reread or a reload's own re-describe that found the answer differed from what the
+live set held, so a change no reread caught (a console delete, a
+tag that now refuses the secret) is kept for `ListLag` from the reload that caught it rather than
+flipping back when the first anchor runs out. `RefreshOne` keeps no record of a reread that matched
+the live set (a name it already served as found, or an absent name it did not serve): that changed
+nothing, and anyone can ask for a reread, so each would otherwise cost every reload in `ListLag` a
+describe under the lock. A name no
+secret under the prefix can carry - not `namePattern`'s form, or one the store's `ValidName`
+refuses - is `policy.ErrNameInvalid` before any store call,
 before the writer lock and before a miss-path reread token (`Loader.secretName`, which
 `Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
 `POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
 `RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
-answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
+answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,
+the key ARN with its region and account (`secrets.AWSKeyARNParts`) or the Cloud KMS key name with the
+project number (`secrets.GCPProject`), the other store's fields omitted.
 
 `agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
-its AWS side in `secret_aws.go`) is the person's side of that reread. Each form reads the broker's
-settings from `AGENT_SECRETS_URL`, loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`,
-else the SDK's default chain) pinned to the key's region, and calls Secrets Manager itself, so IAM
-in that account, not the broker, decides what the person may read or write; it needs no session
-identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
-account than the key's, naming both (`requireAccount`, so a read never lists another account's
-secrets as if they were the agent secrets), and a write also refuses any ARN but
-`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
-in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
-before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
+its AWS side in `secret_aws.go`, its GCP side in `secret_gcp.go`) is the person's side of that
+reread. Each form reads the broker's settings from `AGENT_SECRETS_URL`, whose `store` field
+(`aws-secrets-manager` or absent, `gcp-secret-manager`) chooses the backend
+(`openSecretBackend`), both behind one `secretBackend` interface the forms call through. AWS:
+loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`, else the SDK's default chain)
+pinned to the key's region, and calls Secrets Manager itself, so IAM in that account, not the
+broker, decides what the person may read or write; it needs no session identity. `GetCallerIdentity`
+runs before anything else: every form refuses a sign-in in another account than the key's, naming
+both (`requireAccount`, so a read never lists another account's secrets as if they were the agent
+secrets), and a write also refuses any ARN but `assumed-role/AWSReservedSSO_*/<session>` in that
+account (`requireWriteSignIn`, naming the ARN, in any AWS partition). `--owner me` is that session
+name lowercased; create and retag refuse it before writing unless it matches the broker's email
+rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
+(`gcloud auth application-default login`) and calls Secret Manager itself under
+`cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
+write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
+`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
+the API itself rather than silently reading another project's secrets - the hazard AWS's
+`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
+A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
+service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
+JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
+the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
+lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2417,24 +2490,37 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-`create` writes on the settings' key with both tags
+AWS `create` writes on the settings' key with both tags
 and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
 one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
 secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
-recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. Every write is
+recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
+the secret with automatic replication under the broker's `kms_key_name` and both tags as
+annotations (owner and tier are annotations, never labels, so they carry no GCP label naming
+rules), then adds the value as its first version; `set` adds a version to a secret already held;
+`retag` sends both annotations in one `UpdateSecret` (field mask `annotations`), so a partial
+update can never leave one stale; `delete` sets `expire_time` to now plus 30 days in one
+`UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
+way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
+deletes them for good once it passes, with no further restore - and `restore` clears `expire_time`
+(same field mask, no value) to undo it. Every write is
 followed by the broker's reread of that name (`rereadAfter`): exit 0 when it serves the secret, or
 no longer serves it after a delete; 1 when its answer contradicts the write (a refusal names its
 reason); and 1 when the broker cannot be asked (an unreachable broker, `429 RATE_LIMITED`), saying
-the write stands and is served only from the next reload. `list` (`ListSecrets` with
-`IncludePlannedDeletion`) and `show` never print a
-value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
-plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
-and neither call answers the window it chose: a reader told that date never waits past the purge.
-`earliestPurge` is the one place `DeletedDate` is read. The forms' unit tests run in-process
-against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secret_e2e_test.go`
-runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
+the write stands and is served only from the next reload. `list` (AWS `ListSecrets` with
+`IncludePlannedDeletion`, GCP `ListSecrets` filtered in Go to the prefix) and `show` never print a
+value; for a secret scheduled for deletion they print its deletion moment and, AWS only,
+`earliestPurge` - `DeletedDate` plus 7 days, Secrets Manager's shortest recovery window, since
+`DeletedDate` is when the delete ran and neither call answers the window it chose: a reader told
+that date never waits past the purge (`earliestPurge` is the one place `DeletedDate` is read).
+GCP's deletion moment is `expire_time` itself, the exact purge moment, so `show` and `list` print
+only it, with no separate earliest-purge line. The forms' unit tests run in-process against
+`secrets.Local` and a fake STS and broker (`secret_test.go`) for AWS, and against a fake Secret
+Manager gRPC server and fake Application Default Credentials (`secret_gcp_test.go`) for GCP; AWS's
+`secret_e2e_test.go` runs create, delete, restore and retag against `brokertest.NewRig`'s real
+broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
@@ -2585,8 +2671,15 @@ imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new c
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
-`BROKER_SECRETS_PREFIX` (required; the namespace, a Secrets Manager name prefix ending in `/`),
-`BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
+`BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
+which store the secrets live in, deciding the prefix's form and which key variable is read),
+`BROKER_SECRETS_PREFIX` (required; the namespace: a Secrets Manager name prefix ending in `/`, or
+a Secret Manager one, `projects/<project number>/secrets/<id prefix>-`, the project by its number
+since the API answers resource names with it), `BROKER_SECRETS_KMS_KEY_ARN` (required with the AWS
+store, refused with the GCP one; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
+`BROKER_SECRETS_KMS_KEY_NAME` (required with the GCP store, refused with the AWS one; the
+agent-secrets key's resource name in the `global` location, the only one automatic replication
+takes),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
 entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
 to one name, never a namespace's `default` account (every pod there that names no account runs as
@@ -2628,14 +2721,18 @@ literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
-absolute URL with no path; a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or
-holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed
-elsewhere, and a bare key id names no account); exactly one of
+absolute URL with no path; a `BROKER_SECRETS_STORE` that is neither store's name; with the AWS
+store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or holds white space,
+and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
+bare key id names no account); with the GCP store, a prefix not of its form (a project id in place
+of the number among them) and a key name outside `global`; the other store's key variable set; exactly one of
 `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
-else `method=password`), and reads one thing `config.Load` does not:
+else `method=password`), then which store it built and under what (`secret store store=<store>
+credentials=aws-sdk|application-default|fake secrets file`; the AWS config is loaded only for the
+AWS store or an RDS-form database URL), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
 
@@ -2856,7 +2953,8 @@ cancelled with no cancelled event on its record, the shape an ended enrollment's
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
 `anyone`) for every approver. `Values` releases a
-live grant's values, each read from the secret its request froze (the ARN), re-checking the
+live grant's values, each read from the secret its request froze (its source: the ARN, or the
+Secret Manager resource name), re-checking the
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
 since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
 not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
@@ -2869,7 +2967,7 @@ withheld from the session that its request got automatically is judged as an app
 let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
-(`secrets.AWS.Read` reads both as `ErrNotFound`, and `secrets.Local` answers each as it does).
+(`secrets.AWS.Read` reads both as `ErrNotFound`, `secrets.GCP.Read` reads `NOT_FOUND` and a disabled or destroyed latest version's `FAILED_PRECONDITION` the same way, and `secrets.Local` answers each as it does).
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
@@ -2916,7 +3014,7 @@ its launcher revoked, or a machine login or grant its operator ended through `/v
 `RevokeByApprover` take theirs from their caller, and record it on every row they write
 (`grants.revoked_by`, a cancelled request's `decided_by` and event, each audit row). The granted
 value itself is read fresh from
-`secrets.Reader` on release and never persisted.
+the `secrets.Store` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`

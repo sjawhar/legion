@@ -93,7 +93,7 @@ The documentation's getting-started pages cover each part:
   message each other. [Running the listener](https://sjawhar.github.io/legion/dispatch/envoy/#running-the-listener)
   lists its settings and health checks.
 - **Legion.** [Running Legion](https://sjawhar.github.io/legion/legion/running-legion/) is the
-  operator's guide: the cluster, the two GitHub Apps, `legion.yaml` and the model route.
+  operator's guide: the cluster, the GitHub Apps, `legion.yaml` and the model route.
   [Using Legion](https://sjawhar.github.io/legion/legion/using-legion/) covers handing it an issue.
   The `legion` CLI ships on each `legion-v*` [release](https://github.com/sjawhar/legion/releases) as
   `legion-<os>-<arch>.tar.gz` for Linux and macOS, and the worker image carries the same binary at

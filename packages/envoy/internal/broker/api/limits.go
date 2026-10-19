@@ -50,6 +50,11 @@ var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
 // below what would keep the lock busy.
 var DefaultRereadOverallLimit = ratelimit.Limit{Every: 250 * time.Millisecond, Burst: 10}
 
+// GCPRereadOverallLimit is DefaultRereadOverallLimit for the Google Secret Manager store, where a
+// reread costs two reads against the 600-a-minute metadata quota the whole project shares: one a
+// second, burst ten, so the public route alone can spend at most 120 of them a minute.
+var GCPRereadOverallLimit = ratelimit.Limit{Every: time.Second, Burst: 10}
+
 type launcherLimiter struct {
 	perAddress, perLogin *ratelimit.Keyed
 	// trustedProxyHeader is BROKER_TRUSTED_PROXY_HEADER: empty means every caller reaches the

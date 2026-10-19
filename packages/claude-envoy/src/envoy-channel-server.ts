@@ -18,6 +18,7 @@ import {
   sessionDispatchSettings,
   sessionSettings,
 } from "@legion/envoy-client/session-settings"
+import { postSlackReply } from "@legion/envoy-client/slack-post"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -828,6 +829,15 @@ export async function executeEnvoyTool(
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input)
       return runtime.session.delivery.inbox()
+    case EnvoyToolOperation.slackPost: {
+      const args = parseArguments(spec, input)
+      const posted = await postSlackReply({
+        channel: args.channel,
+        threadTs: args.thread_ts,
+        text: args.text,
+      })
+      return { channel: posted.channel, thread_ts: posted.threadTs, ts: posted.ts }
+    }
   }
 }
 

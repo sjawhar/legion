@@ -73,7 +73,7 @@ const setRepositoryHint = "the issue header's Repository picker, or dispatch iss
 // RefuseRecording says on the Dispatch issue key why Legion did not record it: its repository,
 // resolved, resolves to none or to one Legion does not serve (refused). It says it once per
 // resolution (record.RepoNote), so a repeated event of the issue says nothing again, and reports
-// whether it said it now. A child's refusal is also told to its tree's architect (enterChild).
+// whether it said it now. A child's refusal is also told to its tree's architect (refuseChild).
 func (e *Engine) RefuseRecording(ctx context.Context, tx pgx.Tx, key, resolved string, refused Resolution) (bool, error) {
 	note := "Legion did not admit this issue: " + refused.Refusal + ". Set its repository (" + setRepositoryHint + ") and move it to todo again."
 	if refused.LeftOut {

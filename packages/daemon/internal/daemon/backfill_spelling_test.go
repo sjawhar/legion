@@ -108,3 +108,68 @@ func TestTheBackfillRefusesTwoClonesOfOneRepository(t *testing.T) {
 		t.Fatalf("backfill = %v, want %q", err, want)
 	}
 }
+
+// A repository GitHub renamed (acme/old, which GitHub answers with a 301 to acme/new) while
+// Dispatch still resolves an issue to its old name: with no shared clone the record takes GitHub's
+// new name; a shared clone under the old name, which the workspace would keep, refuses the boot
+// naming what fixes it; and a record already on the old name with no GitHub spelling, which no
+// later boot can rename, refuses the boot naming why.
+func TestTheBackfillOfARepositoryGitHubRenamedNamesTheFix(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/old": "301 acme/new", "acme/new": "acme/new@main"})
+	client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-1", ResolvedRepo: "acme/old"}}}
+	seed := func(t *testing.T, repo, branch string) (*workflowRuntime, string) {
+		t.Helper()
+		pool := isolatedOutboxPool(t)
+		if _, err := pool.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, repo, default_branch)
+			values ('LEGION-1', 'LEGION-1', 'LEGION', 'root', 'implementing', 1, 'in_progress', 'A', 1, $1, $2)`, repo, branch); err != nil {
+			t.Fatal(err)
+		}
+		return &workflowRuntime{pool: pool, records: record.NewStore(), log: quietLogger(),
+			defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}, t.TempDir()
+	}
+	backfill := func(w *workflowRuntime, state string) error {
+		return backfillRepositories(ctx, w.pool, w.records, client, "LEGION", state, w.defaultBranches, quietLogger())
+	}
+
+	t.Run("no shared clone", func(t *testing.T) {
+		w, state := seed(t, "", "")
+		if err := backfill(w, state); err != nil {
+			t.Fatal(err)
+		}
+		if got := recordedIssue(t, w, "LEGION-1"); got.Repo != "acme/new" || got.DefaultBranch != "main" || got.GitHubRepo != "acme/new" {
+			t.Fatalf("LEGION-1 = %s@%s (GitHub's %s), want acme/new@main (GitHub's acme/new)", got.Repo, got.DefaultBranch, got.GitHubRepo)
+		}
+	})
+
+	t.Run("a shared clone under the old name", func(t *testing.T) {
+		w, state := seed(t, "", "")
+		clone, err := workspace.Location(state, ghrepo.MustParse("acme/old"), "LEGION-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(clone.Clone, ".git"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		want := "fill the repository of LEGION-1: GitHub renamed acme/old to acme/new, and the shared clone " + clone.Clone +
+			" still has the old name: map acme/new in Dispatch (Settings → Repositories → Projects), or remove that clone if no issue works in it, and restart"
+		if err := backfill(w, state); err == nil || err.Error() != want {
+			t.Fatalf("backfill = %v, want %q", err, want)
+		}
+		if got := recordedIssue(t, w, "LEGION-1"); got.Repo != "" || got.GitHubRepo != "" {
+			t.Fatalf("LEGION-1 = %s (GitHub's %s) after a refused backfill, want it unfilled", got.Repo, got.GitHubRepo)
+		}
+	})
+
+	t.Run("a record on the old name with no GitHub spelling", func(t *testing.T) {
+		w, state := seed(t, "acme/old", "main")
+		want := "name the repository of LEGION-1: GitHub renamed acme/old to acme/new, and a record's repository never changes; " +
+			"only a pre-release build of this daemon leaves a record with no GitHub spelling, so recreate that build's database"
+		if err := backfill(w, state); err == nil || err.Error() != want {
+			t.Fatalf("backfill = %v, want %q", err, want)
+		}
+		if got := recordedIssue(t, w, "LEGION-1"); got.Repo != "acme/old" || got.GitHubRepo != "" {
+			t.Fatalf("LEGION-1 = %s (GitHub's %s) after a refused backfill, want it unchanged", got.Repo, got.GitHubRepo)
+		}
+	})
+}

@@ -57,8 +57,9 @@ dispatch://PROJECT/artifact/<document-ref>/comment/<id>
 ```
 
 A bare UUID or `KEY#seq` is not a reference; the `dispatch://` form is what Dispatch links and records. `dispatch read` also
-accepts the dashboard URL of an issue, spec, artifact, ask, comment, or project document on the configured server (it maps to the
-`dispatch://` form above), and an ask or comment id may be a unique prefix of at least 8 hex characters; a message id is always the
+accepts the dashboard URL of an issue, spec, artifact, ask, comment, or project document on the configured server, or on its public
+dashboard when `DISPATCH_PUBLIC_URL` names one (it maps to the `dispatch://` form above), and an issue's read names its page
+(`Link:`, on that public dashboard when there is one), the link to hand a person. An ask or comment id may be a unique prefix of at least 8 hex characters; a message id is always the
 full uuid. A non-uuid id on `GET /asks/{id}`, `/comments/{id}`, or `/issues/{key}/messages/{id}` is a 400 `ASK_ID_INPUT` /
 `COMMENT_ID_INPUT` / `MESSAGE_ID_INPUT`, never a 500.
 

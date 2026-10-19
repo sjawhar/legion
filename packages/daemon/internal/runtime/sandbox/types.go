@@ -91,12 +91,14 @@ type Options struct {
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
 	// Resources are each role's container requirements, the controller's included: the daemon
-	// hands one for every role (config.DefaultResources fills what its file leaves out), its cpu and
-	// memory the request and the limit alike, so every container of every pod the runtime builds —
-	// the init containers take the launching role's, the image probe's the controller's — is
-	// Guaranteed. New refuses a map that lacks a role of claim.Roles or the controller, or whose
-	// entry is not such a reservation: cpu and memory each requested as a positive quantity equal
-	// to its limit, and no other resource named.
+	// hands one for every role (config.DefaultResources fills what its file leaves out), and every
+	// container of every pod the runtime builds takes its role's — an issue pod's init containers
+	// the launching role's. At the defaults each cpu and memory request equals its limit, so every
+	// pod is Guaranteed; a role the deployment gives a lower request makes every pod holding its
+	// container Burstable. The image probe carries its own (ImageProbe.Resources). New refuses a
+	// map that lacks a role of claim.Roles or the controller, or whose entry is not a reservation:
+	// cpu and memory each a positive request no greater than its positive limit, and no other
+	// resource named but ephemeral storage (checkReservation).
 	Resources map[claim.Role]corev1.ResourceRequirements
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
@@ -112,6 +114,11 @@ type Options struct {
 	Tools    Tools
 	// AgentSecrets enrolls every pod with the secrets broker; nil enrolls none. See AgentSecrets.
 	AgentSecrets *AgentSecrets
+	// ControllerSlackChannels is the project's slack_channels, which the controller this runtime
+	// launches is told as LEGION_SLACK_CHANNELS, comma-joined and set even when empty, and which a
+	// running controller's address record is compared with (environmentAddresses), so a daemon
+	// restarted with another list relaunches it, resuming its session.
+	ControllerSlackChannels []string
 	// Pod is the operator's pod configuration, added to every worker pod and to the probe pod.
 	Pod Pod
 	// ProviderKeys maps each variable Oh My Pi reads to the key of the providers Secret

@@ -2,13 +2,47 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The `dispatch` command waits for its stdout and stderr writes before it exits. Bun's
+  `process.exit` dropped whatever a pipe had not yet taken, so every omp session, which reads the
+  command through one, lost the end of any output over the pipe's buffer (8 KB to 16 KB) with exit
+  code 0.
+
 ### Changed
 
+- The model's `envoy_role_set` and `envoy_unsubscribe` no longer close a subscription another
+  plugin opened for the role the session holds (`whileHolding`), which used to leave the session
+  deaf to that role's notices without saying so. `envoy_role_set` refuses to move off such a role,
+  naming the role and the subscriptions; a move off any other role names the role it released
+  (`details.released`). `envoy_unsubscribe` keeps them open, listing them as kept
+  (`details.kept`), and an empty `topics` list closes nothing.
+- A role is no longer lost, claimed twice or claimed for the wrong session when role moves and
+  session switches race. Every session event and heartbeat tick now converges pi-envoy to the
+  session Oh My Pi is on, whatever order the events came in: that session's agent subject is the
+  one open and registered, and it holds the role its own records name (a fork's copy of its
+  parent's, none after a `/new`, its own after a resume), every other role handed back at the
+  listener. A `/fork` keeps the role whatever overtakes it; a `/new` or resume never carries it,
+  ends it as the switch lands, and receives no message addressed to the session it replaced; a
+  resumed session whose records name the role takes it back; a switch Oh My Pi rolls back, or one
+  that fails before its event, settles on the session the host stays on. A role the session moves
+  off is handed back under the session the listener names for it (a fork's parent, until the fork
+  carried it). A role ended by a move no session event announced is warned of, naming who claims
+  it again. The agent is told of each id change a fork or branch makes once, in the session it
+  names.
+- `dispatch issue` names the new issue's assignee, and every `dispatch` link points at
+  `DISPATCH_PUBLIC_URL` when it is set; `slack_post` refuses a reply linking a cluster-internal
+  address.
+- Plugin interface version 3 (sjawhar/legion#1998): in the daemon-launched controller's process
+  (`roleClaim.slackRoleOwned`), a resumed session restores its registered interests after
+  dropping every Slack topic among them, from the listener and from what it restores, since a
+  restored one would outlive the controller role. Install it with the `@sjawhar/pi-legion` released
+  beside it.
+- `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
   `machine_id` for a session whose plugin predates the field) rather than the listener that
   registered it, so filtering by machine finds a session on its own machine again even when every
   session shares one listener.
-
 - A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
   profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
@@ -35,6 +69,13 @@
 
 ### Added
 
+- The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
+  `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
+  repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.
+- The `slack_post` tool (sjawhar/legion#1998): a reply in a Slack thread as the Legion Slack app,
+  with the bot token the secrets broker grants the session (`LEGION_SLACK_BOT_TOKEN`), which only
+  the posting process holds. The project's controller answers its Slack channels' mentions with
+  it.
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
   runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
   registers on `/legion/v1/claims/register` with that boot token in place of a controller

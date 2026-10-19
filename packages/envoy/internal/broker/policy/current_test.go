@@ -17,9 +17,13 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
+// awsListLag is the AWS store's ListLag, which every Local-backed Current here runs on.
+var awsListLag = policytest.Store(secrets.NewLocal()).ListLag()
+
 // staleLister freezes ListSecrets at construction while DescribeSecret stays live: AWS's
 // documented ListSecrets lag, reproduced.
 type staleLister struct {
+	*secrets.Local
 	page *secretsmanager.ListSecretsOutput
 }
 
@@ -34,7 +38,7 @@ func TestRefreshKeepsWhatARecentRereadSettled(t *testing.T) {
 		t.Fatal(err)
 	}
 	loader := policytest.Loader(store)
-	loader.Secrets = staleLister{page: stale} // the listing predates everything below
+	loader.Store = policytest.StoreThrough(store, staleLister{Local: store, page: stale}) // the listing predates everything below
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +72,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal(err)
 	}
 	loader := policytest.Loader(store)
-	loader.Secrets = staleLister{page: stale} // never lists NEW_KEY
+	loader.Store = policytest.StoreThrough(store, staleLister{Local: store, page: stale}) // never lists NEW_KEY
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +85,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal("reread must serve NEW_KEY")
 	}
 
-	now = reread.Add(policy.ListLag - time.Second)
+	now = reread.Add(awsListLag - time.Second)
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +93,7 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 		t.Fatal("a full reload inside listLag of the reread dropped NEW_KEY")
 	}
 
-	now = reread.Add(policy.ListLag + time.Second)
+	now = reread.Add(awsListLag + time.Second)
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -98,9 +102,46 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 	}
 }
 
+// slowStore is the AWS store with a longer documented lag, as Secret Manager's six hours.
+type slowStore struct{ secrets.AWS }
+
+func (slowStore) ListLag() time.Duration { return 6 * time.Hour }
+
+// TestAnchorsLastTheStoresOwnLag pins that the window is the store's: on a store whose metadata
+// may lag a write for hours, a reread that stopped serving a secret still holds past AWS's five
+// minutes against a listing that has not caught up, so a stale listing cannot reinstate it.
+func TestAnchorsLastTheStoresOwnLag(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	stale, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := policytest.Loader(store)
+	loader.Store = slowStore{policytest.StoreThrough(store, staleLister{Local: store, page: stale})} // still lists OLD_KEY as agent tier
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reread := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	now := reread
+	policy.SetNow(cur, func() time.Time { return now })
+	store.Put(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierHuman, "v1"))
+	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); lk.Secret.Tier != policy.TierHuman {
+		t.Fatalf("reread = %+v; want OLD_KEY human tier", lk)
+	}
+	now = reread.Add(time.Hour)
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cur.Get().Secrets["OLD_KEY"].Tier; got != policy.TierHuman {
+		t.Fatalf("a reload an hour after the reread, inside the store's lag, served OLD_KEY as %s from the stale listing", got)
+	}
+}
+
 // slowLister answers a frozen page, then runs fetched: a reload whose listing is fetched at one
 // time and whose Load returns at a later one.
 type slowLister struct {
+	*secrets.Local
 	page    *secretsmanager.ListSecretsOutput
 	fetched func()
 }
@@ -121,9 +162,9 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{page: stale} // lists OLD_KEY and never NEW_KEY
+	lister := &slowLister{Local: store, page: stale} // lists OLD_KEY and never NEW_KEY
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -141,8 +182,8 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 	}
 
 	// The listing is fetched inside listLag of the rereads, and Load returns after it ran out.
-	now = reread.Add(policy.ListLag - time.Second)
-	lister.fetched = func() { now = reread.Add(policy.ListLag + time.Second) }
+	now = reread.Add(awsListLag - time.Second)
+	lister.fetched = func() { now = reread.Add(awsListLag + time.Second) }
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -157,18 +198,18 @@ func TestARefreshStraddlingListLagStillRereadsTheName(t *testing.T) {
 
 // TestAReloadThatCatchesAChangeKeepsItForListLag pins that a reload which, rereading a recent
 // name, finds an answer the live policy did not hold re-anchors that name: a secret deleted after
-// a reread served it, with no reread of its own, is dropped by the next reload's re-describe, and a
-// reload listLag after the reread, from a listing that still predates the delete, keeps it out
-// rather than serving it again.
+// a reread changed its answer, with no reread of its own, is dropped by the next reload's
+// re-describe, and a reload listLag after the reread, from a listing that still predates the
+// delete, keeps it out rather than serving it again.
 func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
 	stale, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{page: stale} // lists OLD_KEY throughout
+	lister := &slowLister{Local: store, page: stale} // lists OLD_KEY, agent tier, throughout
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -176,13 +217,14 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	reread := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	now := reread
 	policy.SetNow(cur, func() time.Time { return now })
-	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); !lk.Served {
-		t.Fatal("reread must serve OLD_KEY")
+	store.Put(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierHuman, "v1"))
+	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); lk.Secret.Tier != policy.TierHuman {
+		t.Fatalf("reread = %+v; want OLD_KEY served at human tier", lk)
 	}
 
 	// Deleted (from the console, say) while the next reload lists: its listing still shows OLD_KEY,
 	// and its own re-describe finds it gone.
-	now = reread.Add(policy.ListLag / 2)
+	now = reread.Add(awsListLag / 2)
 	lister.fetched = func() { store.Delete(policytest.ID("OLD_KEY")) }
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -192,7 +234,7 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 	}
 
 	lister.fetched = nil
-	now = reread.Add(policy.ListLag + time.Second)
+	now = reread.Add(awsListLag + time.Second)
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -208,9 +250,9 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 // side: a served name a reread finds gone is still kept, so a lagging listing cannot bring it back.
 func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
-	count := &countingDescriber{DescribeSecretAPIClient: store}
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
 	loader := policytest.Loader(store)
-	loader.Describer = count
+	loader.Store = policytest.StoreThrough(store, count)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -218,24 +260,39 @@ func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 	if lk, err := cur.RefreshOne(context.Background(), "NO_SUCH_KEY"); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent {
 		t.Fatalf("RefreshOne(NO_SUCH_KEY) = %+v, %v; want absent", lk, err)
 	}
-	before := count.calls.Load()
+	before := count.Calls.Load()
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := count.calls.Load() - before; got != 0 {
+	if got := count.Calls.Load() - before; got != 0 {
 		t.Fatalf("the reload after a reread of a name that exists nowhere made %d DescribeSecret calls; want 0", got)
 	}
 }
 
-// countingDescriber counts the DescribeSecret calls a reread or a reload makes.
-type countingDescriber struct {
-	policy.DescribeSecretAPIClient
-	calls atomic.Int64
-}
-
-func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
-	c.calls.Add(1)
-	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
+// TestARereadThatConfirmsTheLiveAnswerCostsNoReload pins that a reread finding a served secret as
+// the live policy already serves it records nothing: anyone may reread an existing name, and on a
+// store whose ListLag is hours each anchor would cost every reload in it a describe.
+func TestARereadThatConfirmsTheLiveAnswerCostsNoReload(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
+	loader := policytest.Loader(store)
+	loader.Store = policytest.StoreThrough(store, count)
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if lk, err := cur.RefreshOne(context.Background(), "OLD_KEY"); err != nil || !lk.Served {
+			t.Fatalf("RefreshOne(OLD_KEY) = %+v, %v; want served", lk, err)
+		}
+	}
+	before := count.Calls.Load()
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count.Calls.Load() - before; got != 0 {
+		t.Fatalf("the reload after rereads that confirmed the live answer made %d DescribeSecret calls; want 0", got)
+	}
 }
 
 // heldCurrent loads an empty namespace's policy and starts a reload whose listing waits until the
@@ -248,9 +305,9 @@ func heldCurrent(t *testing.T) *policy.Current {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &slowLister{page: page}
+	lister := &slowLister{Local: store, page: page}
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -318,6 +375,7 @@ func TestARereadWaitsForTheWriterLockOnlyWhileItsCallerDoes(t *testing.T) {
 // calls it has held. hang and unhang pair: a repeated hang keeps holding, and an unhang with
 // nothing held does nothing.
 type hangingLister struct {
+	*secrets.Local
 	page      *secretsmanager.ListSecretsOutput
 	heldCalls atomic.Int64
 	mu        sync.Mutex
@@ -364,9 +422,9 @@ func hangingLoader(t *testing.T) (*hangingLister, policy.Loader) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lister := &hangingLister{page: page}
+	lister := &hangingLister{Local: store, page: page}
 	loader := policytest.Loader(store)
-	loader.Secrets = lister
+	loader.Store = policytest.StoreThrough(store, lister)
 	return lister, loader
 }
 

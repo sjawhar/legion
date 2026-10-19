@@ -165,13 +165,16 @@ func (s *Postgres) FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo
 	return nil
 }
 
-func (s *Postgres) NameIssueRepository(ctx context.Context, tx pgx.Tx, key, githubRepo string) error {
-	tag, err := tx.Exec(ctx, "update issues set github_repo = $2 where key = $1 and repo <> '' and github_repo = '' and lower(repo) = lower($2)", key, githubRepo)
+func (s *Postgres) NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error {
+	if !strings.EqualFold(repo, githubRepo) {
+		return fmt.Errorf("name the repository of %s: GitHub's spelling %s names another repository than %s", key, githubRepo, repo)
+	}
+	tag, err := tx.Exec(ctx, "update issues set github_repo = $3 where key = $1 and repo = $2 and github_repo = ''", key, repo, githubRepo)
 	if err != nil {
 		return fmt.Errorf("name the repository of %s: %w", key, err)
 	}
 	if tag.RowsAffected() != 1 {
-		return fmt.Errorf("name the repository of %s: it has no unnamed record on %s", key, githubRepo)
+		return fmt.Errorf("name the repository of %s: it has no record on %s without GitHub's spelling", key, repo)
 	}
 	return nil
 }
@@ -622,12 +625,15 @@ const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, 
 // readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:
 // the unique partial index 0044 turns the race between a reopen and a retry into one row. A
 // duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included,
-// restarts its attempts, and takes the row from any worker holding it: that worker read the record
-// before the reopen, so its finish and retry, each matched on its lease token, must touch nothing,
-// and the row decides again on the new record once the lease expires. Its target is that partial
-// index, which holds ready_merge rows alone, so no other kind's insert conflicts on it.
+// restarts its attempts, takes the payload it brings, and takes the row from any worker holding it:
+// that worker read the record before the reopen, so its finish, retry and payload replacement, each
+// matched on its lease token, must touch nothing, and the row decides again on the new record once
+// the lease expires. The new payload starts the row over unarmed (ReadyMerge.Armed): a reopen's
+// queue submits READY's merge again, since the close took away whatever was armed. Its target is
+// that partial index, which holds ready_merge rows alone, so no other kind's insert conflicts on
+// it.
 const readyMergeConflict = `
-	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do update set attempts = 0,
+	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do update set attempts = 0, payload = excluded.payload,
 		lease_token = case when outbox.lease_token = '' then '' else gen_random_uuid()::text end`
 
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
@@ -1002,6 +1008,31 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 		return fmt.Errorf("retry outbox row %d: %w", id, err)
 	}
 	return nil
+}
+
+func (s *Postgres) ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, payload OutboxPayload) (bool, error) {
+	if err := validateOutboxPayload(payload); err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	var kind string
+	err = tx.QueryRow(ctx, "select kind from outbox where id = $1 and lease_token = $2 for update", id, leaseToken).Scan(&kind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	if kind != string(payload.OutboxKind()) {
+		return false, fmt.Errorf("replace the payload of outbox row %d: the row is %s, and the payload %s", id, kind, payload.OutboxKind())
+	}
+	if _, err := tx.Exec(ctx, "update outbox set payload = $2 where id = $1", id, string(encoded)); err != nil {
+		return false, fmt.Errorf("replace the payload of outbox row %d: %w", id, err)
+	}
+	return true, nil
 }
 
 // RoleRun reads one role's run of an issue generation as the store holds it. RoleRuns owns the

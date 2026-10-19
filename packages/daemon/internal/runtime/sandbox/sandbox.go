@@ -84,6 +84,7 @@ type Runtime struct {
 	natsUser                       string
 	sessionDSNKey                  string
 	agentSecrets                   *AgentSecrets
+	controllerSlackChannels        []string
 	agent                          []string
 	bootTimeout                    time.Duration
 	busyBackoff                    time.Duration
@@ -248,8 +249,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		}
 	}
 	// Every container of every pod the runtime builds takes its role's entry of Resources — the
-	// init containers the launching role's, the image probe's the controller's — so a role without
-	// a reservation would run with no requests or limits at all, a silently BestEffort pod.
+	// init containers the launching role's — so a role without a reservation would run with no
+	// requests or limits at all, a silently BestEffort pod.
 	for _, role := range launcherRoles {
 		if err := checkReservation(role, opts.Resources); err != nil {
 			return refuse("%v", err)
@@ -279,8 +280,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		sessionDSNKey: opts.SessionDSNKey,
-		bootTimeout:   opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
+		sessionDSNKey: opts.SessionDSNKey, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
+		bootTimeout: opts.BootTimeout, busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
@@ -301,14 +302,16 @@ func configureProber(opts Options) (*Runtime, error) {
 }
 
 // checkReservation is why resources' entry for role is not a reservation, or nil when it is one:
-// cpu and memory each requested as a positive quantity equal to its limit, the kubelet's Guaranteed
-// rule for the one container; ephemeral-storage requested as a positive quantity no greater than
-// its positive limit — QoS reads cpu and memory alone, so the disk bound need not be one value as
-// both: it is the node-disk isolation between pods of unrelated trees sharing a node, a limit the
-// kubelet evicts the offending pod alone for passing, over a request the scheduler fits to the
-// node's allocatable disk; and no other resource named, since the daemon sizes nothing else
-// (daemon/kubernetes.go, roleRequirements) and an extended resource here would be one no operator
-// configured. A missing role is the first fault: its containers would carry the zero requirements.
+// cpu and memory each limited and requested as positive quantities, the request no greater than
+// the limit — equal, the kubelet's Guaranteed rule for the one container, at the daemon's defaults;
+// below, which makes the pod Burstable, where the deployment set a lower request; ephemeral-storage
+// requested as a positive quantity no greater than its positive limit — QoS reads cpu and memory
+// alone, so the disk bound need not be one value as both: it is the node-disk isolation between
+// pods of unrelated trees sharing a node, a limit the kubelet evicts the offending pod alone for
+// passing, over a request the scheduler fits to the node's allocatable disk; and no other resource
+// named, since the daemon sizes nothing else (daemon/kubernetes.go, roleRequirements) and an
+// extended resource here would be one no operator configured. A missing role is the first fault:
+// its containers would carry the zero requirements.
 func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceRequirements) error {
 	requirements, ok := resources[role]
 	if !ok {
@@ -334,9 +337,9 @@ func checkRequirements(what string, requirements corev1.ResourceRequirements) er
 		request, limit := requirements.Requests[name], requirements.Limits[name]
 		switch {
 		case request.Sign() <= 0 || limit.Sign() <= 0:
-			return fmt.Errorf("resources: %s reserves no %s (request %s, limit %s); a reservation is a positive quantity as both", what, name, request.String(), limit.String())
-		case request.Cmp(limit) != 0:
-			return fmt.Errorf("resources: %s requests %s %s but is limited to %s; a reservation is one value as both", what, name, request.String(), limit.String())
+			return fmt.Errorf("resources: %s reserves no %s (request %s, limit %s); a reservation is a positive request under a positive limit", what, name, request.String(), limit.String())
+		case request.Cmp(limit) > 0:
+			return fmt.Errorf("resources: %s requests %s %s past its limit %s; the request may not exceed the limit", what, name, request.String(), limit.String())
 		}
 	}
 	request, limit := requirements.Requests[corev1.ResourceEphemeralStorage], requirements.Limits[corev1.ResourceEphemeralStorage]

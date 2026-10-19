@@ -108,7 +108,9 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 }
 
 // migrationLockKey is the pg_advisory_xact_lock every Dispatch process's runner takes, so two
-// processes booting at once migrate one after the other.
+// processes booting at once migrate one after the other. The auto-deployer
+// (deploy/scripts/autodeploy.sh, schema_version) takes it too before it reads schema_migrations, so
+// a migration in flight ends first; a change of key changes both.
 const migrationLockKey int64 = 8150001
 
 // createVersionTable creates schema_migrations under the runner's advisory lock, as the broker's

@@ -269,7 +269,7 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
-// Contract 30: every recorded issue carries the repository it targets and its default branch, its
+// Contract 31: every recorded issue carries the repository it targets and its default branch, its
 // pull request the repository it is in, and the state the project's repository mapping as the
 // daemon serves it, each left-out repository named with the App it lacks. Contract 30: each mapped
 // repository carries its cache under the Kubernetes runtime, Ready with its last health read or

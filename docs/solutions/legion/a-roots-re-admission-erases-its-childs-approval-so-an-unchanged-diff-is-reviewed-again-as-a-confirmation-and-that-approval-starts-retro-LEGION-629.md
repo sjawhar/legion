@@ -9,7 +9,7 @@ tags:
   - retro
   - pr-body
 date: 2026-10-09
-status: active
+status: superseded in part by sjawhar/legion#2010 — when the merger sends a round with no recorded approval back to review, the move's reason names `READY_NOT_APPROVED` and the reviewer runs a new round, never a fingerprint confirmation (`packages/daemon/internal/prompts/roles/reviewer.md`, "Final review gate"); a confirmation after a conflict-forced merge, as in the evidence below, still follows the fingerprint rule, and the round-counter labelling below still holds
 module: packages/daemon/internal/admit
 applies_when:
   - A child issue of a Legion tree sits in merging (or past review) when the tree's root is re-admitted at a new generation

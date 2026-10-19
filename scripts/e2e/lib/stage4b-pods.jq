@@ -83,7 +83,7 @@ def reservation_problems($expected):
            or $req["ephemeral-storage"] == null or $lim["ephemeral-storage"] == null
         then "container \($c.name) reserves \($c.resources // {} | tojson), want cpu and memory as both request and limit and ephemeral-storage as request and limit"
         elif (same($req.cpu; $lim.cpu) and same($req.memory; $lim.memory)) | not
-        then "container \($c.name) requests \($req | tojson) but is limited to \($lim | tojson); a reservation is one value as both"
+        then "container \($c.name) requests \($req | tojson) but is limited to \($lim | tojson); this run configures request = limit"
         elif ($req["ephemeral-storage"] | quantity) > ($lim["ephemeral-storage"] | quantity)
         then "container \($c.name) requests ephemeral-storage \($req["ephemeral-storage"]) past its limit \($lim["ephemeral-storage"]); the request may not exceed the limit"
         elif $expected[$c.name] != null and (matches($expected[$c.name]; $req; $lim) | not)

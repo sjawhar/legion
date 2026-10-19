@@ -26,6 +26,9 @@ import (
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
+// Image is the NATS server image the daemon's existing NATS tests use.
+const Image = "mirror.gcr.io/library/nats:2.10"
+
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
 const readinessTimeout = 30 * time.Second
@@ -86,7 +89,7 @@ func URL(t testing.TB) string {
 	}
 	take(t)
 	startOnce.Do(func() {
-		started, err := start()
+		started, err := start(Image)
 		if err != nil {
 			startErr = err
 			return
@@ -274,9 +277,9 @@ func retryStreamStoreFailure(create func() error) error {
 // start runs a NATS container, with its monitoring endpoint on 8222. A container Docker created and never saw ready (a readiness wait
 // that timed out under load) comes back beside the error, and is removed before start returns:
 // no test's end would remove a container the package shares.
-func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
+func start(image string, options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
 	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
-	started, err := tcnats.Run(context.Background(), "mirror.gcr.io/library/nats:2.10", options...)
+	started, err := tcnats.Run(context.Background(), image, options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))
 	}
@@ -288,7 +291,8 @@ func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer
 // client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	return StartNkeyAuthorizedUsers(t, NkeyUser{Public: user})
+	_, url := StartNkeyAuthorizedUsers(t, Image, NkeyUser{Public: user})
+	return url
 }
 
 // NkeyUser is one nkey user a server admits: its public key, and the server's permissions block for
@@ -298,9 +302,9 @@ type NkeyUser struct {
 	Permissions string
 }
 
-// StartNkeyAuthorizedUsers is StartNkeyAuthorized for a server admitting users alone, each with its
-// permissions.
-func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
+// StartNkeyAuthorizedUsers is StartNkeyAuthorized for a server of image admitting users alone,
+// each with its permissions. It returns the container, for a test that reads the server's log.
+func StartNkeyAuthorizedUsers(t testing.TB, image string, users ...NkeyUser) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	entries := make([]string, 0, len(users))
 	for _, user := range users {
@@ -311,7 +315,7 @@ func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
 		entries = append(entries, entry+" }")
 	}
 	config := fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", strings.Join(entries, ", "))
-	container, err := start(tcnats.WithConfigFile(strings.NewReader(config)))
+	container, err := start(image, tcnats.WithConfigFile(strings.NewReader(config)))
 	if err != nil {
 		t.Fatalf("start nkey-authorized NATS: %v", err)
 	}
@@ -321,15 +325,15 @@ func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
 		t.Fatalf("NATS connection string: %v", err)
 	}
 	answering(t, url)
-	return url
+	return container, url
 }
 
 // answering returns once the server at url refuses a connection with no credential with its own
 // authorization violation: the proof it speaks the client protocol and enforces its nkey users. The
 // log line the container's start waits for can come before a connection there is served, and until
 // then a dial ends in EOF or a refusal that says nothing about the server's users. A server that
-// admits the connection enforces no users, and every refusal a test expects of it would pass for
-// the wrong reason, so that fails the test.
+// admits the connection enforces no users, and every refusal a test expects would pass for the wrong
+// reason, so that fails the test.
 func answering(t testing.TB, url string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)

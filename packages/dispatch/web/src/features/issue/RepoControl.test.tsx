@@ -147,6 +147,9 @@ function select(): HTMLSelectElement {
   return screen.getByRole("combobox", { name: "Repository of CORE-1" }) as HTMLSelectElement;
 }
 
+/** The visible badge; the select's description repeats its text in a span of its own. */
+const badge = 'span[aria-hidden="true"]';
+
 test("RepoControl lists the project's mapped repositories, shows the resolved one, and patches repo", async () => {
   const patchIssue = spyOn(api, "patchIssue").mockResolvedValue({
     ...issue,
@@ -161,7 +164,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
   try {
     // The badge names the repository the issue resolves to; no mapping is read until the reader
     // reaches for the control.
-    expect(screen.getByText("acme/widgets", { selector: "span" })).toBeTruthy();
+    expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy();
     expect(listRepoProjects).not.toHaveBeenCalled();
     fireEvent.focus(select());
     await waitFor(() => expect(listRepoProjects).toHaveBeenCalled());
@@ -182,7 +185,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
       expect(queryClient.getQueryData<IssueDetails>(detailKey)?.last_seq).toBe(2)
     );
     expect(select().value).toBe("acme/gadgets");
-    expect(screen.getByText("acme/gadgets", { selector: "span" })).toBeTruthy();
+    expect(screen.getByText("acme/gadgets", { selector: badge })).toBeTruthy();
     expect(queryClient.getQueryData<IssueSummary[]>(listKey)?.[0]?.repo).toBe("acme/gadgets");
   } finally {
     unmount();
@@ -202,12 +205,33 @@ test("RepoControl sends null for Inherit", async () => {
     expect(select().value).toBe("acme/gadgets");
     fireEvent.change(select(), { target: { value: "" } });
     await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: null }));
-    await waitFor(() =>
-      expect(screen.getByText("acme/widgets", { selector: "span" })).toBeTruthy()
-    );
+    await waitFor(() => expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy());
   } finally {
     unmount();
     patchIssue.mockRestore();
+  }
+});
+
+// The badge is decoration for sighted readers (aria-hidden); the select names the repository the
+// issue resolves to in its description, so a screen reader hears the target as well as Inherit.
+test("RepoControl describes the repository the issue resolves to", async () => {
+  const description = () =>
+    document.getElementById(select().getAttribute("aria-describedby") ?? "")?.textContent ?? null;
+  for (const [own, want] of [
+    [
+      { repo: null, resolvedRepo: "acme/widgets" },
+      "acme/widgets, inherited or the project's default",
+    ],
+    [{ repo: "acme/gadgets", resolvedRepo: "acme/gadgets" }, "acme/gadgets"],
+    [{ repo: null, resolvedRepo: null }, "No repository"],
+  ] as const) {
+    const { unmount } = renderControl({ ...own });
+    try {
+      await screen.findByRole("combobox", { name: "Repository of CORE-1" });
+      expect(description()).toBe(want);
+    } finally {
+      unmount();
+    }
   }
 });
 
@@ -216,7 +240,7 @@ test("RepoControl sends null for Inherit", async () => {
 test("RepoControl says No repository when nothing resolves in a project that maps one", async () => {
   const { listRepoProjects, unmount } = renderControl({ repo: null, resolvedRepo: null });
   try {
-    expect(await screen.findByText("No repository", { selector: "span" })).toBeTruthy();
+    expect(await screen.findByText("No repository", { selector: badge })).toBeTruthy();
     expect(screen.getByText("Repository:")).toBeTruthy();
     expect(listRepoProjects).toHaveBeenCalledTimes(1);
   } finally {
@@ -259,7 +283,7 @@ test("RepoControl shows a failed mappings read with a retry instead of hiding th
     await waitFor(() => expect(listRepoProjects).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(select().options.length).toBe(3));
     expect(screen.queryByText("Could not load the repositories mapped to CORE.")).toBeNull();
-    expect(screen.getByText("No repository", { selector: "span" })).toBeTruthy();
+    expect(screen.getByText("No repository", { selector: badge })).toBeTruthy();
   } finally {
     unmount();
   }
@@ -273,7 +297,7 @@ test("RepoControl shows a failed mappings read beside a resolved repository", as
   try {
     fireEvent.focus(select());
     expect(await screen.findByText("Could not load the repositories mapped to CORE.")).toBeTruthy();
-    expect(screen.getByText("acme/widgets", { selector: "span" })).toBeTruthy();
+    expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   } finally {
     unmount();
@@ -298,7 +322,7 @@ test("RepoControl rolls back and shows the server's refusal", async () => {
       )
     ).toBeTruthy();
     expect(select().value).toBe("");
-    expect(screen.getByText("acme/widgets", { selector: "span" })).toBeTruthy();
+    expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy();
   } finally {
     unmount();
     patchIssue.mockRestore();

@@ -381,9 +381,10 @@ type Store interface {
 	FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, defaultBranch, githubRepo string) error
 	// UnnamedIssues is every record of the Dispatch project key project that carries its repository
 	// but was written before the record carried GitHub's spelling of it, by key; NameIssueRepository
-	// names one such record, once, with a spelling of its own repository.
+	// names one such record on repo, once, with a spelling of that repository, refusing another as
+	// FillIssueRepository does.
 	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
-	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, githubRepo string) error
+	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
@@ -466,6 +467,12 @@ type Store interface {
 	// committing it beside the replacement worker's own.
 	FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
+	// ReplaceOutboxPayload replaces row id's payload with payload while leaseToken holds it: what a
+	// running row learned that its next run must know (a ready_merge row having seen READY's head
+	// armed, ReadyMerge.Armed). False is a lease no longer the caller's, a row another worker or a
+	// reopen's queue now holds, which keeps its own payload. A payload of another kind than the row
+	// it holds is an error, and replaces nothing.
+	ReplaceOutboxPayload(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, payload OutboxPayload) (bool, error)
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
 	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
 	PutHandover(ctx context.Context, tx pgx.Tx, handover Handover) error
@@ -552,6 +559,24 @@ type RoleClaim struct {
 func TreeLingers(ctx context.Context, store Store, tx pgx.Tx, tree string) (bool, error) {
 	root, err := store.Issue(ctx, tx, tree)
 	return root != nil && root.Lingers(), err
+}
+
+// ApprovedHead is the head issue's review round approved: its reviewer row's recorded decision
+// when that is an approval naming a head, "" when the round recorded none. The row keeps the
+// decision until the reviewer starts again, and a re-admission clears it with the generation
+// (ClearTreeGeneration), so a re-admitted tree's round has no approved head until it is reviewed
+// again; a hand-over keeps it.
+func ApprovedHead(ctx context.Context, store Store, tx pgx.Tx, issue string) (string, error) {
+	rows, err := store.Phases(ctx, tx, issue)
+	if err != nil {
+		return "", err
+	}
+	for _, row := range rows {
+		if row.Role == claim.RoleReviewer && row.Decision != nil && row.Decision.State == "approved" {
+			return row.Decision.Head, nil
+		}
+	}
+	return "", nil
 }
 
 // Lingers says whether the root lingers after its close: its linger deadline is set, and

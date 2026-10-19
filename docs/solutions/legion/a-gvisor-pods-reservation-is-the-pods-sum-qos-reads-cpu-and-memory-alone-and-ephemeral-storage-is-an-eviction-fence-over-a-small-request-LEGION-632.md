@@ -27,9 +27,10 @@ related_issues:
   no cgroup files, so there is nothing else to read in-pod.
 - The kubelet's QoS class reads cpu and memory alone. `Guaranteed` needs each container's cpu and
   memory request equal to its limit; an ephemeral-storage request under its limit changes no pod's
-  class. So the reservation is two shapes in one container: cpu and memory as one value each, and
-  ephemeral storage as a limit over a smaller request (`checkReservation`,
-  `internal/runtime/sandbox/sandbox.go`).
+  class. The daemon's defaults request cpu and memory in full, so a deployment that sets no
+  `cpu_request` or `memory_request` runs `Guaranteed` pods; a lower request makes the pods holding
+  that role `Burstable` (`checkReservation`, `internal/runtime/sandbox/sandbox.go`, holds each
+  request at or below its limit). Ephemeral storage is a limit over a smaller request either way.
 - Ephemeral storage is the node's disk a container's root filesystem writes to (`$HOME`, the state
   home with its browser profiles and logs, the Go and Bun caches a build fills); nothing else bounds
   it once pods of unrelated trees share a node. The limit is the eviction fence: a container past it

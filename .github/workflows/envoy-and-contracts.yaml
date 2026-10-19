@@ -826,6 +826,13 @@ jobs:
       - name: Verdict test for listener-deploy-probe.sh (two fake listener tasks on 127.0.0.1 and 127.0.0.2)
         run: bash scripts/listener-deploy-probe.test.sh
         working-directory: packages/envoy
+      # The test runs its URL cases under en_US.UTF-8, where bash's [[ =~ ]] ranges reach past ASCII,
+      # to hold the deployer's URL grammar to ASCII; it refuses to run without that locale.
+      - name: Rollback and credential test for deploy/scripts/autodeploy.sh (fakes docker/jj/curl and a libpq client; no real Compose or Postgres)
+        run: |
+          sudo locale-gen en_US.UTF-8
+          bash deploy/scripts/autodeploy_test.sh
+        working-directory: packages/envoy
       - name: Integration test envoy (testcontainers + NATS)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy

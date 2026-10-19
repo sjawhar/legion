@@ -200,6 +200,9 @@ fork's parent). If a different live session holds it — the parent of a `/fork`
 the child, or a second process on the same transcript — the listener refuses atomically and the
 resumed session logs a warning and holds nothing. Only an explicit `envoy_role_set` is
 last-claim-wins. Re-running `envoy_role_set` for a role this session already holds is harmless.
+Moving to a different role is refused while another plugin holds subscriptions that last only as
+long as this session keeps its current role (the refusal names them), and `envoy_unsubscribe`
+keeps those subscriptions open, listing them as kept.
 
 ## Legion role claims
 
@@ -236,6 +239,12 @@ envoy_subscribe([
 
 This follows every message and mention in one thread. Channel-level topics end in `.message` or
 `.mention`; thread timestamps replace dots with underscores.
+
+Reply in a thread with `slack_post(channel=<channel_id>, thread_ts=<the message's thread_ts, or
+its ts>, text=…)`, which posts as the Legion Slack app with the bot token the secrets broker grants
+the session (`LEGION_SLACK_BOT_TOKEN`). A refusal carries Slack's own error code, or the broker's
+state when it has not granted the token. The post is sent once; when the answer is that Slack did
+not answer, the reply may already be there, so do not post it again.
 
 ## Ghost Wispr
 

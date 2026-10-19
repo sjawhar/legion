@@ -235,7 +235,8 @@ func TestUnfilledIssuesAndFillIssueRepository(t *testing.T) {
 // A record written before the schema carried GitHub's spelling of its repository has its own
 // spelling and no GitHub one, and the boot names it (daemon's backfillRepositories):
 // UnnamedIssues lists one project's such records, and NameIssueRepository names one, once, with a
-// spelling of the record's own repository alone.
+// spelling of the record's own repository alone, refusing another repository as
+// FillIssueRepository does.
 func TestUnnamedIssuesAndNameIssueRepository(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -255,18 +256,23 @@ func TestUnnamedIssuesAndNameIssueRepository(t *testing.T) {
 		if len(unnamed) != 1 || unnamed[0].Key != "LEGION-502" {
 			t.Fatalf("UnnamedIssues(LEGION) = %#v, want LEGION-502 alone", unnamed)
 		}
-		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "Acme/Gadgets"); err == nil ||
-			err.Error() != "name the repository of LEGION-502: it has no unnamed record on Acme/Gadgets" {
+		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "acme/widgets", "Acme/Gadgets"); err == nil ||
+			err.Error() != "name the repository of LEGION-502: GitHub's spelling Acme/Gadgets names another repository than acme/widgets" {
 			t.Fatalf("naming another repository = %v, want it refused", err)
 		}
-		must(t, records.NameIssueRepository(ctx, tx, "LEGION-502", "Acme/Widgets"))
+		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "zeta/tools", "Zeta/Tools"); err == nil ||
+			err.Error() != "name the repository of LEGION-502: it has no record on zeta/tools without GitHub's spelling" {
+			t.Fatalf("naming a record on another repository = %v, want it refused", err)
+		}
+		must(t, records.NameIssueRepository(ctx, tx, "LEGION-502", "acme/widgets", "Acme/Widgets"))
 		got, err := records.Issue(ctx, tx, "LEGION-502")
 		must(t, err)
 		if got.Repo != "acme/widgets" || got.GitHubRepo != "Acme/Widgets" {
 			t.Fatalf("named issue = %s (GitHub's %s), want acme/widgets (GitHub's Acme/Widgets)", got.Repo, got.GitHubRepo)
 		}
-		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "Acme/Widgets"); err == nil {
-			t.Fatal("a second naming was not refused")
+		if err := records.NameIssueRepository(ctx, tx, "LEGION-502", "acme/widgets", "Acme/Widgets"); err == nil ||
+			err.Error() != "name the repository of LEGION-502: it has no record on acme/widgets without GitHub's spelling" {
+			t.Fatalf("a second naming = %v, want it refused", err)
 		}
 	})
 }
@@ -755,6 +761,62 @@ func TestRenewOutboxLeaseRenewsOnlyUnderItsToken(t *testing.T) {
 		must(t, err)
 		if renewed {
 			t.Fatal("a finished row's lease was renewed")
+		}
+	})
+}
+
+// A ready_merge row records that it saw READY's head armed (ReadyMerge.Armed) only under its own
+// lease: a wrong token replaces nothing, and a payload of another kind is an error, never taken for a
+// lease lost. A queue of the same issue and head, a reopen at READY's head, starts the row over
+// unarmed and takes it from the worker holding it, whose replacement then touches nothing.
+func TestAREADYMergeRowsArmIsItsLeaseHoldersAndAReopenStartsItOver(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Date(2026, 10, 17, 6, 0, 0, 0, time.UTC)
+	queue := func(tx pgx.Tx) {
+		row, err := NewOutboxRow("LEGION-208", ReadyMerge{Number: 42, Head: "ready-head"}, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+	}
+	armed := func(tx pgx.Tx) bool {
+		var armed bool
+		must(t, tx.QueryRow(ctx, `select coalesce((payload->>'armed')::boolean, false) from outbox where kind = 'ready_merge'`).Scan(&armed))
+		return armed
+	}
+	seen := ReadyMerge{Number: 42, Head: "ready-head", Armed: true}
+	var leased OutboxRow
+	inTx(t, st, func(tx pgx.Tx) {
+		queue(tx)
+		claimed := claimEachDue(t, records, tx, "LEGION", now)
+		if len(claimed) != 1 {
+			t.Fatalf("claimed %v, want the one row", outboxKeys(claimed))
+		}
+		leased = claimed[0]
+		replaced, err := records.ReplaceOutboxPayload(ctx, tx, leased.ID, "another-lane", seen)
+		must(t, err)
+		if replaced || armed(tx) {
+			t.Fatalf("a replacement under a wrong token = %v, armed %v; want neither", replaced, armed(tx))
+		}
+		replaced, err = records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, AutoMergeDisable{Number: 42})
+		if err == nil || replaced || armed(tx) {
+			t.Fatalf("a replacement of another kind under the lease's token = %v, %v, armed %v; want an error and nothing replaced", replaced, err, armed(tx))
+		}
+		replaced, err = records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, seen)
+		must(t, err)
+		if !replaced || !armed(tx) {
+			t.Fatalf("a replacement under the lease's token = %v, armed %v; want both", replaced, armed(tx))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		queue(tx)
+		if armed(tx) {
+			t.Fatal("a queue of the same issue and head kept the row armed, want it started over")
+		}
+		replaced, err := records.ReplaceOutboxPayload(ctx, tx, leased.ID, leased.LeaseToken, seen)
+		must(t, err)
+		if replaced || armed(tx) {
+			t.Fatalf("the worker the queue took the row from replaced its payload = %v, armed %v; want neither", replaced, armed(tx))
 		}
 	})
 }

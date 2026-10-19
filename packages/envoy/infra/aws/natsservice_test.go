@@ -164,7 +164,8 @@ func exampleAuthorization() *envoyaws.AuthorizationArgs {
 }
 
 // `envoy-infra render nats-start-script` reads the authorization input into core's types by their
-// JSON keys, so each core field's key is the schema's name of the input field it mirrors.
+// JSON keys, so each core field's key is the schema's name of the input field it mirrors. A core
+// field tagged `json:"-"` is never read from the input, so it mirrors nothing.
 func TestCoreAuthorizationKeysAreTheSchemasNames(t *testing.T) {
 	for _, pair := range [][2]reflect.Type{
 		{reflect.TypeFor[envoyaws.AuthorizationArgs](), reflect.TypeFor[core.Authorization]()},
@@ -172,7 +173,13 @@ func TestCoreAuthorizationKeysAreTheSchemasNames(t *testing.T) {
 		{reflect.TypeFor[envoynats.RulesArgs](), reflect.TypeFor[core.Rules]()},
 	} {
 		args, mirror := pair[0], pair[1]
-		require.Equal(t, args.NumField(), mirror.NumField(), "%s mirrors %s field for field", args, mirror)
+		read := 0
+		for i := range mirror.NumField() {
+			if mirror.Field(i).Tag.Get("json") != "-" {
+				read++
+			}
+		}
+		require.Equal(t, args.NumField(), read, "%s mirrors %s field for field", args, mirror)
 		for i := range args.NumField() {
 			field := args.Field(i)
 			coreField, ok := mirror.FieldByName(field.Name)
