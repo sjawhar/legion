@@ -2008,6 +2008,17 @@ its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND`
 line only as an addition in `smoke_file`'s patch, never in a notes file or in a `.legion/` handoff
 that quotes it.
 
+`request_changes_as_reviewer ISSUE ROUND BODY [NOTE]` is a scripted changes-requested round: it
+tells the reviewer pane its decision and the review's text, quoted, which the reviewer ends with
+the Legion footer naming its own session, as its role ends every review. The daemon sets aside a
+review-App review whose footer does not name the session recorded on the reviewer's claim, and that
+session is recorded at the reviewer's first completion, so a round from the second on that told the
+reviewer to post a body verbatim, footer-less, would decide nothing and leave the issue in
+`reviewing`. `NOTE` is a further step the round asks of the reviewer, never part of the review. The
+round waits for `reviewer_requested_changes_from ROUND SESSION`: the review App's ROUND-th
+changes-requested review whose last footer names the session the daemon's state gives the reviewer,
+read as the daemon reads it. `lib/reviewer-footer.test.ts` drives both against a fake `gh`.
+
 The handoff checks read the daemon's phase record (the `phases` table joined to `issues`), not the
 ids of the facts it processed, so they hold whatever format a handoff event id takes. A role's
 `handoff_commit` is the commit its `handoff_complete` reported at its last completion the daemon

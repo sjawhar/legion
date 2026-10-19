@@ -346,15 +346,23 @@ require_proof_human() {
 pull_request_product_files() {
   gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .filename'
 }
-# request_changes_as_reviewer ISSUE ROUND BODY has the reviewer pane post a round's
+# request_changes_as_reviewer ISSUE ROUND BODY [NOTE] has the reviewer pane post a round's
 # changes-requested review and complete its phase. A review ends when its reviewer completes it —
 # the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
-# as the final approval is, rather than posted from the proof's own gh.
+# as the final approval is, rather than posted from the proof's own gh. BODY is the review's text;
+# the reviewer ends it with the Legion footer naming its own session, as its role ends every review,
+# since the daemon sets aside a review-App review whose footer does not name the session recorded on
+# the reviewer's claim (workflow.Engine.DecidesRound). NOTE, when given, is a further step for the
+# reviewer this round, never part of the review. The wait is for the round's review from the
+# reviewer's own session, so a review the daemon would set aside fails here, naming the session.
 request_changes_as_reviewer() {
-  local issue=$1 round=$2 body=$3 app
+  local issue=$1 round=$2 body=$3 note=${4:-} app session
   app=$(role_app reviewer) || return 1
-  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
-  until_true 300 "$app's round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
+  session=$(issue_worker_session "$issue" reviewer) && [ -n "$session" ] ||
+    fail "the daemon's state names no session for $issue's reviewer"
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app. The review's body is this quoted text, then the Legion footer naming your own session that your role appends to every review: \"$body\"${note:+ $note} Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
+  until_true 300 "$app's round $round changes-requested review on pull request #$pr_number, its Legion footer naming the reviewer's session $session" \
+    reviewer_requested_changes_from "$round" "$session"
 }
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
 # reviews on the proof's pull request.
@@ -363,6 +371,22 @@ reviewer_requested_changes() {
   # --paginate applies --jq to each page, so one line per matching review, counted after.
   reviews=$(review_app_reviews '.state == "CHANGES_REQUESTED"' id) || return 1
   [ "$(grep -c . <<<"$reviews")" -ge "$1" ]
+}
+# reviewer_requested_changes_from ROUND SESSION: the review App has posted at least ROUND
+# changes-requested reviews on the proof's pull request, and the newest one's Legion footer names
+# SESSION. The footer is read as the daemon reads it (intake.PullRequestReview.LegionSession): the
+# `session` of the JSON object between the body's last `<!-- legion:` and the first `-->` after it,
+# none when either marker is missing, the JSON does not parse, or its session is not a string.
+reviewer_requested_changes_from() {
+  local app reviews
+  app=$(role_app reviewer) || return 1
+  reviews=$(timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" --jq '.[]') || return 1
+  jq -es --arg app "$app" --argjson round "$1" --arg session "$2" '
+    def legion_session:
+      (split("<!-- legion:") | if length < 2 then "" else last | split("-->") | if length < 2 then "" else .[0] end end)
+      | (try (fromjson | .session) catch null) | if type == "string" then . else "" end;
+    [.[] | select(.user.login == $app and .state == "CHANGES_REQUESTED")]
+    | length >= $round and ((last.body // "") | legion_session) == $session' <<<"$reviews" >/dev/null
 }
 # round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
 # within the spec, whose architect was told a review may ask for one more line in the smoke file.
