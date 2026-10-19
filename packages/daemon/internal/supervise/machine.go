@@ -430,6 +430,10 @@ type Machine struct {
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
 	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
+	// relaunch is the relaunch a refused lifecycle check left waiting (relaunchRefused), tried again
+	// when TimerRelaunch fires. It is memory only, as the timer is: a restart launches that claim
+	// again as an unfinished launch.
+	relaunch func(context.Context) error
 	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
 	// to the shim over the claim's current connection.
@@ -845,9 +849,9 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // failure and is tried again after the backoff (backOff), waiting out the same process, until the
 // budget runs out; only a start that succeeds forgets it. A launch that fails stops the process it
 // let go (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch)
-// starts nothing and is charged nothing, and so is one whose context ended under it — the daemon's
-// stop. A runtime waits out a cluster that answers a launch's requests overloaded inside the
-// launch's own deadline, so what reaches here failed the launch.
+// starts nothing and is charged nothing (relaunchRefused), and so is one whose context ended under
+// it — the daemon's stop. A runtime waits out a cluster that answers a launch's requests overloaded
+// inside the launch's own deadline, so what reaches here failed the launch.
 func (m *Machine) launch(ctx context.Context) error {
 	return m.launchAfter(ctx, false)
 }
@@ -857,7 +861,7 @@ func (m *Machine) launch(ctx context.Context) error {
 // its generation and with every charge so far, before its backoff waits.
 func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
-		return err
+		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged) }, err)
 	}
 	m.letGo()
 	for {
