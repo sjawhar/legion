@@ -402,6 +402,10 @@ session's role is its newest Envoy role claim) and fails on any workflow notice 
 every notice kind is for the architect that owns its issue, on that architect's role topic, and the
 run's `pr-blocked`, production-check `phase-finished` and `worker-died` are each checked in their
 architect's session where they are written.
+Each wait for a tree's architect to be suspended once its tree lingers (`await_tree_suspended`) is
+bounded by `phase_seconds`, the proof's budget for an agent's turn: the daemon holds that
+suspension until the architect's turn ends and names it no deadline, and a timeout prints the
+architect's claim from `legion claims list` (its state and whether its suspension is held).
 After the sign-off the proof human removes
 every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
 fixture pull request, and the run checks that `main` carries none: retro's last commit removes the
@@ -2022,7 +2026,8 @@ one line per pull request (its URL, and gh's reason when the close failed) and f
 returns 1 when the pull request may still be open or the branch remains. Without a record it makes
 no `gh` call. `lib/smoke-cleanup.test.ts` drives both teardowns against a fake `gh`.
 
-Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: 600 s, unless
+Every wait for an issue to reach one phase is `wait_for_phase ISSUE PHASE [SECONDS]`: `phase_seconds`
+(600 s, the proof's budget for an agent's turn), unless
 the phase's worker runs a whole loop and the caller passes its own bound: a correction round, the
 retro, and planning, whose planner runs its gap analyst and up to three plan-review rounds before
 its handoff (Stage 4b's `plan_seconds`, 2700 s). `round_correction_pushed ROUND` accepts the round's
