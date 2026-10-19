@@ -183,11 +183,11 @@ describe("the dispatch command surface", () => {
   });
 
   test("a bare issue key is refused with the --issue form of the same command", () => {
-    expect(parseCommand(["read", "INFRA-26"], noFiles)).toEqual({
+    expect(parseCommand(["read", "ACME-12"], noFiles)).toEqual({
       kind: "refused",
       tool: "dispatch_read",
       problems: [
-        "unexpected argument INFRA-26: use --issue <KEY>, as in: dispatch read --issue INFRA-26",
+        "unexpected argument ACME-12: use --issue <KEY>, as in: dispatch read --issue ACME-12",
       ],
     });
     expect(parseCommand(["read", "hello"], noFiles)).toMatchObject({

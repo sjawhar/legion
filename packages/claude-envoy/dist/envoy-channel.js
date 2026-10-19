@@ -38014,6 +38014,12 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
+        const corrected = [command, ...rest.slice(0, index), "--issue", token];
+        corrected.push(...rest.slice(index + 1));
+        problems.push(`unexpected argument ${token}: use --issue <KEY>, as in: dispatch ${corrected.map(quoteWord).join(" ")}`);
+        continue;
+      }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
       continue;
     }
@@ -38117,6 +38123,7 @@ function appendedItem(kind, flag, value, number4) {
   const parsed = number4(flag, value);
   return parsed === undefined ? undefined : { value: parsed };
 }
+var ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 function quoteWord(value) {
   return BARE_WORD.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }
