@@ -93,11 +93,18 @@ type workflowRuntime struct {
 	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
 	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
 	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
-	// mapping change from Dispatch's consumer to refreshOnMappingChange, one waiting at most.
-	repositories   *repositories
-	installs       appauth.Installations
-	mappingMu      sync.Mutex
-	mappingChanged chan struct{}
+	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
+	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
+	// read covers; awaiting is each deferred admission event's request (awaitMappingRead), by
+	// issue key and sequence, under awaitingMu.
+	repositories     *repositories
+	installs         appauth.Installations
+	mappingMu        sync.Mutex
+	mappingChanged   chan struct{}
+	mappingRequested atomic.Uint64
+	mappingApplied   atomic.Uint64
+	awaitingMu       sync.Mutex
+	awaiting         map[string]uint64
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -146,24 +153,6 @@ var appMintAttempt = 15 * time.Second
 // attempt inside the 180 s Stage 3 gives a daemon to answer /healthz.
 var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Second, Attempts: 5}
 
-// onAppSchedule runs attempt until it passes, on retry (appMintRetry, or that schedule unbounded),
-// each try bounded by appMintAttempt: a failure transient calls GitHub's or Dispatch's own trouble
-// is tried again, and any other is refused at once (bootprobe.Run).
-func onAppSchedule(ctx context.Context, name string, retry bootprobe.Retry, log *slog.Logger, transient func(error) bool, attempt func(context.Context) error) error {
-	return bootprobe.Run(ctx, name, retry, log, func(ctx context.Context) bootprobe.Outcome {
-		bounded, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
-		switch err := attempt(bounded); {
-		case err == nil:
-			return bootprobe.Outcome{Passed: true}
-		case transient(err):
-			return bootprobe.Outcome{Detail: err.Error()}
-		default:
-			return bootprobe.Outcome{Refusal: err}
-		}
-	})
-}
-
 // appTransient is a failure GitHub reports as its own trouble (appauth.TransientError).
 func appTransient(err error) bool {
 	var transient *appauth.TransientError
@@ -178,7 +167,7 @@ func appTransient(err error) bool {
 // review App's and count no fix attempt, and is refused, as is a review App that names no login.
 func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
-	err := onAppSchedule(ctx, "GitHub App logins read", appMintRetry, log, appTransient, func(ctx context.Context) error {
+	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
 			login, err := apps.AppLogin(ctx, role)
 			if err != nil {
@@ -187,7 +176,7 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 			logins[role] = login
 		}
 		return nil
-	})
+	}, appMintAttempt, appTransient))
 	if err != nil {
 		return "", err
 	}
@@ -202,14 +191,14 @@ func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger)
 // refused at once. The token manager keeps a lease it minted, so an attempt after the implement
 // token passed asks GitHub only for the review token.
 func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
-	return onAppSchedule(ctx, "GitHub App tokens mint", appMintRetry, log, appTransient, func(ctx context.Context) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
 			if _, err := tokens.Token(ctx, role, owner); err != nil {
 				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			}
 		}
 		return nil
-	})
+	}, appMintAttempt, appTransient))
 }
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
@@ -422,8 +411,8 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		if summary.Status != "todo" {
 			continue
 		}
-		if _, err := w.prepareRepository(ctx, intake.DispatchIssue{Key: summary.Key, Status: summary.Status, Parent: deref(summary.Parent),
-			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}); err != nil {
+		if _, err := w.prepare(ctx, intake.DispatchIssue{Key: summary.Key, Status: summary.Status, Parent: deref(summary.Parent),
+			HandedOver: summary.HandedOver, ResolvedRepo: summary.ResolvedRepo}, false); err != nil {
 			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
 		}
 	}

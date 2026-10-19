@@ -343,10 +343,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		err := bootprobe.Run(ctx, "connect Envoy NATS", readinessRetry, log,
 			readinessAttempt(func(attempt context.Context) error {
 				return workflow.connect(attempt, cfg, plan.nats)
-			}, natsauth.Unreachable))
+			}, bootTimeout, natsauth.Unreachable))
 		if err == nil {
 			err = bootprobe.Run(ctx, "list Dispatch issues for admission", readinessRetry, log,
-				readinessAttempt(workflow.reconcile, dispatch.Unreachable))
+				readinessAttempt(workflow.reconcile, bootTimeout, dispatch.Unreachable))
 		}
 		if err != nil {
 			s.stop()
