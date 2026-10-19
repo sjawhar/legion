@@ -332,7 +332,13 @@ the file, refused — posting nothing — while the file has an uncommitted chan
 not committed on this branch, is carried by a commit another pane's `JJ_USER`/`JJ_EMAIL` authored,
 or is not yet on `legion/<issue>@origin` (push the issue branch, then complete again); for every
 other phase the commit the workspace stands on, `@-`. It then posts
-`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The daemon reads no
+`POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The implementer's
+report on a look of its closed issue's production check is the one call that finds no commit: the
+operation reads the daemon's state first, and an implementer's call on an issue in `done` whose
+`check` is open is a check report, posted with its `verdict` (`pass`, `pending` or `fail`, required
+there; `pending` is refused on a phase completion) and `summary` alone, no handoff and no `commit`;
+the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
+(`packages/daemon/internal/api/handoff.go`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
 reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
 pull request's head, each refusal named in the merger's role prompt

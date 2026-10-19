@@ -20,7 +20,9 @@ retrospective's durable output.
 
 1. Tester green and all code-review cycles finish.
 2. The reviewer approves the head. It still carries the issue's handoffs, `.legion/<issue>/`
-   (`<issue>` is your `LEGION_ISSUE`), which every tester and reviewer round writes again.
+   (`<issue>` is your `LEGION_ISSUE`), which every tester and reviewer round writes again. The
+   architect then accepts the issue (`accepting`) with `sign_off`, which starts this retro; one it
+   sends back to `implementing` or `testing` instead runs those phases again first.
 3. Run this retro (*Durable outputs*, below): its learnings under `docs/solutions/`, then one final
    commit removing `.legion/<issue>/`, pushed together, and the retro message on the Dispatch
    issue. Retro writes **no handoff**. The removal exists because a squash merge commits the head
@@ -32,13 +34,14 @@ retrospective's durable output.
    posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
    configured. On READY's acceptance the daemon submits the merge, and it lands under the
    repository's rules: its required reviews and checks, and its merge queue when it enables one.
-5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
-   and records it on the PR and the issue: the agent that developed it is responsible for testing
-   in production. The architect's sign-off waits for that record.
-   The record is the pull request's `Production:` line, one pull-request comment, and a
-   `dispatch message` on the issue, each naming what was driven, how, what was observed, and the
-   merge commit. A defect the production check finds becomes a corrective child issue of the same tree,
-   owned by the architect and implemented by the same implementer; the parent stays open until it lands.
+5. That merge closes the issue: the daemon writes `done`, and the implementer — not the reviewer or
+   merger — is handed the production check in its live session, as work after the close: the agent
+   that developed the change is responsible for testing it in production, once production carries
+   the merge. The record is the pull request's `Production:` line and one pull-request comment,
+   naming what was driven, how, what was observed, the merge commit and what woke the look; nothing
+   is written on the closed issue, since Dispatch refuses it. A defect the check finds is filed as
+   an issue of its own in the project, never as a child of the closed one
+   (`skill://legion-worker/references/merge-gate.md`, *The production check after the close*).
 
 Retro's commits sit above the reviewer's approved head and the approval stands: commits that change
 only `docs/solutions/`, and the one that removes `.legion/<issue>/`, do not void it, and the tree
@@ -47,7 +50,7 @@ the approved head with no review round after it brings the base's paths above th
 refuses it (`READY_UNREVIEWED_CHANGE`) and the reviewer reviews the new head as a new round; one the
 conflict procedure sends back through `implementing` is confirmed before READY. Any round after
 retro (a conflict round, a round a red CI sends back, a re-review) writes `.legion/<issue>/` again,
-and every approval moves the issue to retro once more: each retro ends with the removal again, or
+and every approval, through the architect's acceptance, moves the issue to retro once more: each retro ends with the removal again, or
 READY is refused.
 
 Do not start retro before step 2 or skip it because the change seems mechanical; the merger's
@@ -174,7 +177,7 @@ Dispatch message on
 the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
 issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
-follows the merge. The message must carry this revived implementer's structured
+follows the merge's close of the issue. The message must carry this revived implementer's structured
 attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
 
 ```bash
@@ -189,7 +192,7 @@ dispatch message --issue <KEY> --body-file - <<'EOF'
 
 **Proofs read:** implementer <surface/command>, tester <surface/command>.
 
-**Production check:** <what the implementer will drive after the merge, and any deploy or restart it waits on first, with the agent or role the deployment instructions name to perform it, or the person it asks when they name none>
+**Production check:** <what the implementer will drive in production once the merge closes the issue and production carries it, and the deploy or restart that carries it there, with the agent or role the deployment instructions name to perform it, or the person it asks when they name none; no reply is awaited, the daemon wakes the check on the deploy's event>
 
 <!-- legion: {"session":"<session-id>","phase":"retro"} -->
 EOF
