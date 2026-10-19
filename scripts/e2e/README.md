@@ -292,7 +292,7 @@ unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier, and
 [`read_app_logins`](#libworkflowsh) runs the same two commands once, in `lib/app-logins.ts`, to
 read each App's bot login from GitHub, the login every check that names an App compares with. The agents'
-model is Anthropic through the Hawk model gateway, the route every devbox agent session uses:
+model is Anthropic through the Hawk model gateway, on a devbox whose agent sessions use that gateway:
 [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes the isolated profile there in
 `prerequisites`, where its preflight mint refuses a locked keyring by name, and the daemon is given
 no `provider_keys` (the Google provider answered long workflow turns with empty responses, so the
@@ -1540,7 +1540,7 @@ break the pod the daemon loads). Its refusal names the variable on stderr and ne
 ## lib/install-model-gateway.sh
 
 Routes a named OMP profile's model turns to the Hawk model gateway (middleman) on the operator's
-own hawk login, the route every devbox agent session uses (`~/.omp/agent/models.yml`:
+own hawk login, the route a devbox's agent sessions use when it is configured for the gateway (`~/.omp/agent/models.yml`:
 `X-Api-Key: !hawk-token`), so the tmux stage proofs' panes reach Anthropic with no provider key.
 Stage 2 and Stage 3 run it under the operator's own `HOME`, before they move any XDG directory of
 their own.
