@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -70,6 +71,35 @@ type Issue struct {
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
 	// issue, so only an event whose status differs from it writes a status.
 	DispatchStatus string
+	// Repo is the GitHub repository (owner/name) the issue targets, and DefaultBranch that
+	// repository's default branch: Dispatch's resolved repository and GitHub's default branch when
+	// the daemon first recorded the issue (a root's admission, a child's recording under its tree, an
+	// orphan's admission). Neither changes after that: a carried child, a re-admission and a
+	// hand-over keep them, and a later edit of the issue's repository in Dispatch is not applied.
+	// Every repository-dependent action reads them. Repo is spelled as the issue's workspace and
+	// shared clone are, which can be a clone's spelling that differs from GitHub's in case.
+	Repo          string
+	DefaultBranch string
+	// GitHubRepo is GitHub's own spelling of Repo, taken with it and never changed: what Envoy's
+	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
+	// repository by it, read from the record at boot.
+	GitHubRepo string
+}
+
+// Repository is the repository the record names (Repo) in the spelling the record keeps: what
+// every repository-dependent action of the issue works and mints for its owner.
+func (i Issue) Repository() (ghrepo.Repository, error) {
+	return ghrepo.Parse("the repository of "+i.Key, i.Repo)
+}
+
+// RepoNote is what the daemon last said on a Dispatch issue about its repository: the resolved
+// repository the issue showed then ("" for none) and the note posted, so an event that resolves the
+// same way posts nothing again.
+type RepoNote struct {
+	Issue        string
+	ResolvedRepo string
+	Note         string
+	PostedAt     time.Time
 }
 
 // Hold is a held issue's hold: the phase it left, and why it is held when the hold has a reason.
@@ -348,7 +378,24 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
+	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
+	// spelling of the repository, one whose GitHub spelling names another repository, and one that
+	// would give a recorded issue another of any of them.
 	PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error
+	// UnfilledIssues is every record of the Dispatch project key project written before the record
+	// carried its repository, by key; FillIssueRepository fills one such record, once.
+	UnfilledIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
+	FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, defaultBranch, githubRepo string) error
+	// UnnamedIssues is every record of the Dispatch project key project that carries its repository
+	// but was written before the record carried GitHub's spelling of it, by key; NameIssueRepository
+	// names one such record on repo, once, with a spelling of that repository, refusing another as
+	// FillIssueRepository does.
+	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
+	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, githubRepo string) error
+	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
+	// PutRepoNote records a note it posts.
+	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
+	PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error
 	Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error)
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)

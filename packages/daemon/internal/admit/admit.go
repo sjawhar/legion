@@ -127,6 +127,9 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 	if err != nil {
 		return nil, fmt.Errorf("read admission issue %s: %w", observation.Key, err)
 	}
+	if observation, err = workflow.SettleRetainedRepository(observation, stored); err != nil {
+		return nil, err
+	}
 	if stored == nil {
 		handed := observation.HandedOver
 		// A root in triage handed to Legion is the controller's to triage, so each observation of it
@@ -323,7 +326,29 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 	return a.wakeForFreeSlot(ctx, tx, released)
 }
 
+// putNewRoot records an unrecorded root or orphan handed to Legion in todo, on the repository its
+// observation resolves to and that repository's default branch (workflow's ResolveRepository).
+// One whose repository resolves to none, or to one Legion does not serve, is not recorded: the
+// daemon says why on the issue, once for that resolution, and the issue's next observation in
+// todo is admission's next look at it.
 func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intake.DispatchIssue, logOrphan bool) error {
+	resolution, err := a.engine.ResolveRepository(observation.ResolvedRepo)
+	if err != nil {
+		return fmt.Errorf("resolve the repository of %s: %w", observation.Key, err)
+	}
+	if resolution.Refusal != "" {
+		noted, err := a.engine.RefuseRecording(ctx, tx, observation.Key, observation.ResolvedRepo, resolution)
+		if err != nil {
+			return fmt.Errorf("say why %s is not admitted: %w", observation.Key, err)
+		}
+		if noted {
+			intake.OnCommit(ctx, func() {
+				a.log.Info("admission: not admitted; its repository is not one Legion serves", "issue", observation.Key,
+					"resolved", observation.ResolvedRepo, "reason", resolution.Refusal)
+			})
+		}
+		return nil
+	}
 	issue := record.Issue{
 		Key:             observation.Key,
 		Tree:            observation.Key,
@@ -337,6 +362,9 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		HandedOver:      observation.HandedOver,
 		LastDispatchSeq: observation.Seq,
 		DispatchStatus:  observation.Status,
+		Repo:            resolution.Repo,
+		DefaultBranch:   resolution.DefaultBranch,
+		GitHubRepo:      resolution.GitHubRepo,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)
@@ -369,12 +397,16 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 			a.log.Debug("admission: not handed to Legion", "issue", summary.Key, "label", dispatch.LegionLabel)
 			return nil
 		}
-		return a.putNewRoot(ctx, tx, intake.DispatchIssue{
-			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title, Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: summary.HandedOver,
-		}, false)
+		return a.putNewRoot(ctx, tx, intake.ListedIssue(summary), false)
 	}
 	if summary.LastSeq > 0 && summary.LastSeq < stored.LastDispatchSeq {
 		return nil
+	}
+	// The record keeps the repository it was recorded with, as for a live event (the engine's
+	// NoteRepositoryKept); the note is said once per resolution, so a listing no newer than the
+	// record says nothing again.
+	if err := a.engine.NoteRepositoryKept(ctx, tx, *stored, summary.ResolvedRepo); err != nil {
+		return err
 	}
 	seq := stored.LastDispatchSeq
 	if summary.LastSeq > seq {
@@ -400,10 +432,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		// root's or a live tree's own state, not the record it briefly showed on Dispatch. Re-read
 		// afterward: the engine's own write (phase, hold, linger) must not be clobbered by
 		// recordObservation writing back the stale copy this call fetched before the engine ran.
-		if _, err := a.engine.Apply(ctx, tx, intake.DispatchIssue{
-			Key: summary.Key, Seq: summary.LastSeq, Status: summary.Status, Title: summary.Title,
-			Parent: deref(summary.Parent), Rank: summary.Rank, HandedOver: handed,
-		}); err != nil {
+		if _, err := a.engine.Apply(ctx, tx, intake.ListedIssue(summary)); err != nil {
 			return fmt.Errorf("apply engine transition for %s: %w", summary.Key, err)
 		}
 		refreshed, err := a.store.Issue(ctx, tx, summary.Key)
@@ -846,7 +875,7 @@ func (a *Admission) refreshHeldSummary(observation intake.DispatchIssue) {
 	a.pending[observation.Key] = dispatch.IssueSummary{
 		Key: observation.Key, Title: observation.Title, Status: observation.Status,
 		Parent: record.ParentOf(observation.Parent), Rank: observation.Rank,
-		HandedOver: observation.HandedOver, LastSeq: observation.Seq,
+		HandedOver: observation.HandedOver, LastSeq: observation.Seq, ResolvedRepo: observation.ResolvedRepo,
 	}
 }
 
@@ -1004,7 +1033,7 @@ func (a *Admission) reenterStrandedChildren(ctx context.Context, tx pgx.Tx, cand
 		}
 		fact := intake.DispatchIssue{
 			Key: child.Key, Seq: child.LastDispatchSeq, Status: child.Status, Title: child.Title,
-			Parent: deref(child.Parent), Rank: child.Rank, HandedOver: child.HandedOver,
+			Parent: deref(child.Parent), Rank: child.Rank, HandedOver: child.HandedOver, ResolvedRepo: child.Repo,
 		}
 		if err := a.engine.ReenterChild(ctx, tx, child, fact); err != nil {
 			return fmt.Errorf("re-enter stranded child %s: %w", child.Key, err)

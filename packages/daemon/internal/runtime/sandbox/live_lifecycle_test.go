@@ -30,11 +30,22 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-// root-ready: the root claim spawns, provisions its workspace, and registers at generation 1.
+// root-ready: the root claim spawns, provisions its workspace, and registers at generation 1. The
+// root is the run's first issue pod, so its launch is also where the run's repository gets its
+// cache: there is none before (its Sandbox recorded for the teardown first), the launch makes it,
+// and the root's fetch fills its feed from that cache alone, asking GitHub only for the delta.
 func (r *liveRig) checkRootReady() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
 	}
+	cache := CacheSandboxName(r.env.project, r.env.repo)
+	if _, found := r.rt.RepositoryCache(r.env.repo); found {
+		return fmt.Errorf("the repository cache %s exists before the run's first issue pod launched", cache)
+	}
+	if err := r.recordSandbox(cache); err != nil {
+		return err
+	}
+	r.mapRepository(r.env.repo)
 	root := r.claim("root")
 	since := time.Now()
 	loc, err := r.spawn(root, true)
@@ -69,6 +80,13 @@ func (r *liveRig) checkRootReady() error {
 		return fmt.Errorf("registered at generation %d with token hash %s, want generation 1 with %s", reg.gen, short(reg.hash), short(tokenHash(root.bootToken)))
 	}
 	note("harness", "hello registered %s at generation 1, token sha256 %s… (the generation-1 token's)", root.token, reg.hash[:12])
+	if _, found := r.rt.RepositoryCache(r.env.repo); !found {
+		return fmt.Errorf("the root's launch made no repository cache of %s", r.env.repo)
+	}
+	if err := r.assertCacheFed(root); err != nil {
+		return err
+	}
+	note("runtime", "the root's launch made the repository cache %s, and the root's feed came from it alone", cache)
 	return nil
 }
 
@@ -1018,9 +1036,15 @@ func (r *liveRig) checkIndependentProvision() error {
 // LEGION_E2E_REPO is private to its owner); git, through the clone's `legion git-credential`
 // helper, lists LEGION_E2E_REPO's refs and is refused a push there (403: the token is read-only);
 // and GitHub, read with the operator's gh, holds no branch of that push. Nothing is pushed to the
-// second owner's repository.
+// second owner's repository. That repository's cache is its own: the issue's launch makes it (its
+// Sandbox recorded for the teardown first), and the issue's feed comes from it alone.
 func (r *liveRig) checkSecondOwner() error {
 	c := r.claim("second-owner")
+	cache := CacheSandboxName(r.env.project, c.repo)
+	if err := r.recordSandbox(cache); err != nil {
+		return err
+	}
+	r.mapRepository(c.repo)
 	since := time.Now()
 	if _, err := r.spawn(c, true); err != nil {
 		return err
@@ -1037,6 +1061,9 @@ func (r *liveRig) checkSecondOwner() error {
 		return fmt.Errorf("%s's init log lacks %q: %s", c.name, strings.TrimSpace(want), strings.TrimSpace(log))
 	}
 	note("runtime", "%s on %s: init log names %s from %s", c.name, c.repo, dir.Bookmark, r.secondDefaultBranch)
+	if err := r.assertCacheFed(c); err != nil {
+		return err
+	}
 	agent, err := r.agentEnviron(c)
 	if err != nil {
 		return err
@@ -1077,7 +1104,9 @@ func (r *liveRig) checkSecondOwner() error {
 		return fmt.Errorf("%s's git ls-remote %s through the clone's helper = %q, %v; want its HEAD", c.name, url, refs, err)
 	}
 	note("operator", "%s's agent: git ls-remote %s HEAD: %s", c.name, url, oneLine(refs))
-	branch := "legion/" + strings.ToLower(c.issue) + "-must-not-land"
+	// The run's own name: if the refusal ever broke, the push would land on the repository every run
+	// shares, and only this run's "want none" below should fail for it.
+	branch := "legion/" + strings.ToLower(c.issue) + "-must-not-land-" + r.env.claimProject
 	out, err = r.asAgent(c, "git --git-dir="+clone+"/.git push "+url+" HEAD:refs/heads/"+branch+" 2>&1")
 	if err == nil || !strings.Contains(out+err.Error(), "403") {
 		return fmt.Errorf("%s's git push to %s was not refused 403 (%v): %s", c.name, url, err, oneLine(out))

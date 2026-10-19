@@ -83,11 +83,13 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	projected := api.State{Issues: make(map[string]api.Issue, len(issues))}
 	for _, issue := range issues {
 		view := api.Issue{
-			Key:        issue.Key,
-			Generation: issue.Generation,
-			Phase:      issue.Phase,
-			Status:     issue.Status,
-			Workers:    map[claim.Role]api.PhaseView{},
+			Key:           issue.Key,
+			Generation:    issue.Generation,
+			Phase:         issue.Phase,
+			Status:        issue.Status,
+			Repo:          issue.Repo,
+			DefaultBranch: issue.DefaultBranch,
+			Workers:       map[claim.Role]api.PhaseView{},
 		}
 		// An escalation waits on the controller only while its tree runs. A held issue of a tree
 		// that lingers or closed keeps the reason on its record, and shows it again once the tree is
@@ -129,6 +131,7 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 		}
 		if pr != nil {
 			view.PullRequest = &api.PullRequestView{
+				Repo:           pr.Repo,
 				Number:         pr.Number,
 				Head:           pr.HeadSHA,
 				ChecksVerdict:  classify.HeadVerdict(*pr),

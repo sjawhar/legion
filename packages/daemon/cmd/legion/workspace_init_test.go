@@ -36,15 +36,15 @@ const winitHelper = workspace.GitHubCredentialHelper
 
 // fakeJJ is the jj first on the issue volume's PATH. It records every invocation as one line,
 // "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
-// pin — with WINIT_HOLD set, a clone of github.com/acme/widgets (which reaches the pod's feed)
-// opens the directory's `release` fifo, writes its pid to its `held` fifo, waits on `release`
-// until the test closes its end there, and exits without cloning. A fresh provisioning's first
-// command is that clone, so a process held there is mid-provisioning.
+// pin — with WINIT_HOLD set, the `jj git init --colocate` that makes the shared clone (cloned from
+// the pod's feed just before) opens the directory's `release` fifo, writes its pid to its `held`
+// fifo, waits on `release` until the test closes its end there, and exits without initializing. A
+// fresh provisioning's first jj command is that init, so a process held there is mid-provisioning.
 const fakeJJ = `#!/bin/sh
 pin=
 case "$1" in --config=*) pin=$1; shift ;; esac
 printf '%s %s\n' "$WINIT_TAG" "$*" >> "$WINIT_JJ_LOG"
-if [ -n "$WINIT_HOLD" ] && [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
+if [ -n "$WINIT_HOLD" ] && [ "$1 $2 $3" = "git init --colocate" ]; then
 	exec 3< "$WINIT_HOLD/release"
 	printf '%s' "$$" > "$WINIT_HOLD/held"
 	read _ <&3
@@ -176,7 +176,7 @@ func (v *issueVolume) args(issue string) []string {
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
 // launches; no run in these tests inherits them from whoever runs the tests.
-var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_EXPECT_ISSUE_VOLUME", "LEGION_WORKSPACE_RECOVERED_FROM"}
+var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_EXPECT_ISSUE_VOLUME", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE"}
 
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {
@@ -812,7 +812,7 @@ func TestWorkspaceInitReportsAFailedProvisioning(t *testing.T) {
 	v.setenv(t)
 
 	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
-	if code != 1 || !strings.Contains(stderr, "jj git clone https://github.com/acme/widgets") || stdout != "" {
+	if code != 1 || !strings.Contains(stderr, "git clone --shared --quiet "+filepath.Join(v.feed, "acme", "widgets.git")) || stdout != "" {
 		t.Fatalf("exit %d, stdout %q, stderr %q; want 1 naming the failed clone", code, stdout, stderr)
 	}
 }
@@ -918,7 +918,7 @@ func (p *initProcess) wait(t *testing.T) (code int, rest []string) {
 }
 
 // holder fills the feed, starts `provision` for LEGION-42, and returns once it is held inside its
-// first command, the clone (fakeJJ's WINIT_HOLD), where it stays until the test ends. That jj
+// first jj command, the shared clone's init (fakeJJ's WINIT_HOLD), where it stays until the test ends. That jj
 // leads a process group of its own (procgroup.Configure), which no kill of workspace-init reaches,
 // so the test holds the one writing end of the jj's `release` fifo (O_RDWR opens a fifo without
 // waiting for a reader) and the hold ends when that end closes: in holder's cleanup, which runs

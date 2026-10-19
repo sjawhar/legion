@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,12 +80,17 @@ type paneRequest struct {
 	// GHToken is the GitHub token the rig stands in for the claim's App token: it is rendered
 	// into the claim's gh bundle (runtime.GHConfigDir), the one directory of rigOwner, which the
 	// pane's GH_CONFIG_DIR names, as the daemon's tmux runtime writes it at spawn; the pane's
-	// LEGION_GH_PATH is the first gh on Path, as the daemon resolves it at boot. "" is a daemon
+	// LEGION_GH_PATH is realGH's: GHPath when the rig names one, else the first gh on Path,
+	// refused when that is a script, as the daemon resolves it at boot. "" is a daemon
 	// with no GitHub credential: no files, and no gh variable on the pane.
 	GHToken string `json:"ghToken"`
 	// Path is the PATH the daemon would start under; the pane's PATH is it behind the pane's
 	// launcher directory (workerbin.Path).
 	Path string `json:"path"`
+	// GHPath is the real gh the rig names for the pane, as an operator names one with
+	// LEGION_GH_PATH: its recording stand-in. "" is the daemon's own resolution, the first gh on
+	// Path, refused when that is a script.
+	GHPath string `json:"ghPath"`
 	// SystemPrompt asks for the pane's system prompt, composed from the role prompts the daemon
 	// module embeds.
 	SystemPrompt bool `json:"systemPrompt"`
@@ -119,7 +125,7 @@ func pane() error {
 		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
 			return fmt.Errorf("write the claim's gh files: %w", err)
 		}
-		if gh, err = realGH(req.Path); err != nil {
+		if gh, err = realGH(req.GHPath, req.Path); err != nil {
 			return err
 		}
 	}
@@ -148,16 +154,47 @@ func pane() error {
 // bundle holds the rig's token.
 const rigOwner = "skills-rig"
 
-// realGH is the first gh on path, which the daemon resolves at boot (LEGION_GH_PATH) and refuses
-// to boot without.
-func realGH(path string) (string, error) {
+// realGH is the real gh the pane is told as LEGION_GH_PATH: named, the gh the rig names (its
+// stand-in, as an operator's LEGION_GH_PATH is taken as given), else the daemon's resolution at
+// boot, the first executable gh on path, refused when it is a script (daemon.RefuseScriptGH's
+// rule). It is this program's own copy, since the rig runs it against each label's checkout of the
+// daemon module, an older one among them.
+func realGH(named, path string) (string, error) {
+	if named != "" {
+		if info, err := os.Stat(named); err != nil || !filepath.IsAbs(named) || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			return "", fmt.Errorf("the rig's gh %q is not an absolute executable path", named)
+		}
+		return named, nil
+	}
 	for _, dir := range filepath.SplitList(path) {
 		gh := filepath.Join(dir, "gh")
 		if info, err := os.Stat(gh); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			head, err := firstBytes(gh, 2)
+			if err != nil {
+				return "", fmt.Errorf("read %s, the first gh on the daemon's PATH: %w", gh, err)
+			}
+			if string(head) == "#!" {
+				return "", fmt.Errorf("the first gh on the daemon's PATH, %s, is a script, not the real gh, which the daemon refuses to boot on", gh)
+			}
 			return gh, nil
 		}
 	}
 	return "", fmt.Errorf("no gh on the daemon's PATH %q: the daemon resolves the real gh every pane's `legion gh` runs at boot", path)
+}
+
+// firstBytes is up to n bytes from the start of path.
+func firstBytes(path string, n int) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	head := make([]byte, n)
+	read, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return head[:read], nil
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the

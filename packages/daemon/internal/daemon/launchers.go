@@ -81,7 +81,7 @@ func resolveClaude(_ config.Config, lookupEnv func(string) (string, bool), _ fun
 	var launch tmux.ClaudeLaunch
 	var missing []string
 	for tool, into := range map[string]*string{"claude": &launch.Binary, "bun": &launch.Bun} {
-		found, err := findTool(lookupEnv, tool)
+		found, err := resolveTool(lookupEnv, tool)
 		if err != nil {
 			return launchReads{}, err
 		}

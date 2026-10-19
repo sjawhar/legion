@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -39,6 +40,50 @@ type DispatchIssue struct {
 	// by its daemon-authored todo event.
 	ActorSession string
 	DaemonActor  bool
+	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to at the event: its
+	// own, else its nearest ancestor's, else its project's default; empty when it resolves to none.
+	// The workflow takes it when it first records the issue, and never after.
+	ResolvedRepo string
+	// ResolvedRepoMissing is an event JetStream retained from before Dispatch resolved an issue's
+	// repository: its payload has no resolved_repo, so ResolvedRepo says nothing. The consumer's
+	// PrepareRepository fills ResolvedRepo from the issue's record, or from Dispatch for an issue
+	// not yet recorded, and clears this; the workflow fills a recorded issue's from its record, and
+	// never records an issue from a fact still missing it.
+	ResolvedRepoMissing bool
+	// Observed is a fact made from Dispatch's view of an issue the workflow did not record when the
+	// fact was prepared (ObservedIssue), not from one event, so no actor is known to have written
+	// its state. It reaches only an issue still unrecorded when it applies: ApplyFact, under the fact
+	// lock, applies Delivered in its place once the issue is recorded (release_children, or another
+	// delivery, recording it meanwhile), or nothing when Delivered is nil, so a state the view shows
+	// never reaches a record without the actor of the event that wrote it.
+	Observed bool
+	// Delivered is the event an Observed fact was prepared in place of, as it was delivered; nil for
+	// release_children's view, prepared in place of no event.
+	Delivered *DispatchIssue
+}
+
+// ObservedIssue is issue as Dispatch's detail shows it now, as an Observed fact at the sequence
+// Dispatch has run to: its status, title, parent, rank, hand-over and repository, with no event's
+// type or actor, since no one event wrote that state. release_children's todo child and an
+// unrecorded issue's admission event are applied from it.
+func ObservedIssue(issue dispatch.Issue) DispatchIssue {
+	parent := ""
+	if issue.Parent != nil {
+		parent = *issue.Parent
+	}
+	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Observed: true}
+}
+
+// ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
+// no event's type or actor: what a boot's reconcile records or prepares from.
+func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
+	parent := ""
+	if issue.Parent != nil {
+		parent = *issue.Parent
+	}
+	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -52,6 +97,16 @@ type Handover struct {
 func (Handover) isFact() {}
 
 func (DispatchIssue) isFact() {}
+
+// RepoMappingChanged is Dispatch's settings.repo_project.updated on the daemon's own project: a
+// repository was mapped to the project, unmapped, moved or made its default. It is no workflow
+// fact: the consumer has the daemon read the mapping again (ConsumerSpec.RepositoryMapping) and
+// applies nothing.
+type RepoMappingChanged struct {
+	Project string
+}
+
+func (RepoMappingChanged) isFact() {}
 
 // DispatchArtifactKind identifies the three Dispatch artifact observations that affect a gate.
 type DispatchArtifactKind string
@@ -507,7 +562,8 @@ type Refusal struct {
 // ApplyFact is the only transaction path for facts, whether they arrived through JetStream, the
 // API, or supervision. It records the event before running handlers, skips duplicates before any
 // handler runs, remembers the first refusal while completing every handler, and rolls all writes
-// back when any handler returns an error.
+// back when any handler returns an error. An Observed issue fact is settled first, under the lock
+// (settleObserved): the handlers see its view only while the workflow records no such issue.
 //
 // Facts apply one at a time. Handlers read and rewrite whole records, and admission's slots span
 // every tree, so two facts in flight together would each act on what the other is about to change;
@@ -531,7 +587,7 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 			_ = tx.Rollback(ctx)
 		}
 	}()
-	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))"); err != nil {
+	if err := SerializeFacts(ctx, tx); err != nil {
 		return Result{}, fmt.Errorf("serialize fact %s/%s: %w", source, eventID, err)
 	}
 
@@ -547,6 +603,13 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 		return Result{Duplicate: true}, nil
 	}
 
+	fact, apply, err := settleObserved(ctx, tx, fact)
+	if err != nil {
+		return Result{}, err
+	}
+	if !apply {
+		handlers = nil
+	}
 	ctx, committedHooks := WithCommitHooks(ctx)
 	var result Result
 	for _, handler := range handlers {
@@ -564,4 +627,40 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 	committed = true
 	committedHooks()
 	return result, nil
+}
+
+// settleObserved is the fact ApplyFact applies in fact's place, under the fact lock, and whether it
+// applies one: an Observed issue fact's view, as a plain observation, while the workflow records no
+// issue of its key, and once one is recorded the event it was prepared in place of (Delivered), or
+// nothing when it was prepared in place of none. Every other fact applies as it is, so no handler
+// sees Observed or Delivered.
+func settleObserved(ctx context.Context, tx pgx.Tx, fact Fact) (Fact, bool, error) {
+	issue, ok := fact.(DispatchIssue)
+	if !ok || !issue.Observed {
+		return fact, true, nil
+	}
+	recorded, err := record.NewStore().Issue(ctx, tx, issue.Key)
+	if err != nil {
+		return nil, false, fmt.Errorf("read the record of %s before applying Dispatch's view of it: %w", issue.Key, err)
+	}
+	switch {
+	case recorded == nil:
+		issue.Observed, issue.Delivered = false, nil
+		return issue, true, nil
+	case issue.Delivered == nil:
+		return nil, false, nil
+	default:
+		return *issue.Delivered, true, nil
+	}
+}
+
+// SerializeFacts takes, for tx's life, the lock every fact applies under (ApplyFact): until tx
+// commits or rolls back, no fact resolves a repository and commits an issue recorded on it. The
+// boot's reconcile, which records issues in its own transaction, takes it, as does a refresh of
+// the repository mapping across its live-record snapshot, its subscription update and its
+// publication, so a repository an admission is recording an issue on is never unsubscribed under
+// it.
+func SerializeFacts(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))")
+	return err
 }

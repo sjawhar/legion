@@ -299,7 +299,7 @@ func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
 	if loc == nil {
 		return fmt.Errorf("adopt the working copy of %s: the claim has no locator", m.claim.Token)
 	}
-	id, err := m.deps.Identity(m.ctx, role)
+	id, err := m.deps.Identity(m.ctx, role, m.claim.Issue)
 	if err != nil {
 		return fmt.Errorf("the git identity of %s: %w", m.claim.Token, err)
 	}

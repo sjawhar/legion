@@ -217,9 +217,12 @@ db_value() { docker exec "$pg_container" psql -U legion -d legion -tAc "$1"; }
 
 # A role's ordinary state is enough for the protocol; each real agent receives a deliberately
 # narrow smoke instruction so the proof observes the workflow rather than an arbitrary feature.
-# wait_for_phase ISSUE PHASE [SECONDS] waits for ISSUE to reach PHASE, 600 s unless SECONDS says:
-# a phase whose worker runs its whole loop (a correction round, the retro) takes longer.
-wait_for_phase() { until_true "${3:-600}" "$1 to reach $2" issue_phase "$1" "$2"; }
+# phase_seconds is the proof's budget for an agent's turn, the bound of a wait on work the daemon
+# gives no deadline of its own.
+phase_seconds=600
+# wait_for_phase ISSUE PHASE [SECONDS] waits for ISSUE to reach PHASE, phase_seconds unless SECONDS
+# says: a phase whose worker runs its whole loop (a correction round, the retro) takes longer.
+wait_for_phase() { until_true "${3:-$phase_seconds}" "$1 to reach $2" issue_phase "$1" "$2"; }
 wait_for_worker() {
   until_true 300 "$2 worker on $1 to register" issue_worker_live "$1" "$2"
   assert_claim_endpoints "$1" "$2"
@@ -1042,7 +1045,7 @@ worker_notices() {
   while IFS=$'\t' read -r f role; do
     jq -R -r --arg file "${f##*/}" --arg role "$role" '
       fromjson? | select(.customType == "envoy-message") | (.content | tostring)
-      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|carried-gate-opened|ready-refused|child-closed|child-status|child-release-stalled|catch-up|checks-red|review-stuck|status-reasserted) on [^\\n]*)")
+      | capture("summary: (?<summary>(phase-finished|worker-died|held|pr-blocked|pr-merged|pr-closed-unmerged|design-approved|design-changes-requested|carried-gate-opened|ready-refused|child-closed|child-status|child-release-stalled|child-not-recorded|catch-up|checks-red|review-stuck|status-reasserted) on [^\\n]*)")
       | "\($file) \($role) \(.summary)"' "$f"
   done < <(worker_sessions "$1")
 }

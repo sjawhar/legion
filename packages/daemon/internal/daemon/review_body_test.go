@@ -164,3 +164,40 @@ func TestReviewBodyRateLimitedReadRetriesLater(t *testing.T) {
 		t.Fatalf("GitHub was asked %d times across two reads within the held limit, want once", calls)
 	}
 }
+
+// A 401 for the review App's token on the body read decides nothing and holds no rate limit: an
+// old token is dropped and the delivery retried, and the retried read restores the full body.
+func TestReviewBodyA401IsRetriedWithAFreshToken(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		w.Write([]byte(`{"body":"the full body"}`))
+	}))
+	defer server.Close()
+
+	pool := reviewPermissionPool(t)
+	w := reviewPermissionRuntime(pool, server.URL, quietLogger())
+	tokens := &forgettingTokens{minted: time.Now().Add(-time.Hour)}
+	w.tokens, w.forget = tokens, tokens
+	review := intake.PullRequestReview{Repo: "acme/widgets", Number: 42, ID: 7, Author: "legion-reviewer[bot]",
+		Body: "a capped body", BodyTruncated: true}
+
+	_, err := w.reviewBody(context.Background(), review)
+	var later *intake.RetryLater
+	if !errors.As(err, &later) || later.After != tokenRefusedWait {
+		t.Fatalf("a 401 on the body read = %v; want a %s retry", err, tokenRefusedWait)
+	}
+	if tokens.forgot != "review acme" {
+		t.Fatalf("forgot %q, want the review App's token for acme", tokens.forgot)
+	}
+	if left := w.rateLimitLeft(); left > 0 {
+		t.Fatalf("a 401 held GitHub's rate limit for %s, want no hold", left)
+	}
+	if body, err := w.reviewBody(context.Background(), review); err != nil || body != "the full body" {
+		t.Fatalf("the retried read = %q, %v; want the full body", body, err)
+	}
+}

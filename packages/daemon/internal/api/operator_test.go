@@ -739,7 +739,7 @@ func TestTheOperatorsCloseRefusesAWorkflowTreeAndAWorker(t *testing.T) {
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-209-implementer/close", nil),
 		http.StatusConflict, "close refused: legion-legion-legion-209-implementer is not its tree's root claim; stop it instead")
 
-	h.recordIssue(record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil),
 		http.StatusConflict, "close refused: LEGION-208 is a workflow issue's tree, which closes when its linger expires")
 
@@ -793,7 +793,7 @@ func TestACloseOfARetiredRootStillAsksWhetherAWorkflowIssueBacksTheTree(t *testi
 	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
 		t.Fatalf("first close = %d; body %s", recorder.Code, recorder.Body)
 	}
-	h.recordIssue(record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U"})
 
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil),
 		http.StatusConflict, "close refused: LEGION-208 is a workflow issue's tree, which closes when its linger expires")

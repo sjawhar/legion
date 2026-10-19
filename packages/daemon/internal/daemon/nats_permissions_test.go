@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
@@ -122,7 +123,7 @@ func TestDaemonPermissionsOnRealServers(t *testing.T) {
 				cfg := daemonGrantConfig(uri)
 				attempt, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 				defer cancel()
-				w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
+				w := grantWorkflow(t, logs)
 				if err := w.connect(attempt, cfg, natsConnection{seed: daemonSeed}); err == nil {
 					t.Fatal("the daemon connected without the dispatch consumer-create permission")
 				}
@@ -158,14 +159,26 @@ func daemonGrantConfig(uri string) config.Config {
 	const project = "CAPTURE"
 	return config.Config{
 		Project: project, NatsURLs: []string{uri}, WorkerRPCTimeout: time.Second,
-		Projects: map[string]config.Project{project: {Repo: ghrepo.MustParse("sjawhar/legion")}},
+		Projects: map[string]config.Project{project: {}},
 	}
+}
+
+// grantWorkflow is the workflow the grant tests connect: its project's mapping serves
+// sjawhar/legion, the repository the fixtures' events name, so GitHub intake hears it, and a
+// stand-in GitHub names it, as preparing the Dispatch fixture's todo issue reads it.
+func grantWorkflow(t *testing.T, logs *syncBuffer) *workflowRuntime {
+	t.Helper()
+	repos := newRepositories("CAPTURE")
+	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("sjawhar/legion"), Default: true}}, nil)
+	github := newNamedGitHub(t, map[string]string{"sjawhar/legion": "sjawhar/legion@main"})
+	return &workflowRuntime{pool: isolatedOutboxPool(t), records: projectRecords{Store: record.NewStore(), project: "CAPTURE"},
+		repositories: repos, defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: grantLogger(logs)}
 }
 
 func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workflowRuntime {
 	t.Helper()
 	cfg := daemonGrantConfig(uri)
-	w := &workflowRuntime{project: cfg.Projects[cfg.Project], log: grantLogger(logs)}
+	w := grantWorkflow(t, logs)
 	if err := w.connect(t.Context(), cfg, natsConnection{seed: seed}); err != nil {
 		t.Fatalf("connect the daemon: %v", err)
 	}

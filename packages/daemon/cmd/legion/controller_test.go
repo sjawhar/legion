@@ -1474,17 +1474,19 @@ func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
 }
 
 // The real gh the controller's `legion gh` runs is the operator's LEGION_GH_PATH when set, and
-// otherwise the first gh on the operator's PATH that is not this state directory's own wrapper. A
-// start that finds none, and a LEGION_GH_PATH that is relative, absent, or no executable file, is
-// refused naming it before the daemon is asked for anything: a mint would replace the running
-// controller's capability with one whose gh cannot run.
+// otherwise the first gh on the operator's PATH that is not this state directory's own wrapper,
+// which must be a compiled program: a script there is a gh wrapper (a machine's own shim), which
+// would choose its own token in place of the review App's. A start that finds none or a script,
+// and a LEGION_GH_PATH that is relative, absent, or no executable file, is refused naming it
+// before the daemon is asked for anything: a mint would replace the running controller's
+// capability with one whose gh cannot run.
 func TestControllerStartResolvesTheRealGh(t *testing.T) {
 	t.Run("on PATH, past the controller's own wrapper", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
 		bin := t.TempDir()
 		real := filepath.Join(bin, "gh")
-		if err := os.WriteFile(real, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		if err := os.WriteFile(real, []byte("\x7fELF\x02\x01\x01\x00"), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		wrapper := filepath.Join(c.defaultDir, "bin")
@@ -1502,6 +1504,25 @@ func TestControllerStartResolvesTheRealGh(t *testing.T) {
 		if got := c.env()["LEGION_GH_PATH"]; got != real {
 			t.Errorf("LEGION_GH_PATH = %q, want the gh on PATH past the wrapper, %s", got, real)
 		}
+	})
+	t.Run("a script first on PATH", func(t *testing.T) {
+		d := newControllerDaemon(t)
+		c := newControllerStart(t, d, controllerOptions{})
+		shims, bin := t.TempDir(), t.TempDir()
+		shim := filepath.Join(shims, "gh")
+		if err := os.WriteFile(shim, []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("\x7fELF\x02\x01\x01\x00"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		unsetenv(t, "LEGION_GH_PATH")
+		t.Setenv("PATH", shims+":"+bin+":/usr/bin:/bin")
+		code, _, errb := c.run()
+		if want := "the first gh on PATH, " + shim + ", is a script"; code != 1 || !strings.Contains(errb, want) || !strings.Contains(errb, "LEGION_GH_PATH") {
+			t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal containing %q and LEGION_GH_PATH", code, errb, want)
+		}
+		c.wantNoSecretRequest()
 	})
 	notExecutable := filepath.Join(t.TempDir(), "gh")
 	if err := os.WriteFile(notExecutable, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {

@@ -72,7 +72,7 @@ func strandedClaim(t *testing.T, tree, issue string, role claim.Role, state supe
 }
 
 func strandedIssue(key, tree string, p phase.Phase) record.Issue {
-	issue := record.Issue{Key: key, Tree: tree, Project: "LEGION", Phase: p, Generation: 2, Status: "in_progress"}
+	issue := record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: tree, Project: "LEGION", Phase: p, Generation: 2, Status: "in_progress"}
 	if key != tree {
 		issue.Parent = &tree
 	}

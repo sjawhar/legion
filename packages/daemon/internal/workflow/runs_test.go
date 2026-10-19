@@ -37,17 +37,17 @@ func TestAnInFlightChildSetBackToTodoSuspendsThePreviousRunsWorker(t *testing.T)
 			pool := migratedPool(t)
 			ctx := context.Background()
 			approved := 1
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
 			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: &approved})
 			parentKey := "LEGION-208"
-			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
 				Phase: tc.phase, Generation: 1, Status: "in_progress", Rank: "V", LastDispatchSeq: 4})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: tc.role, Claim: "child-worker", Rounds: 1})
 			engine := testEngine(config.DesignGateRootIssues, nil)
 
 			if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-back-to-todo", intake.DispatchIssue{
-				Key: "LEGION-209", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V",
+				Key: "LEGION-209", ResolvedRepo: "acme/widgets", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-208", Rank: "V",
 			}, engine, admissionStub{}); err != nil {
 				t.Fatalf("ApplyFact child todo: %v", err)
 			}
@@ -97,11 +97,11 @@ func TestACompletionFromAnInterruptedRunIsRefused(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	approved := 1
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
 	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: &approved})
 	parentKey := "LEGION-208"
-	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parentKey,
 		Phase: phase.Planning, Generation: 2, Status: "in_progress", Rank: "V", LastDispatchSeq: 6})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RolePlanner, Claim: "child-planner"})
 	engine := testEngine(config.DesignGateRootIssues, nil)

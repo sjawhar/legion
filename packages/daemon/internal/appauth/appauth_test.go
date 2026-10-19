@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -207,6 +208,141 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 	defer mu.Unlock()
 	if exchanges != 2 || discoveries != 1 || identities != 1 {
 		t.Fatalf("exchanges=%d discoveries=%d identities=%d, want 2, 1, 1", exchanges, discoveries, identities)
+	}
+}
+
+// An App removed from an owner after the daemon found its installation answers the next mint's
+// exchange 404: the installation found is forgotten and looked for again, so the mint answers
+// ErrNotInstalled, an answer about the owner, rather than an error a caller retries without end;
+// and an App installed there again, under a new installation, mints on that one.
+func TestAnInstallationRemovedAfterItWasFoundIsAnsweredNotInstalled(t *testing.T) {
+	_, privatePEM := testAppKey(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	installation, discoveries := "77", 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		current := installation
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/app/installations":
+			mu.Lock()
+			discoveries++
+			mu.Unlock()
+			if current == "" {
+				fmt.Fprint(w, `[]`)
+				return
+			}
+			fmt.Fprintf(w, `[{"id":%s,"account":{"login":"acme"}}]`, current)
+		case "/app/installations/77/access_tokens", "/app/installations/88/access_tokens":
+			if !strings.Contains(r.URL.Path, "/"+current+"/") || current == "" {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"message":"Not Found"}`)
+				return
+			}
+			fmt.Fprintf(w, `{"token":"installation-%s","expires_at":%q}`, current, now.Add(time.Hour).Format(time.RFC3339))
+		case "/app":
+			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
+		case "/users/legion-reviewer[bot]":
+			fmt.Fprint(w, `{"id":271566631}`)
+		default:
+			t.Errorf("unexpected GitHub path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	tokens := New(config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "12345", PrivateKey: privatePEM},
+		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
+	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
+	if _, err := tokens.Token(context.Background(), Review, "acme"); err != nil {
+		t.Fatalf("first token: %v", err)
+	}
+
+	mu.Lock()
+	installation = ""
+	mu.Unlock()
+	now = now.Add(time.Hour)
+	_, err := tokens.Token(context.Background(), Review, "acme")
+	if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("a mint after the App was removed = %v, want ErrNotInstalled", err)
+	}
+
+	mu.Lock()
+	installation = "88"
+	mu.Unlock()
+	lease, err := tokens.Token(context.Background(), Review, "acme")
+	if err != nil || lease.Token != "installation-88" {
+		t.Fatalf("a mint after the App was installed again = %+v, %v; want the new installation's token", lease, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if discoveries != 3 {
+		t.Fatalf("installations were listed %d times, want 3: at the first mint, once the removed one answered 404, and once more for the reinstall", discoveries)
+	}
+}
+
+// Forget drops both of an owner's cached leases for a role, the write token's and the read
+// token's, in any case of the owner's name, so the next Token and ReadToken each mint again; a
+// lease it did not drop is still served from the cache, and each lease records when it was minted.
+func TestForgetMakesTheNextTokenAndReadTokenMintAgain(t *testing.T) {
+	_, privatePEM := testAppKey(t)
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	exchanges := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			fmt.Fprint(w, `[{"id":77,"account":{"login":"acme"}}]`)
+		case "/app/installations/77/access_tokens":
+			mu.Lock()
+			exchanges++
+			n := exchanges
+			mu.Unlock()
+			fmt.Fprintf(w, `{"token":"installation-%d","expires_at":%q}`, n, now.Add(time.Hour).Format(time.RFC3339))
+		case "/app":
+			fmt.Fprint(w, `{"slug":"legion-reviewer"}`)
+		case "/users/legion-reviewer[bot]":
+			fmt.Fprint(w, `{"id":271566631}`)
+		default:
+			t.Errorf("unexpected GitHub path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	tokens := New(config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "12345", PrivateKey: privatePEM},
+		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
+	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
+	ctx := context.Background()
+	mint := func(read bool) Lease {
+		t.Helper()
+		get := tokens.Token
+		if read {
+			get = tokens.ReadToken
+		}
+		lease, err := get(ctx, Review, "acme")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lease
+	}
+	write, read := mint(false), mint(true)
+	if !write.Minted.Equal(now) || !read.Minted.Equal(now) {
+		t.Fatalf("minted %s and %s, want both at %s", write.Minted, read.Minted, now)
+	}
+	if again := mint(false); again.Token != write.Token {
+		t.Fatalf("a second Token = %s, want the cached %s", again.Token, write.Token)
+	}
+	tokens.Forget(Review, "ACME")
+	if again := mint(false); again.Token == write.Token {
+		t.Fatalf("Token after Forget = the dropped %s, want a fresh mint", again.Token)
+	}
+	if again := mint(true); again.Token == read.Token {
+		t.Fatalf("ReadToken after Forget = the dropped %s, want a fresh mint", again.Token)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if exchanges != 4 {
+		t.Fatalf("%d exchanges, want 4: each lease once, then each again after Forget", exchanges)
 	}
 }
 

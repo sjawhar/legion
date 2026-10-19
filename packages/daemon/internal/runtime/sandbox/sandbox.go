@@ -46,6 +46,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -100,6 +101,12 @@ type Runtime struct {
 	launcherAuth                   launcherCredentials
 	now                            func() time.Time
 	log                            *slog.Logger
+	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
+	// mapping names now (Options.RepositoryCache, Options.Mapped), and cacheDial opens every
+	// connection the health read makes (net.Dialer's own; a test routes the Service's name itself).
+	cacheConfig RepositoryCache
+	mapped      func() []ghrepo.Repository
+	cacheDial   func(ctx context.Context, network, address string) (net.Conn, error)
 
 	// lifetime is the informers' context; a read no single caller waits for
 	// (readLauncherCredential) ends with it.
@@ -108,8 +115,13 @@ type Runtime struct {
 	kube      kubernetes.Interface
 	sandboxes cache.SharedIndexInformer
 	pods      cache.SharedIndexInformer
-	// sandboxFeed and podFeed are whether each informer's latest list or watch request succeeded.
-	sandboxFeed, podFeed feed
+	// services is every Service of the namespace, whatever its labels: the Agent Sandbox controller
+	// labels a cache's Service with no project, and one it did not make carries what its maker gave
+	// it (cacheServiceRefusal).
+	services cache.SharedIndexInformer
+	// sandboxFeed, podFeed and serviceFeed are whether each informer's latest list or watch request
+	// succeeded.
+	sandboxFeed, podFeed, serviceFeed feed
 
 	mu sync.Mutex
 	// changed is closed and replaced on every informer event, waking every wait.
@@ -124,6 +136,14 @@ type Runtime struct {
 	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
 	// other: each issue's pod provisions its own clone on its own volume.
 	podTurns map[string]chan struct{}
+	// occupiedCaches are the cache names RepositoryCache found held by another repository's cache and
+	// has logged, so each is logged once.
+	occupiedCaches map[string]bool
+	// cacheHealth is each Ready cache's last health read (readCacheHealth), by its Sandbox's name.
+	cacheHealth map[string]cacheHealthRead
+	// cacheBearers is each cache's bearer token as its Secret last held it (writeCacheSecret), by its
+	// Sandbox's name: what the health read presents, and what an issue pod's Secret is given.
+	cacheBearers map[string]string
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -158,9 +178,10 @@ func configure(opts Options) (*Runtime, error) {
 }
 
 // checkSupervision refuses opts that lack what only supervision reads — launching, relaunching,
-// adopting and sweeping a claim's pod: the provisioning token source, the roles' gh-files
-// function, the store, the connection directory, and a worker stream address a pod can dial. A
-// runtime that runs the image probe alone (newProber) reads none of them.
+// adopting and sweeping a claim's pod, and making, refreshing and sweeping the repository caches:
+// the provisioning token source, the roles' gh-files function, the store, the connection
+// directory, a worker stream address a pod can dial, the repository caches' configuration and the
+// mapping they follow. A runtime that runs the image probe alone (newProber) reads none of them.
 func checkSupervision(opts Options) error {
 	refuse := func(format string, args ...any) error { return fmt.Errorf("sandbox runtime: "+format, args...) }
 	switch {
@@ -172,6 +193,11 @@ func checkSupervision(opts Options) error {
 		return refuse("no store")
 	case opts.Conns == nil:
 		return refuse("no connection directory")
+	case opts.Mapped == nil:
+		return refuse("no repository mapping for the repository caches")
+	}
+	if err := opts.RepositoryCache.check(); err != nil {
+		return refuse("%v", err)
 	}
 	host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
 	if _, _, err := net.SplitHostPort(host); !ok || err != nil {
@@ -184,7 +210,7 @@ func checkSupervision(opts Options) error {
 // defaults, touching no cluster. A runtime it builds alone runs the image probe and nothing else
 // (newProber); configure adds supervision's requirements to it.
 func configureProber(opts Options) (*Runtime, error) {
-	provisionBound := workspace.FetchTimeout + workspace.CloneTimeout
+	provisionBound := workspace.FetchBudget + workspace.CloneTimeout
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}
@@ -260,7 +286,8 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		launchers: newLaunchers(),
+		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
+		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -290,13 +317,19 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 	if !ok {
 		return fmt.Errorf("resources: no reservation for role %s", role)
 	}
+	return checkRequirements("role "+string(role), requirements)
+}
+
+// checkRequirements is why requirements, what's (a role's, or the repository cache's), is not a
+// reservation (checkReservation's rule), or nil when it is one.
+func checkRequirements(what string, requirements corev1.ResourceRequirements) error {
 	for _, list := range []struct {
 		name string
 		list corev1.ResourceList
 	}{{"requests", requirements.Requests}, {"limits", requirements.Limits}} {
 		for _, name := range slices.Sorted(maps.Keys(list.list)) {
 			if name != corev1.ResourceCPU && name != corev1.ResourceMemory && name != corev1.ResourceEphemeralStorage {
-				return fmt.Errorf("resources: role %s names %s in its %s; a reservation is cpu, memory and ephemeral-storage alone", role, name, list.name)
+				return fmt.Errorf("resources: %s names %s in its %s; a reservation is cpu, memory and ephemeral-storage alone", what, name, list.name)
 			}
 		}
 	}
@@ -304,22 +337,22 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 		request, limit := requirements.Requests[name], requirements.Limits[name]
 		switch {
 		case request.Sign() <= 0 || limit.Sign() <= 0:
-			return fmt.Errorf("resources: role %s reserves no %s (request %s, limit %s); a reservation is a positive request under a positive limit", role, name, request.String(), limit.String())
+			return fmt.Errorf("resources: %s reserves no %s (request %s, limit %s); a reservation is a positive request under a positive limit", what, name, request.String(), limit.String())
 		case request.Cmp(limit) > 0:
-			return fmt.Errorf("resources: role %s requests %s %s past its limit %s; the request may not exceed the limit", role, name, request.String(), limit.String())
+			return fmt.Errorf("resources: %s requests %s %s past its limit %s; the request may not exceed the limit", what, name, request.String(), limit.String())
 		}
 	}
 	request, limit := requirements.Requests[corev1.ResourceEphemeralStorage], requirements.Limits[corev1.ResourceEphemeralStorage]
 	switch {
 	case request.Sign() <= 0 || limit.Sign() <= 0:
-		return fmt.Errorf("resources: role %s bounds no ephemeral-storage (request %s, limit %s); the bound is a positive request under a positive limit", role, request.String(), limit.String())
+		return fmt.Errorf("resources: %s bounds no ephemeral-storage (request %s, limit %s); the bound is a positive request under a positive limit", what, request.String(), limit.String())
 	case request.Cmp(limit) > 0:
-		return fmt.Errorf("resources: role %s requests ephemeral-storage %s past its limit %s; the request may not exceed the limit", role, request.String(), limit.String())
+		return fmt.Errorf("resources: %s requests ephemeral-storage %s past its limit %s; the request may not exceed the limit", what, request.String(), limit.String())
 	}
 	return nil
 }
 
-// start runs both informers (startInformers) and then the GitHub credential refresher
+// start runs the informers (startInformers) and then the GitHub credential refresher
 // (refreshGitHubCredentials) on ctx, the informers' lifetime, so it stops with the informers whose
 // pod store it walks.
 func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
@@ -330,26 +363,36 @@ func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
 	return nil
 }
 
-// startInformers runs both informers over c's informers' clients, selected on the project label,
-// until ctx ends, and waits for both stores to sync; every other request of the runtime goes
-// through c's requests' clients, each read and write of them sent again while the API server
-// answers a launch's overloaded (patientDynamic, patientKube).
+// startInformers runs the three informers over c's informers' clients — the Sandboxes and pods
+// selected on the project label, every Service of the namespace — until ctx ends, and waits for the
+// three stores to sync; every other request of the runtime goes through c's requests' clients, each
+// read and write of them sent again while the API server answers a launch's overloaded
+// (patientDynamic, patientKube).
 func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 	r.dyn, r.kube, r.lifetime = patientDynamic{c.requests.dyn, r}, patientKube{c.requests.kube, r}, ctx
 	sandboxes := c.informers.dyn.Resource(sandboxGVR).Namespace(r.namespace)
 	pods := c.informers.kube.CoreV1().Pods(r.namespace)
-	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
-	r.sandboxes = r.informer(&r.sandboxFeed, c.informers.dyn, &unstructured.Unstructured{},
+	services := c.informers.kube.CoreV1().Services(r.namespace)
+	r.sandboxFeed.resource, r.podFeed.resource, r.serviceFeed.resource = "Sandbox", "pod", "Service"
+	project := labelProject + "=" + r.project
+	r.sandboxes = r.informer(&r.sandboxFeed, c.informers.dyn, &unstructured.Unstructured{}, project,
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
 			return sandboxes.List(ctx, o)
 		},
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
 			return sandboxes.Watch(ctx, o)
 		})
-	r.pods = r.informer(&r.podFeed, c.informers.kube, &corev1.Pod{},
+	r.pods = r.informer(&r.podFeed, c.informers.kube, &corev1.Pod{}, project,
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
-	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
+	r.services = r.informer(&r.serviceFeed, c.informers.kube, &corev1.Service{}, "",
+		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
+			return services.List(ctx, o)
+		},
+		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			return services.Watch(ctx, o)
+		})
+	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods, r.services} {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    func(obj any) { r.notify(obj) },
 			UpdateFunc: func(_, obj any) { r.notify(obj) },
@@ -361,6 +404,7 @@ func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 	running, stop := context.WithCancel(ctx)
 	go r.sandboxes.RunWithContext(running)
 	go r.pods.RunWithContext(running)
+	go r.services.RunWithContext(running)
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
 	// Whether the stores are being fed is the feeds' answer, not client-go's watch-error handler:
@@ -374,9 +418,9 @@ func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 			stop()
 			return fmt.Errorf("sandbox runtime: the informers did not sync: %w", ctx.Err())
 		case <-tick.C:
-			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check()); err != nil {
+			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check(), r.serviceFeed.check()); err != nil {
 				stop()
-				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
+				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes, pods and Services failed before the stores synced: %w",
 					r.namespace, err)
 			}
 		}
@@ -385,25 +429,25 @@ func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
 	return nil
 }
 
-// informer is a shared informer of the namespace's objects of the project, listed and watched
-// through list and watch, with the outcome of every request recorded in f: client-go's reflector
-// retries a refused watch itself without calling the watch-error handler, so only the requests
-// themselves say whether the store is still being fed.
-func (r *Runtime) informer(f *feed, client any, example k8sruntime.Object, list cache.ListWithContextFunc,
+// informer is a shared informer of the namespace's objects, those selector selects when it is set,
+// listed and watched through list and watch, with the outcome of every request recorded in f:
+// client-go's reflector retries a refused watch itself without calling the watch-error handler, so
+// only the requests themselves say whether the store is still being fed.
+func (r *Runtime) informer(f *feed, client any, example k8sruntime.Object, selector string, list cache.ListWithContextFunc,
 	watchFn cache.WatchFuncWithContext,
 ) cache.SharedIndexInformer {
-	project := func(o metav1.ListOptions) metav1.ListOptions {
-		o.LabelSelector = labelProject + "=" + r.project
+	selected := func(o metav1.ListOptions) metav1.ListOptions {
+		o.LabelSelector = selector
 		return o
 	}
 	lw := &cache.ListWatch{
 		ListWithContextFunc: func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
-			object, err := list(ctx, project(o))
+			object, err := list(ctx, selected(o))
 			f.record(err, r.now())
 			return object, err
 		},
 		WatchFuncWithContext: func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
-			w, err := watchFn(ctx, project(o))
+			w, err := watchFn(ctx, selected(o))
 			f.record(err, r.now())
 			return w, err
 		},
@@ -456,7 +500,9 @@ func call(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }
 
-func (r *Runtime) synced() bool { return r.sandboxes.HasSynced() && r.pods.HasSynced() }
+func (r *Runtime) synced() bool {
+	return r.sandboxes.HasSynced() && r.pods.HasSynced() && r.services.HasSynced()
+}
 
 // notify wakes every wait and marks every watched claim whose Sandbox or pod changed for the
 // running Observe. A pod is named after its Sandbox, so one name finds both.
@@ -467,6 +513,8 @@ func (r *Runtime) notify(obj any) {
 	var name string
 	switch o := obj.(type) {
 	case *corev1.Pod:
+		name = o.Name
+	case *corev1.Service:
 		name = o.Name
 	case *unstructured.Unstructured:
 		name = o.GetName()
@@ -771,7 +819,9 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
 // next sweep judges it on the claims known then. The image probe's Sandbox (labelled
 // legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
-// has the controller delete it otherwise (probe.go). known's located claims join the watch, unless
+// has the controller delete it otherwise (probe.go). A repository cache's Sandbox (labelled
+// legion.dev/cache) is no claim's either: the claim path passes over it, and sweepCaches keeps,
+// repairs or retires it after the claim path. known's located claims join the watch, unless
 // it already holds a newer incarnation of the claim, and are evaluated at once. Nothing here lists
 // Secrets: each goes with its Sandbox. Each Sandbox whose pod runs an image other than the
 // runtime's (imageDrift) is warned of, named with both images, at the boot reconciliation and at
@@ -803,7 +853,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	}
 	for _, obj := range r.sandboxes.GetStore().List() {
 		u := obj.(*unstructured.Unstructured)
-		if u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
+		if u.GetLabels()[labelProbe] != "" || u.GetLabels()[labelCache] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
 		r.warnImageDrift(u)
@@ -814,6 +864,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 			errs = append(errs, err)
 		}
 	}
+	r.sweepCaches(ctx)
 	return errors.Join(errs...)
 }
 

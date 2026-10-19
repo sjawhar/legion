@@ -31,16 +31,16 @@ func git(t *testing.T, clone string, args ...string) string {
 	return stdout.String()
 }
 
-// A tmux daemon's boot rewrites the shared clone an older daemon provisioned, whose helper names
-// that daemon's own (`legion credential` by the pane launcher's path, or `gh auth git-credential`,
-// which answers from one owner's gh files alone), to `legion git-credential`, the helper that
-// answers each pane's git from the gh files of the owner the repository's path names: the clone's
-// credential.helper and its github.com one each read as the empty reset and then the new helper,
-// with credential.useHttpPath true so git passes that path, as a clone provisioned now does, and
-// the boot log names the clone. The next boot finds the helper current and writes and logs
-// nothing; a clone with the current helper and no useHttpPath is rewritten. A state directory with
-// no clone is nothing to do, and so is a configuration with no repository.
-func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
+// A tmux daemon's boot rewrites every shared clone an older daemon provisioned, one per repository,
+// whose helper names that daemon's own (`legion credential` by the pane launcher's path, or `gh
+// auth git-credential`, which answers from one owner's gh files alone), to `legion git-credential`,
+// the helper that answers each pane's git from the gh files of the owner the repository's path
+// names: each clone's credential.helper and its github.com one read as the empty reset and then the
+// new helper, with credential.useHttpPath true so git passes that path, as a clone provisioned now
+// does, and the boot log names each clone. The next boot finds the helpers current and writes and
+// logs nothing; a clone with the current helper and no useHttpPath is rewritten. A state directory
+// with no clone is nothing to do.
+func TestTmuxBootRewritesEveryOlderClonesCredentialHelper(t *testing.T) {
 	if _, err := os.Stat(realGit); err != nil {
 		t.Skipf("no git at %s: %v", realGit, err)
 	}
@@ -50,8 +50,7 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	// its own git, its `git init`, and the fix-up's runner all inherit this process's environment.
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
-	cfg := config.Config{Project: "WIDGETS", StateDir: t.TempDir(), Runtime: config.Runtime{Name: "tmux"},
-		Projects: map[string]config.Project{"WIDGETS": {Repo: ghrepo.MustParse("acme/widgets")}}}
+	cfg := config.Config{Project: "WIDGETS", StateDir: t.TempDir(), Runtime: config.Runtime{Name: "tmux"}}
 	tools := map[string]string{"git": realGit}
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -64,65 +63,74 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 		t.Fatalf("the fix-up logged %q with no clone", logs.String())
 	}
 
-	located, err := workspace.Location(cfg.StateDir, cfg.Projects["WIDGETS"].Repo, "WIDGETS-1")
-	if err != nil {
-		t.Fatal(err)
+	var clones []string
+	for _, repo := range []string{"acme/widgets", "zeta/tools"} {
+		located, err := workspace.Location(cfg.StateDir, ghrepo.MustParse(repo), "WIDGETS-1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(located.Clone, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command(realGit, "init", "-q", located.Clone).CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v\n%s", err, out)
+		}
+		old := "!gh auth git-credential"
+		git(t, located.Clone, "config", "--add", "credential.helper", old)
+		git(t, located.Clone, "config", "--add", "credential.https://github.com.helper", old)
+		clones = append(clones, located.Clone)
 	}
-	if err := os.MkdirAll(located.Clone, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if out, err := exec.Command(realGit, "init", "-q", located.Clone).CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, out)
-	}
-	old := "!gh auth git-credential"
-	git(t, located.Clone, "config", "--add", "credential.helper", old)
-	git(t, located.Clone, "config", "--add", "credential.https://github.com.helper", old)
 
 	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil {
 		t.Fatalf("reconfigureCloneCredential: %v", err)
 	}
 	want := "\n" + workspace.GitHubCredentialHelper + "\n"
-	for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
-		if got := git(t, located.Clone, "config", "--get-all", key); got != want {
-			t.Errorf("%s reads %q after the fix-up, want the empty reset and then %q", key, got, workspace.GitHubCredentialHelper)
+	for _, clone := range clones {
+		for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
+			if got := git(t, clone, "config", "--get-all", key); got != want {
+				t.Errorf("%s of %s reads %q after the fix-up, want the empty reset and then %q", key, clone, got, workspace.GitHubCredentialHelper)
+			}
+		}
+		if got := strings.TrimSpace(git(t, clone, "config", "credential.interactive")); got != "false" {
+			t.Errorf("credential.interactive of %s = %q, want false", clone, got)
+		}
+		if got := strings.TrimSpace(git(t, clone, "config", "credential.useHttpPath")); got != "true" {
+			t.Errorf("credential.useHttpPath of %s = %q, want true", clone, got)
+		}
+		if !strings.Contains(logs.String(), clone) {
+			t.Errorf("the fix-up logged %q, want a line naming %s", logs.String(), clone)
 		}
 	}
-	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.interactive")); got != "false" {
-		t.Errorf("credential.interactive = %q, want false", got)
-	}
-	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.useHttpPath")); got != "true" {
-		t.Errorf("credential.useHttpPath = %q, want true", got)
-	}
-	if lines := strings.Count(logs.String(), "set the shared clone's git credential helper"); lines != 1 || !strings.Contains(logs.String(), located.Clone) {
-		t.Errorf("the fix-up logged %q, want one line naming %s", logs.String(), located.Clone)
+	if lines := strings.Count(logs.String(), "set the shared clone's git credential helper"); lines != 2 {
+		t.Errorf("the fix-up logged %d lines, want one per clone:\n%s", lines, logs.String())
 	}
 
-	// The next boot: the helper is current, so nothing is written and nothing logged.
+	// The next boot: the helpers are current, so nothing is written and nothing logged.
 	logs.Reset()
-	before := git(t, located.Clone, "config", "--list", "--local")
-	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil {
-		t.Fatalf("reconfigureCloneCredential on a current clone: %v", err)
+	var before []string
+	for _, clone := range clones {
+		before = append(before, git(t, clone, "config", "--list", "--local"))
 	}
-	if after := git(t, located.Clone, "config", "--list", "--local"); after != before || logs.Len() != 0 {
-		t.Errorf("a current clone was rewritten or logged: config before %q, after %q, log %q", before, after, logs.String())
+	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil {
+		t.Fatalf("reconfigureCloneCredential on current clones: %v", err)
+	}
+	for i, clone := range clones {
+		if after := git(t, clone, "config", "--list", "--local"); after != before[i] {
+			t.Errorf("current clone %s was rewritten: config before %q, after %q", clone, before[i], after)
+		}
+	}
+	if logs.Len() != 0 {
+		t.Errorf("current clones logged %q", logs.String())
 	}
 
 	// A clone with the current helper and no useHttpPath answers every repository with one
 	// owner's token, so it is rewritten too.
-	git(t, located.Clone, "config", "--unset", "credential.useHttpPath")
+	git(t, clones[1], "config", "--unset", "credential.useHttpPath")
 	logs.Reset()
 	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil {
 		t.Fatalf("reconfigureCloneCredential on a clone without useHttpPath: %v", err)
 	}
-	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.useHttpPath")); got != "true" || !strings.Contains(logs.String(), located.Clone) {
-		t.Errorf("credential.useHttpPath = %q after the fix-up, log %q; want true and a line naming %s", got, logs.String(), located.Clone)
-	}
-
-	// A configuration with no repository has no clone to look for, whatever the state directory
-	// holds.
-	cfg.Projects = nil
-	logs.Reset()
-	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil || logs.Len() != 0 {
-		t.Fatalf("reconfigureCloneCredential with no repository = %v, logged %q; want nothing to do", err, logs.String())
+	if got := strings.TrimSpace(git(t, clones[1], "config", "credential.useHttpPath")); got != "true" || !strings.Contains(logs.String(), clones[1]) {
+		t.Errorf("credential.useHttpPath = %q after the fix-up, log %q; want true and a line naming %s", got, logs.String(), clones[1])
 	}
 }

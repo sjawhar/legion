@@ -24,7 +24,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/notify"
@@ -40,15 +39,17 @@ import (
 // It is absent for Stage 2 configurations, whose unchanged supervision proof deliberately has no
 // Dispatch, Apps, or Envoy stream configured.
 type workflowRuntime struct {
-	pool            *pgxpool.Pool
-	records         record.Store
-	engine          *workflow.Engine
-	admission       *admit.Admission
-	handlers        []intake.Handler
-	dispatch        dispatch.Client
-	tokens          appauth.Tokens
+	pool      *pgxpool.Pool
+	records   record.Store
+	engine    *workflow.Engine
+	admission *admit.Admission
+	handlers  []intake.Handler
+	dispatch  dispatch.Client
+	tokens    appauth.Tokens
+	// forget drops the token source's cached leases for an App and owner, a token GitHub refused
+	// (tokenRefused).
+	forget          appauth.Forgetter
 	grants          *credential.Grants
-	project         config.Project
 	projectID       string
 	dispatchProject string
 	stateDir        string
@@ -87,10 +88,26 @@ type workflowRuntime struct {
 	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
-	// defaultBranches is each repository's default branch as GitHub names it, read under githubAPI
-	// and kept defaultBranchTTL: the base the outbox creates an issue's branch at and provisions
-	// its workspace from, and the one every launch names (specs.defaultBranch).
+	// defaultBranches is each repository as GitHub names it and its default branch, read under
+	// githubAPI and kept defaultBranchTTL: what an issue's record takes its repository and default
+	// branch from when it is first recorded (ResolveRepository), and what the mapping serves each
+	// repository as (nameAccepted).
 	defaultBranches *defaultBranches
+	// repositories is the project's repository mapping as the daemon serves it (loadMapping at
+	// boot, refreshMapping on a mapping change); installs answers each App's installation on a
+	// mapped repository; mappingMu serializes the mapping's re-reads; mappingChanged carries a
+	// request for a read to refreshOnMappingChange, one waiting at most. mappingRequested counts
+	// the reads asked for (requestMappingRead) and mappingApplied is the last request a finished
+	// read covers; awaiting is each held admission event's request (awaitMappingRead), by issue key
+	// and then the sequence it was delivered at, under awaitingMu.
+	repositories     *repositories
+	installs         appauth.Installations
+	mappingMu        sync.Mutex
+	mappingChanged   chan struct{}
+	mappingRequested atomic.Uint64
+	mappingApplied   atomic.Uint64
+	awaitingMu       sync.Mutex
+	awaiting         map[string]map[int64]uint64
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -139,74 +156,117 @@ var appMintAttempt = 15 * time.Second
 // attempt inside the 180 s Stage 3 gives a daemon to answer /healthz.
 var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Second, Attempts: 5}
 
-// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
-// after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
-// refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token. It returns the review App's bot login from
-// its lease: the engine judges a push by its pusher against it, so one App configured for both
-// roles would make every implementer push the review App's and count no fix attempt, and is
-// refused, as is a review lease that names no login.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (string, error) {
+// appTransient is a failure GitHub reports as its own trouble (appauth.TransientError).
+func appTransient(err error) bool {
+	var transient *appauth.TransientError
+	return errors.As(err, &transient)
+}
+
+// appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
+// installation, so a daemon serving no repository yet still knows the review App's login, as one
+// attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
+// other failure is refused at once. It returns the review App's login: the engine judges a push by
+// its pusher against it, so one App configured for both roles would make every implementer push the
+// review App's and count no fix attempt, and is refused, as is a review App that names no login.
+func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
-	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
-		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
-		defer cancel()
+	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
 		for _, role := range appauth.Roles {
-			lease, err := tokens.Token(attempt, role, owner)
-			if err == nil {
-				logins[role] = lease.Identity.Name
-				continue
+			login, err := apps.AppLogin(ctx, role)
+			if err != nil {
+				return err
 			}
-			err = fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
-			var transient *appauth.TransientError
-			if errors.As(err, &transient) {
-				return bootprobe.Outcome{Detail: err.Error()}
-			}
-			return bootprobe.Outcome{Refusal: err}
+			logins[role] = login
 		}
-		return bootprobe.Outcome{Passed: true}
-	})
+		return nil
+	}, appMintAttempt, appTransient))
 	if err != nil {
 		return "", err
 	}
 	if logins[appauth.Review] == "" || logins[appauth.Review] == logins[appauth.Implement] {
-		return "", fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
+		return "", fmt.Errorf("the review App names bot login %q and the implement App %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
 	}
 	return logins[appauth.Review], nil
 }
 
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
+// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
+// after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
+// refused at once. The token manager keeps a lease it minted, so an attempt after the implement
+// token passed asks GitHub only for the review token.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, readinessAttempt(func(ctx context.Context) error {
+		for _, role := range appauth.Roles {
+			if _, err := tokens.Token(ctx, role, owner); err != nil {
+				return fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
+			}
+		}
+		return nil
+	}, appMintAttempt, appTransient))
+}
+
+// openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
+// Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
+// checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
+// from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
+// written before the record carried its repository.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
-	// The loader refuses a workflow whose projects do not configure the daemon's own, and a repo that
-	// is not owner/name.
-	project := cfg.Projects[cfg.Project]
-	owner := project.Repo.Owner()
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {
 		tokens = appauth.New(cfg.GitHubApps, appauth.Options{})
 	}
-	reviewAppLogin, err := mintAtBoot(ctx, tokens, owner, log)
-	if err != nil {
-		return nil, err
+	installs, ok := tokens.(appauth.Installations)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source answers no App installation, which the repository mapping is checked against")
 	}
-	log.Info("legion workflow boot stage", "stage", "appauth")
-	// The database is shared by every project's daemon: the workflow reads this project's issues.
-	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
-	// through the runtime, since the outbox itself is built later (attach).
+	logins, ok := tokens.(appauth.Logins)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source answers no App login, which the workflow judges pushes and reviews by")
+	}
+	forget, ok := tokens.(appauth.Forgetter)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source cannot drop a token GitHub refused, which a review's reads mint again")
+	}
 	w := &workflowRuntime{
-		pool: st.Pool(), tokens: tokens, reviewAppLogin: reviewAppLogin,
-		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
-		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
+		tokens: tokens, forget: forget, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
+		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
+		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1), mappingChanged: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}
-	records := projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
-	engine := workflow.New(records, engineConfig(cfg, reviewAppLogin), log)
-	w.records, w.engine, w.admission = records, engine, admit.New(records, engine, cfg.AdmissionCap, cfg.Project, log)
-	w.handlers = []intake.Handler{w.engine, w.admission}
+	log.Info("legion workflow boot stage", "stage", "dispatch")
+	if err := w.loadMapping(ctx); err != nil {
+		return nil, err
+	}
+	reviewAppLogin, err := appLoginsAtBoot(ctx, logins, log)
+	if err != nil {
+		return nil, err
+	}
+	for _, owner := range w.repositories.Owners() {
+		if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
+			return nil, err
+		}
+	}
+	log.Info("legion workflow boot stage", "stage", "appauth")
+	if err := w.nameMapping(ctx); err != nil {
+		return nil, err
+	}
+	// The database is shared by every project's daemon: the workflow reads this project's issues.
+	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
+	// through the runtime, since the outbox itself is built later (attach).
+	w.records = projectRecords{Store: record.NewStore(), project: cfg.Project, wake: w.wakeOutbox, log: log}
+	engineCfg := engineConfig(cfg, reviewAppLogin)
+	engineCfg.Repositories = w
+	w.engine = workflow.New(w.records, engineCfg, log)
+	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
+	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine, w.admission}, reviewAppLogin
+	w.pool = st.Pool()
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
+		return nil, err
+	}
 	return w, nil
 }
 
@@ -227,11 +287,6 @@ func engineConfig(cfg config.Config, reviewAppLogin string) workflow.Config {
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ReviewAppLogin: reviewAppLogin,
 		MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
 	}
-}
-
-// bind is the workflow's Dispatch client, with the bearer prepare read.
-func (w *workflowRuntime) bind(url, token string) {
-	w.dispatch = dispatch.New(url, token)
 }
 
 // connect opens Envoy's JetStream and this project's durable consumers, so a missing
@@ -259,9 +314,16 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
+	heard, err := w.heardAtBoot(ctx)
+	if err != nil {
+		conn.Close()
+		w.conn = nil
+		return err
+	}
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
-		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+		Project: cfg.Project, Repositories: heard, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
 		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
+		RepositoryMapping: w.mappingChange, PrepareRepository: w.prepareRepository,
 	})
 	if err != nil {
 		conn.Close()
@@ -351,6 +413,15 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("list Dispatch issues for admission: %w", err)
 	}
+	// The transaction performs no I/O: what admission reads of a todo issue's repository is read now.
+	for _, summary := range issues {
+		if summary.Status != "todo" {
+			continue
+		}
+		if _, err := w.prepareIssue(ctx, intake.ListedIssue(summary), false, false); err != nil {
+			return fmt.Errorf("prepare the repository of %s for admission: %w", summary.Key, err)
+		}
+	}
 	target, err := w.consumers.DispatchTarget(ctx)
 	if err != nil {
 		return fmt.Errorf("read notification stream target: %w", err)
@@ -360,9 +431,14 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		return fmt.Errorf("read Dispatch consumer position: %w", err)
 	}
 	// The reconcile is its own transaction, so it owns the commit hooks its admission and workflow
-	// changes register (intake.OnCommit), as ApplyFact does for a fact.
+	// changes register (intake.OnCommit), as ApplyFact does for a fact, and it records issues, so it
+	// takes the lock every fact applies under: a mapping refresh never unsubscribes a repository it
+	// is recording an issue on.
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		if err := intake.SerializeFacts(scoped, tx); err != nil {
+			return fmt.Errorf("serialize the reconcile with every fact: %w", err)
+		}
 		return w.admission.Reconcile(scoped, tx, issues, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)
@@ -385,7 +461,7 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner s
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, w.defaultBranches.Of,
+		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
@@ -500,6 +576,10 @@ func (w *workflowRuntime) run(ctx context.Context) error {
 	})
 	group.Go(func() error {
 		w.pollHoldRelease(running)
+		return nil
+	})
+	group.Go(func() error {
+		w.refreshOnMappingChange(running)
 		return nil
 	})
 	group.Go(func() error {
