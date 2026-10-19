@@ -91,13 +91,18 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 
 // ghWrapperScript is the `gh` wrapper both runtimes install first on PATH: a script whose one
 // command execs `legion gh` with its arguments (packages/daemon/docker/gh, workerbin.Install),
-// the legion path a bare word of the characters a shell reads literally (shellprefix's safe set),
-// or quoted, in single quotes (shellprefix.Literal) or in double quotes with no expansion.
-var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('(?:[^']|'\\'')*'|"[^"$` + "`" + `\\]*"|[A-Za-z0-9_./:-]+) gh "\$@"\n?$`)
+// the legion path absolute, so the shell's exec reads it as no option, and either a bare word of
+// the characters a shell reads literally (shellprefix's safe set) or quoted, in single quotes
+// (shellprefix.Literal) or in double quotes with no expansion.
+var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('/(?:[^']|'\\'')*'|"/[^"$` + "`" + `\\]*"|/[A-Za-z0-9_./:-]*) gh "\$@"\n?$`)
+
+// ghWrapperMaxBytes bounds the wrapper read: a script longer than any wrapper Legion installs is
+// no wrapper, and is refused whole rather than matched by its start.
+const ghWrapperMaxBytes = 4096
 
 // ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute
 // path: gh names its git credential helper after it (GH_PATH). It is refused when PATH's first gh
-// is no such wrapper (ghWrapperScript), or there is none: the real gh itself would answer every
+// is no such wrapper (isGhWrapper), or there is none: the real gh itself would answer every
 // github.com request with GH_CONFIG_DIR's token, and a machine's own wrapper with whatever it
 // chooses.
 func ghWrapperPath() (string, error) {
@@ -113,15 +118,24 @@ func ghWrapperPath() (string, error) {
 		return "", fmt.Errorf("read %s: %w", wrapper, err)
 	}
 	defer file.Close()
-	head := make([]byte, 4096)
-	n, err := io.ReadFull(file, head)
-	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+	ok, err := isGhWrapper(file)
+	if err != nil {
 		return "", fmt.Errorf("read %s: %w", wrapper, err)
 	}
-	if !ghWrapperScript.Match(head[:n]) {
+	if !ok {
 		return "", fmt.Errorf("the first gh on PATH, %s, is not the wrapper that runs `legion gh`, so the git gh runs would not authenticate through it; run it as a Legion pane's gh", wrapper)
 	}
 	return wrapper, nil
+}
+
+// isGhWrapper says whether r holds, whole, a script ghWrapperScript accepts: one longer than
+// ghWrapperMaxBytes is none.
+func isGhWrapper(r io.Reader) (bool, error) {
+	script, err := io.ReadAll(io.LimitReader(r, ghWrapperMaxBytes+1))
+	if err != nil {
+		return false, err
+	}
+	return len(script) <= ghWrapperMaxBytes && ghWrapperScript.Match(script), nil
 }
 
 // withGitHubUseHTTPPath adds credential.https://github.com.useHttpPath=true to env's GIT_CONFIG_COUNT

@@ -868,9 +868,28 @@ func TestTheRuntimesGhWrappersAreOnesLegionGhAccepts(t *testing.T) {
 		// Two commands, a redirect, a tilde and a glob: shell, not one literal path.
 		"#!/bin/sh\nexec /x|/bin/sh gh \"$@\"\n", "#!/bin/sh\nexec /x&/bin/sh gh \"$@\"\n", "#!/bin/sh\nexec /x;/bin/sh gh \"$@\"\n",
 		"#!/bin/sh\nexec /x>/dev/null gh \"$@\"\n", "#!/bin/sh\nexec ~/legion gh \"$@\"\n", "#!/bin/sh\nexec /opt/*/legion gh \"$@\"\n",
+		// An option to the shell's exec, and a path relative to wherever gh runs.
+		"#!/bin/sh\nexec -a gh \"$@\"\n", "#!/bin/sh\nexec '-a' gh \"$@\"\n", "#!/bin/sh\nexec \"-a\" gh \"$@\"\n",
+		"#!/bin/sh\nexec legion gh \"$@\"\n", "#!/bin/sh\nexec 'bin/legion' gh \"$@\"\n",
 	} {
 		if ghWrapperScript.MatchString(script) {
 			t.Errorf("legion gh accepts %q as its wrapper", script)
+		}
+	}
+
+	// The whole script is read: one that starts as a wrapper and goes on past the bound is none.
+	line := "#!/bin/sh\nexec '/" + strings.Repeat("a", ghWrapperMaxBytes) + "' gh \"$@\"\n"
+	long := line[:ghWrapperMaxBytes-len("' gh \"$@\"\n")] + "' gh \"$@\"\n"
+	for name, tc := range map[string]struct {
+		script string
+		want   bool
+	}{
+		"a wrapper at the bound":    {long, true},
+		"one going on past it":      {long + "rm -rf ~\n", false},
+		"a wrapper of a short path": {"#!/bin/sh\nexec '/opt/legion/bin/legion' gh \"$@\"\n", true},
+	} {
+		if got, err := isGhWrapper(strings.NewReader(tc.script)); err != nil || got != tc.want {
+			t.Errorf("isGhWrapper(%s, %d bytes) = %t, %v; want %t", name, len(tc.script), got, err, tc.want)
 		}
 	}
 }
