@@ -4143,8 +4143,8 @@ code_message=$(timeout 60 gh api "repos/$repo/commits/$code_head" --jq .commit.m
 code_checks() { [ "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" -gt 0 ] 2>/dev/null; }
 on_tree "$tree1" until_true 300 "a check run on the implementer's code head $code_head" code_checks
 printf 'planner handoff %s: 0 check runs, two empty lines then skip-checks: true as the last line\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
-# Negative control: the same gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
-if pod_viewer "$gh_pod" implementer /nonexistent >/dev/null 2>"$evidence/github-credential-negative.txt"; then
+# Negative control: the real gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
+if pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= /usr/local/bin/gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login" >/dev/null 2>"$evidence/github-credential-negative.txt"; then
   fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
 fi
 grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_CONFIG_DIR=/nonexistent failed without gh's own not-logged-in message: $(cat "$evidence/github-credential-negative.txt")"
