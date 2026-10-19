@@ -174,6 +174,7 @@ func (d *postingDispatch) MessageBodiesSince(context.Context, string, time.Time)
 func (d *postingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *postingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 
 // postsTo is how many messages were posted on issue.
 func (d *postingDispatch) postsTo(issue string) int {
@@ -221,6 +222,7 @@ func (d *laneBoard) MessageBodiesSince(context.Context, string, time.Time) ([]st
 func (d *laneBoard) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *laneBoard) BuildCommit(context.Context) (string, error) { return "", nil }
 
 // statuses is each status that landed, in order.
 func (d *laneBoard) statuses() []string {

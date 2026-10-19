@@ -335,7 +335,7 @@ func TestABootServesHealthzWhileTheStrandedReportStoreReadWaits(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
+	go func() { done <- run(runCtx, cfg, Build{}, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
 	t.Cleanup(func() {
 		if locked {
 			_ = lock.Rollback(context.Background())

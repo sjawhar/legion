@@ -113,6 +113,8 @@ func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatc
 	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
 
+func (r *statusRecorder) BuildCommit(context.Context) (string, error) { return "", nil }
+
 var _ dispatch.Client = (*statusRecorder)(nil)
 
 func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder, *statusRecorder) {

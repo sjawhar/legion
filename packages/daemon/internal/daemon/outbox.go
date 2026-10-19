@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -61,6 +62,10 @@ const (
 	// answers would hold the lane and every later lifecycle row of the issue behind it — the
 	// starts that wait for the branch first of all.
 	issueBranchTimeout = 30 * time.Second
+	// checkCompareTimeout bounds one check_compare row's GitHub calls, its token's mint with them:
+	// the row runs on its issue's lifecycle lane, one row at a time, so a call GitHub never
+	// answers would hold every later lifecycle row of the issue behind it.
+	checkCompareTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed, one lane per issue and kind of
@@ -331,13 +336,22 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 }
 
 // retry returns row to the outbox, due again after its backoff, or after the wait GitHub asks for
-// when cause carries GitHub's rate limit and asks for longer.
+// when cause carries GitHub's rate limit and asks for longer, or at the moment cause names when it
+// is a wait that knows when it ends (wait.Until) and that moment is still ahead: a lingering
+// tree's close waiting for a member's production check names the check's bound, and the row runs
+// again then rather than climbing its backoff for days. A named moment already past is the backoff's.
 func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) error {
+	now := r.now().UTC()
 	delay := retryBackoff(row.Attempts)
 	if after, _ := githubrest.RetryAfter(cause); after > delay {
 		delay = after
 	}
-	return r.retryAt(ctx, row, r.now().UTC().Add(delay), cause)
+	nextAt := now.Add(delay)
+	if at, ok := wait.UntilAt(cause); ok && at.After(now) {
+		nextAt = at.UTC()
+		r.log.Debug("outbox row waits until", "row", row.ID, "kind", row.Kind, "issue", row.Issue, "until", nextAt)
+	}
+	return r.retryAt(ctx, row, nextAt, cause)
 }
 
 // retryAt returns row to the outbox, due again at nextAt, with cause as its last error.
@@ -358,12 +372,14 @@ type rateLimit struct {
 }
 
 // githubBudgets is the GitHub budgets a row of each kind spends, as the implement App: its REST
-// calls (an issue branch's create) the REST core's, its GraphQL calls (a disarm, a READY merge)
-// GraphQL's, and every call GitHub's secondary limit. A kind it does not name calls no GitHub API.
+// calls (an issue branch's create, a production check's compare) the REST core's, its GraphQL
+// calls (a disarm, a READY merge) GraphQL's, and every call GitHub's secondary limit. A kind it
+// does not name calls no GitHub API.
 var githubBudgets = map[record.OutboxKind][]githubrest.Budget{
 	record.OutboxKindIssueBranch:      {githubrest.BudgetCore, githubrest.BudgetSecondary},
 	record.OutboxKindAutoMergeDisable: {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
 	record.OutboxKindReadyMerge:       {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
+	record.OutboxKindCheckCompare:     {githubrest.BudgetCore, githubrest.BudgetSecondary},
 }
 
 // standingLimit is the limit in limits, among the budgets a row of kind spends, that still stands
@@ -462,6 +478,12 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.autoMergeDisable(ctx, row, value)
 	case record.ReadyMerge:
 		return r.readyMerge(ctx, row, value)
+	case record.CheckCompare:
+		return r.checkCompare(ctx, row, value)
+	case record.CheckLook:
+		return r.checkLook(ctx, row, value)
+	case record.CheckBound:
+		return r.checkBound(ctx, row)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -714,15 +736,24 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			return err
 		}
 	}
-	if payload.Generation != issue.Generation {
-		r.log.Info("outbox supervise row serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
-			"generation", payload.Generation, "current", issue.Generation, "op", payload.Op, "role", payload.Role)
-		return nil
-	}
-	if payload.Phase != "" && payload.Phase != issue.Phase {
-		r.log.Info("outbox start serves a phase the issue has left; finished without acting", "row", row.ID, "issue", issue.Key,
-			"phase", payload.Phase, "current", issue.Phase, "role", payload.Role)
-		return nil
+	// A check start (CheckLook) runs after the close: its issue holds no phase, its generation may
+	// be a later run's and its tree may linger, so it is fenced on the open check and its look
+	// (checkLookHolds) where a phase start is fenced on the generation and the phase.
+	if payload.CheckLook > 0 {
+		if holds, err := r.checkLookHolds(ctx, row, payload); err != nil || !holds {
+			return err
+		}
+	} else {
+		if payload.Generation != issue.Generation {
+			r.log.Info("outbox supervise row serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
+				"generation", payload.Generation, "current", issue.Generation, "op", payload.Op, "role", payload.Role)
+			return nil
+		}
+		if payload.Phase != "" && payload.Phase != issue.Phase {
+			r.log.Info("outbox start serves a phase the issue has left; finished without acting", "row", row.ID, "issue", issue.Key,
+				"phase", payload.Phase, "current", issue.Phase, "role", payload.Role)
+			return nil
+		}
 	}
 	if payload.Tree != issue.Tree {
 		return fmt.Errorf("supervise row %d tree %s does not match issue %s tree %s", row.ID, payload.Tree, issue.Key, issue.Tree)
@@ -737,15 +768,19 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// A tree that lingers has left the workflow, and linger holds each member where it stood: a
 		// start that reaches its claim after the close (queued before it and backing off) finishes
 		// without acting and records no start, so the close's suspend still applies. Re-admission
-		// starts the member again (admit's startMidPhaseChildren).
-		root, err := r.root(ctx, issue)
-		if err != nil {
-			return err
-		}
-		if root != nil && root.Lingers() {
-			r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
-				"tree", issue.Tree, "role", payload.Role)
-			return nil
+		// starts the member again (admit's startMidPhaseChildren). A check start is the one start
+		// a lingering tree runs: a look of a closed issue's production check, which resumes the
+		// implementer the linger suspended.
+		if payload.CheckLook == 0 {
+			root, err := r.root(ctx, issue)
+			if err != nil {
+				return err
+			}
+			if root != nil && root.Lingers() {
+				r.log.Info("outbox start of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key,
+					"tree", issue.Tree, "role", payload.Role)
+				return nil
+			}
 		}
 		// A child carried into a tree of its own — a finished root's hand-over, or a person's label
 		// on a child its tree left mid-run — may still run a role of its old tree: one in a turn when
@@ -768,9 +803,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// An operator's suspension holds its claim until the operator resumes
 		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
 		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
-		// claim's own decision.
+		// claim's own decision. A check start does not wait: its look cannot run, and ends
+		// (checkLookHeld).
 		if found {
 			if held := machine.Claim(); held.RuleHolds() {
+				if payload.CheckLook > 0 {
+					return r.checkLookHeld(ctx, row, payload)
+				}
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
 			}
 		}
@@ -810,9 +849,14 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}
 		case supervise.StateSuspended:
 			// The role owns the issue's phase this start is for: the rule resumes it, unless an
-			// operator suspended it meanwhile, when the task's delivery below waits instead.
-			if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token,
-				Reason: fmt.Sprintf("start row %d of %s (phase %q)", row.ID, issue.Key, payload.Phase)}); err != nil {
+			// operator suspended it meanwhile, when the task's delivery below waits instead. A check
+			// start resumes the implementer the close or the linger suspended, in a Sandbox the
+			// resume relaunches (runtime/sandbox's relaunch).
+			reason := fmt.Sprintf("start row %d of %s (phase %q)", row.ID, issue.Key, payload.Phase)
+			if payload.CheckLook > 0 {
+				reason = fmt.Sprintf("start row %d of %s (production check look %d)", row.ID, issue.Key, payload.CheckLook)
+			}
+			if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token, Reason: reason}); err != nil {
 				return fmt.Errorf("resume claim %s: %w", token, err)
 			}
 		case supervise.StateFailed:
@@ -857,7 +901,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// (promotion's) or the row relaunched a failed claim (the architect's retry of the held phase,
 		// or a later transition). A confirmed task on a claim not working is over: the relaunch's
 		// decision retired it here, or retires it first when a launch whose outcome was uncertain is
-		// released and spawned again, after this start, so the row's task goes in its place.
+		// released and spawned again, after this start, so the row's task goes in its place. A check
+		// start names no phase, so it is never one of these: each look's task is delivered, its row
+		// id its delivery's, and a delivery with no phase is held by nothing (supervise's
+		// phaseHolds), so the task reaches the implementer whatever the issue's phase.
 		held := machine.Claim()
 		if pending := held.Pending; (payload.ResumeTask || state == supervise.StateFailed) && pending != nil && payload.Phase != "" &&
 			pending.StillWorked(payload.Generation, payload.Phase, held.State) {
@@ -1155,6 +1202,181 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("apply linger expiration for %s: %w", row.Issue, err)
 	}
 	return nil
+}
+
+// checkLookHolds says whether a check start row still has a look to start: its issue's production
+// check is open, at the look the row names, with that look open. A check closed since (a report,
+// its last look), a look its bound or a hold ended, or a later look's start leave the row nothing
+// to start, and it finishes without acting, logged with why.
+func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
+	check, err := r.productionCheck(ctx, row.Issue)
+	if err != nil {
+		return false, err
+	}
+	var why string
+	switch {
+	case check == nil:
+		why = "the issue has no production check"
+	case !check.Open():
+		why = fmt.Sprintf("the check closed as %s", check.Outcome)
+	case check.Looks != payload.CheckLook:
+		why = fmt.Sprintf("the check is at look %d", check.Looks)
+	case !check.LookOpen:
+		why = "the look has ended"
+	default:
+		return true, nil
+	}
+	r.log.Info("production check start finishes without acting", "row", row.ID, "issue", row.Issue, "look", payload.CheckLook, "why", why)
+	return false, nil
+}
+
+// checkLookHeld is a check start that met an operator's suspension of the implementer
+// (supervise.Claim.RuleHolds): a phase start waits for the operator's resume, but a look cannot
+// run while the operator holds the implementer, and its bound would end it anyway, so the look
+// ends now as one nobody reported (intake.CheckLookEnded, cause `operator hold`) and the row
+// finishes without acting.
+func (r *outbox) checkLookHeld(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) error {
+	r.log.Info("production check start finishes without acting", "row", row.ID, "issue", row.Issue, "look", payload.CheckLook,
+		"why", "the operator suspended the implementer; the look ends")
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look-hold:%s:%d", row.Issue, payload.CheckLook),
+		intake.CheckLookEnded{Issue: row.Issue, Look: payload.CheckLook, Cause: "operator hold"}, r.handlers...); err != nil {
+		return fmt.Errorf("end look %d of %s's production check on the operator's hold: %w", payload.CheckLook, row.Issue, err)
+	}
+	return nil
+}
+
+// checkLook is a look's bound coming due (record.CheckLook): the look it names ends as one nobody
+// reported (intake.CheckLookEnded, cause `look bound`), which the workflow applies only while the
+// check is open at that look with the look open, so a look reported in time changes nothing.
+func (r *outbox) checkLook(ctx context.Context, row record.OutboxRow, payload record.CheckLook) error {
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-look:%s:%d", row.Issue, payload.Look),
+		intake.CheckLookEnded{Issue: row.Issue, Look: payload.Look, Cause: "look bound"}, r.handlers...); err != nil {
+		return fmt.Errorf("end look %d of %s's production check at its bound: %w", payload.Look, row.Issue, err)
+	}
+	return nil
+}
+
+// checkBound is the whole check's bound coming due (record.CheckBound): intake.CheckBound, under
+// an event of this row's own rather than the check's, since a bound the workflow defers — a look
+// open at the bound, an earlier check's bound — is queued again as a new row, whose apply must be
+// fresh rather than a duplicate of this one's.
+func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-bound:%s:%d", row.Issue, row.ID),
+		intake.CheckBound{Issue: row.Issue}, r.handlers...); err != nil {
+		return fmt.Errorf("apply the bound of %s's production check: %w", row.Issue, err)
+	}
+	return nil
+}
+
+// checkCompare is a build compared against an issue's open production check (record.CheckCompare):
+// whether the build — the commit a daemon boot or a Dispatch start reported itself built from —
+// contains the check's merge commit, read from GitHub as the implement App, the App that merged
+// it. A check closed since, or whose last look has started, is compared with nothing. A check that
+// recorded no merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has it read
+// from its pull request first and recorded (recordMergeCommit), so this compare and every later
+// one has it. GitHub's compare of the merge with the build answering `identical` or `ahead` says
+// the merge is an ancestor of the build, so the build carries it: intake.CheckWake wakes the look
+// the row was queued for, once per build and cause. `behind` or `diverged` is a build without the
+// merge, and a commit GitHub does not know (404) is one it cannot place; neither wakes anything,
+// each logged. Any other failure retries on the row's backoff, a rate limit as every GitHub row's
+// (noteLimit, deferral).
+func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload record.CheckCompare) error {
+	ctx, cancel := context.WithTimeout(ctx, checkCompareTimeout)
+	defer cancel()
+	check, err := r.productionCheck(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
+	if check == nil || !check.Open() || check.Last {
+		r.log.Info("outbox check compare finished without acting: the check is closed or its last look has started",
+			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build)
+		return nil
+	}
+	if r.tokens == nil {
+		return errors.New("check compare executor has no GitHub App token manager")
+	}
+	repository, err := ghrepo.Parse("the production check's repository", check.Repo)
+	if err != nil {
+		return fmt.Errorf("compare %s's production check: %w", row.Issue, err)
+	}
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repository.Owner())
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}
+	if check.MergeSHA == "" {
+		var pull struct {
+			MergeCommitSHA string `json:"merge_commit_sha"`
+		}
+		if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", check.Number), &pull); err != nil {
+			return fmt.Errorf("read the merge commit of pull request #%d for %s's production check: %w", check.Number, row.Issue, err)
+		}
+		if pull.MergeCommitSHA == "" {
+			return fmt.Errorf("pull request #%d of %s names no merge commit for %s's production check", check.Number, check.Repo, row.Issue)
+		}
+		if err := r.recordMergeCommit(ctx, row.Issue, pull.MergeCommitSHA); err != nil {
+			return err
+		}
+		check.MergeSHA = pull.MergeCommitSHA
+		r.log.Info("outbox check compare recorded the merge commit its check opened without", "row", row.ID, "issue", row.Issue,
+			"pullRequest", check.Number, "mergeCommit", check.MergeSHA)
+	}
+	var compare struct {
+		Status string `json:"status"`
+	}
+	err = github.Get(ctx, "/compare/"+check.MergeSHA+"..."+payload.Build+"?per_page=1", &compare)
+	var answer *githubrest.Answer
+	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
+		r.log.Info("outbox check compare finished without acting: GitHub does not know the merge or the build", "row", row.ID,
+			"issue", row.Issue, "mergeCommit", check.MergeSHA, "build", payload.Build, "cause", payload.Cause)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("compare the merge %s of %s's production check with build %s: %w", check.MergeSHA, row.Issue, payload.Build, err)
+	}
+	if compare.Status != "identical" && compare.Status != "ahead" {
+		r.log.Info("outbox check compare finished without acting: the build does not carry the merge", "row", row.ID,
+			"issue", row.Issue, "mergeCommit", check.MergeSHA, "build", payload.Build, "status", compare.Status, "cause", payload.Cause)
+		return nil
+	}
+	fact := intake.CheckWake{Issue: row.Issue, Look: payload.Look, Cause: payload.Cause, Detail: payload.Build}
+	if _, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("check-wake:%s:%s:%s", row.Issue, payload.Cause, payload.Build), fact, r.handlers...); err != nil {
+		return fmt.Errorf("wake %s's production check on build %s: %w", row.Issue, payload.Build, err)
+	}
+	r.log.Info("outbox check compare found the merge in the build; the check is woken", "row", row.ID, "issue", row.Issue,
+		"mergeCommit", check.MergeSHA, "build", payload.Build, "status", compare.Status, "cause", payload.Cause, "look", payload.Look)
+	return nil
+}
+
+// recordMergeCommit fills the merge commit of issue's production check with merge, read from GitHub,
+// when the record still has none: the check is re-read in the write's transaction, so a look the
+// workflow started or ended meanwhile is kept, and a commit another compare recorded first stands.
+func (r *outbox) recordMergeCommit(ctx context.Context, issue, merge string) error {
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		check, err := r.records.ProductionCheck(ctx, tx, issue)
+		if err != nil || check == nil || check.MergeSHA != "" {
+			return err
+		}
+		check.MergeSHA = merge
+		return r.records.PutProductionCheck(ctx, tx, *check)
+	}); err != nil {
+		return fmt.Errorf("record the merge commit of %s's production check: %w", issue, err)
+	}
+	return nil
+}
+
+// productionCheck is issue's production check as recorded, nil for none, read in a transaction of
+// its own just before the executor acts on a row.
+func (r *outbox) productionCheck(ctx context.Context, issue string) (*record.ProductionCheck, error) {
+	var check *record.ProductionCheck
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		check, err = r.records.ProductionCheck(ctx, tx, issue)
+		return err
+	}); err != nil {
+		return nil, fmt.Errorf("read the production check of %s: %w", issue, err)
+	}
+	return check, nil
 }
 
 // issueBranch creates the issue's branch, legion/<KEY>, on GitHub at the repository's default

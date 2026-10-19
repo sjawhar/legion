@@ -30,7 +30,7 @@ func TestLingerHoursReachesTheEngineAsItsDuration(t *testing.T) {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 
-	engine := engineConfig(cfg, "legion-reviewer[bot]")
+	engine := engineConfig(cfg, "legion-reviewer[bot]", Build{})
 	if engine.Linger != 18*time.Minute {
 		t.Errorf("the engine's linger = %s, want 18m0s", engine.Linger)
 	}
@@ -60,7 +60,7 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 		"no review login":        {appauth.Implement: "legion-implementer[bot]"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens, "")
+			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens, "", Build{})
 			if err == nil || !strings.Contains(err.Error(), "the workflow needs two different Apps") {
 				t.Fatalf("openWorkflow = %v, want the two-Apps refusal", err)
 			}

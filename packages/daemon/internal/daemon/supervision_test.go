@@ -114,7 +114,7 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 			testCase.change(&cfg, &o)
 			want := strings.NewReplacer("{state}", cfg.StateDir, "{seed}", cfg.NatsNkeySeedFile).Replace(testCase.want)
 
-			err := run(context.Background(), cfg, quietLogger(), o)
+			err := run(context.Background(), cfg, Build{}, quietLogger(), o)
 
 			if err == nil || !strings.Contains(err.Error(), want) {
 				t.Fatalf("run = %v, want a refusal naming %q", err, want)

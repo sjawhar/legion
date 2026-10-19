@@ -295,6 +295,7 @@ func (d *blockingDispatch) MessageBodiesSince(context.Context, string, time.Time
 func (d *blockingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *blockingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 func (d *blockingDispatch) count() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -445,6 +446,7 @@ func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time
 func (d *refusingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *refusingDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 
 // boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
 type boardDispatch struct {
@@ -476,6 +478,7 @@ func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) (
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *boardDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 
 // A failed transaction is one row's failure, never the runner's end: a Postgres restart drops the
 // pool's connections, and the outbox has to keep draining once they are back. A claim that fails

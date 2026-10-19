@@ -1252,6 +1252,58 @@ func TestPlainStateSummarizesTheHeldLifecycleRows(t *testing.T) {
 	}
 }
 
+// An operator reading plain `legion state` is told how many production checks are open and the
+// oldest: its issue, pull request and merge commit, the look it is on with what woke it and when,
+// and when the check is bound — read from each issue record's `check`, which the daemon serves for
+// an open check and leaves out once it closes. With none open the line says so.
+func TestPlainStateSummarizesTheOpenProductionChecks(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
+	closed := `"LEGION-207":{"key":"LEGION-207","generation":1,"phase":"done","status":"done"}`
+	oldest := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"done","status":"done","check":{"repo":"sjawhar/legion","pullRequest":1301,` +
+		`"mergeCommit":"a1b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0","openedAt":"2026-10-19T09:00:00Z","looks":2,"lookOpen":false,` +
+		`"lastWake":{"kind":"issue.deployed","detail":"run 77 completed 2026-10-19T10:00:00Z","at":"2026-10-19T10:00:05Z"},"nextWakeAt":"2026-11-02T09:00:00Z","last":false}}`
+	newer := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"done","status":"done","check":{"repo":"sjawhar/legion","pullRequest":1302,` +
+		`"mergeCommit":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","openedAt":"2026-10-19T11:00:00Z","looks":1,"lookOpen":true,` +
+		`"lastWake":{"kind":"merge","detail":"b2c3d4e5f6a7b8c9d0a1b2c3d4e5f6a7b8c9d0a1","at":"2026-10-19T11:00:00Z"},"nextWakeAt":"2026-11-02T11:00:00Z","last":false}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "two open, the oldest not the first listed",
+			issues: `{` + newer + `,` + closed + `,` + oldest + `}`,
+			want:   "open production checks: 2; the oldest, LEGION-208 #1301 at a1b2c3d, look 2 woken by issue.deployed at 2026-10-19T10:00:05Z, bound 2026-11-02T09:00:00Z\n",
+		},
+		{
+			name:   "one open",
+			issues: `{` + closed + `,` + newer + `}`,
+			want:   "open production checks: 1; the oldest, LEGION-209 #1302 at b2c3d4e, look 1 woken by merge at 2026-10-19T11:00:00Z, bound 2026-11-02T11:00:00Z\n",
+		},
+		{name: "none open", issues: `{` + closed + `}`, want: "open production checks: none\n"},
+		{name: "no issues", issues: `{}`, want: "open production checks: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
 // and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
 // there are; with none the line says so.

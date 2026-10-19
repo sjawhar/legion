@@ -83,6 +83,9 @@ type outboxDispatch struct {
 	postErr        error
 	approval       dispatch.Approval
 	approvalErr    error
+	build          string
+	buildErr       error
+	buildAsked     int
 }
 
 func (d *outboxDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -111,6 +114,10 @@ func (d *outboxDispatch) MessageBodiesSince(context.Context, string, time.Time) 
 }
 func (d *outboxDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, d.approvalErr
+}
+func (d *outboxDispatch) BuildCommit(context.Context) (string, error) {
+	d.buildAsked++
+	return d.build, d.buildErr
 }
 
 func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {

@@ -27,6 +27,9 @@ func MessageBodyLength(body string) int {
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
+// BuildCommit is the one read of Dispatch itself rather than of its issues: the build commit it
+// reports on /healthz, which the boot compares against the open production checks of the
+// repository the daemon is built from.
 type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
@@ -35,6 +38,7 @@ type Client interface {
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
+	BuildCommit(ctx context.Context) (string, error)
 }
 
 // LegionLabel is the Dispatch label that hands an issue to Legion. A human sets it from the issue

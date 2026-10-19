@@ -221,6 +221,7 @@ func (d *pilotDispatch) MessageBodiesSince(context.Context, string, time.Time) (
 func (d *pilotDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *pilotDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 
 // filteringDispatch honors the statuses argument exactly as the real HTTPClient does: only
 // summaries whose status is in the requested set, or every summary when the caller asks for none.
@@ -259,6 +260,7 @@ func (d *filteringDispatch) MessageBodiesSince(context.Context, string, time.Tim
 func (d *filteringDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+func (d *filteringDispatch) BuildCommit(context.Context) (string, error) { return "", nil }
 
 // reconcile's boot listing read only todo through retro, so a root moved to
 // backlog while the daemon was down fell out of the window entirely — nothing held its key. The
