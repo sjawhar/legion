@@ -387,8 +387,10 @@ assignment, which opens even a closed phase, and the dashboard shows it twice. O
 that `agent_end` starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
-message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
-sent follow-up stays quiet until the next Envoy delivery or assignment. The state is appended to the
+message holding a tool call written as text is told so. One follow-up per stall, except that a
+follow-up for a text call answered by a text call again gets one more (state `text-call`), so a stall
+sends at most two; a WAITING reply or the stall's last follow-up stays quiet until the next Envoy
+delivery or assignment. The state is appended to the
 transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
 `--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`) through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`),

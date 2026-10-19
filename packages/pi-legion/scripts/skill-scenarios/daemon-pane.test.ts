@@ -17,10 +17,14 @@ const home = path.join(rig, "caller-home");
 
 // The pane's git and jj are whatever its PATH resolves, and its gh the launcher directory's
 // wrapper over the real gh the daemon resolves on its PATH at boot: the inherited PATH holds a
-// stand-in gh, the one tool the daemon needs on it for the pane to be built.
+// stand-in gh, the one tool the daemon needs on it for the pane to be built. It reads as a
+// compiled program (no `#!` line), since the daemon refuses a script as the first gh on PATH.
 const outerBin = path.join(rig, "outer-bin");
 mkdirSync(outerBin);
-writeFileSync(path.join(outerBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+writeFileSync(path.join(outerBin, "gh"), "\x7fELF\x02\x01\x01\x00", { mode: 0o700 });
+const scriptBin = path.join(rig, "script-bin");
+mkdirSync(scriptBin);
+writeFileSync(path.join(scriptBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o700 });
 const inherited = {
   HOME: home,
   ANTHROPIC_API_KEY: "personal-key-must-not-reach-worker",
@@ -160,4 +164,22 @@ test("refuses a profile envoy.json whose Envoy has no NATS server", () => {
       { daemonModule: DAEMON_MODULE }
     )
   ).toThrow("envoy: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)");
+}, 600_000);
+
+// The daemon refuses a script as the first gh on its PATH (a gh wrapper would answer in place of
+// the claim's App token), and so does the rig's reading of it; a gh the rig names, as an operator
+// names one with LEGION_GH_PATH, is the pane's real gh whatever it is, which is how the rig hands
+// panes its recording stand-in.
+test("refuses a script as the first gh on PATH and takes the gh the rig names", () => {
+  const claim = { project: "skillsrig", issue: "LWEVAL-1", role: "tester" } as const;
+  const launch = { rig, port: 13399, profile: "rig-profile" };
+  const shimmed = { ...inherited, PATH: `${scriptBin}:${outerBin}:/usr/bin` };
+  expect(() => workerPane(launch, shimmed, claim, { daemonModule: DAEMON_MODULE })).toThrow(
+    `the first gh on the daemon's PATH, ${path.join(scriptBin, "gh")}, is a script`
+  );
+  const named = workerPane(launch, shimmed, claim, {
+    daemonModule: DAEMON_MODULE,
+    ghPath: path.join(scriptBin, "gh"),
+  }).env;
+  expect(named.LEGION_GH_PATH).toBe(path.join(scriptBin, "gh"));
 }, 600_000);

@@ -675,8 +675,8 @@ run_tester_proof() {
   base_env
   standins
   # The pane the label's checkout's daemon would give the tester, over the base every agent gets:
-  # worker.env and system-args. The stand-ins come first, so the gh the pane names is the recording
-  # one.
+  # worker.env and system-args. standins runs first, since worker-pane.ts names its $R/bin/gh, the
+  # recording stand-in, as the pane's real gh.
   bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co"
   {
     cat "$R/worker.env" "$services_env"

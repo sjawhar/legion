@@ -11,7 +11,7 @@ tags:
   - plugin-release
   - deployment-gap
 date: 2026-09-13
-status: active
+status: superseded — the grant rig (`packages/pi-envoy/scripts/grant-rig`) and its `--prompt-file` are gone with the grant file and credential routes (LEGION-631) and the TypeScript daemon; `packages/pi-legion/scripts/skill-scenarios/rig.sh` runs one fresh agent per task on each version's packed plugin, and the rule (the released plugin under the same prompt is the negative control) still stands
 module: packages/pi-envoy/scripts/grant-rig
 related_issues:
   - "LEGION-45"
