@@ -1313,6 +1313,10 @@ esac`;
       "403 for the wrong repository (never anchored to T)",
       'echo "remote: Permission to other/outside.git denied. The requested URL returned error: 403" >&2; exit 128',
     ],
+    [
+      "T's URL on one line and a 403 on another (never one line naming T)",
+      'printf "%s\\n%s\\n" "fatal: unable to access \'https://github.com/acme/widgets/\': could not resolve" "error: 403" >&2; exit 128',
+    ],
   ] as const) {
     test(`a dry-run push to T failing for a non-permission reason (${name}) is a FAIL, not a PASS`, async () => {
       daemonServer = daemonStub(stateWithPR("production_check"));
