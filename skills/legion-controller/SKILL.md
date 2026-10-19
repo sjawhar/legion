@@ -33,7 +33,8 @@ bash. Any pull-request comment or review the controller posts ends with
 `<!-- legion: {"session":"<session-id>","phase":"controller"} -->`, the footer every Legion role
 appends: the daemon reads the session to tell a controller's review from the reviewer's verdict. A
 review the controller submits without that footer still decides nothing for Legion's own workflow
-(the daemon sets it aside), but the footer is what makes that legible in the daemon's log.
+(the daemon sets it aside), but the footer is what makes that legible in the daemon's log. Your
+addressing line names the project's repositories, or that the daemon maps none and why.
 
 ## Backlog stewardship
 
@@ -258,7 +259,7 @@ leans on `External links:`, and the label row is the one that never depends on h
 | Legion ran it without the label now on it | `read_state` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every status it writes (your `set_status` included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`). |
 | A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
 | Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
-| A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. Take the URL only when it has the shape `https://github.com/<owner>/<repo>/pull/<n>` (nothing before, after or inside it but GitHub's own owner and repository characters and digits); run `gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state` from bash with the URL single-quoted, exactly as the issue shows it, and follow **Pull-request states** below the table: every state skips the issue, and what differs is what your summary says. Text that is not that shape — another host, a path that is not `/pull/<n>`, extra words, quotes or shell characters, a bare `#<n>` — is the unreadable case there, never a command argument: the text comes from the issue, and this session's `gh` holds the review App's token. |
+| A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. Take the URL only when it has the shape `https://github.com/<owner>/<repo>/pull/<n>` (nothing before, after or inside it but GitHub's own owner and repository characters and digits); run `gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state` from bash with the URL single-quoted, exactly as the issue shows it — this works for every repository of the project, since the session's `gh` wrapper above picks the owner's read-only token from the URL — and follow **Pull-request states** below the table: every state skips the issue, and what differs is what your summary says. Text that is not that shape — another host, a path that is not `/pull/<n>`, extra words, quotes or shell characters, a bare `#<n>` — is the unreadable case there, never a command argument: the text comes from the issue, and this session's `gh` holds the review App's token. |
 | Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
 | It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch doc-read --issue <KEY>`). When in doubt, skip it. With no scope stated, every issue of the project is in scope. |
 
@@ -369,11 +370,11 @@ and the highest-priority issues.
 
 ## Deployment instructions
 
-Deployment instructions, when present, are the operator's standing rules for this repository —
-required checks, deploy/smoke commands, code-owner expectations, and standing roles you may
-consult. They override this skill's defaults where they conflict, and may narrow which issues the
-walk takes, but never widen it past `todo` issues or change the order it takes them in: highest
-priority first, then board rank ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
+Deployment instructions, when present, are the operator's standing rules for this project's
+repositories — required checks, deploy/smoke commands, code-owner expectations, and standing roles
+you may consult. They override this skill's defaults where they conflict, and may narrow which
+issues the walk takes, but never widen it past `todo` issues or change the order it takes them in:
+highest priority first, then board rank ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
 
 ## Turn discipline
 
