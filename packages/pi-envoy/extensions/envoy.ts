@@ -546,8 +546,9 @@ export default function envoyExtension(pi: PiApi): void {
   // listener refused, left for the listener to reap: a claim the listener refuses naming it records
   // no refusal, and a later pass claims again, for as long as the listener's `last_seen` for that
   // session stands still (`lastSeen`, read at each such refusal). Once it moves, another process
-  // heartbeats that session, which is then the newer holder.
-  const abandonedHolds = new Map<string, { readonly id: string; lastSeen?: number }>();
+  // registers that session, which is then the newer holder. A pass that registers that session
+  // itself takes the hold back as a pending hand-back, under the host session's own id.
+  const abandonedHolds = new Map<string, { readonly id: string; readonly lastSeen?: number }>();
   // Per session, a role the listener refused to that session's automatic claim because another
   // live session holds it: that holder is the newer one, so no pass claims the role for that
   // session again until a session event lands on it, the model or a plugin claims a role for it,
@@ -1670,12 +1671,13 @@ export default function envoyExtension(pi: PiApi): void {
     }
   };
 
-  // Whether a claim of `role` the listener refused, naming `holder`, waits on this process's own
-  // abandoned hold of `topic` (`abandonedHolds`): the listener's `last_seen` for that session, read
-  // now, is the one an earlier such refusal read, or the first read. A `last_seen` that moved
-  // means another process heartbeats that session, which is the newer holder from then on. A read
-  // that fails, or finds another holder, leaves the next pass to decide.
-  const waitsOnReap = async (
+  // Reads the listener's `last_seen` for the session a refused claim of `role` names when that
+  // session holds this process's own abandoned hold of `topic` (`abandonedHolds`), and answers
+  // whether the claim waits on it. The first read is recorded on the hold; one that differs from
+  // it means another process registers that session (this process's own registration of it takes
+  // the hold back first, in `reconcileNow`), which is the newer holder from then on, and the hold
+  // is dropped. A read that fails, or finds another holder, leaves the next pass to decide.
+  const observeAbandonedHold = async (
     topic: string,
     role: string,
     holder: string | undefined
@@ -1693,7 +1695,7 @@ export default function envoyExtension(pi: PiApi): void {
       abandonedHolds.delete(topic);
       return false;
     }
-    abandoned.lastSeen = seen;
+    abandonedHolds.set(topic, { id: abandoned.id, lastSeen: seen });
     return true;
   };
 
@@ -1762,7 +1764,7 @@ export default function envoyExtension(pi: PiApi): void {
       // Only a soft claim is refused. A holder that is this process's own abandoned hold is waited
       // out, since the listener reaps it; any other is the newer holder, and the role stays its
       // for this session.
-      const waitingOnReap = await waitsOnReap(topic, role, result.holder);
+      const waitingOnReap = await observeAbandonedHold(topic, role, result.holder);
       if (!waitingOnReap) refusedRoles.set(id, role);
       logger.warn(
         waitingOnReap
@@ -1999,6 +2001,13 @@ export default function envoyExtension(pi: PiApi): void {
     if (registration === undefined) {
       establishedSession = host;
       ensureHeartbeat(context);
+      // Registering the session an abandoned hold names moves its `last_seen`, so that hold is
+      // this process's again: one under the host session's own id, which the pass settles.
+      for (const [topic, hold] of abandonedHolds) {
+        if (hold.id !== host) continue;
+        abandonedHolds.delete(topic);
+        pendingHandBacks.set(`${topic}@${host}`, { topic, id: host });
+      }
     }
     const decided = await roleMoves.run(() =>
       settleRole(context, host, cause, registration === undefined)

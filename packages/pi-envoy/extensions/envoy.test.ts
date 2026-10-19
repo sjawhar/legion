@@ -4402,9 +4402,10 @@ describe("envoy OMP extension", () => {
     // the role is unheld, already held by the claimant, or held by the session it names as its
     // predecessor (every holder here is live).
     const holders = new Map<string, string>();
-    // The listener's `last_seen` per session, which a heartbeat of that session moves (1 unless set).
+    // The listener's `last_seen` per session, which every registration of that session moves, by
+    // this process or (set by a test) another one.
     const lastSeen = new Map<string, number>();
-    // While positive, each read of a role's holder fails with a 500.
+    // While positive, each read of a role's holder fails with a 500 (the client retries once).
     let failingRoleReads = 0;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
@@ -4510,6 +4511,9 @@ describe("envoy OMP extension", () => {
           if (outage.refusing === 0) outage.over();
           return new Response(JSON.stringify({ error: "listener unavailable" }), { status: 503 });
         }
+        // The listener's registry entry for the session is written now, which moves its
+        // `last_seen` whoever registers it.
+        lastSeen.set(body?.session_id, (lastSeen.get(body?.session_id) ?? 1) + 1);
         if (registered?.session === body?.session_id) {
           const { seen } = registered;
           registered = undefined;
@@ -6225,13 +6229,61 @@ describe("envoy OMP extension", () => {
     const waiting = claimSessions.filter((claim) => claim === `${role}@ses_ah_c`).length;
     expect(waiting).toBe(2);
     // Another process resumes ses_ah and heartbeats it: the next refusal sees it, and stands.
-    lastSeen.set("ses_ah", 2);
+    lastSeen.set("ses_ah", (lastSeen.get("ses_ah") ?? 1) + 1);
     await ticks(3);
     expect(claimSessions.filter((claim) => claim === `${role}@ses_ah_c`).length).toBe(waiting + 1);
     // That process ends; nothing here takes the role back.
     holders.delete(role);
     await ticks(2);
     expect(holders.has(role)).toBe(false);
+  });
+
+  test("an abandoned hold's session this process registers again is its own hold again, not a newer holder", async () => {
+    const role = "legion-controller";
+    const {
+      fixture,
+      live,
+      context,
+      manager,
+      holders,
+      refuseRegistrations,
+      failHandBacks,
+      holdRegistration,
+    } = await gatedRoleFixture("abandoned-hold-registered-here", "ses_sr");
+    const own = [...manager.branch()];
+    // A /new lands during a listener outage, so the hand-back of ses_sr is abandoned.
+    const refused = refuseRegistrations(2);
+    failHandBacks(2);
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      live("ses_sr_n", { fresh: true })
+    );
+    await refused;
+    // A resume to a session whose records name the role waits on the abandoned hold.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    live("ses_sr_c", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    const resumedBranch = manager.branch;
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_sr_c"));
+    expect(holders.get(role)).toBe("ses_sr");
+    // A resume back to ses_sr registers it, which moves its `last_seen`, and the host moves on to
+    // ses_sr_c again before that pass claims anything.
+    const held = holdRegistration("ses_sr");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    manager.id = "ses_sr";
+    manager.branch = () => own;
+    const pending: unknown[] = [
+      fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_sr")),
+    ];
+    await held.reached;
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    manager.id = "ses_sr_c";
+    manager.branch = resumedBranch;
+    pending.push(fixture.handlers.get("session_switch")?.({ reason: "resume" }, live("ses_sr_c")));
+    held.release();
+    await Promise.all(pending);
+    expect(holders.get(role)).toBe("ses_sr_c");
   });
 
   test("a fork's run that ends after the host moved keeps the announcement, so the parent's frames arrive before any pass", async () => {
