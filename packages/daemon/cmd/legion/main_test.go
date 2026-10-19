@@ -492,7 +492,8 @@ func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) 
 // workflowConfig writes a Stage 3 configuration whose two GitHub Apps read their keys through a
 // private_key_command that leaves marker behind and fails: a command that ran it is seen twice
 // over, in the marker and in the refusal. The operator and Dispatch bearer files it names exist, and
-// LEGION_OMP_PATH names an executable, so the OMP invocation resolves without mise.
+// LEGION_OMP_PATH and LEGION_GH_PATH name an executable, so the OMP invocation resolves without
+// mise and the real gh whatever heads the machine's PATH.
 func workflowConfig(t *testing.T, port int, extra string) (path, marker string) {
 	t.Helper()
 	omp, err := os.Executable()
@@ -500,6 +501,7 @@ func workflowConfig(t *testing.T, port int, extra string) (path, marker string) 
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_OMP_PATH", omp)
+	t.Setenv("LEGION_GH_PATH", omp)
 	dir := t.TempDir()
 	marker = filepath.Join(dir, "private-key-command-ran")
 	command := "touch " + marker + "; exit 1"
@@ -654,7 +656,8 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 
 // --check-config makes every refusal boot makes from the configuration, the environment and the
 // files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
-// operator bearer's file, the Dispatch bearer's file, the instructions file and the OMP invocation.
+// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation and
+// the real gh every pane's `legion gh` runs, which a script heading PATH (a gh wrapper) is not.
 // Each is refused in boot's words, no App key command runs, and no state directory is made.
 func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
@@ -685,6 +688,20 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
 			func(string) string {
 				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
+			}},
+		{"a script as the first gh on PATH", "", func(t *testing.T, dir string) {
+			shims := filepath.Join(dir, "shims")
+			if err := os.MkdirAll(shims, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(shims, "gh"), []byte("#!/bin/bash\nexec knives gh -- \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			unsetenv(t, "LEGION_GH_PATH")
+			t.Setenv("PATH", shims+string(os.PathListSeparator)+os.Getenv("PATH"))
+		},
+			func(dir string) string {
+				return "legion start: the first gh on PATH, " + filepath.Join(dir, "shims", "gh") + ", is a script, not the real gh"
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

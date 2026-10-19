@@ -305,10 +305,11 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile, gh
 // controllerRealGH is the real gh the controller's `legion gh` runs, its LEGION_GH_PATH: the
 // operator's own LEGION_GH_PATH when set, which a start from inside a Legion pane inherits from
 // that pane, and otherwise the first gh on the operator's PATH that is not this state directory's
-// own wrapper (workerbin.LauncherDir), which would run itself. Either is an executable file; a
-// LEGION_GH_PATH that is relative, absent or not executable, and no gh at all, are refused before
-// the daemon is asked for anything, since the mint that follows replaces the running controller's
-// capability.
+// own wrapper (workerbin.LauncherDir), which would run itself, and that is no script
+// (daemon.RefuseScriptGH): a gh wrapper of the operator's machine there would answer in place of
+// the review App's token. Either is an executable file; a LEGION_GH_PATH that is relative, absent
+// or not executable, a script first on PATH, and no gh at all, are refused before the daemon is
+// asked for anything, since the mint that follows replaces the running controller's capability.
 func controllerRealGH(stateDir string) (string, error) {
 	if gh := os.Getenv("LEGION_GH_PATH"); gh != "" {
 		if !filepath.IsAbs(gh) {
@@ -330,6 +331,9 @@ func controllerRealGH(stateDir string) (string, error) {
 		}
 		gh := filepath.Join(dir, "gh")
 		if info, err := os.Stat(gh); err == nil && executableFile(info) {
+			if err := daemon.RefuseScriptGH(gh); err != nil {
+				return "", err
+			}
 			return gh, nil
 		}
 	}

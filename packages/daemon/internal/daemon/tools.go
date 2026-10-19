@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +29,9 @@ var daemonTools = []string{"git", "jj", "gh"}
 func toolEnv(tool string) string { return "LEGION_" + strings.ToUpper(tool) + "_PATH" }
 
 // resolveTools resolves each daemon tool by its LEGION_<TOOL>_PATH override, which must be an
-// absolute executable, or on PATH. It names every missing tool with its override in one error, and
-// refuses a jj older than the oldest the daemon runs (checkJJVersion).
+// absolute executable, or on PATH. It names every missing tool with its override in one error,
+// refuses a gh found on PATH that is a script (RefuseScriptGH), and refuses a jj older than the
+// oldest the daemon runs (checkJJVersion).
 func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, error) {
 	path, _ := lookupEnv("PATH")
 	tools := map[string]string{}
@@ -54,6 +56,11 @@ func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, err
 			missing = append(missing, fmt.Sprintf("%s (set %s to an absolute executable path)", tool, toolEnv(tool)))
 			continue
 		}
+		if tool == "gh" {
+			if err := RefuseScriptGH(found); err != nil {
+				return nil, err
+			}
+		}
 		tools[tool] = found
 	}
 	if len(missing) > 0 {
@@ -63,6 +70,30 @@ func resolveTools(lookupEnv func(string) (string, bool)) (map[string]string, err
 		return nil, err
 	}
 	return tools, nil
+}
+
+// RefuseScriptGH refuses gh, the first gh on PATH, when it is a script, a file whose first two
+// bytes are `#!`. The real gh is a compiled program, so a script there is a gh wrapper: a
+// machine's own shim, which picks a token of its own (or loops back through the `legion gh`
+// wrapper first on a pane's PATH), or a `legion gh` wrapper, which would run `legion gh` again.
+// Either, run as the real gh, replaces the GitHub App token of the owner's gh directory `legion gh`
+// hands it. A LEGION_GH_PATH override is the operator's own word and is taken as it is; this check
+// reads only what PATH found. `legion controller start` makes the same check on the operator's PATH.
+func RefuseScriptGH(gh string) error {
+	file, err := os.Open(gh)
+	if err != nil {
+		return fmt.Errorf("read %s, the first gh on PATH: %w", gh, err)
+	}
+	defer file.Close()
+	head := make([]byte, 2)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read %s, the first gh on PATH: %w", gh, err)
+	}
+	if string(head[:n]) == "#!" {
+		return fmt.Errorf("the first gh on PATH, %s, is a script, not the real gh: a gh wrapper would answer in place of the GitHub App token `legion gh` gives it; set LEGION_GH_PATH to the real gh's absolute path, or put the real gh ahead of the wrapper on PATH", gh)
+	}
+	return nil
 }
 
 // minimumJJ is the oldest jj the daemon runs, as major and minor: 0.38, the release that moved a

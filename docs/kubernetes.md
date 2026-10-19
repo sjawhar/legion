@@ -3437,7 +3437,8 @@ keeping nothing until the daemon has answered, the command:
    never starts: the mint in step 3 has already replaced the incumbent, as every post-mint failure
    does. Before step 3 the command finds the real gh its session's `gh` wrapper runs: the
    operator's `LEGION_GH_PATH`, or the first `gh` on its PATH that is not the state directory's own
-   wrapper, and refuses to start with neither (`gh is not on PATH`);
+   wrapper, and refuses to start with neither (`gh is not on PATH`) or when that first `gh` is a
+   script, a `gh` wrapper of the operator's machine that would answer in place of the review App;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
    and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
