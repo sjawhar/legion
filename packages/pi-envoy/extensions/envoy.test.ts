@@ -5903,7 +5903,7 @@ describe("envoy OMP extension", () => {
 
   for (const [event, label] of [
     ["reload", "a /reload's event"],
-    ["run", "an agent run on the session it announced leaving"],
+    ["run", "a run under it that ends unaborted"],
   ] as const) {
     test(`${label} ends a switch's announcement, so a later move with no event carries the session`, async () => {
       const { fixture, live, context, claimSessions, landed, tick } = await gatedRoleFixture(
@@ -5920,6 +5920,10 @@ describe("envoy OMP extension", () => {
         // A `/new` another extension cancels moves nothing; the session runs on.
         await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
         await fixture.handlers.get("agent_start")?.({}, context);
+        await fixture.handlers.get("agent_end")?.(
+          { messages: [{ role: "assistant", stopReason: "stop" }] },
+          context
+        );
       }
       // The host later moves off its session file with no event.
       live("ses_ae_moved");
@@ -5930,6 +5934,28 @@ describe("envoy OMP extension", () => {
       expect(idNotices.map((message) => message.session)).toEqual(["ses_ae_moved"]);
     });
   }
+
+  test("a run that starts while a /new is announced, which the /new aborts, keeps the announcement, so a tick before the switch's event carries no role into it", async () => {
+    const { fixture, live, context, claimSessions, holders, tick } = await gatedRoleFixture(
+      "run-under-new",
+      "ses_ru"
+    );
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    // An Envoy delivery wakes the session while another extension's announcement handler awaits.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    await fixture.handlers.get("agent_start")?.({}, context);
+    // The switch goes ahead: it aborts that run and moves the host; a tick lands before its event.
+    await fixture.handlers.get("agent_end")?.(
+      { messages: [{ role: "assistant", stopReason: "aborted" }] },
+      context
+    );
+    const moved = live("ses_ru_new", { fresh: true });
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+    expect(claimSessions.filter((claim) => claim.endsWith("@ses_ru_new"))).toEqual([]);
+    expect(holders.has("legion-controller")).toBe(false);
+  });
 
   for (const meanwhile of ["nothing else", "the model claiming another role there"] as const) {
     test(`a resume rolled back after its event ended the role, with ${meanwhile}, keeps the hold, never handing it back for another session to take`, async () => {
@@ -6066,6 +6092,127 @@ describe("envoy OMP extension", () => {
     tick();
     for (let step = 0; step < 10; step += 1) await drain();
     expect(holders.get(role)).toBe("ses_ca_fork");
+  });
+
+  test("a refusal in another session does not clear this session's, so a rollback with no event takes nothing back", async () => {
+    const role = "legion-controller";
+    const { fixture, live, context, manager, holders, claimSessions, tick } =
+      await gatedRoleFixture("two-refusals", "ses_tr2");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const own = [...manager.branch()];
+    // A newer live session takes the role; the heartbeat's re-assertion is refused.
+    holders.set(role, "ses_newer");
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    // A resume to a session whose records name a role a third session holds is refused too.
+    holders.set("reviewer", "ses_third");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const resumed = live("ses_tr2_b", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role: "reviewer" });
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+    expect(claimSessions.at(-1)).toBe("reviewer@ses_tr2_b");
+    // The resume rolls back with no event, and the newer holder leaves.
+    manager.id = "ses_tr2";
+    manager.branch = () => own;
+    holders.delete(role);
+    const before = claimSessions.length;
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(claimSessions.slice(before)).toEqual([]);
+    expect(holders.has(role)).toBe(false);
+  });
+
+  test("a role whose hand-back an outage lost is claimed by a later session once the listener reaps the hold, not refused to it", async () => {
+    const role = "legion-controller";
+    const {
+      fixture,
+      live,
+      context,
+      holders,
+      claimSessions,
+      refuseRegistrations,
+      failHandBacks,
+      tick,
+    } = await gatedRoleFixture("abandoned-hold", "ses_ab");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    // A /new lands during a listener outage: its registration and the hand-back both fail.
+    const refused = refuseRegistrations(2);
+    failHandBacks(2);
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      live("ses_ab_n", { fresh: true })
+    );
+    await refused;
+    expect(holders.get(role)).toBe("ses_ab");
+    // The listener is back; a resume opens a session whose records name the role, and the
+    // listener still names the session this process left.
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const resumed = live("ses_ab_c", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+    expect(holders.get(role)).toBe("ses_ab");
+    // The listener reaps the abandoned hold; the next tick claims the role.
+    holders.delete(role);
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(holders.get(role)).toBe("ses_ab_c");
+    // From then on that id is no longer this process's to wait out: another process that resumes
+    // it and takes the role is the newer holder, refused to the next session once.
+    holders.set(role, "ses_ab");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+    const later = live("ses_ab_d", { fresh: true });
+    fixture.pi.appendEntry("envoy-role-claim", { role });
+    await fixture.handlers.get("session_switch")?.({ reason: "resume" }, later);
+    const refusedOnce = claimSessions.length;
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(claimSessions.length).toBe(refusedOnce);
+    expect(holders.get(role)).toBe("ses_ab");
+  });
+
+  test("a hand-back the listener fails under the session's own id is made by a later pass", async () => {
+    const { fixture, live, manager, holders, roleTool, failHandBacks, tick } =
+      await gatedRoleFixture("own-id-hand-back-retried", "ses_oi");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const beforeMove = fixture.entries.length;
+    expect((await roleTool.execute("", { role: "reviewer" })).isError).not.toBe(true);
+    expect(holders.get("reviewer")).toBe("ses_oi");
+    // A tree navigation back to before the move: its records name legion-controller, so its
+    // event ends reviewer, whose hand-back the listener fails.
+    failHandBacks(2);
+    manager.branch = () => fixture.entries.slice(0, beforeMove);
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_oi"));
+    expect(holders.get("reviewer")).toBe("ses_oi");
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    expect(holders.has("reviewer")).toBe(false);
+    expect(holders.get("legion-controller")).toBe("ses_oi");
+  });
+
+  test("a role the model claims again in a /new before its pass is carried by a fork that follows", async () => {
+    const role = "legion-controller";
+    const { fixture, live, context, holders, roleTool, holdRegistration } = await gatedRoleFixture(
+      "reclaim-in-new-then-fork",
+      "ses_rf"
+    );
+    const held = holdRegistration("ses_rf_n");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+    const pending: unknown[] = [
+      fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_rf_n", { fresh: true })
+      ),
+    ];
+    await held.reached;
+    // The /new's event ended the role; the model claims it again in the new session.
+    expect((await roleTool.execute("", { role })).isError).not.toBe(true);
+    expect(holders.get(role)).toBe("ses_rf_n");
+    await fixture.handlers.get("session_before_switch")?.({ reason: "fork" }, context);
+    pending.push(fixture.handlers.get("session_switch")?.({ reason: "fork" }, live("ses_rf_f")));
+    held.release();
+    await Promise.all(pending);
+    expect(holders.get(role)).toBe("ses_rf_f");
   });
 
   test("a session the host returns to while NATS was down gets its agent subject back once NATS is", async () => {
@@ -7462,6 +7609,7 @@ describe("envoy OMP extension", () => {
     const role = "release-captain";
     const roleClaims: Record<string, unknown>[] = [];
     let newerHolderLive = true;
+    let registrations = 0;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === `/v1/roles/${role}`) {
@@ -7487,6 +7635,7 @@ describe("envoy OMP extension", () => {
           topics: [`notifications.role.${role}`],
         });
       }
+      if (url.pathname === "/v1/interests/subscribe") registrations += 1;
       return responseWithRegistration(input, init, {});
     };
     const { default: envoyExtension } = await import("./envoy.ts?heartbeat-409");
@@ -7518,13 +7667,18 @@ describe("envoy OMP extension", () => {
 
     intervals[0]?.();
     await refused.promise;
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    // More ticks, the last two after the newer holder has gone: re-registration continues,
-    // re-assertion of this role does not.
+    const settle = async () => {
+      for (let step = 0; step < 20; step += 1) await new Promise<void>((r) => setImmediate(r));
+    };
+    await settle();
+    // More ticks, the last two after the newer holder has gone: each re-registers, and none
+    // re-asserts this role.
     for (let tick = 0; tick < 4; tick += 1) {
       if (tick === 2) newerHolderLive = false;
+      const before = registrations;
       intervals[0]?.();
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await settle();
+      expect(registrations).toBe(before + 1);
     }
 
     expect(roleClaims).toEqual([

@@ -507,11 +507,13 @@ export default function envoyExtension(pi: PiApi): void {
   // `session_before_branch`) and why: read until the next pass sees where the host went, to learn
   // whether the session it went to continues the one it left, and by the frame drop meanwhile. A
   // session event ends it wherever it lands (a `/reload` lands on the session it announced
-  // leaving), and so does an agent run starting while the host is still on that session: a switch
-  // that goes ahead aborts the agent and moves the host, so that switch was cancelled.
+  // leaving), and so does a run that started on that session under it and ended unaborted: a
+  // switch that goes ahead aborts that run, so that switch was cancelled.
   let announced:
     | { readonly from: string; readonly reason: SessionSwitchReason | undefined }
     | undefined;
+  // The announcement the current run started under, on the session it announced leaving.
+  let runUnderAnnouncement: typeof announced;
   // The session each host session continues, for a session a fork or a branch opened from another:
   // its records are a copy of that session's, so that session's role and listener rows are its
   // own when its own records name none. A session opened any other way (`/new`, a resume, or a
@@ -536,13 +538,17 @@ export default function envoyExtension(pi: PiApi): void {
   let claimedRoleSessionID: string | undefined;
   // Holds this process gave up locally while the listener still names them, keyed by
   // `<topic>@<session>`: a session event that ends the role at once leaves its hold here, and the
-  // next pass hands it back (`settleRole`).
+  // next pass hands it back (`settleEndedHolds`).
   const pendingHandBacks = new Map<string, { readonly topic: string; readonly id: string }>();
-  // A role the listener refused to a session's automatic claim, because another live session
-  // holds it: that holder is the newer one, so no pass claims the role for that session again
-  // until a session event lands on it, the model or a plugin claims a role for it, or the process
-  // restarts and reads its records afresh.
-  let refusedRole: { readonly session: string; readonly role: string } | undefined;
+  // Per role topic, a hold this process gave up under a session it has left whose hand-back the
+  // listener refused: left for the listener to reap, and never a newer holder, so a claim the
+  // listener refuses naming it records no refusal and the next pass claims again.
+  const abandonedHolds = new Map<string, string>();
+  // Per session, a role the listener refused to that session's automatic claim because another
+  // live session holds it: that holder is the newer one, so no pass claims the role for that
+  // session again until a session event lands on it, the model or a plugin claims a role for it,
+  // or the process restarts and reads its records afresh.
+  const refusedRoles = new Map<string, string>();
   // The role a plugin last opened role-bound notices for: a pass that claims that role back after
   // a role end closed them says they stay closed until that plugin claims it again.
   let roleNoticesFor: string | undefined;
@@ -1503,7 +1509,7 @@ export default function envoyExtension(pi: PiApi): void {
    * (`GET /v1/roles/<role>`), so a healthy tick writes nothing; a soft claim goes out only when the
    * listener does not name this session, and the listener's soft-claim rule is the arbiter: a 409
    * (a different live holder) drops the local claim — the newer holder is correct — with no
-   * transcript entry, and no pass claims the role for this session again (`refusedRole`). A regain
+   * transcript entry, and no pass claims the role for this session again (`refusedRoles`). A regain
    * (`"reclaimed"`), or the first healthy tick after a failed registration, during which the
    * listener may have answered "no holder" for a claim that survived (`"reregistered"`), fires
    * legion.ts's hook so the role's daemon ready call runs again. The listener calls here propagate
@@ -1543,7 +1549,7 @@ export default function envoyExtension(pi: PiApi): void {
       if (claimedRoleTopic !== topic || !sessionOpen(id)) return false;
       if (!result.claimed) {
         endRole();
-        refusedRole = { session: id, role };
+        refusedRoles.set(id, role);
         logger.warn("envoy: role re-assertion refused; held by another live session", {
           role,
           sessionID: id,
@@ -1694,9 +1700,10 @@ export default function envoyExtension(pi: PiApi): void {
       previousSessionID: options.previousSessionID,
     });
     if (result.claimed) {
-      if (refusedRole?.session === id) refusedRole = undefined;
-      // The listener names this claim's session for the role now, so no hold of it a session
-      // event gave up is left to hand back (one under this same id would end the new hold).
+      refusedRoles.delete(id);
+      // The listener names this claim's session for the role now, so no hold of it this process
+      // gave up is left to hand back or wait on (one under this same id would end the new hold).
+      abandonedHolds.delete(topic);
       for (const [key, hold] of pendingHandBacks) {
         if (hold.topic === topic) pendingHandBacks.delete(key);
       }
@@ -1720,13 +1727,17 @@ export default function envoyExtension(pi: PiApi): void {
       );
     }
     if (!result.claimed) {
-      // Only a soft claim is refused: the role stays the newer holder's for this session.
-      refusedRole = { session: id, role };
-      logger.warn("envoy: role held by another live session; not reclaimed", {
-        role,
-        sessionID: id,
-        holder: result.holder,
-      });
+      // Only a soft claim is refused. A holder that is this process's own abandoned hold is waited
+      // out, since the listener reaps it; any other is the newer holder, and the role stays its
+      // for this session.
+      const waitingOnReap = abandonedHolds.get(topic) === result.holder;
+      if (!waitingOnReap) refusedRoles.set(id, role);
+      logger.warn(
+        waitingOnReap
+          ? "envoy: role still held by a session this process left; claiming again once the listener reaps it"
+          : "envoy: role held by another live session; not reclaimed",
+        { role, sessionID: id, holder: result.holder }
+      );
       endRole();
       return false;
     }
@@ -1768,7 +1779,7 @@ export default function envoyExtension(pi: PiApi): void {
   //  - Otherwise, once when a pass establishes a resumed or switched session (`readRows`), the
   //    listener's rows for `id` (a same-id resume inside the reap window) and for the sessions it
   //    continues.
-  // None of them while the listener has refused that role to `id` (`refusedRole`). The pass
+  // None of them while the listener has refused that role to `id` (`refusedRoles`). The pass
   // claims it softly (`settleRole`): a session's records may be stale evidence (the parent of a
   // fork whose role moved to the child, a second process on the same transcript), and it must not
   // take a role another live session holds; the listener decides that atomically.
@@ -1777,8 +1788,7 @@ export default function envoyExtension(pi: PiApi): void {
     branch: readonly unknown[],
     readRows: boolean
   ): Promise<string | undefined> => {
-    const want = (role: string) =>
-      refusedRole?.session === id && refusedRole.role === role ? undefined : role;
+    const want = (role: string) => (refusedRoles.get(id) === role ? undefined : role);
     const recorded = transcriptClaimedRole(branch);
     if (recorded === null) return undefined;
     if (recorded !== undefined) return want(recorded);
@@ -1982,11 +1992,14 @@ export default function envoyExtension(pi: PiApi): void {
   // to the session that held it) is this process's hold again, which this pass and every later
   // one keep, carry or hand back as any hold, so no hand-back opens the role to another claim on
   // the way; a claim of a role drops every hand-back of it left pending, so there is at most one.
-  // Any other is handed back once: one the listener does not take back is left to its reaping,
-  // since nothing heartbeats the session it names any more, and a later try could take a hold
-  // another process made under that id. Answers whether a hold came back.
-  const settleEndedHolds = async (wanted: string | undefined): Promise<boolean> => {
+  // Any other is handed back. One the listener does not take back stays pending while it is under
+  // the host session's own id (a tree navigation), which this process heartbeats and no other can
+  // rightly hold; under a session it has left, it is abandoned to the listener's reaping
+  // (`abandonedHolds`), since nothing heartbeats that session any more and a later try could take
+  // a hold another process made under that id. Answers whether a hold came back.
+  const settleEndedHolds = async (host: string, wanted: string | undefined): Promise<boolean> => {
     let restored = false;
+    const failed: { readonly key: string; readonly topic: string; readonly id: string }[] = [];
     for (const [key, hold] of pendingHandBacks) {
       pendingHandBacks.delete(key);
       if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {
@@ -1997,13 +2010,18 @@ export default function envoyExtension(pi: PiApi): void {
       }
       await requireEnvoy()
         .client.unsubscribe({ sessionID: hold.id, topics: [hold.topic] })
-        .catch((error: unknown) =>
+        .catch((error: unknown) => {
+          failed.push({ key, ...hold });
           logger.warn("envoy: a role this process gave up was not handed back", {
             topic: hold.topic,
             sessionID: hold.id,
             error: messageFor(error),
-          })
-        );
+          });
+        });
+    }
+    for (const { key, topic, id } of failed) {
+      if (id === host) pendingHandBacks.set(key, { topic, id });
+      else abandonedHolds.set(topic, id);
     }
     return restored;
   };
@@ -2035,7 +2053,7 @@ export default function envoyExtension(pi: PiApi): void {
       if (ended !== undefined && unheard) warnRoleEnded(context, host, ended);
       if (!sessionOpen(host)) return false;
     }
-    if ((await settleEndedHolds(desired)) && unheard && desired !== undefined) {
+    if ((await settleEndedHolds(host, desired)) && unheard && desired !== undefined) {
       warnNoticesClosed(context, desired);
     }
     if (!sessionOpen(host)) return false;
@@ -2290,7 +2308,7 @@ export default function envoyExtension(pi: PiApi): void {
     const host = context.sessionManager.getSessionId();
     noteMove(host, { kind: reason });
     lastHeard = host;
-    if (refusedRole?.session === host) refusedRole = undefined;
+    refusedRoles.delete(host);
     if (sessionID !== host) restoreLocalSessionState(context);
     endUnwantedRoleNow(context);
     // With inbound messages off the session opens no agent subject; a heartbeat's pass, when a
@@ -2446,11 +2464,13 @@ export default function envoyExtension(pi: PiApi): void {
 
   // Every run the host starts, typed or not: the user's prompt, an Envoy delivery waking the
   // session, another extension's continuation. `agent_end` compares it with what it read at the
-  // settle, so a verdict that arrives after the session has moved on steers nothing. A run on the
-  // session a switch announced leaving means that switch was cancelled (`announced`).
+  // settle, so a verdict that arrives after the session has moved on steers nothing. A run that
+  // starts on the session a switch announced leaving is marked, and its end tells whether that
+  // switch went ahead (`runUnderAnnouncement`).
   pi.on("agent_start", async (_event, context) => {
     runSeq += 1;
-    if (announced?.from === context.sessionManager.getSessionId()) announced = undefined;
+    runUnderAnnouncement =
+      announced?.from === context.sessionManager.getSessionId() ? announced : undefined;
   });
 
   // Arms one nudge period. A genuine user turn is the only thing that arms one: its caller,
@@ -2496,10 +2516,23 @@ export default function envoyExtension(pi: PiApi): void {
     // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
     // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
     endInjectedUserTurns(sessionID);
+    const lastReply = event.messages?.findLast((message) => message.role === "assistant");
+    // A run that started under a switch's announcement and ended with a reply it was not aborted
+    // in, the host still on the session it announced leaving: that switch was cancelled.
+    if (runUnderAnnouncement !== undefined && event.willContinue !== true) {
+      if (
+        announced === runUnderAnnouncement &&
+        announced.from === id &&
+        lastReply !== undefined &&
+        lastReply.stopReason !== "aborted"
+      ) {
+        announced = undefined;
+      }
+      runUnderAnnouncement = undefined;
+    }
     // Only a run that settled normally is nudged: steering an interrupt (`aborted`), a provider
     // failure (`error`), a truncation, or a run with no reply of its own answers the user's cancel,
     // or a failure, with a turn nobody asked for.
-    const lastReply = event.messages?.findLast((message) => message.role === "assistant");
     const ask = sideTurn(context);
     if (
       event.willContinue === true ||
