@@ -97,8 +97,10 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('/(?:[^']|'\\'')*'|"/[^"$` + "`" + `\\]*"|/[A-Za-z0-9_./:-]*) gh "\$@"\n?$`)
 
 // ghWrapperMaxBytes bounds the wrapper read: a script longer is refused whole rather than matched
-// by its start. A wrapper whose quoted legion path takes it past the bound (a state directory near
-// PATH_MAX) is refused too, which refuses every command rather than letting one through.
+// by its start. A wrapper whose quoted legion executable path takes it past the bound (a path near
+// PATH_MAX, or one whose single quotes, four bytes each once quoted, grow it that far) is refused
+// too, which refuses every command `legion gh` would hand the real gh rather than letting one
+// through; `legion gh auth git-credential`, answered before the check, answers by git's path alone.
 const ghWrapperMaxBytes = 4096
 
 // ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute
