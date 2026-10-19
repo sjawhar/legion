@@ -43,6 +43,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -591,10 +592,12 @@ type plan struct {
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
 // listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
 // workflow's App tokens and repository the workflow's repository of an issue (issueRepository;
-// both nil without a workflow), and st the store the runtime reads. openSupervision hands it the
+// both nil without a workflow), st the store the runtime reads, and mapped the repositories
+// Dispatch's mapping names now (plan.repositories, which the workflow fills; none without a
+// workflow), which the Sandbox runtime's repository caches follow. openSupervision hands it the
 // plan the workflow completed, so no factory reads a field the workflow sets after prepare.
 type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens,
-	repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store) (runtime.Runtime, error)
+	repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -730,7 +733,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // files. The private server's environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, owners func() []string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens,
-		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store) (runtime.Runtime, error) {
+		repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
@@ -952,7 +955,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, p.repository, st)
+	rt, err := p.newRuntime(supervising, listener, dial, apps, p.repository, st, p.repositories.Accepted)
 	if err != nil {
 		cancel()
 		endDrain()
@@ -1363,6 +1366,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
 			repositories: p.repositories,
+			caches:       repositoryCachesOf(s.runtime),
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1481,6 +1485,9 @@ type source struct {
 	// repositories is the project's repository mapping as the workflow serves it, empty for a
 	// daemon with no workflow, whose state serves no repository.
 	repositories *repositories
+	// caches is the Kubernetes runtime's repository caches with their last health reads
+	// (sandbox.Runtime.RepositoryCaches); nil under a runtime that keeps none.
+	caches func() []sandbox.CacheStatus
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1599,7 +1606,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
 	if s.repositories != nil {
-		state.Repositories = s.repositories.view()
+		var caches []sandbox.CacheStatus
+		if s.caches != nil {
+			caches = s.caches()
+		}
+		state.Repositories = s.repositories.view(caches)
 	}
 	return state, nil
 }
@@ -1627,4 +1638,13 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 	return func(project string) config.MergeRules {
 		return cfg.Projects[project].Merge
 	}
+}
+
+// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime that
+// keeps them, and nil under any other.
+func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
+	if keeper, ok := rt.(*sandbox.Runtime); ok {
+		return keeper.RepositoryCaches
+	}
+	return nil
 }

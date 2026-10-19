@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -34,7 +35,6 @@ const (
 // projection of its role Secret's two gh files its container alone mounts at GHConfigDir.
 const (
 	provisionVolume = "provision"
-	feedVolume      = "feed"
 	stateVolume     = "state"
 	tempVolume      = "tmp"
 	configVolume    = "config"
@@ -117,7 +117,7 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // has a key volume when the pod enrolls and a gh volume always.
 func legionVolumeNames() []string {
 	names := []string{
-		issueVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+		issueVolume, provisionVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role),
@@ -130,10 +130,11 @@ func legionVolumeNames() []string {
 // legionMountPaths are where Legion mounts a volume in the containers the operator's mounts join,
 // each role container and the image probe's: an operator's mount may be neither at, under, nor
 // above one. AgentSecretsKeyDir and AgentSecretsTokenDir are reserved whether or not this
-// deployment enrolls, and GHConfigDir whether or not the pod is an issue's.
+// deployment enrolls, GHConfigDir whether or not the pod is an issue's, and FeedDir, which TreeRoot
+// already covers, is named for the read-only mount every issue pod's role container carries there.
 func legionMountPaths() []string {
 	paths := []string{
-		TreeRoot, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
+		TreeRoot, FeedDir, ompSessionsDir, LauncherDir, LauncherPrivateDir, StateDir, xdgConfigHome, ProvidersDir,
 		AgentSecretsKeyDir, AgentSecretsTokenDir, GHConfigDir,
 	}
 	slices.Sort(paths)
@@ -175,6 +176,9 @@ type launch struct {
 	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
 	// controller's is held to one.
 	sessionsInDatabase bool
+	// cacheURL is the address of the issue's repository's cache (cacheURL, set by
+	// issuePod.provision), which its fetch container is told (fetchEnvironment).
+	cacheURL string
 	// gitHubOwners are the owners of the pod's gh bundle, sorted, whose files each role's gh volume
 	// projects, and gitHubDefault the one whose directory is every agent's GH_CONFIG_DIR: the
 	// bundle writeLauncherSecrets mints for a new pod, or, for a pod a launch keeps, the default its
@@ -208,6 +212,8 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, sessionsInDatabase: r.sessionDSNKey != "", gh: r.tools.GH}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}
+	} else {
+		l.cacheURL = r.cacheURL(CacheSandboxName(r.project, spec.Repository))
 	}
 	if spec.ResumeSessionFile != "" {
 		if err := validateSessionPath(spec.ResumeSessionFile); err != nil {
@@ -440,6 +446,7 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			{Name: configVolume, MountPath: xdgConfigHome},
 			{Name: roleVolume(ghVolume, role), MountPath: GHConfigDir, ReadOnly: true},
 		}
+		mounts = append(mounts, l.kind.agentMounts()...)
 		containers = append(containers, corev1.Container{
 			Name:  string(role),
 			Image: r.image,
@@ -709,14 +716,18 @@ func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
 
-// fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, and the
-// mounted provisioning token. Its git reads no configuration but its own, so it is told no config
-// home.
-func fetchEnvironment() []corev1.EnvVar {
+// fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
+// provisioning token, and, for an issue pod, its repository's cache — its address, which resolves
+// only while the cache is Ready, so the fetch waits for it, and its bearer token's file, from the
+// same Secret — which `fetch` streams a fresh feed from alone before it asks GitHub for the delta.
+// Its git reads no configuration but its own, so it is told no config home.
+func fetchEnvironment(l launch) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
 		{Name: "TMPDIR", Value: initTempDir},
 		{Name: "LEGION_PROVISION_TOKEN_FILE", Value: ProvisionDir + "/" + provisionTokenKey},
+		{Name: "LEGION_REPOSITORY_CACHE_URL", Value: l.cacheURL},
+		{Name: repocache.CacheTokenFileEnv, Value: ProvisionDir + "/" + cacheTokenKey},
 	}
 }
 
@@ -741,13 +752,16 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment(xdgStateHome)...)
 }
 
-// ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout plus workspace.CloneTimeout, the
-// bounds of the pod's two clones of the whole repository, workspace-fetch's from GitHub and
-// workspace-init's from the feed, which is how much longer than the boot timeout a launch may wait
-// for its pod's launcher, counted from when it first sees one of the pod's init containers running
-// (awaitRoleLauncher). The fetch started no later than that and the shared clone's clone after the
-// fetch ended, so both end inside the bound; workspace-init's other commands, local work that waits
-// on no other pod, then have at least the boot timeout. A test shortens it (provisionBound).
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the
+// real bounds of the pod's two provisioning phases, one after the other: workspace-fetch's whole
+// budget (its wait for the repository cache, then the stream, verification and delta that share
+// one FetchTimeout) and workspace-init's shared clone of the feed, whose size-following steps
+// share one CloneTimeout. It is how much longer than the boot timeout a launch may wait for
+// its pod's launcher, counted from when it first sees one of the pod's init containers running
+// (awaitRoleLauncher). The fetch started no later than that and the shared clone after the fetch
+// ended, so both end inside the bound, each failing on its own, naming why, when it runs out;
+// workspace-init's other commands, local work that waits on no other pod, then have at least the
+// boot timeout. A test shortens it (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }

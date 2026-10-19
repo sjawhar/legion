@@ -190,11 +190,25 @@ func populatedState() State {
 			RolesWithoutResources: []claim.Role{claim.RoleTester},
 		}.Report()),
 		// The project maps three repositories of two owners; the review App is not installed on one,
-		// which the daemon leaves out.
+		// which the daemon leaves out. acme/widgets' cache is Ready and its last health read
+		// answered, zeta/tools' could not be read, and acme/legacy, mapped no longer, keeps its cache
+		// until its retention ends.
 		Repositories: RepositoriesView{
-			Owners:  []string{"acme", "zeta"},
-			Mapped:  []MappedRepositoryView{{Repo: "acme/widgets", Default: true}, {Repo: "zeta/tools"}},
+			Owners: []string{"acme", "zeta"},
+			Mapped: []MappedRepositoryView{
+				{Repo: "acme/widgets", Default: true, Cache: &CacheView{
+					Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+					Head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992", LastFetchAt: time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC), Bytes: 6612345678,
+				}},
+				{Repo: "zeta/tools", Cache: &CacheView{
+					Repo: "zeta/tools", Sandbox: "legion-legion-cache-zeta-tools-1b2c3d4e", State: "failing",
+					Reason: "container cache CrashLoopBackOff: back-off 5m0s restarting failed container (restarted 4 times)",
+				}},
+			},
 			Refused: []RefusedRepositoryView{{Repo: "acme/gadgets", Reason: "the review App is not installed on acme/gadgets"}},
+			Caches: []CacheView{{
+				Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "starting", RetainedUntil: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
+			}},
 		},
 	}
 }

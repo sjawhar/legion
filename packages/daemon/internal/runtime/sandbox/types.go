@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -182,6 +183,14 @@ type Options struct {
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns
+	// RepositoryCache is how the runtime makes each repository's cache (runtime.kubernetes
+	// .repository_cache, whose defaults the daemon's configuration supplies): required for
+	// supervision, which sweeps and refreshes caches.
+	RepositoryCache RepositoryCache
+	// Mapped is the repositories the project's mapping names now, read at every orphan sweep: the
+	// sweep makes or repairs each one's cache (EnsureRepositoryCache), and retires the cache of a
+	// repository it no longer names once that cache's retention passes. Required for supervision.
+	Mapped func() []ghrepo.Repository
 	// Now stamps observations and ages pods and orphans; time.Now when nil.
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
@@ -238,6 +247,9 @@ type sandboxSpec struct {
 	PodTemplate          podTemplate           `json:"podTemplate"`
 	VolumeClaimTemplates []volumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 	OperatingMode        string                `json:"operatingMode,omitempty"`
+	// Service has the Agent Sandbox controller make a headless Service of the Sandbox's name, whose
+	// DNS name resolves to the pod while it is Ready: what a repository cache sets.
+	Service *bool `json:"service,omitempty"`
 }
 
 // podTemplate is upstream's PodTemplate: labels and annotations, and a core PodSpec.

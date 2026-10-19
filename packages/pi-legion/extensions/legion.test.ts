@@ -1569,6 +1569,7 @@ describe("Legion OMP extension", () => {
           owners: ["acme"],
           mapped: [{ repo: "acme/widgets", default: true }],
           refused: [],
+          caches: [],
         },
       };
       const booted = await bootPane({

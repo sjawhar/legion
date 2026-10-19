@@ -43,6 +43,7 @@
   "repositories": {
     "owners": [],
     "mapped": [],
-    "refused": []
+    "refused": [],
+    "caches": []
   }
 }

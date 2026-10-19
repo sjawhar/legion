@@ -89,6 +89,7 @@ const STATE = LegionStateResponse.parse({
     owners: ["sjawhar"],
     mapped: [{ repo: "sjawhar/legion-smoke", default: true }],
     refused: [],
+    caches: [],
   },
 });
 

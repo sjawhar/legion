@@ -232,7 +232,20 @@ package api
 // plugin at 30 reads the state with a strict schema that knows none of these fields, so it
 // refuses the state.
 //
-// 32: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
+// 32: sjawhar/legion#1986 (the repository cache) -- the daemon runs one repository cache pod per
+// served repository, whose one container is the image's `legion workspace-init cache`, and every
+// issue pod's `workspace-init fetch` is told its repository's cache (`LEGION_REPOSITORY_CACHE_URL`)
+// and that cache's bearer token (`LEGION_REPOSITORY_CACHE_TOKEN_FILE`), and fills a fresh feed
+// from that cache alone, verified, fetching only the delta from GitHub; its `workspace-init
+// provision` makes the issue's clone shared with the feed, which now lives on the issue's own
+// volume. An image whose `legion` was built before 32 exits 2 on the unknown subcommand in every
+// cache pod, and its fetch clones from GitHub, ignoring the cache, so the daemon's image probe,
+// which holds the image's pi-legion to this number, refuses such an image at boot instead. The
+// state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
+// its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
+// `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither.
+//
+// 33: LEGION-781 -- the architect accepts before the merge, the merge closes the issue, and the
 // production check is work after the close. The phase enum gains `accepting` (between `reviewing`
 // and `retro`, the architect's `sign_off` phase, a backward target too) and loses
 // `production_check`; the issue record on GET /legion/v1/state gains `check` (api.CheckView), the
@@ -241,11 +254,11 @@ package api
 // implementer's report on a look of that check (`handoff_complete` on a done issue whose check is
 // open) pushes nothing, and its `verdict` gains `pending` beside `pass` and `fail`;
 // `PhaseBackwardRequest` gains an optional `issue`, which the architect's grant, serving its whole
-// tree, names the issue it returns from `accepting` with. A 31 plugin's strict reader refuses a
+// tree, names the issue it returns from `accepting` with. A 32 plugin's strict reader refuses a
 // state carrying `check` or the phase `accepting`, and its `handoff_complete` requires a commit the
 // check report has none of, so the boot gate and `legion probe-image` refuse the mixed pair. (This
 // branch took 30, then 31 when main landed sjawhar/legion#1986 at 30 and released pi-legion
 // v10.8.3 declaring it; main then landed sjawhar/legion#2005 at 31 and released pi-legion v10.9.0
-// declaring it without these shapes, so this branch takes the number above it, as the collision
-// note says.)
-const DaemonAPIVersion = 32
+// declaring it, then sjawhar/legion#2009 at 32 and released pi-legion v10.10.0 declaring it, each
+// without these shapes, so this branch takes the number above it, as the collision note says.)
+const DaemonAPIVersion = 33

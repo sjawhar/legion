@@ -6,6 +6,7 @@ import (
 	"flag"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -755,6 +756,10 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 				}
 				return
 			}
+			// No other container may write what workspace-fetch mounts: the feed, a subPath of the issue
+			// volume, is reachable through another container's read-write mount of the volume (or of a
+			// subPath above the feed) unless that container mounts the feed read-only over exactly the
+			// path the read-write mount reaches it at.
 			fetch := containerNamed(t, pod, fetchContainer)
 			for _, mount := range fetch.VolumeMounts {
 				for _, other := range containers {
@@ -762,8 +767,19 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 						continue
 					}
 					for _, theirs := range other.VolumeMounts {
-						if theirs.Name == mount.Name && !theirs.ReadOnly {
-							t.Errorf("%s can write volume %s, which %s mounts at %s", other.Name, mount.Name, fetch.Name, mount.MountPath)
+						if theirs.Name != mount.Name || theirs.ReadOnly {
+							continue
+						}
+						below, ok := strings.CutPrefix(mount.SubPath, theirs.SubPath)
+						if !ok || (theirs.SubPath != "" && below != "" && !strings.HasPrefix(below, "/")) {
+							continue
+						}
+						reached := path.Join(theirs.MountPath, below)
+						shadowed := slices.ContainsFunc(other.VolumeMounts, func(m corev1.VolumeMount) bool {
+							return m.Name == mount.Name && m.ReadOnly && m.SubPath == mount.SubPath && m.MountPath == reached
+						})
+						if !shadowed {
+							t.Errorf("%s can write volume %s at %s, which %s mounts at %s", other.Name, mount.Name, reached, fetch.Name, mount.MountPath)
 						}
 					}
 				}
@@ -843,6 +859,10 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"the pool restated":         {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
 		"no tokens":                 {func(o *Options) { o.Tokens = nil }, "no provisioning token source"},
 		"no gh credential":          {func(o *Options) { o.GitHubCredential = nil }, "no github credential function"},
+		"no repository mapping":     {func(o *Options) { o.Mapped = nil }, "no repository mapping for the repository caches"},
+		"no cache volume":           {func(o *Options) { o.RepositoryCache.Volume = resource.Quantity{} }, "repository cache volume 0 is not a positive quantity"},
+		"no cache retention":        {func(o *Options) { o.RepositoryCache.Retain = 0 }, "repository cache retention 0s is not positive"},
+		"an unreserved cache":       {func(o *Options) { o.RepositoryCache.Resources = corev1.ResourceRequirements{} }, "the repository cache reserves no cpu"},
 		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
 		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
 		"cpu request past limit": {

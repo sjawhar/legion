@@ -184,7 +184,7 @@ const legionCheckWakeView = z.strictObject({
 });
 
 /** `api.CheckView` — an issue's open production check, the implementer's work after the merge
- * closed the issue (contract 32): the repository, pull request and merge commit the check looks
+ * closed the issue (contract 33): the repository, pull request and merge commit the check looks
  * for in production (`mergeCommit` is empty until the first build compare fills it for a pull
  * request merged before the daemon recorded merge commits), when it opened, how many looks the
  * implementer has taken and whether the latest is still open, what woke the latest look
@@ -326,14 +326,42 @@ const legionCapabilityState = z.strictObject({
   source: z.enum(["configuration", "boot"]).optional(),
 });
 
+/** `api.CacheView` — a repository cache as the Kubernetes runtime shows it: its repository and
+ * Sandbox, its `state` (`failing` with the kubelet's `reason`, `refused` with its Service's),
+ * whether its pod is Ready behind its own Service and its address then, from its last health read
+ * the default branch's `head`, `lastFetchAt` and the `bytes` it serves or the read's
+ * `healthError`, and, for a repository the mapping no longer names, `retainedUntil` (contract 32). */
+const legionCacheView = z.strictObject({
+  repo: nonEmptyString,
+  sandbox: nonEmptyString,
+  state: z.enum(["starting", "cloning", "ready", "failing", "refused"]),
+  reason: nonEmptyString.optional(),
+  ready: z.boolean(),
+  address: nonEmptyString.optional(),
+  head: nonEmptyString.optional(),
+  lastFetchAt: timestamp.optional(),
+  bytes: z.number().int().positive().optional(),
+  healthError: nonEmptyString.optional(),
+  retainedUntil: timestamp.optional(),
+});
+
 /** `api.RepositoriesView` — the project's repository mapping as the daemon serves it: the owners
  * its roles' credentials span, each repository it serves (as GitHub names it, `default` the
- * project's default in Dispatch), and each mapped repository it leaves out with `reason`, a GitHub
- * App not installed on it. Every list sorted and never null (contract 31). */
+ * project's default in Dispatch, `cache` its repository cache under the Kubernetes runtime), each
+ * mapped repository it leaves out with `reason`, a GitHub App not installed on it, and the `caches`
+ * of repositories the mapping no longer names. Every list sorted and never null (contracts 31,
+ * 32). */
 const legionRepositories = z.strictObject({
   owners: z.array(nonEmptyString),
-  mapped: z.array(z.strictObject({ repo: nonEmptyString, default: z.boolean() })),
+  mapped: z.array(
+    z.strictObject({
+      repo: nonEmptyString,
+      default: z.boolean(),
+      cache: legionCacheView.optional(),
+    })
+  ),
   refused: z.array(z.strictObject({ repo: nonEmptyString, reason: nonEmptyString })),
+  caches: z.array(legionCacheView),
 });
 
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session

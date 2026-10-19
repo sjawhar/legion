@@ -34,32 +34,49 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 		return err
 	}
 	gitDir := filepath.Join(workspace.Clone, ".git")
-	worktrees := filepath.Join(gitDir, "worktrees")
+	why := "no container of the issue's pod has started, and no other pod mounts its volume"
 	for _, dir := range append([]string{gitDir}, own...) {
-		err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
-			switch {
-			case errors.Is(err, fs.ErrNotExist) && path == dir:
-				return nil
-			case err != nil:
-				return fmt.Errorf("look for stale git locks in %s: %w", dir, err)
-			case entry.IsDir() && path == worktrees:
-				return fs.SkipDir
-			case entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lock"):
-				return nil
-			}
-			info, err := entry.Info()
-			if err != nil {
-				return fmt.Errorf("read the stale git lock %s: %w", path, err)
-			}
-			if err := os.Remove(path); err != nil {
-				return fmt.Errorf("remove the stale git lock %s: %w", path, err)
-			}
-			log(fmt.Sprintf("removed the stale git lock %s, last written %s ago: no container of the issue's pod has started, and no other pod mounts its volume", path, now.Sub(info.ModTime()).Round(time.Second)))
-			return nil
-		})
-		if err != nil {
+		if err := removeLocksUnder(dir, filepath.Join(gitDir, "worktrees"), now, log, why); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// RemoveStaleFeedLocks removes every git lock file in the bare repository gitDir, a feed: the
+// `<file>.lock` a fetch killed mid-update leaves beside a ref, packed-refs, HEAD or the shallow
+// file, which blocks every later update of that file. Objects are never touched: the issue's clone
+// borrows them through objects/info/alternates. Each removal is logged with the lock's path and
+// age, and a lock it cannot remove is an error naming it. A feed's only writer is Fetch, called by
+// one process at a time: a pod's workspace-fetch, its first init container and the one container
+// that mounts the feed writable, or the repository cache's process under its write lock, so no
+// lock there is held by anyone when Fetch starts.
+func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error {
+	return removeLocksUnder(gitDir, "", now, log, "a feed's only writer is the fetch now starting")
+}
+
+// removeLocksUnder removes every `*.lock` file under dir but those under skip, logging each with
+// its age and why no process can hold it.
+func removeLocksUnder(dir, skip string, now time.Time, log func(string), why string) error {
+	return filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		switch {
+		case errors.Is(err, fs.ErrNotExist) && path == dir:
+			return nil
+		case err != nil:
+			return fmt.Errorf("look for stale git locks in %s: %w", dir, err)
+		case entry.IsDir() && skip != "" && path == skip:
+			return fs.SkipDir
+		case entry.IsDir() || !strings.HasSuffix(entry.Name(), ".lock"):
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("read the stale git lock %s: %w", path, err)
+		}
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove the stale git lock %s: %w", path, err)
+		}
+		log(fmt.Sprintf("removed the stale git lock %s, last written %s ago: %s", path, now.Sub(info.ModTime()).Round(time.Second), why))
+		return nil
+	})
 }

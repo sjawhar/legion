@@ -113,6 +113,7 @@ func (r *liveRig) checkIdentity() error {
 	}
 	questions := []question{
 		{true, authzv1.ResourceAttributes{Namespace: r.env.namespace, Verb: "create", Group: "agents.x-k8s.io", Resource: "sandboxes"}},
+		{true, authzv1.ResourceAttributes{Namespace: r.env.namespace, Verb: "watch", Resource: "services"}},
 		{true, authzv1.ResourceAttributes{Namespace: "agent-sandbox-system", Verb: "get", Group: "apps", Resource: "deployments", Name: "agent-sandbox-controller"}},
 	}
 	for _, resource := range []string{"users", "groups", "serviceaccounts", "uids"} {
@@ -178,8 +179,9 @@ func expand(rule authzv1.ResourceRule) []string {
 	return out
 }
 
-// planGrants is the Stage 4 plan's Task 4.4 grant set, with the self-review endpoints every
-// authenticated user has.
+// planGrants is the Stage 4 plan's Task 4.4 grant set, with the Service reads the repository
+// cache's check needs (docs/kubernetes.md "RBAC the Go daemon needs") and the self-review endpoints
+// every authenticated user has.
 func planGrants(ns, grant string) bool {
 	everywhere := []string{
 		"create authentication.k8s.io/selfsubjectreviews",
@@ -197,7 +199,7 @@ func planGrants(ns, grant string) bool {
 			legion = append(legion, verb+" agents.x-k8s.io/sandboxes")
 		}
 		for _, verb := range []string{"get", "list", "watch"} {
-			legion = append(legion, verb+" /pods")
+			legion = append(legion, verb+" /pods", verb+" /services")
 		}
 		for _, verb := range []string{"create", "get", "update", "delete"} {
 			legion = append(legion, verb+" /secrets")

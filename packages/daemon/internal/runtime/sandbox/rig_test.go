@@ -85,7 +85,12 @@ func testOptions() Options {
 		Tokens:           staticTokens{},
 		GitHubCredential: staticCredential,
 		Conns:            fake.NewConns(),
-		Log:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		RepositoryCache: RepositoryCache{
+			Volume: resource.MustParse("20Gi"), Refresh: 10 * time.Minute, Retain: 168 * time.Hour,
+			Resources: reservations()[claim.RoleController],
+		},
+		Mapped: func() []ghrepo.Repository { return nil },
+		Log:    slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
 }
 
@@ -548,12 +553,16 @@ func (g *rig) clearActions() {
 	g.actions = nil
 }
 
-// control is the controller stand-in, reconciling every Sandbox every few milliseconds. Its own
-// requests go through the tracker directly, so they never appear among the runtime's.
+// control is the controller stand-in, reconciling every Sandbox every few milliseconds: its pod,
+// and the headless Service of a Sandbox that asks for one, which it makes as the controller does
+// (cacheService) when no Service of the name exists and removes once its Sandbox is gone, as the
+// garbage collector would. Its own requests go through the tracker directly, so they never appear
+// among the runtime's.
 func (g *rig) control() {
 	tick := time.NewTicker(5 * time.Millisecond)
 	defer tick.Stop()
 	terminating := map[types.UID]time.Time{}
+	services := map[string]types.UID{}
 	for {
 		select {
 		case <-g.ctx.Done():
@@ -568,10 +577,19 @@ func (g *rig) control() {
 		if items == nil {
 			continue
 		}
+		live := map[types.UID]bool{}
 		for i := range items.Items {
 			s, err := decodeSandbox(&items.Items[i])
 			if err != nil || s.DeletionTimestamp != nil {
 				continue
+			}
+			live[s.UID] = true
+			if s.Spec.Service != nil && *s.Spec.Service {
+				if _, err := g.kube.Tracker().Get(servicesGVR, testNamespace, s.Name); err != nil {
+					if g.kube.Tracker().Add(cacheService(s.Name, s.UID)) == nil {
+						services[s.Name] = s.UID
+					}
+				}
 			}
 			pod := g.pod(s.Name)
 			owned := ownedBy(pod, s.UID)
@@ -590,8 +608,16 @@ func (g *rig) control() {
 				g.createPod(s)
 			}
 		}
+		for name, uid := range services {
+			if !live[uid] {
+				_ = g.kube.Tracker().Delete(servicesGVR, testNamespace, name)
+				delete(services, name)
+			}
+		}
 	}
 }
+
+var servicesGVR = corev1.SchemeGroupVersion.WithResource("services")
 
 var podsGVR = corev1.SchemeGroupVersion.WithResource("pods")
 

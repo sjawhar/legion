@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -32,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The provisioning token is the implement App's installation token, and every agent of a tree can
@@ -131,6 +134,8 @@ type initRig struct {
 	bin    string
 	legion string
 	github *gitHubStandIn
+	// cache is the repository cache of boundaryRepo the pods' fetch fills its feed from.
+	cache *httptest.Server
 	// network is what every process reaching a remote is told: the egress proxy, the trust store
 	// holding the stand-in's CA, and the hosts reached directly.
 	network []string
@@ -159,6 +164,7 @@ func newInitRig(t *testing.T, legion string) *initRig {
 		t.Fatal(err)
 	}
 	rig.github = newGitHubStandIn(t, root)
+	rig.cache = newCacheStandIn(t, rig.github.remote)
 	rig.network = []string{
 		"HTTPS_PROXY=" + rig.github.proxy.URL, "https_proxy=" + rig.github.proxy.URL,
 		"NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost", "GIT_SSL_CAINFO=" + rig.github.caFile,
@@ -274,8 +280,11 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 		if volume.Secret != nil {
 			for _, item := range volume.Secret.Items {
 				value := "not-the-provisioning-token"
-				if item.Key == provisionTokenKey {
+				switch item.Key {
+				case provisionTokenKey:
 					value = canaryToken
+				case cacheTokenKey:
+					value = boundaryCacheToken
 				}
 				path := filepath.Join(dir, item.Path)
 				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -293,7 +302,7 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 			return err
 		}
 		if c.Name == fetchContainer {
-			rig.holdsNoCanary("the feed", volumes[feedVolume])
+			rig.holdsNoCanary("the feed", filepath.Join(volumes[issueVolume], feedSubPath))
 		}
 	}
 	return nil
@@ -313,6 +322,12 @@ func (rig *initRig) runContainer(podDir string, volumes map[string]string, c cor
 	var readOnly []string
 	for _, mount := range c.VolumeMounts {
 		host := filepath.Join(volumes[mount.Name], mount.SubPath)
+		// The kubelet makes a subPath that does not exist yet before it mounts it.
+		if mount.SubPath != "" {
+			if err := os.MkdirAll(host, 0o700); err != nil {
+				return err
+			}
+		}
 		moves = append(moves, move{mount.MountPath, host})
 		mounted[volumes[mount.Name]] = true
 		if mount.ReadOnly {
@@ -338,7 +353,12 @@ func (rig *initRig) runContainer(podDir string, volumes map[string]string, c cor
 	}
 	env := []string{}
 	for _, v := range c.Env {
-		env = append(env, v.Name+"="+remap(kubeExpand(v.Value, declared)))
+		value := remap(kubeExpand(v.Value, declared))
+		// The cache's address names its Service in the cluster; here it is the rig's stand-in.
+		if v.Name == "LEGION_REPOSITORY_CACHE_URL" {
+			value = rig.cache.URL
+		}
+		env = append(env, v.Name+"="+value)
 	}
 	if _, set := declared["TMPDIR"]; !set {
 		env = append(env, "TMPDIR="+tmp)
@@ -689,6 +709,8 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 type gitHubStandIn struct {
 	proxy  *httptest.Server
 	caFile string
+	// remote is the bare repository the stand-in serves as boundaryRepo.
+	remote string
 	mu     sync.Mutex
 	count  int
 }
@@ -719,7 +741,7 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 	if err := os.WriteFile(caFile, caPEM, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	g := &gitHubStandIn{caFile: caFile}
+	g := &gitHubStandIn{caFile: caFile, remote: remote}
 	backend := &cgi.Handler{
 		Path: git, Args: []string{"http-backend"},
 		Env: []string{"GIT_PROJECT_ROOT=" + projects, "GIT_HTTP_EXPORT_ALL=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"},
@@ -736,6 +758,101 @@ func newGitHubStandIn(t *testing.T, root string) *gitHubStandIn {
 		backend.ServeHTTP(w, r)
 	}, nil)
 	return g
+}
+
+// boundaryCacheToken is the bearer token the rig's Secret projections hold for the repository
+// cache, and the one the stand-in cache takes.
+const boundaryCacheToken = "the-repository-cache-token"
+
+// newCacheStandIn is the repository cache of boundaryRepo as an issue pod's fetch reaches it at
+// the address the runtime names: its /healthz answers any request, its /tar only the bearer
+// boundaryCacheToken, it names sjawhar/legion-smoke on every answer it gives, is ready at once, and
+// streams as its /tar the refs and packs (workspace.FeedEntry) of a bare clone of remote as it is
+// when asked.
+func newCacheStandIn(t *testing.T, remote string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/healthz":
+			w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
+			_, _ = w.Write([]byte(`{"ready":true,"repo":"sjawhar/legion-smoke","bytes":1}`))
+		case "/tar":
+			if r.Header.Get("Authorization") != "Bearer "+boundaryCacheToken {
+				http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+				return
+			}
+			body, err := feedTar(remote)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set(workspace.CacheRepositoryHeader, "sjawhar/legion-smoke")
+			_, _ = w.Write(body)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// feedTar is a tar stream of the refs and packs of a bare clone of remote, as the repository
+// cache streams its own.
+func feedTar(remote string) ([]byte, error) {
+	dir, err := os.MkdirTemp("", "boundary-cache-")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	clone := filepath.Join(dir, "clone.git")
+	command := exec.Command("git", "clone", "--bare", "--quiet", "--no-local", remote, clone)
+	command.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("clone %s: %w\n%s", remote, err, output)
+	}
+	var stream bytes.Buffer
+	archive := tar.NewWriter(&stream)
+	err = filepath.WalkDir(clone, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || path == clone {
+			return err
+		}
+		relative, err := filepath.Rel(clone, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
+		if !workspace.FeedEntry(name, entry.IsDir()) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name = name
+		if entry.IsDir() {
+			header.Name += "/"
+			return archive.WriteHeader(header)
+		}
+		body, err := os.ReadFile(path)
+		if err == nil {
+			err = archive.WriteHeader(header)
+		}
+		if err == nil {
+			_, err = archive.Write(body)
+		}
+		return err
+	})
+	if err == nil {
+		err = archive.Close()
+	}
+	return stream.Bytes(), err
 }
 
 // authorized is how many requests presented the provisioning token.

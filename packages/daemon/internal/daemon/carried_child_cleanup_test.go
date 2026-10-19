@@ -180,6 +180,7 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout: 300 * time.Millisecond, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: logger,
+			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
 		if err != nil {
 			t.Fatal(err)

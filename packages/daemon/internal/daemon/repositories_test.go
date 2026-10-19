@@ -13,12 +13,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/repocache"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -200,6 +203,39 @@ func newNamedGitHub(t *testing.T, repos map[string]string) *namedGitHub {
 	}))
 	t.Cleanup(server.Close)
 	return &namedGitHub{url: server.URL}
+}
+
+// The state's mapping carries each mapped repository's cache, matched by repository whatever its
+// case, with its last health read; a cache whose repository the mapping no longer names is listed
+// apart with when the sweep retires it; a mapped repository with no cache carries none.
+func TestTheMappingsViewCarriesTheRepositoryCaches(t *testing.T) {
+	repos := newRepositories("LEGION")
+	repos.set([]mappedRepository{
+		{Repo: ghrepo.MustParse("Acme/Widgets"), Default: true},
+		{Repo: ghrepo.MustParse("zeta/tools")},
+	}, nil)
+	fetched := time.Date(2026, 10, 16, 19, 20, 30, 0, time.UTC)
+	retained := time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC)
+	view := repos.view([]sandbox.CacheStatus{
+		{Repo: ghrepo.MustParse("acme/legacy"), Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "failing",
+			Reason: "container cache ImagePullBackOff: pull access denied (restarted 0 times)", RetainedUntil: retained},
+		{Repo: ghrepo.MustParse("acme/widgets"), Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+			Health: &repocache.Health{Ready: true, Repo: "acme/widgets", Head: "34a7ac80", LastFetchAt: fetched, Bytes: 6612345678}},
+	})
+	want := api.RepositoriesView{
+		Owners: []string{"acme", "zeta"},
+		Mapped: []api.MappedRepositoryView{
+			{Repo: "Acme/Widgets", Default: true, Cache: &api.CacheView{
+				Repo: "acme/widgets", Sandbox: "legion-legion-cache-acme-widgets-d782c874", State: "ready", Ready: true, Address: "http://legion-legion-cache-acme-widgets-d782c874.legion.svc:8418",
+				Head: "34a7ac80", LastFetchAt: fetched, Bytes: 6612345678,
+			}},
+			{Repo: "zeta/tools"},
+		},
+		Caches: []api.CacheView{{Repo: "acme/legacy", Sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d", State: "failing", Reason: "container cache ImagePullBackOff: pull access denied (restarted 0 times)", RetainedUntil: retained}},
+	}
+	if !reflect.DeepEqual(view, want) {
+		t.Fatalf("view = %+v\nwant %+v", view, want)
+	}
 }
 
 // An issue the workflow does not record, such as an operator's claim, works the project's default

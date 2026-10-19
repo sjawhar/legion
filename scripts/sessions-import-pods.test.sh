@@ -71,8 +71,8 @@ readonly dedicated='{"key":"example.internal/dedicated","operator":"Exists","eff
 
 cat >"$state/claims.json" <<'EOF'
 {"claims": [
-  {"token": "legion-acmewidgets-infra-1234-architect", "tree": "INFRA-1234", "issue": "INFRA-1234", "role": "architect", "sessionFile": "/s/a.jsonl"},
-  {"token": "legion-acmewidgets-infra-1235-planner", "tree": "INFRA-1234", "issue": "INFRA-1235", "role": "planner", "sessionFile": "/s/b.jsonl"},
+  {"token": "legion-acmewidgets-acme-1234-architect", "tree": "ACME-1234", "issue": "ACME-1234", "role": "architect", "sessionFile": "/s/a.jsonl"},
+  {"token": "legion-acmewidgets-acme-1235-planner", "tree": "ACME-1234", "issue": "ACME-1235", "role": "planner", "sessionFile": "/s/b.jsonl"},
   {"token": "legion-acmewidgets-acme-7-architect", "tree": "ACME-7", "issue": "ACME-7", "role": "architect", "sessionFile": "/s/c.jsonl"},
   {"token": "legion-acmewidgets-controller", "tree": "", "issue": "", "role": "controller", "sessionFile": "/s/d.jsonl"}
 ]}
@@ -82,23 +82,23 @@ EOF
 # the script never computes.
 labels() { jq -cn --arg r "$1" --arg t "$2" --arg i "$3" '{"legion.dev/project": "acmewidgets", "legion.dev/role": $r} + (if $t == "" then {} else {"legion.dev/tree": $t, "legion.dev/issue": $i} end)'; }
 v10_state() {
-  jq -n --argjson a "$(labels architect INFRA-1234 INFRA-1234)" --argjson p "$(labels planner INFRA-1234 INFRA-1235)" \
+  jq -n --argjson a "$(labels architect ACME-1234 ACME-1234)" --argjson p "$(labels planner ACME-1234 ACME-1235)" \
     --argjson b "$(labels architect ACME-7 ACME-7)" --argjson c "$(labels controller '' '')" \
     --argjson pool "$pool" --argjson dedicated "$dedicated" '{items: [
-    {metadata: {name: "legion-acmewidgets-infra-1234-archite-59acf6b9", labels: $a}, spec: {podTemplate: {spec: {
+    {metadata: {name: "legion-acmewidgets-acme-1234-archite-59acf6b9", labels: $a}, spec: {podTemplate: {spec: {
       nodeSelector: {"legion.dev/pool": "legion", "example.internal/zone": "a"}, tolerations: [$pool, $dedicated],
       priorityClassName: "legion-high", serviceAccountName: "legion-worker"}}}},
-    {metadata: {name: "legion-acmewidgets-infra-1235-planner", labels: $p}, spec: {podTemplate: {spec: {}}}},
+    {metadata: {name: "legion-acmewidgets-acme-1235-planner", labels: $p}, spec: {podTemplate: {spec: {}}}},
     {metadata: {name: "legion-acmewidgets-acme-7-architect", labels: $b}, spec: {podTemplate: {spec: {
       nodeSelector: {"legion.dev/pool": "legion"}, tolerations: [$pool]}}}},
     {metadata: {name: "legion-acmewidgets-controller", labels: $c}, spec: {podTemplate: {spec: {}}}}
   ] | map(.spec.operatingMode = "Suspended")}' >"$state/sandboxes.json"
-  jq -n --argjson a "$(labels architect INFRA-1234 INFRA-1234)" --argjson b "$(labels architect ACME-7 ACME-7)" '{items: [
-    {metadata: {name: "tree-legion-acmewidgets-infra-1234-archite-59acf6b9", labels: $a}},
+  jq -n --argjson a "$(labels architect ACME-1234 ACME-1234)" --argjson b "$(labels architect ACME-7 ACME-7)" '{items: [
+    {metadata: {name: "tree-legion-acmewidgets-acme-1234-archite-59acf6b9", labels: $a}},
     {metadata: {name: "tree-legion-acmewidgets-acme-7-architect", labels: $b}}
   ]}' >"$state/pvc.json"
-  jq -n --argjson a "$(labels architect INFRA-1234 INFRA-1234)" '{items: [
-    {metadata: {name: "legion-acmewidgets-infra-1234-archite-59acf6b9", labels: $a}, status: {phase: "Succeeded"}}]}' >"$state/pods.json"
+  jq -n --argjson a "$(labels architect ACME-1234 ACME-1234)" '{items: [
+    {metadata: {name: "legion-acmewidgets-acme-1234-archite-59acf6b9", labels: $a}, status: {phase: "Succeeded"}}]}' >"$state/pods.json"
   echo Succeeded >"$state/phase"
 }
 
@@ -138,7 +138,7 @@ expect_pod() {
 v10_state
 run
 ((code == 0)) || fail "every tree: exit $code, want 0; stderr: $(<"$temporary_dir/err")"
-expect_pod legion-sessions-import-infra-1234 tree-legion-acmewidgets-infra-1234-archite-59acf6b9 INFRA-1234 \
+expect_pod legion-sessions-import-acme-1234 tree-legion-acmewidgets-acme-1234-archite-59acf6b9 ACME-1234 \
   '{"legion.dev/pool":"legion","example.internal/zone":"a"}' "[$pool,$dedicated]" legion-high
 expect_pod legion-sessions-import-acme-7 tree-legion-acmewidgets-acme-7-architect ACME-7 '{"legion.dev/pool":"legion"}' "[$pool]" ""
 grep -qF "delete pod legion-sessions-import-acme-7 --ignore-not-found --wait" "$state/calls" || fail "a leftover import pod was not deleted first"
@@ -162,7 +162,7 @@ jq '.items |= map(select(.metadata.labels["legion.dev/tree"] != "ACME-7"))' "$st
 run
 ((code == 1)) || fail "a lost volume: exit $code, want 1"
 grep -qF "tree ACME-7 has no volume labelled" "$temporary_dir/err" || fail "the lost volume was not named: $(<"$temporary_dir/err")"
-[[ -f $state/created/legion-sessions-import-infra-1234.yaml ]] || fail "the other trees did not run beside the failed one"
+[[ -f $state/created/legion-sessions-import-acme-1234.yaml ]] || fail "the other trees did not run beside the failed one"
 
 # A pod of the project that has not ended, or a Sandbox not Suspended, whose pod may yet start,
 # stops the script before anything is created.

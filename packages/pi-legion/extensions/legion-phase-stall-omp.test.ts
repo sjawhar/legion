@@ -89,6 +89,7 @@ const STALL_STATE = {
     owners: ["acme"],
     mapped: [{ repo: "acme/widgets", default: true }],
     refused: [],
+    caches: [],
   },
 };
 

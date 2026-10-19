@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -44,7 +45,7 @@ func kubernetesConfig(t *testing.T, server string) config.Config {
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
 		StorageClass: "gp2", IssueVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
-		Resources: config.DefaultResources(),
+		Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
 	}}
 	return cfg
 }
@@ -64,6 +65,20 @@ func defaultReservations(t *testing.T) map[claim.Role]corev1.ResourceRequirement
 	}
 	return reservations
 }
+
+// defaultRepositoryCache is the repository cache at the daemon's defaults, translated as
+// sandboxOptions translates it, for a test that builds Options by hand.
+func defaultRepositoryCache(t *testing.T) sandbox.RepositoryCache {
+	t.Helper()
+	cache, err := repositoryCache(config.DefaultRepositoryCache())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cache
+}
+
+// noRepositories is a mapping that names none, for a test whose runtime makes no cache.
+func noRepositories() []ghrepo.Repository { return nil }
 
 // writeKubeconfig is a kubeconfig of one cluster at server and one context, its current context
 // when current names it.
@@ -206,9 +221,10 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 
 // Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
 // itself, the one address the runtime hands every pod's shim, and the runtime is given the
-// workflow's App tokens and its repository of an issue, already set when the runtime is built. The
-// host's own agent machinery never runs: no pane launcher is installed, no Dispatch token file is
-// written, and the workflow's boot has no worker-bin stage.
+// workflow's App tokens, its repository of an issue, already set when the runtime is built, and the
+// repositories Dispatch's mapping names, which its repository caches follow. The host's own agent
+// machinery never runs: no pane launcher is installed, no Dispatch token file is written, and the
+// workflow's boot has no worker-bin stage.
 func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	cfg.Runtime = kubernetesConfig(t, "https://127.0.0.1:1").Runtime
@@ -230,8 +246,14 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	awaitHealthz(t, cfg, done)
 
 	record.mu.Lock()
-	address, apps, repository := record.address, record.apps, record.repository
+	address, apps, repository, mapped := record.address, record.apps, record.repository, record.mapped
 	record.mu.Unlock()
+	if mapped == nil {
+		t.Fatal("the runtime was handed no mapping")
+	}
+	if got := mapped(); !slices.Equal(got, []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}) {
+		t.Errorf("the runtime's repository caches follow %v, want the workflow's mapping, acme/widgets", got)
+	}
 	prefix := "tcp://" + cfg.Bind + ":"
 	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
 		t.Fatalf("the runtime was told to have shims dial %q, want %s<bound port>", address, prefix)
@@ -486,6 +508,29 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 	}
 	if controller := opts.Resources[claim.RoleController]; reflect.DeepEqual(probe.Resources, controller) {
 		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", controller)
+	}
+}
+
+// runtime.kubernetes.repository_cache reaches the runtime's Options as its volume, its intervals and
+// its container's requirements, a settled reservation's lower memory request under its limit.
+func TestTheRepositoryCacheReachesTheSandboxRuntime(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	reservation := config.RoleResources{CPU: "2", CPURequest: "2", Memory: "8Gi", MemoryRequest: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"}
+	cfg.Runtime.Kubernetes.RepositoryCache = config.RepositoryCacheConfig{Volume: "50Gi", RefreshMinutes: 5, RetainHours: 24, Resources: reservation}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	want, err := requirements("runtime.kubernetes.repository_cache.resources", reservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := opts.RepositoryCache
+	if cache.Volume.Cmp(resource.MustParse("50Gi")) != 0 || cache.Refresh != 5*time.Minute || cache.Retain != 24*time.Hour || !reflect.DeepEqual(cache.Resources, want) {
+		t.Errorf("RepositoryCache = %+v, want 50Gi, 5m, 24h and %+v", cache, want)
+	}
+	if request, limit := cache.Resources.Requests[corev1.ResourceMemory], cache.Resources.Limits[corev1.ResourceMemory]; request.Cmp(resource.MustParse("4Gi")) != 0 || limit.Cmp(resource.MustParse("8Gi")) != 0 {
+		t.Errorf("the cache's memory is requested %s under %s, want 4Gi under 8Gi", request.String(), limit.String())
 	}
 }
 

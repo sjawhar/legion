@@ -117,20 +117,22 @@ func TestALaunchTryItsContextEndsIsChargedNothing(t *testing.T) {
 }
 
 // launchBound is the sum of a replacing try's waits and of its relaunchCalls calls at apiTimeout:
-// three boot timeouts, the launcher backstop, the termination grace, then the calls. At the
-// daemon's production defaults — worker_boot_timeout_seconds 120 and worker_stop_timeout_seconds
-// 10 (config), and ProvisionBound's 60 minutes (workspace.FetchTimeout + workspace.CloneTimeout) —
-// that is 1 h 45 min 41 s with relaunchCalls at 71: well past the 60-minute floor a provisioning pod's rightful wait sets, and
-// never under the boot timeout, ProvisionBound and the grace together. The rig's runtime answers
-// the same arithmetic over its own options.
+// three boot timeouts, the repository cache's waits (cacheWaits: five boot timeouts and one other
+// ensure's calls), the launcher backstop, the termination grace, then the calls. At the daemon's
+// production defaults — worker_boot_timeout_seconds 120 and worker_stop_timeout_seconds 10
+// (config), and ProvisionBound's 100 minutes (workspace.FetchBudget + workspace.CloneTimeout) —
+// that is 2 h 49 min 41 s with relaunchCalls at 85: well past the 100-minute floor a provisioning
+// pod's rightful wait sets, and never under the boot timeout, ProvisionBound and the grace
+// together. The rig's runtime answers the same arithmetic over its own options.
 func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
-	boot, provision, grace := 120*time.Second, 60*time.Minute, 10*time.Second
-	if relaunchCalls != 71 {
-		t.Fatalf("relaunchCalls = %d, want 71: %d per try and %d per each of %d roles", relaunchCalls, relaunchPodCalls, relaunchRoleCalls, len(claim.Roles))
+	boot, provision, grace := 120*time.Second, 100*time.Minute, 10*time.Second
+	if relaunchCalls != 85 || cacheEnsureCalls != 14 {
+		t.Fatalf("relaunchCalls = %d, want 85: %d per try (%d of them the repository cache's ensure) and %d per each of %d roles", relaunchCalls, relaunchPodCalls, cacheEnsureCalls, relaunchRoleCalls, len(claim.Roles))
 	}
-	waits := 3*boot + (2*boot + provision + 2*recheckInterval) + grace
-	if got, want := launchBound(boot, provision, grace), waits+71*apiTimeout; got != want || want != time.Hour+45*time.Minute+41*time.Second {
-		t.Fatalf("launchBound = %s, want %s (1h45m41s)", got, want)
+	cache := 5*boot + 14*apiTimeout
+	waits := 3*boot + cache + (2*boot + provision + 2*recheckInterval) + grace
+	if got, want := launchBound(boot, provision, grace), waits+85*apiTimeout; got != want || want != 2*time.Hour+49*time.Minute+41*time.Second {
+		t.Fatalf("launchBound = %s, want %s (2h49m41s)", got, want)
 	}
 	production := testOptions()
 	production.BootTimeout, production.TerminationGrace = boot, grace
@@ -138,8 +140,8 @@ func TestLaunchBoundSumsTheTrysWaitsAndCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 60*time.Minute {
-		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 60m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
+	if got := r.LaunchBound(); got != launchBound(boot, provision, grace) || got < boot+r.ProvisionBound()+grace || got <= 100*time.Minute {
+		t.Fatalf("LaunchBound at the production defaults = %s, want %s, at least %s and past 100m", got, launchBound(boot, provision, grace), boot+r.ProvisionBound()+grace)
 	}
 	g := newRig(t, nil)
 	if got, want := g.r.LaunchBound(), launchBound(g.opts.BootTimeout, g.r.ProvisionBound(), g.opts.TerminationGrace); got != want {
@@ -214,8 +216,8 @@ func TestAReplacingLaunchMakesNoMoreCallsThanTheBoundCounts(t *testing.T) {
 		}
 		t.Fatalf("the replacing try made %d bounded calls, more than the %d relaunchCalls counts; its requests:\n%s", calls, relaunchCalls, strings.Join(listed, "\n"))
 	}
-	if frames != 1 || mints.Load() != 1 || renders.Load() != int32(len(claim.Roles)) {
-		t.Fatalf("the replacing try sent %d launcher frames, minted %d tokens and rendered %d credentials, want one Start, one mint and one credential per role",
+	if frames != 1 || mints.Load() != 2 || renders.Load() != int32(len(claim.Roles)) {
+		t.Fatalf("the replacing try sent %d launcher frames, minted %d tokens and rendered %d credentials, want one Start, two mints (the provisioning token and the repository cache's) and one credential per role",
 			frames, mints.Load(), renders.Load())
 	}
 }

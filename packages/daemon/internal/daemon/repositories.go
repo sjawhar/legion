@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -149,14 +150,43 @@ func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal
 	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false
 }
 
-// view is the mapping as the daemon's state shows it.
-func (r *repositories) view() api.RepositoriesView {
+// view is the mapping as the daemon's state shows it, with caches, the Kubernetes runtime's
+// repository caches (none under tmux): each on the mapped repository it is for, matched whatever
+// the case, and the rest, caches of repositories the mapping no longer names, listed apart.
+func (r *repositories) view(caches []sandbox.CacheStatus) api.RepositoriesView {
+	byRepo := map[string]sandbox.CacheStatus{}
+	for _, cache := range caches {
+		byRepo[strings.ToLower(cache.Repo.String())] = cache
+	}
 	view := api.RepositoriesView{Owners: r.Owners()}
 	for _, mapped := range r.Mapped() {
-		view.Mapped = append(view.Mapped, api.MappedRepositoryView{Repo: mapped.Repo.String(), Default: mapped.Default})
+		entry := api.MappedRepositoryView{Repo: mapped.Repo.String(), Default: mapped.Default}
+		key := strings.ToLower(mapped.Repo.String())
+		if cache, held := byRepo[key]; held {
+			entry.Cache = new(cacheView(cache))
+			delete(byRepo, key)
+		}
+		view.Mapped = append(view.Mapped, entry)
 	}
 	for _, refused := range r.Refused() {
 		view.Refused = append(view.Refused, api.RefusedRepositoryView{Repo: refused.Repo, Reason: refused.Reason})
+	}
+	for _, cache := range caches {
+		if _, unmapped := byRepo[strings.ToLower(cache.Repo.String())]; unmapped {
+			view.Caches = append(view.Caches, cacheView(cache))
+		}
+	}
+	return view
+}
+
+// cacheView is a repository cache as the state shows it.
+func cacheView(cache sandbox.CacheStatus) api.CacheView {
+	view := api.CacheView{
+		Repo: cache.Repo.String(), Sandbox: cache.Sandbox, State: cache.State, Reason: cache.Reason, Ready: cache.Ready,
+		Address: cache.Address, HealthError: cache.HealthError, RetainedUntil: cache.RetainedUntil,
+	}
+	if health := cache.Health; health != nil {
+		view.Head, view.LastFetchAt, view.Bytes = health.Head, health.LastFetchAt, health.Bytes
 	}
 	return view
 }

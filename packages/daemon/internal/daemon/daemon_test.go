@@ -269,7 +269,8 @@ type stopped struct{}
 func (stopped) Stop() bool { return true }
 
 // built is what the daemon handed the runtime it built: the connection directory, the address
-// every pane's shim dials, the workflow's App tokens and repository rule, and the store it reads.
+// every pane's shim dials, the workflow's App tokens and repository rule, the store it reads, and
+// the repositories the project's mapping names.
 type built struct {
 	mu         sync.Mutex
 	conns      runtime.Conns
@@ -277,6 +278,7 @@ type built struct {
 	apps       appauth.Tokens
 	repository func(context.Context, string) (ghrepo.Repository, string, error)
 	store      *store.Store
+	mapped     func() []ghrepo.Repository
 }
 
 // fakeRuntime is a daemon whose runtime is rt — the fake, or a test's runtime built over it: the
@@ -284,10 +286,10 @@ type built struct {
 func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
 		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens,
-			repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store) (runtime.Runtime, error) {
+			repository func(context.Context, string) (ghrepo.Repository, string, error), st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
-			record.conns, record.address, record.apps, record.repository, record.store = listener, address, apps, repository, st
+			record.conns, record.address, record.apps, record.repository, record.store, record.mapped = listener, address, apps, repository, st, mapped
 			return rt, nil
 		},
 		clock:  stillClock{},
