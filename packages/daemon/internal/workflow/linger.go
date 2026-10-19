@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -244,12 +245,7 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		return intake.Result{}, err
 	}
 	if len(open) > 0 {
-		earliest := open[0]
-		for _, check := range open[1:] {
-			if check.BoundAt.Before(earliest.BoundAt) {
-				earliest = check
-			}
-		}
+		earliest := slices.MinFunc(open, func(a, b record.ProductionCheck) int { return a.BoundAt.Compare(b.BoundAt) })
 		return intake.Result{}, wait.Until(earliest.BoundAt.Add(CheckLookBound),
 			fmt.Sprintf("tree %s lingers past its deadline; member %s's production check is open", issue.Key, earliest.Issue))
 	}

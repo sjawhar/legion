@@ -360,9 +360,10 @@ func (e *Engine) wake(ctx context.Context, tx pgx.Tx, check *record.ProductionCh
 	if issue == nil {
 		return fmt.Errorf("production check of %s: its issue is not recorded", check.Issue)
 	}
-	if RoleFor(issue.Phase) != "" || check.LookOpen {
+	runsAgain := RoleFor(issue.Phase) != ""
+	if runsAgain || check.LookOpen {
 		why := "a look is open"
-		if RoleFor(issue.Phase) != "" {
+		if runsAgain {
 			why = "the issue runs again"
 		}
 		if check.PendingCauseKind != "" {

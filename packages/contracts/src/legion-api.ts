@@ -175,7 +175,7 @@ const legionSlotView = z.strictObject({
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
  * (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
  * `detail` the cause's own detail (the run and its completion, or the build's commit), `at` when. */
-export const LegionCheckWake = z.strictObject({
+const legionCheckWakeView = z.strictObject({
   kind: nonEmptyString,
   detail: z.string(),
   at: timestamp,
@@ -190,14 +190,14 @@ export const LegionCheckWake = z.strictObject({
  * look starts, the one wake the record promises; the deploy and build wakes before it are events,
  * not timers), and whether the last look has started. Present on the issue record only while the
  * check is open; absent once it closed or while none was opened. */
-export const LegionProductionCheck = z.strictObject({
+const legionCheckView = z.strictObject({
   repo: nonEmptyString,
   pullRequest: z.number().int().positive(),
   mergeCommit: z.string(),
   openedAt: timestamp,
   looks: z.number().int().nonnegative(),
   lookOpen: z.boolean(),
-  lastWake: LegionCheckWake.optional(),
+  lastWake: legionCheckWakeView.optional(),
   nextWakeAt: timestamp,
   last: z.boolean(),
 });
@@ -256,7 +256,7 @@ const legionIssue = z.strictObject({
   pullRequest: legionPullRequestView.optional(),
   designGate: legionGateView.optional(),
   slot: legionSlotView.optional(),
-  check: LegionProductionCheck.optional(),
+  check: legionCheckView.optional(),
 });
 
 /** `api.DaemonInfo` — the running daemon: its project, its store's schema, and its boot history. */

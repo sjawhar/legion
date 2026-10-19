@@ -298,41 +298,41 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 	return pr, pending, head, err
 }
 
-// handoffPosition is where issue key stands as the completion route reads it, in one repeatable-read
+// completionPosition is where issue key stands as the completion route reads it, in one repeatable-read
 // snapshot: the issue record, its tree's generation (the root's), its review round — the
 // implementer's count of returns to implementing, which tells each implementing, testing, and
 // reviewing pass from the last — and its production check, nil while none was ever opened.
-type handoffPosition struct {
+type completionPosition struct {
 	issue          *record.Issue
 	treeGeneration uint64
 	round          int
 	check          *record.ProductionCheck
 }
 
-// handoffPosition reads key's position (handoffPosition); an issue the workflow does not record is
+// handoffPosition reads key's position (completionPosition); an issue the workflow does not record is
 // a position with no issue and no error.
-func (s *server) handoffPosition(ctx context.Context, key string) (handoffPosition, error) {
+func (s *server) handoffPosition(ctx context.Context, key string) (completionPosition, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly, IsoLevel: pgx.RepeatableRead})
 	if err != nil {
-		return handoffPosition{}, err
+		return completionPosition{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	issue, err := s.records.Issue(ctx, tx, key)
 	if err != nil || issue == nil {
-		return handoffPosition{}, err
+		return completionPosition{}, err
 	}
 	root := issue
 	if !claim.IsTreeRoot(issue.Key, issue.Tree) {
 		if root, err = s.records.Issue(ctx, tx, issue.Tree); err != nil {
-			return handoffPosition{}, err
+			return completionPosition{}, err
 		}
 		if root == nil {
-			return handoffPosition{}, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
+			return completionPosition{}, fmt.Errorf("the tree root %s of %s is not recorded", issue.Tree, issue.Key)
 		}
 	}
 	rows, err := s.records.Phases(ctx, tx, key)
 	if err != nil {
-		return handoffPosition{}, err
+		return completionPosition{}, err
 	}
 	round := 0
 	for _, row := range rows {
@@ -342,7 +342,7 @@ func (s *server) handoffPosition(ctx context.Context, key string) (handoffPositi
 	}
 	check, err := s.records.ProductionCheck(ctx, tx, key)
 	if err != nil {
-		return handoffPosition{}, err
+		return completionPosition{}, err
 	}
-	return handoffPosition{issue: issue, treeGeneration: root.Generation, round: round, check: check}, tx.Commit(ctx)
+	return completionPosition{issue: issue, treeGeneration: root.Generation, round: round, check: check}, tx.Commit(ctx)
 }

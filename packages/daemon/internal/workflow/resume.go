@@ -49,11 +49,15 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 		return intake.Result{}, err
 	}
 	if fact.Revision != "" {
-		if err := e.compareBuilds(ctx, tx, "daemon boot", fact.Revision); err != nil {
+		if err := e.compareBuilds(ctx, tx, wakeDaemonBoot, fact.Revision); err != nil {
 			return intake.Result{}, err
 		}
-		if err := e.compareBuilds(ctx, tx, "dispatch build", fact.DispatchBuild); err != nil {
-			return intake.Result{}, err
+		// Dispatch and the daemon are built from one repository, so a deploy that ships them
+		// together reports one commit twice: the daemon's own compare already covers it.
+		if fact.DispatchBuild != fact.Revision {
+			if err := e.compareBuilds(ctx, tx, wakeDispatchBuild, fact.DispatchBuild); err != nil {
+				return intake.Result{}, err
+			}
 		}
 	}
 	issues, err := e.store.Issues(ctx, tx)

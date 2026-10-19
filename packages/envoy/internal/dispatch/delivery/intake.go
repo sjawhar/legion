@@ -207,7 +207,10 @@ func (in *Intake) routeWorkflowEnvelope(ctx context.Context, settings DeliverySe
 	case settings.DeployWorkflowPath:
 		return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
 	case settings.PRChecksWorkflowPath:
-		return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
+		// A pr_checks run is no part of the shipping rule (shippingRunJoin reads deploy runs
+		// alone), so storing one can ship nothing: the envelope ends with no deployed pass.
+		_, err := in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
+		return false, err
 	default:
 		return false, nil
 	}

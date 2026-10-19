@@ -530,8 +530,8 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 		if !requireFailureFields(w, field{"issue", req.Issue}) {
 			return
 		}
-		grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
-		if !ok || !s.architectOwns(w, r, grant, recorded, "request_backward_move") {
+		architect, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+		if !ok || !s.architectOwns(w, r, architect, recorded, "request_backward_move") {
 			return
 		}
 		s.applyFact(w, r, requestFactID("phase/backward"),

@@ -434,12 +434,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
-	checks, err := openChecks(body)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion state: read the production checks %s served: %v\n", address, err)
-		return 1
-	}
-	fmt.Fprintln(stdout, checksSummary(checks))
+	fmt.Fprintln(stdout, checksSummary(openChecks(state.Issues)))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
@@ -476,47 +471,17 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
 }
 
-// stateCheck is a closed issue's open production check as the state's issue record carries it
-// (`check`: the repository, the pull request, the merge commit, when it opened, the looks so far
-// and whether the latest is open, what last woke it and when, when it is next woken — its bound —
-// and whether the latest look is the last). It is decoded from the state's JSON itself rather than
-// api.Issue, which this build's wire shape does not carry yet, so the line prints none until the
-// daemon serves the field, and the daemon that adds it matches these names.
-type stateCheck struct {
-	Repo        string    `json:"repo"`
-	PullRequest int       `json:"pullRequest"`
-	MergeCommit string    `json:"mergeCommit"`
-	OpenedAt    time.Time `json:"openedAt"`
-	Looks       int       `json:"looks"`
-	LookOpen    bool      `json:"lookOpen"`
-	LastWake    *struct {
-		Kind   string    `json:"kind"`
-		Detail string    `json:"detail"`
-		At     time.Time `json:"at"`
-	} `json:"lastWake"`
-	NextWakeAt time.Time `json:"nextWakeAt"`
-	Last       bool      `json:"last"`
-}
-
-// issueCheck is one open production check with the issue it belongs to.
+// issueCheck is one open production check (api.CheckView) with the issue it belongs to.
 type issueCheck struct {
 	issue string
-	check stateCheck
+	check api.CheckView
 }
 
-// openChecks reads every open production check from the state body the daemon served, oldest
-// opened first and then by issue key, so the oldest is the one named whatever order the map came in.
-func openChecks(body []byte) ([]issueCheck, error) {
-	var served struct {
-		Issues map[string]struct {
-			Check *stateCheck `json:"check"`
-		} `json:"issues"`
-	}
-	if err := json.Unmarshal(body, &served); err != nil {
-		return nil, err
-	}
+// openChecks is every open production check the state's issues carry, oldest opened first and then
+// by issue key, so the oldest is the one named whatever order the map came in.
+func openChecks(issues map[string]api.Issue) []issueCheck {
 	var checks []issueCheck
-	for key, issue := range served.Issues {
+	for key, issue := range issues {
 		if issue.Check != nil {
 			checks = append(checks, issueCheck{issue: key, check: *issue.Check})
 		}
@@ -524,7 +489,7 @@ func openChecks(body []byte) ([]issueCheck, error) {
 	slices.SortFunc(checks, func(a, b issueCheck) int {
 		return cmp.Or(a.check.OpenedAt.Compare(b.check.OpenedAt), cmp.Compare(a.issue, b.issue))
 	})
-	return checks, nil
+	return checks
 }
 
 // checksSummary is the one line an operator reads for the production checks still open: how many,
