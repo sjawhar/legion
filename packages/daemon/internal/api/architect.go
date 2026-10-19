@@ -332,7 +332,16 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree str
 	}
 	if s.prepare != nil {
 		prepared, err := s.prepare(r.Context(), observed)
-		if err != nil {
+		var later *intake.RetryLater
+		var superseded *intake.Superseded
+		switch {
+		case errors.As(err, &later):
+			writeFailure(w, http.StatusConflict, "CHILD_RELEASE_BACKOFF", fmt.Sprintf("%s: %v; retry after %s", child.Key, err, later.After))
+			return false
+		case errors.As(err, &superseded):
+			writeFailure(w, http.StatusConflict, "CHILD_RELEASE_BACKOFF", fmt.Sprintf("%s changed in Dispatch while it was released: %v; retry release_children", child.Key, err))
+			return false
+		case err != nil:
 			writeFailure(w, http.StatusBadGateway, "REPOSITORY_READ_FAILED", fmt.Sprintf("could not read the repository of %s: %v; retry release_children", child.Key, err))
 			return false
 		}

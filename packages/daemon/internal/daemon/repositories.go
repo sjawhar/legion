@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -266,9 +265,9 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 // Dispatch reports as its own trouble (appauth.TransientError, dispatch.Unreachable) on the App
 // mint's schedule; any other failure refuses the boot. A project with no repository mapped refuses
 // it too. One whose every mapped repository lacks an App boots serving none, each left out and
-// reported: it admits nothing, saying why on each issue, until an App is installed and the
-// mapping's next read or an issue's admission recheck finds it. nameMapping, once the Apps' tokens
-// are minted, reads GitHub's spelling.
+// reported: it admits nothing, saying why on each issue, until an App is installed and a read of
+// the mapping finds it, one the next mapping change or an issue held for it asks for
+// (requestMappingRead). nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var accepted []mappedRepository
 	var refused []refusedRepository
@@ -307,14 +306,13 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 	return nil
 }
 
-// refreshMapping reads the repository mapping again, for Dispatch's settings.repo_project.updated
-// on the project (refreshOnMappingChange) and for an issue on a left-out repository coming up for
-// admission. It has GitHub intake hear every repository the new mapping serves and every
-// repository a record of the project names, so a repository unmapped while an issue is recorded
-// on it is still heard, and only then publishes the new mapping: a refresh that fails before the
-// subscription took publishes nothing, so a repository is never served, and an issue never
-// recorded on it, while GitHub intake does not hear it, and the issue's next admission recheck
-// refreshes again.
+// refreshMapping reads the repository mapping again: refreshOnMappingChange's read, which a
+// mapping change in Dispatch or an admission held for it asks for (requestMappingRead). It has
+// GitHub intake hear every repository the new mapping serves and every repository a record of the
+// project names, so a repository unmapped while an issue is recorded on it is still heard, and
+// only then publishes the new mapping: a read that fails before the subscription took publishes
+// nothing, so a repository is never served, and an issue never recorded on it, while GitHub intake
+// does not hear it, and the refresher reads it again.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -421,25 +419,68 @@ func (w *workflowRuntime) refreshOnMappingChange(ctx context.Context) {
 // call for an event (by issue key and sequence) requests the read; until it is covered, every call
 // answers an intake.RetryLater, so the event is delivered again after its delay, off its
 // acknowledgement window; once covered, it answers nil, for the caller to look the repository up
-// again.
+// again and release the hold (releaseHold).
 func (w *workflowRuntime) awaitMappingRead(issue intake.DispatchIssue) error {
-	key := issue.Key + "#" + strconv.FormatInt(issue.Seq, 10)
 	w.awaitingMu.Lock()
 	defer w.awaitingMu.Unlock()
-	request, asked := w.awaiting[key]
+	request, asked := w.awaiting[issue.Key][issue.Seq]
 	if !asked {
 		if w.awaiting == nil {
-			w.awaiting = map[string]uint64{}
+			w.awaiting = map[string]map[int64]uint64{}
+		}
+		if w.awaiting[issue.Key] == nil {
+			w.awaiting[issue.Key] = map[int64]uint64{}
 		}
 		request = w.requestMappingRead()
-		w.awaiting[key] = request
+		w.awaiting[issue.Key][issue.Seq] = request
 	}
 	if w.mappingApplied.Load() >= request {
-		delete(w.awaiting, key)
 		return nil
 	}
 	return &intake.RetryLater{After: mappingReadWait,
 		Err: fmt.Errorf("%s resolves to %s, which the repository mapping did not serve when last read: the mapping is being read again before the issue is admitted", issue.Key, issue.ResolvedRepo)}
+}
+
+// releaseHold ends the hold of an admission event awaitMappingRead held back, as it goes on to be
+// applied. Events of its issue applied meanwhile went ahead of it, so it is applied only while
+// Dispatch still shows what it says: the issue in todo, handed to Legion or a child of a tree, on
+// the same repository. Otherwise it is superseded (intake.Superseded), acknowledged unapplied,
+// since the newer event carries the issue's current state: a person who withdrew the issue while
+// its event was held is not overruled. An event never held asks Dispatch nothing; a read that
+// fails keeps the hold, for the event to be delivered again.
+func (w *workflowRuntime) releaseHold(ctx context.Context, issue intake.DispatchIssue) error {
+	w.awaitingMu.Lock()
+	_, held := w.awaiting[issue.Key][issue.Seq]
+	w.awaitingMu.Unlock()
+	if !held {
+		return nil
+	}
+	now, err := w.dispatch.GetIssue(ctx, issue.Key)
+	if err != nil {
+		return fmt.Errorf("read %s from Dispatch before applying its event %d, held for a read of the repository mapping: %w", issue.Key, issue.Seq, err)
+	}
+	w.forgetHold(issue.Key, issue.Seq)
+	admissionBound := now.HandedOver || now.Parent != nil && *now.Parent != ""
+	if now.Status != "todo" || !admissionBound || !strings.EqualFold(now.ResolvedRepo, issue.ResolvedRepo) {
+		return &intake.Superseded{Err: fmt.Errorf("%s's event %d was held for a read of the repository mapping, and Dispatch now shows the issue %s, handed over %t, on %q: the newer event that changed it carries its current state",
+			issue.Key, issue.Seq, now.Status, now.HandedOver, now.ResolvedRepo)}
+	}
+	return nil
+}
+
+// forgetHold drops issue's hold for the event at seq, and every hold of the issue when seq is 0
+// (its record written, so no event of it is held any longer).
+func (w *workflowRuntime) forgetHold(issue string, seq int64) {
+	w.awaitingMu.Lock()
+	defer w.awaitingMu.Unlock()
+	if seq == 0 {
+		delete(w.awaiting, issue)
+		return
+	}
+	delete(w.awaiting[issue], seq)
+	if len(w.awaiting[issue]) == 0 {
+		delete(w.awaiting, issue)
+	}
 }
 
 // mappingReadWait is how long an admission event held back for a read of the mapping
@@ -552,22 +593,24 @@ func (w *workflowRuntime) recordOf(ctx context.Context, key string) (*record.Iss
 // what the workflow reads in memory when it records the issue (ResolveRepository) is readied: an
 // issue coming up for admission (handed to Legion, or a child of a tree) on a repository the
 // mapping did not serve when last read waits for a read of the mapping that covers it
-// (awaitMappingRead), so a repository just mapped, or an App just installed, is served for it,
+// (awaitMappingRead) and then for Dispatch to still show it so (releaseHold), so a repository just
+// mapped, or an App just installed, is served for it and a person's withdrawal meanwhile stands,
 // and a served repository's default branch is read when the read Legion holds is older than its
 // TTL. An unrecorded issue's event in any other status asks GitHub nothing.
 func (w *workflowRuntime) prepareRepository(ctx context.Context, issue intake.DispatchIssue) (intake.DispatchIssue, error) {
-	return w.prepare(ctx, issue, true)
+	return w.prepareIssue(ctx, issue, true)
 }
 
-// prepare is prepareRepository, holding back an admission event on a repository not served for a
-// read of the mapping only when await is set: reconcile's boot read prepares on the mapping the
-// boot has just read.
-func (w *workflowRuntime) prepare(ctx context.Context, issue intake.DispatchIssue, await bool) (intake.DispatchIssue, error) {
+// prepareIssue is prepareRepository, holding back an admission event on a repository not served
+// for a read of the mapping only when await is set: reconcile's boot read prepares on the mapping
+// the boot has just read.
+func (w *workflowRuntime) prepareIssue(ctx context.Context, issue intake.DispatchIssue, await bool) (intake.DispatchIssue, error) {
 	recorded, err := w.recordOf(ctx, issue.Key)
 	if err != nil {
 		return issue, err
 	}
 	if recorded != nil {
+		w.forgetHold(issue.Key, 0)
 		if issue.ResolvedRepoMissing {
 			issue.ResolvedRepo, issue.ResolvedRepoMissing = recorded.Repo, false
 		}
@@ -584,11 +627,16 @@ func (w *workflowRuntime) prepare(ctx context.Context, issue intake.DispatchIssu
 		return issue, nil
 	}
 	mapped, refusal, _ := w.repositories.lookup(issue.ResolvedRepo)
-	if refusal != "" && await && (issue.HandedOver || issue.Parent != "") {
-		if err := w.awaitMappingRead(issue); err != nil {
+	if await && (issue.HandedOver || issue.Parent != "") {
+		if refusal != "" {
+			if err := w.awaitMappingRead(issue); err != nil {
+				return issue, err
+			}
+			mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
+		}
+		if err := w.releaseHold(ctx, issue); err != nil {
 			return issue, err
 		}
-		mapped, refusal, _ = w.repositories.lookup(issue.ResolvedRepo)
 	}
 	if refusal != "" {
 		return issue, nil
