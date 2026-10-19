@@ -200,11 +200,13 @@ check): build the image from this daemon's commit`), and a probe pod that exits 
 is refused with its log tail, which names it (`capability <name> is missing: <detail>` under the table's
 `missing` row; the stage 4a harness's `image-probe-capability-negative` check drives that with an operator
 pod env `PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium`). A volume of the operator's pod block
-(`runtime.kubernetes.pod.volumes`) naming a ConfigMap or Secret that does not exist in the daemon's
-namespace, or asking a key it lacks, leaves the probe pod `Pending` with the kubelet's `FailedMount`
-(`configmap "<name>" not found` or `configmaps "<name>" not found`, `secret "<name>" not found` or
-`secrets "<name>" not found`, `configmap references non-existent config key: <key>`, `references
-non-existent secret key: <key>`); the daemon reads the pod's events once the pod is scheduled, at most
+(`runtime.kubernetes.pod.volumes`) that a `volume_mounts` entry mounts, naming a ConfigMap or Secret
+that does not exist in the daemon's namespace, or asking a key it lacks, leaves the probe pod
+`Pending` with the kubelet's `FailedMount` (`configmap "<name>" not found` or `configmaps "<name>" not
+found`, `secret "<name>" not found` or `secrets "<name>" not found`, `configmap references
+non-existent config key: <key>`, `references non-existent secret key: <key>`; the kubelet attempts no
+volume that no container mounts, so an unmounted one produces no event and no refusal); the daemon
+reads the pod's events once the pod is scheduled, at most
 every 15 s (`mountRecheck`), and refuses on the first such event, with no retry, naming the probe pod,
 the volume, the object the pod block gives it from and the kubelet's message — `the probe pod <name>
 cannot mount volume "<volume>", which runtime.kubernetes.pod.volumes gives it from ConfigMap "<name>":
@@ -1226,7 +1228,8 @@ Legion holds no model route. `pod` is the operator's: `env`, `volumes` (each a `
 `config_map` or `projected` source), `volume_mounts` and `service_account`, added to every pod, the
 image probe's included, and refused where they name a path or variable of Legion's own or the
 worker image's. A ConfigMap or Secret a volume names must exist in the daemon's namespace, with every
-key the volume asks of it: the image probe refuses the boot at once, naming it, when it does not
+key the volume asks of it: the image probe refuses the boot at once, naming it, when it does not, for
+every volume a `volume_mounts` entry mounts (the kubelet attempts no other)
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)).
 `provider_keys` names keys of the providers Secret, which every pod mounts, those
 keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
