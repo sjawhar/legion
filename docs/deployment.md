@@ -138,15 +138,15 @@ name none, runs at the issue owner's. A command whose last `--help` is true, and
 alone, only print. It fails closed: a command it cannot read for certain (an option the leaf's
 help does not list or names a repository with in a way it does not know, a subcommand gh does not
 know, a first word gh's own help does not list, anything before the command but `-R` and
-`--help`, an
-argument the leaf's usage has no place for or names in a way it does not know, a search qualifier
-gh or GitHub could read otherwise, a gh alias or an extension, run or named as `gh help`'s target,
-whose help it never reads since reading it runs them, `gh copilot` and `gh extension exec`), one
-naming two owners (an option or a second repository naming one owner while gh acts on another's,
-or a workspace whose remotes name two), one naming an owner the bundle holds no directory for,
-every command where `PATH`'s first `gh` is not Legion's wrapper (a script that execs `legion gh`),
-and every command under a `GH_HOST` other than `github.com` or a set `GH_TOKEN` or `GITHUB_TOKEN`
-are refused with exit 2, naming the argument, and send nothing. The real gh runs with `GH_PATH`
+`--help`, an argument the leaf's usage has no place for or names in a way it does not know, a
+search qualifier gh or GitHub could read otherwise, a gh alias or an extension, run or named as
+`gh help`'s target, whose help it never reads since reading it runs them, `gh copilot` and `gh
+extension exec`), one naming two owners (an option or a second repository naming one owner while
+gh acts on another's, or a workspace whose remotes name two), one naming an owner the bundle
+holds no directory for, every command where `PATH`'s first `gh` is not Legion's wrapper (a script
+that execs `legion gh` by its absolute path), and every command under a `GH_HOST` other than
+`github.com` or a set `GH_TOKEN` or `GITHUB_TOKEN` are refused with exit 2, naming the argument,
+and send nothing. The real gh runs with `GH_PATH`
 naming the pane's wrapper, so the git gh runs itself (a clone, the fetch of a fork's parent, `pr
 checkout`) authenticates through the helper gh names after it, `legion gh auth git-credential`,
 which answers as `legion git-credential` does, with `credential.useHttpPath` on for `github.com`;
