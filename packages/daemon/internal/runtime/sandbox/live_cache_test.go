@@ -34,10 +34,10 @@ var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes 
 // cache's Sandbox, selecting the hash of its name, and headless with no external name, the shape
 // the launch checked before telling
 // the root's pod the cache's address. Asked inside the cache's own pod, its /healthz answers with
-// no token, ready at the head GitHub named for the repository's default branch when the cache last
-// fetched (headAtFetch), and its /tar refuses a request without its token, 401 naming nothing, and
-// answers its own token, which reaches curl on its standard input (`-H @-`) from the file the pod
-// mounts, never in a process's argv.
+// no token, ready with a fetch no older than its refresh and two minutes, at the head GitHub named
+// for the repository's default branch at that fetch (headAtFetch), and its /tar refuses a request
+// without its token, 401 naming nothing, and answers its own token, which reaches curl on its
+// standard input (`-H @-`) from the file the pod mounts, never in a process's argv.
 func (r *liveRig) checkRepositoryCache() error {
 	name := CacheSandboxName(r.env.project, r.env.repo)
 	status, err := r.awaitCacheReady()
