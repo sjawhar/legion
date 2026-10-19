@@ -554,6 +554,32 @@ func TestConsumePreparesAnIssueEventsRepositoryBeforeApplyingIt(t *testing.T) {
 	}
 }
 
+// An event its preparation answers Superseded (held back, and replaced by a newer event of its
+// issue meanwhile) is acknowledged and never applied: nothing is left pending for redelivery.
+func TestConsumeAcknowledgesASupersededEventUnapplied(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	var prepared atomic.Int32
+	spec.PrepareRepository = func(_ context.Context, issue DispatchIssue) (DispatchIssue, error) {
+		prepared.Add(1)
+		return issue, &Superseded{Err: errors.New("CAPTURE-3's event was held, and Dispatch now shows it in backlog")}
+	}
+	stop := startConsume(t, js, spec, pool, writeHandler("superseded", nil))
+	defer stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	testwait.Eventually(t, "the superseded event prepared", func() bool { return prepared.Load() >= 1 })
+	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+	if count := writeCount(t, pool); count != 0 {
+		t.Fatalf("the superseded event was applied %d times, want never", count)
+	}
+	if count := prepared.Load(); count != 1 {
+		t.Fatalf("the superseded event was prepared %d times, want once: it is acknowledged, not delivered again", count)
+	}
+}
+
 // Envoy's goldens (packages/contracts/fixtures/github-envelopes, which its golden test writes from
 // its webhook fixtures) are the subjects its listener publishes. For each, the consumer configured
 // with the payload's repository filters on a prefix of the golden's topic and decodes the workflow

@@ -63,7 +63,8 @@ type ConsumerSpec struct {
 	// AckWait, and returns the fact to apply: the workflow performs no I/O, and takes the repository
 	// and its default branch when it first records an issue, so a retained event's missing
 	// repository (ResolvedRepoMissing) is filled here. A failed preparation is retried after
-	// NakDelay rather than applied without it. No preparer (a test) applies the fact as decoded.
+	// NakDelay rather than applied without it, and one answered Superseded is acknowledged
+	// unapplied. No preparer (a test) applies the fact as decoded.
 	PrepareRepository func(ctx context.Context, issue DispatchIssue) (DispatchIssue, error)
 }
 
@@ -77,6 +78,15 @@ type RetryLater struct {
 
 func (r *RetryLater) Error() string { return r.Err.Error() }
 func (r *RetryLater) Unwrap() error { return r.Err }
+
+// Superseded is an error ConsumerSpec.PrepareRepository returns for an event a newer one of its
+// issue has replaced while it was held back (intake's nak, after a RetryLater): the delivery is
+// acknowledged without being applied, since the issue's current state, which the newer event
+// carries, says something else.
+type Superseded struct{ Err error }
+
+func (s *Superseded) Error() string { return s.Err.Error() }
+func (s *Superseded) Unwrap() error { return s.Err }
 
 // Consumers are this project's two durable JetStream consumers, created before intake runs so a
 // daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
@@ -271,6 +281,12 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		return
 	}
 	prepared, err := prepareRepository(ctx, spec, decoded.Fact)
+	var superseded *Superseded
+	if errors.As(err, &superseded) {
+		logMessage(spec.Logger, slog.LevelInfo, "superseded event acknowledged unapplied", message, "event_id", decoded.EventID, "reason", err)
+		ackMessage(spec.Logger, message)
+		return
+	}
 	if err != nil {
 		nakResolve(spec, message, decoded.EventID, "prepare the issue's repository", "nak the repository preparation", err)
 		return

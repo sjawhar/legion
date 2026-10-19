@@ -357,47 +357,79 @@ type ghArgKind struct {
 }
 
 // ghSlotKinds is the ghArgKind of each argument name gh's usages spell, gh 2.98.0's and 2.65.0's,
-// every command of their references, and ghCommandSlotKinds that of a name whose meaning is one
-// command's own, keyed `<path> <name>`. A name neither holds is one this cannot read: an argument
-// filling it is refused, never read as naming nothing.
-var (
-	ghSlotKinds = map[string]ghArgKind{
-		"repository":             {kind: "repository"},
-		"destination-repo":       {kind: "second-repository"},
-		"destination-repository": {kind: "second-repository"},
-		"source-repository":      {kind: "second-repository"},
-		"owner":                  {kind: "owner"},
-		"url":                    {kind: "url"},
-		"urls":                   {kind: "url", many: true},
-		"pr-url":                 {kind: "url"},
-		"discussion-url":         {kind: "url"},
-		"comment-url":            {kind: "url"},
-		"query":                  {kind: "query", many: true},
-		"number":                 {kind: "number"},
-		"numbers":                {kind: "number", many: true},
-		"pr-number":              {kind: "number"},
-		// Arguments naming no repository, several of them in one slot.
-		"files": {many: true}, "sources": {many: true},
-		// Arguments naming no repository, one to a slot.
-		"alias": {}, "asset-name": {}, "branch": {}, "cache-id": {}, "cache-key": {}, "comment-id": {},
-		"commit-sha": {}, "commit-SHA": {}, "dest": {}, "directory": {}, "expansion": {}, "file-path": {},
-		"filename": {}, "flag": {}, "gist": {}, "id": {}, "image-uri": {}, "key": {}, "key-file": {},
-		"key-id": {}, "keyPrefix": {}, "license-key": {}, "local-port": {}, "name": {}, "new-filename": {},
-		"newFilename": {}, "new-name": {}, "old-filename": {}, "oldFilename": {}, "path": {}, "pattern": {},
-		"pr-branch": {}, "prompt": {}, "remote-port": {}, "ruleset-id": {}, "run-id": {}, "secret-name": {},
-		"session-id": {}, "shell": {}, "skill": {}, "skill[@version]": {}, "spdx-id": {}, "SPDX-ID": {},
-		"tag": {}, "task description": {}, "template": {}, "type": {}, "urlTemplate": {}, "value": {},
-		"variable-name": {}, "workflow-id": {}, "workflow-name": {},
-	}
-	ghCommandSlotKinds = map[string]ghArgKind{
-		"repo create name": {kind: "new-repository"},
-	}
-)
+// every command of their references; a leaf's quirk (ghLeafQuirks) may give one of its own names
+// another. A name neither holds is one this cannot read: an argument filling it is refused, never
+// read as naming nothing.
+var ghSlotKinds = map[string]ghArgKind{
+	"repository":             {kind: "repository"},
+	"destination-repo":       {kind: "second-repository"},
+	"destination-repository": {kind: "second-repository"},
+	"source-repository":      {kind: "second-repository"},
+	"owner":                  {kind: "owner"},
+	"url":                    {kind: "url"},
+	"urls":                   {kind: "url", many: true},
+	"pr-url":                 {kind: "url"},
+	"discussion-url":         {kind: "url"},
+	"comment-url":            {kind: "url"},
+	"query":                  {kind: "query", many: true},
+	"number":                 {kind: "number"},
+	"numbers":                {kind: "number", many: true},
+	"pr-number":              {kind: "number"},
+	// Arguments naming no repository, several of them in one slot.
+	"files": {many: true}, "sources": {many: true},
+	// Arguments naming no repository, one to a slot. A discussion's comment-id may be a node id of
+	// a discussion in any repository, which, as a GraphQL query's node id, names none gh could
+	// resolve.
+	"alias": {}, "asset-name": {}, "branch": {}, "cache-id": {}, "cache-key": {}, "comment-id": {},
+	"commit-sha": {}, "commit-SHA": {}, "dest": {}, "directory": {}, "expansion": {}, "file-path": {},
+	"filename": {}, "flag": {}, "gist": {}, "id": {}, "image-uri": {}, "key": {}, "key-file": {},
+	"key-id": {}, "keyPrefix": {}, "license-key": {}, "local-port": {}, "name": {}, "new-filename": {},
+	"newFilename": {}, "new-name": {}, "old-filename": {}, "oldFilename": {}, "path": {}, "pattern": {},
+	"pr-branch": {}, "prompt": {}, "remote-port": {}, "ruleset-id": {}, "run-id": {}, "secret-name": {},
+	"session-id": {}, "shell": {}, "skill": {}, "skill[@version]": {}, "spdx-id": {}, "SPDX-ID": {},
+	"tag": {}, "task description": {}, "template": {}, "type": {}, "urlTemplate": {}, "value": {},
+	"variable-name": {}, "workflow-id": {}, "workflow-name": {},
+}
 
-// ghArgKindOf is the ghArgKind of the argument name in the usage of the leaf path, and whether
-// either table holds it.
+// ghLeafQuirk is where gh, for one leaf, departs from what its help says, in what the leaf reads
+// as its repository: GH_REPO for its own repository though its -R is a plain string
+// (readsGHRepo); every remote's network whatever names its repository (readsAllRemotes);
+// OWNER/REPO#N in a number's place as that repository's (readsRepositoryNumber); a URL as naming
+// its pull request, and so its repository, only at /OWNER/REPO/pull/N, any other as the name of a
+// branch of its own repository (pullRequestFinder); an option naming its target in place of its
+// own repository (targetOption); and argument names of its own kind (slotKinds).
+type ghLeafQuirk struct {
+	readsGHRepo, readsAllRemotes, readsRepositoryNumber, pullRequestFinder bool
+	targetOption                                                           string
+	slotKinds                                                              map[string]ghArgKind
+}
+
+// ghLeafQuirks are gh 2.98.0's and 2.65.0's quirks, by leaf path, read from gh's source: project
+// link and unlink call gh's repository override with -R a plain string, and act on --team when it
+// is given; repo set-default resolves every remote's network before it reads its argument; agent-
+// task view is gh's one reader of OWNER/REPO#N (ParseFullReference) and reads a URL through the pr
+// finder, as every pr leaf does (quirkOf); and repo create's <name> is the repository it creates.
+var ghLeafQuirks = map[string]ghLeafQuirk{
+	"project link":     {readsGHRepo: true, targetOption: "team"},
+	"project unlink":   {readsGHRepo: true, targetOption: "team"},
+	"repo set-default": {readsAllRemotes: true},
+	"agent-task view":  {readsRepositoryNumber: true, pullRequestFinder: true},
+	"repo create":      {slotKinds: map[string]ghArgKind{"name": {kind: "new-repository"}}},
+}
+
+// quirkOf is the leaf path's ghLeafQuirk, every pr leaf reading a URL through gh's pr finder.
+func quirkOf(path []string) ghLeafQuirk {
+	quirk := ghLeafQuirks[strings.Join(path, " ")]
+	if len(path) > 0 && path[0] == "pr" {
+		quirk.pullRequestFinder = true
+	}
+	return quirk
+}
+
+// ghArgKindOf is the ghArgKind of the argument name in the usage of the leaf path, its quirk's or
+// ghSlotKinds', and whether either holds it.
 func ghArgKindOf(path []string, name string) (ghArgKind, bool) {
-	if kind, ok := ghCommandSlotKinds[strings.Join(append(slices.Clone(path), name), " ")]; ok {
+	if kind, ok := quirkOf(path).slotKinds[name]; ok {
 		return kind, true
 	}
 	kind, ok := ghSlotKinds[name]
@@ -471,11 +503,6 @@ func (c *ghCommand) slotIndexes(n int) ([]int, bool) {
 	}
 	return indexes, true
 }
-
-// ghReadsGHRepoByPath are the leaves that read GH_REPO, and else the working directory's
-// repository, for their own repository without the inherited -R's placeholder: gh's `project
-// link` and `project unlink` take -R as a plain string and still call gh's repository override.
-var ghReadsGHRepoByPath = map[string]bool{"project link": true, "project unlink": true}
 
 // readsOwnRepository says whether gh resolves the leaf's own repository, from GH_REPO or the
 // working directory, when n positional arguments are given and nothing else names it: a leaf that
@@ -594,9 +621,9 @@ func ghOptionKind(path []string, name string, flag ghFlag) string {
 }
 
 // readsGHRepo says whether the leaf reads GH_REPO for its own repository: it takes the inherited
-// -R, or is one of ghReadsGHRepoByPath.
+// -R, or its quirk says it does.
 func (c *ghCommand) readsGHRepo() bool {
-	return c.flags["repo"].placeholder == "[HOST/]OWNER/REPO" || ghReadsGHRepoByPath[strings.Join(c.path, " ")]
+	return c.flags["repo"].placeholder == "[HOST/]OWNER/REPO" || quirkOf(c.path).readsGHRepo
 }
 
 // isAPI says whether the leaf is gh api, whose argument is an endpoint and which has no -R.

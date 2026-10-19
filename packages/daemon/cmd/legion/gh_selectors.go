@@ -51,14 +51,24 @@ func (s *selectors) owner(value, what string) error {
 }
 
 // ghRepositoryNumber is an issue or pull request named OWNER/REPO#N, which gh reads in a number's
-// place as that repository's.
+// place as that repository's only for a leaf whose quirk says so; a pr leaf reads it as the name
+// of a branch of its own repository.
 var ghRepositoryNumber = regexp.MustCompile(`^([^/\s#]+/[^/\s#]+)#[0-9]+$`)
 
+// ghPullRequestPath is the path of the one URL gh's pr finder reads as naming its pull request,
+// and so its repository, `/OWNER/REPO/pull/N`; it reads any other URL as the name of a branch of
+// the command's own repository.
+var ghPullRequestPath = regexp.MustCompile(`^/[^/]+/[^/]+/pull/[0-9]+`)
+
 // fromCommand collects the owners the leaf's arguments and options name, and whether one names
-// the command's own repository: -R, a repository, owner or URL argument, or OWNER/REPO#N.
+// the command's own repository: -R, a repository, owner or URL argument (through gh's pr finder,
+// only a pull request's), OWNER/REPO#N where the leaf reads it, or its quirk's target option.
 func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
-	leaf := cmd.quoted()
+	leaf, quirk := cmd.quoted(), quirkOf(cmd.path)
 	s.targeted = len(parsed.values["repo"]) > 0 && cmd.readsGHRepo()
+	if quirk.targetOption != "" && len(parsed.values[quirk.targetOption]) > 0 {
+		s.targeted = true
+	}
 	if s.api {
 		if err := s.fromAPI(parsed); err != nil {
 			return err
@@ -74,7 +84,7 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 			if unknown != "" {
 				return cannotPlace(arg, fmt.Sprintf("fills <%s> of %s's usage, an argument this does not know", unknown, leaf), false)
 			}
-			if placed[i].takes("number") && ghRepositoryNumber.MatchString(arg) {
+			if placed[i].takes("number") && quirk.readsRepositoryNumber && ghRepositoryNumber.MatchString(arg) {
 				if err := s.repository(ghRepositoryNumber.FindStringSubmatch(arg)[1], "the issue or pull request "+arg); err != nil {
 					return err
 				}
@@ -111,7 +121,11 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 					if err := s.repository(arg, "the URL "+arg); err != nil {
 						return err
 					}
-					s.targeted = true
+					// gh's pr finder acts on the URL's repository only for a pull request's
+					// URL; any other names a branch of its own, so both owners count.
+					if u, err := url.Parse(arg); !quirk.pullRequestFinder || (err == nil && ghPullRequestPath.MatchString(u.Path)) {
+						s.targeted = true
+					}
 				}
 			case "query":
 				query = append(query, arg)
@@ -127,10 +141,14 @@ func (s *selectors) fromCommand(cmd *ghCommand, parsed ghArgs) error {
 // fromOwnRepository collects the owner of the repository gh takes as the command's own when no
 // argument names it and the leaf reads one (readsOwnRepository), and, for a command naming no
 // owner at all, wherever gh might: GH_REPO for a leaf that reads it, gh api's base placeholders
-// among them, and otherwise the working directory's git remotes (fromWorkingDirectory). So an
-// option or a second repository naming one owner while gh acts on another's repository names
-// two owners, and is refused.
+// among them, and otherwise the working directory's git remotes (fromWorkingDirectory). A leaf
+// whose quirk reads every remote counts them whatever names its repository. So an option or a
+// second repository naming one owner while gh acts on another's repository names two owners, and
+// is refused.
 func (s *selectors) fromOwnRepository(cmd *ghCommand, parsed ghArgs, env map[string]string, remotes func() ([]ghRemote, error)) error {
+	if quirkOf(cmd.path).readsAllRemotes {
+		return s.fromWorkingDirectory(remotes)
+	}
 	reads := !s.targeted && cmd.readsOwnRepository(len(parsed.positionals))
 	if s.api {
 		reads = s.readsBase

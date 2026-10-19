@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,8 +32,8 @@ const ghUsage = "usage: legion gh [gh args…]  (the gh first on a Legion pane's
 // through the credential helper gh names after its own executable, GH_PATH: runGh sets it to the
 // `gh` wrapper first on PATH, so that helper is `legion gh auth git-credential`, which answers as
 // `legion git-credential` does, from the directory of the owner in git's path (useHttpPath set for
-// github.com through GIT_CONFIG_COUNT), never with GH_CONFIG_DIR's token; with no wrapper ahead of
-// the real gh it refuses. The child also runs with gh's update check and prompts off, which a TTY
+// github.com through GIT_CONFIG_COUNT), never with GH_CONFIG_DIR's token; when PATH's first gh is
+// no such wrapper it refuses. The child also runs with gh's update check and prompts off, which a TTY
 // would otherwise reach. Each of the three variables is runtime-set and required; an unset one is
 // refused, exit 2, naming it. With no LEGION_GH_PATH, --help prints this command's usage, so
 // `legion gh --help` outside a pane answers as every legion command does.
@@ -52,7 +53,7 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runGitCredential(ctx, args[2:], stdout, stderr)
 	}
 	gh := env["LEGION_GH_PATH"]
-	wrapper, err := ghWrapperPath(gh)
+	wrapper, err := ghWrapperPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "legion gh: %v\n", err)
 		return 2
@@ -88,24 +89,37 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	return 1
 }
 
+// ghWrapperScript is the `gh` wrapper both runtimes install first on PATH: a script whose one
+// command execs `legion gh` with its arguments (packages/daemon/docker/gh, workerbin.Install),
+// the legion path a bare word of the characters a shell reads literally (shellprefix's safe set),
+// or quoted, in single quotes (shellprefix.Literal) or in double quotes with no expansion.
+var ghWrapperScript = regexp.MustCompile(`^#!/bin/sh\nexec ('(?:[^']|'\\'')*'|"[^"$` + "`" + `\\]*"|[A-Za-z0-9_./:-]+) gh "\$@"\n?$`)
+
 // ghWrapperPath is the `gh` first on PATH, the wrapper that runs `legion gh`, as an absolute
 // path: gh names its git credential helper after it (GH_PATH). It is refused when PATH's first gh
-// is the real gh itself, or there is none, since gh's own helper would then answer every github.com
-// request with GH_CONFIG_DIR's token.
-func ghWrapperPath(gh string) (string, error) {
+// is no such wrapper (ghWrapperScript), or there is none: the real gh itself would answer every
+// github.com request with GH_CONFIG_DIR's token, and a machine's own wrapper with whatever it
+// chooses.
+func ghWrapperPath() (string, error) {
 	wrapper, err := exec.LookPath("gh")
 	if err == nil {
 		wrapper, err = filepath.Abs(wrapper)
 	}
 	if err != nil {
-		return "", fmt.Errorf("no gh on PATH runs `legion gh` (%v), so the git gh runs would authenticate with GH_CONFIG_DIR's token; run it as a Legion pane's gh", err)
+		return "", fmt.Errorf("no gh on PATH runs `legion gh` (%v), so the git gh runs would not authenticate through it; run it as a Legion pane's gh", err)
 	}
-	wrapperInfo, err := os.Stat(wrapper)
+	file, err := os.Open(wrapper)
 	if err != nil {
-		return "", fmt.Errorf("stat %s: %w", wrapper, err)
+		return "", fmt.Errorf("read %s: %w", wrapper, err)
 	}
-	if ghInfo, err := os.Stat(gh); err == nil && os.SameFile(wrapperInfo, ghInfo) {
-		return "", fmt.Errorf("the first gh on PATH is the real gh, %s, not the wrapper that runs `legion gh`, so the git gh runs would authenticate with GH_CONFIG_DIR's token; run it as a Legion pane's gh", wrapper)
+	defer file.Close()
+	head := make([]byte, 4096)
+	n, err := io.ReadFull(file, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read %s: %w", wrapper, err)
+	}
+	if !ghWrapperScript.Match(head[:n]) {
+		return "", fmt.Errorf("the first gh on PATH, %s, is not the wrapper that runs `legion gh`, so the git gh runs would not authenticate through it; run it as a Legion pane's gh", wrapper)
 	}
 	return wrapper, nil
 }
@@ -158,13 +172,16 @@ func withGitHubUseHTTPPath(env []string) ([]string, error) {
 // <gitflags>...]`).
 //
 // Every selector the leaf's help names counts: a `<repository>` (or another repository) argument,
-// an `<owner>`, a URL argument that is a github.com URL, a number argument written OWNER/REPO#N, a
-// search `<query>`'s repo:/owner:/user:/org: qualifiers, `gh api`'s endpoint (repos/<owner>/,
-// orgs/<owner>/, users/<owner>/, a search endpoint's q) and a GraphQL query's owner variable (`-F
-// owner=<login>`), and the options naming a repository, an owner, a team or an issue by URL
-// (ghOptionKinds). So does the command's own repository when gh resolves it, because no argument
-// names it and the leaf reads one (fromOwnRepository): GH_REPO for a leaf that reads it, gh api's
-// :owner and {repo} placeholders among them, and otherwise every github.com repository the working
+// before `--` or, for a leaf passing the rest on, the first after it; an `<owner>`; a URL argument
+// that is a github.com URL (through gh's pr finder, which reads any other as a branch of the
+// command's own repository, only a pull request's names its repository); OWNER/REPO#N where the
+// leaf reads it (ghLeafQuirks); a search `<query>`'s repo:/owner:/user:/org: qualifiers; `gh api`'s
+// endpoint (repos/<owner>/, orgs/<owner>/, users/<owner>/, a search endpoint's q) and a GraphQL
+// query's owner variable (`-F owner=<login>`); and the options naming a repository, an owner, a
+// team or an issue by URL (ghOptionKinds). So does the command's own repository when gh resolves
+// it, because no argument names it and the leaf reads one, or whatever names it for a leaf that
+// reads every remote (fromOwnRepository): GH_REPO for a leaf that reads it, gh api's :owner and
+// {repo} placeholders among them, and otherwise every github.com repository the working
 // directory's git remotes name (remotes), read as gh reads them; a command naming no owner at all
 // counts those too. They must all name one owner; two are an error. A GraphQL query naming its
 // repository otherwise, by a node id or in the query text, names none gh could resolve. GH_HOST
@@ -271,7 +288,10 @@ type ghArgs struct {
 // parse reads args, the arguments of the leaf with its path taken out, as pflag does, refusing an
 // option the leaf's help does not list or does not say the arity of. --help is a boolean whose
 // last value decides; a -h no option of the leaf takes is pflag's request for help, which ends
-// the reading there.
+// the reading there. After `--` every argument is positional, but for a leaf whose usage passes
+// them on (`gh repo clone <repository> [<directory>] [-- <gitflags>...]`), where gh, as cobra
+// hands it every positional, takes the first one as the repository even after the dash and passes
+// the rest on: so the first argument after `--` is positional when none came before it.
 func (c *ghCommand) parse(args []string) (ghArgs, error) {
 	api, leaf := c.isAPI(), c.quoted()
 	parsed := ghArgs{values: map[string][]string{}}
@@ -279,9 +299,13 @@ func (c *ghCommand) parse(args []string) (ghArgs, error) {
 		arg := args[i]
 		switch {
 		case arg == "--":
-			if !c.passthrough {
-				parsed.positionals = append(parsed.positionals, args[i+1:]...)
+			rest := args[i+1:]
+			if c.passthrough && len(parsed.positionals) > 0 {
+				rest = nil
+			} else if c.passthrough && len(rest) > 1 {
+				rest = rest[:1]
 			}
+			parsed.positionals = append(parsed.positionals, rest...)
 			return parsed, nil
 		case strings.HasPrefix(arg, "--"):
 			name, value, hasValue := strings.Cut(arg[2:], "=")
