@@ -512,35 +512,14 @@ func readRepositoryCache(value *yaml.Node) (RepositoryCacheConfig, error) {
 		if err != nil {
 			return RepositoryCacheConfig{}, err
 		}
-		var set RoleResources
-		for _, quantity := range []struct {
-			field string
-			into  *string
-		}{
-			{"cpu", &set.CPU}, {"cpu_request", &set.CPURequest}, {"memory", &set.Memory}, {"memory_request", &set.MemoryRequest},
-			{"ephemeral_storage", &set.EphemeralStorage}, {"ephemeral_storage_request", &set.EphemeralStorageRequest},
-		} {
-			if *quantity.into, err = readQuantity(parts[quantity.field], field+"."+quantity.field); err != nil {
-				return RepositoryCacheConfig{}, err
-			}
+		set, err := readRoleQuantities(parts, field)
+		if err != nil {
+			return RepositoryCacheConfig{}, err
 		}
-		defaults := settled.Resources
-		settled.Resources = RoleResources{
-			CPU: cmp.Or(set.CPU, defaults.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, defaults.CPURequest),
-			Memory: cmp.Or(set.Memory, defaults.Memory), MemoryRequest: settledRequest(set.MemoryRequest, set.Memory, defaults.MemoryRequest),
-			EphemeralStorage:        cmp.Or(set.EphemeralStorage, defaults.EphemeralStorage),
-			EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, defaults.EphemeralStorageRequest),
-		}
+		settled.Resources = settleResources(set, settled.Resources)
 	}
-	for _, bound := range []struct{ requestKey, request, limitKey, limit string }{
-		{"cpu_request", settled.Resources.CPURequest, "cpu", settled.Resources.CPU},
-		{"memory_request", settled.Resources.MemoryRequest, "memory", settled.Resources.Memory},
-		{"ephemeral_storage_request", settled.Resources.EphemeralStorageRequest, "ephemeral_storage", settled.Resources.EphemeralStorage},
-	} {
-		request, limit := resource.MustParse(bound.request), resource.MustParse(bound.limit)
-		if request.Cmp(limit) > 0 {
-			return RepositoryCacheConfig{}, fmt.Errorf("%s.resources.%s %s exceeds %s %s", key, bound.requestKey, bound.request, bound.limitKey, bound.limit)
-		}
+	if err := requestsUnderLimits(key+".resources", settled.Resources); err != nil {
+		return RepositoryCacheConfig{}, err
 	}
 	return settled, nil
 }
@@ -907,25 +886,11 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	}
 	block.Resources = DefaultResources()
 	for role, set := range file.Kubernetes.Resources {
-		settled := block.Resources[role]
-		block.Resources[role] = RoleResources{
-			CPU: cmp.Or(set.CPU, settled.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, settled.CPURequest),
-			Memory: cmp.Or(set.Memory, settled.Memory), MemoryRequest: settledRequest(set.MemoryRequest, set.Memory, settled.MemoryRequest),
-			EphemeralStorage:        cmp.Or(set.EphemeralStorage, settled.EphemeralStorage),
-			EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, settled.EphemeralStorageRequest),
-		}
+		block.Resources[role] = settleResources(set, block.Resources[role])
 	}
 	for _, role := range append(slices.Clone(claim.Roles), claim.RoleController) {
-		settled := block.Resources[role]
-		for _, bound := range []struct{ requestKey, request, limitKey, limit string }{
-			{"cpu_request", settled.CPURequest, "cpu", settled.CPU},
-			{"memory_request", settled.MemoryRequest, "memory", settled.Memory},
-			{"ephemeral_storage_request", settled.EphemeralStorageRequest, "ephemeral_storage", settled.EphemeralStorage},
-		} {
-			request, limit := resource.MustParse(bound.request), resource.MustParse(bound.limit)
-			if request.Cmp(limit) > 0 {
-				return fmt.Errorf("%s.resources.%s.%s %s exceeds %s %s", kubernetesKey, role, bound.requestKey, bound.request, bound.limitKey, bound.limit)
-			}
+		if err := requestsUnderLimits(kubernetesKey+".resources."+string(role), block.Resources[role]); err != nil {
+			return err
 		}
 	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
@@ -938,6 +903,34 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 // keeps the default's shape, whatever request it carries.
 func settledRequest(request, limit, defaultRequest string) string {
 	return cmp.Or(request, limit, defaultRequest)
+}
+
+// settleResources is a reservation the file set over defaults, as resolveKubernetes settles a role's
+// and readRepositoryCache the cache's: each limit and ephemeral-storage request the file set, else
+// the default's; each cpu or memory request as settledRequest settles it.
+func settleResources(set, defaults RoleResources) RoleResources {
+	return RoleResources{
+		CPU: cmp.Or(set.CPU, defaults.CPU), CPURequest: settledRequest(set.CPURequest, set.CPU, defaults.CPURequest),
+		Memory: cmp.Or(set.Memory, defaults.Memory), MemoryRequest: settledRequest(set.MemoryRequest, set.Memory, defaults.MemoryRequest),
+		EphemeralStorage:        cmp.Or(set.EphemeralStorage, defaults.EphemeralStorage),
+		EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, defaults.EphemeralStorageRequest),
+	}
+}
+
+// requestsUnderLimits refuses a settled reservation whose cpu, memory or ephemeral-storage request
+// exceeds its limit, naming both keys under prefix, since the API server would refuse the pod.
+func requestsUnderLimits(prefix string, settled RoleResources) error {
+	for _, bound := range []struct{ requestKey, request, limitKey, limit string }{
+		{"cpu_request", settled.CPURequest, "cpu", settled.CPU},
+		{"memory_request", settled.MemoryRequest, "memory", settled.Memory},
+		{"ephemeral_storage_request", settled.EphemeralStorageRequest, "ephemeral_storage", settled.EphemeralStorage},
+	} {
+		request, limit := resource.MustParse(bound.request), resource.MustParse(bound.limit)
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("%s.%s %s exceeds %s %s", prefix, bound.requestKey, bound.request, bound.limitKey, bound.limit)
+		}
+	}
+	return nil
 }
 
 // secretDataKey is what Kubernetes accepts as a Secret's data key.
@@ -1139,18 +1132,9 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 				return nil, fmt.Errorf("%s.%s is gone: a role's reservation is its cpu and memory limits, with cpu_request and memory_request below them where set", field, gone)
 			}
 		}
-		var read RoleResources
-		for _, quantity := range []struct {
-			key    string
-			target *string
-		}{
-			{"cpu", &read.CPU}, {"cpu_request", &read.CPURequest},
-			{"memory", &read.Memory}, {"memory_request", &read.MemoryRequest},
-			{"ephemeral_storage", &read.EphemeralStorage}, {"ephemeral_storage_request", &read.EphemeralStorageRequest},
-		} {
-			if *quantity.target, err = readQuantity(fields[quantity.key], field+"."+quantity.key); err != nil {
-				return nil, err
-			}
+		read, err := readRoleQuantities(fields, field)
+		if err != nil {
+			return nil, err
 		}
 		if resources == nil {
 			resources = map[claim.Role]RoleResources{}
@@ -1158,6 +1142,26 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 		resources[role] = read
 	}
 	return resources, nil
+}
+
+// readRoleQuantities reads a reservation's six quantities from fields, the members of the mapping
+// at field: its cpu, memory and ephemeral-storage limits and requests, each empty where unset.
+func readRoleQuantities(fields map[string]*yaml.Node, field string) (RoleResources, error) {
+	var read RoleResources
+	for _, quantity := range []struct {
+		key    string
+		target *string
+	}{
+		{"cpu", &read.CPU}, {"cpu_request", &read.CPURequest},
+		{"memory", &read.Memory}, {"memory_request", &read.MemoryRequest},
+		{"ephemeral_storage", &read.EphemeralStorage}, {"ephemeral_storage_request", &read.EphemeralStorageRequest},
+	} {
+		var err error
+		if *quantity.target, err = readQuantity(fields[quantity.key], field+"."+quantity.key); err != nil {
+			return RoleResources{}, err
+		}
+	}
+	return read, nil
 }
 
 // checkKubernetesKeys refuses a file whose keys outside the block leave a pod unable to run, or
