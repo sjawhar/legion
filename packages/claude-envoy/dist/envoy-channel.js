@@ -36247,6 +36247,16 @@ var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
+var IssueDeployedEventPayloadSchema = exports_external.strictObject({
+  repo: exports_external.string(),
+  number: exports_external.number().int().positive(),
+  run_id: exports_external.number().int().positive(),
+  completed_at: exports_external.iso.datetime()
+});
+var DispatchServerStartedPayloadSchema = exports_external.strictObject({
+  commit: exports_external.string().min(1),
+  started_at: exports_external.iso.datetime()
+});
 var DispatchEventSchema = exports_external.object({
   issue_key: exports_external.string().nullable(),
   artifact_id: exports_external.string().nullish(),
