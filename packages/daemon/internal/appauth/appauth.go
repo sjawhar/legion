@@ -181,6 +181,21 @@ func (m *Manager) ReadToken(ctx context.Context, role AppRole, owner string) (Le
 	return m.lease(ctx, role, owner, "read:", readPermissions)
 }
 
+// Forgetter drops the leases a token source holds for an App role and owner, so the next one is
+// minted: a token GitHub refused (401) is not served again from the cache.
+type Forgetter interface {
+	Forget(role AppRole, owner string)
+}
+
+// Forget drops every lease cached for role and owner, the write token's and the read token's.
+func (m *Manager) Forget(role AppRole, owner string) {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.leases, string(role)+":"+owner)
+	delete(m.leases, "read:"+string(role)+":"+owner)
+}
+
 // lease serves the cached lease under prefix+role+owner while more than refreshWindow remains, and
 // otherwise mints one with permissions (nil: the installation's own), sharing one exchange among
 // concurrent callers.

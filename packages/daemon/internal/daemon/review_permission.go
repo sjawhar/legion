@@ -54,15 +54,15 @@ type permissionKey struct{ repository, login string }
 // the review App decides while it lasts: it is logged at error, naming the installation. So is a
 // review App with no installation on the repository's owner (appauth.ErrNotInstalled: installed
 // once, then removed, while a record still names the repository, which GitHub intake keeps
-// hearing), and a `401` for its token, which GitHub answers for an installation removed since the
-// token was minted; both are answered at once, since a retry would only mint or read again on
-// every redelivery. A rate limit is returned as an intake.RetryLater naming the wait GitHub asks
-// for, which intake waits out before the review's delivery is tried again, and is held: while it
-// stands, every account with no answer kept is answered with the wait left and no call is made,
-// since GitHub warns that calling on through a limit can get an integration banned. Any other
-// failure - a mint that failed transiently, a network error, a 5xx, the pull request's record
-// unread - is returned, and intake retries the delivery after its nak delay rather than applying
-// it with a permission nobody read.
+// hearing), answered at once, since a retry would only mint again on every redelivery. A `401` for
+// its token decides nothing and keeps nothing: the token is dropped and the delivery retried with
+// a fresh one (tokenRefused). A rate limit is returned as an intake.RetryLater naming the wait
+// GitHub asks for, which intake waits out before the review's delivery is tried again, and is
+// held: while it stands, every account with no answer kept is answered with the wait left and no
+// call is made, since GitHub warns that calling on through a limit can get an integration banned.
+// Any other failure - a mint that failed transiently, a network error, a 5xx, the pull request's
+// record unread - is returned, and intake retries the delivery after its nak delay rather than
+// applying it with a permission nobody read.
 func (w *workflowRuntime) reviewerCanWrite(ctx context.Context, review intake.PullRequestReview) (bool, error) {
 	if review.Author == w.reviewAppLogin {
 		return false, nil
@@ -128,11 +128,30 @@ func rateLimitRefusal(left time.Duration, what string) *intake.RetryLater {
 // the review.
 func (w *workflowRuntime) holdIfLimited(err error) error {
 	var later *intake.RetryLater
-	if errors.As(err, &later) {
+	if errors.As(err, &later) && !errors.Is(err, errTokenRefused) {
 		w.holdRateLimit(later.After)
 	}
 	return err
 }
+
+// tokenRefused answers a 401 for the review App's token on repository: GitHub answers it for a
+// token it has not yet accepted (one minted moments before) as for one whose installation was
+// removed since, and neither says anything of the author or the review, so the cached token is
+// dropped (appauth.Forgetter) and the delivery retried after tokenRefusedWait, unheld: the fresh
+// mint either reads it or, for a removed App, is refused as not installed (appauth.ErrNotInstalled).
+func (w *workflowRuntime) tokenRefused(repository ghrepo.Repository, err error) error {
+	if forgetter, ok := w.tokens.(appauth.Forgetter); ok {
+		forgetter.Forget(appauth.Review, repository.Owner())
+	}
+	return &intake.RetryLater{After: tokenRefusedWait, Err: fmt.Errorf("%w: %w", errTokenRefused, err)}
+}
+
+// errTokenRefused marks tokenRefused's retry, which is no rate limit to hold.
+var errTokenRefused = errors.New("GitHub refused the review App's token, which is minted again")
+
+// tokenRefusedWait is how long a delivery whose review App token GitHub refused waits before it is
+// tried with a fresh one.
+const tokenRefusedWait = 5 * time.Second
 
 // reviewAppClient mints the review App's installation token for repository and returns a
 // githubrest.Client using it, as reviewerCanWrite and reviewBody both need: a mint that fails as
@@ -188,9 +207,7 @@ func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.
 				"app", appauth.Review, "bot", lease.Identity.Name, "installation_owner", repository.Owner(), "repo", repository.String(), "login", login, "status", refused.Status, "body", refused.Body)
 			return false, nil
 		case refused.Status == http.StatusUnauthorized:
-			w.log.Error("workflow: GitHub refuses the review App's token for the review's repository, as for an installation removed since the token was minted, so the review decides nothing; once the token expires, a mint for an owner the App is no longer installed on is refused as not installed",
-				"app", appauth.Review, "bot", lease.Identity.Name, "installation_owner", repository.Owner(), "repo", repository.String(), "login", login, "status", refused.Status)
-			return false, nil
+			return false, w.tokenRefused(repository, fmt.Errorf("read %s's permission on %s: %w", login, repository.String(), err))
 		}
 		return false, fmt.Errorf("read %s's permission on %s: %w", login, repository.String(), err)
 	}
