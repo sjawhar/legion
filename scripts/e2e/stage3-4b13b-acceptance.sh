@@ -528,7 +528,7 @@ instructor() {
 phase_rank() {
   case "$1" in
     admitted) echo 0 ;; planning) echo 1 ;; implementing) echo 2 ;; testing) echo 3 ;; reviewing) echo 4 ;;
-    retro) echo 5 ;; merging) echo 6 ;; awaiting_merge) echo 7 ;; production_check) echo 8 ;; done) echo 9 ;; *) echo -1 ;;
+    accepting) echo 5 ;; retro) echo 6 ;; merging) echo 7 ;; awaiting_merge) echo 8 ;; done) echo 9 ;; *) echo -1 ;;
   esac
 }
 phase_at_least() { local p; p=$(daemon_state | jq -r --arg i "$1" '.issues[$i].phase') || return 1; [ "$(phase_rank "$p")" -ge "$(phase_rank "$2")" ]; }
@@ -899,7 +899,7 @@ printf '%s\n' "$child2" >>"$work/instructor-issues"
 set_status "$child2" todo
 wait_for_phase "$child2" planning
 wait_for_worker "$child2" planner
-# The proof human closes the child: the workflow's leave parks it as a sign-off does (phase done,
+# The proof human closes the child: the workflow's leave parks it as the merge's close does (phase done,
 # Dispatch status done), and rerun_child must reopen a closed Dispatch issue.
 set_status "$child2" "done"
 until_true 300 "$child2 to leave the workflow" issue_phase "$child2" "done"
@@ -978,15 +978,22 @@ begin reviewers
 # leaves reviewing, and the retro's handoff moves it again. Whether that approval still stands for
 # the head the round ends on is the daemon's judgement (classify.ApprovalStands), recorded on the
 # round as its decision; the proof checks the review App approved and the daemon ended the round on
-# that approval.
+# that approval, which moves the issue to accepting, where no worker runs: the tree's architect
+# accepts with the legion tool's sign_off (→ retro), told here by the proof, since it acts on no
+# notice under the rig's instructions.
 reviewed_through() {
-  reviewer_approved "${pr_of[$1]}" >/dev/null && phase_at_least "$1" retro &&
+  reviewer_approved "${pr_of[$1]}" >/dev/null && phase_at_least "$1" accepting &&
     daemon_state | jq -e --arg i "$1" '.issues[$i].pullRequest.reviewDecision == "approved"' >/dev/null
 }
 review_app=$(role_app reviewer)
 for issue in "$root1" "$root2" "$root3"; do
   until_true 900 "$repo#${pr_of[$issue]} approved by $review_app, and $issue past reviewing on that approval" reviewed_through "$issue"
   note "$issue: $review_app approved $({ reviewer_approved "${pr_of[$issue]}" || true; } | cut -c1-8 | tr '\n' ' '); the head is now $(gh api "repos/$repo/pulls/${pr_of[$issue]}" --jq .head.sha | cut -c1-8)"
+  if issue_phase "$issue" accepting >/dev/null; then
+    send_agent "$issue" architect "Acceptance sign-off: the reviewer approved pull request #${pr_of[$issue]} and $issue is in accepting; accept it with the legion tool's sign_off for $issue now, report the result verbatim, then wait."
+  fi
+  wait_for_phase_at_least "$issue" retro 600
+  note "$issue: the architect's sign_off at accepting moved it to retro"
 done
 pass
 
@@ -1016,7 +1023,9 @@ until_true 300 "the pr-merged notice on $root2's architect" notice_delivered "$r
 issue_phase "$root2" merging >/dev/null || soft "$root2 left merging on the early merge"
 notice_line "$root2" architect "$(notice_needle pr-merged "$root2")" | head -1 >"$evidence/notice-pr-merged.jsonl"
 send_agent "$root2" merger "Acceptance READY operation: the proof human has already merged pull request #${pr_of[$root2]}. Build your READY packet exactly as your instructions describe anyway and end this phase with the legion tool: op handoff_complete, ready true, and the packet as the summary. Then wait."
-wait_for_phase "$root2" production_check 600
+# The merger's READY on an already-merged pull request reaches awaiting_merge with nothing to merge,
+# and the merge closes the issue at once: done, no READY posted.
+wait_for_phase "$root2" "done" 600
 sleep 30
 ready_messages "$root2" >"$evidence/ready-messages-$root2.json"
 [ "$(jq length "$evidence/ready-messages-$root2.json")" = 0 ] || soft "a READY was posted for $root2 whose PR had merged: $(cat "$evidence/ready-messages-$root2.json")"
@@ -1024,7 +1033,7 @@ n=$(notice_deliveries "$root2" architect "$(notice_needle pr-merged "$root2")")
 c=$(notice_deliveries "$root2" architect "$(notice_needle pr-closed-unmerged "$root2")")
 [ "$n" = 1 ] || soft "$root2's architect got $n pr-merged notices, want 1"
 [ "$c" = 0 ] || soft "$root2's merged PR also produced $c pr-closed-unmerged notices"
-note "merged $repo#${pr_of[$root2]} in merging: pr-merged $n, pr-closed-unmerged $c (control); the merger's READY moved $root2 straight to production_check with $(jq length "$evidence/ready-messages-$root2.json") READY messages posted"
+note "merged $repo#${pr_of[$root2]} in merging: pr-merged $n, pr-closed-unmerged $c (control); the merger's READY moved $root2 straight to done, the merge's close, with $(jq length "$evidence/ready-messages-$root2.json") READY messages posted"
 pass
 
 # ---- 7a. the merger's pane: no grant file, and no `legion` run from bash ----------------------------
@@ -1108,11 +1117,13 @@ gh api "repos/$repo/git/refs" -f ref="refs/heads/$merge_base" -f sha="$main_sha"
 gh -R "$repo" pr edit "${pr_of[$root1]}" --base "$merge_base" >/dev/null
 note "$repo#${pr_of[$root1]} retargeted to its own base $merge_base at main $main_sha"
 merge_when_clean "$repo" "${pr_of[$root1]}" --squash --delete-branch
-wait_for_phase "$root1" production_check 600
+# A merge at awaiting_merge closes the issue: done, with no pr-merged notice (the close tells a root's
+# architect nothing; it suspends it with the rest of its tree).
+wait_for_phase "$root1" "done" 600
 sleep 60
 n=$(notice_deliveries "$root1" architect "$(notice_needle pr-merged "$root1")")
 [ "$n" = 0 ] || soft "a merge at awaiting_merge still told $root1's architect pr-merged ($n)"
-note "merged $repo#${pr_of[$root1]} at awaiting_merge: $root1 → production_check, pr-merged notices $n (negative control)"
+note "merged $repo#${pr_of[$root1]} at awaiting_merge: $root1 → done, the merge's close, pr-merged notices $n (negative control)"
 pass
 
 # ---- 8. READY stored across a refused gate, posted at the approval, with no merge queue holder ------
