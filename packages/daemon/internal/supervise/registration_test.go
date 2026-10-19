@@ -1,6 +1,7 @@
 package supervise
 
 import (
+	"context"
 	"errors"
 	"slices"
 	"testing"
@@ -78,6 +79,49 @@ func TestAStreamClosedAfterAShutdownInterruptedRelaunchDoesNotCrash(t *testing.T
 	if lines := h.logs.lines("probed with no process to probe"); len(lines) != 1 {
 		t.Errorf("logged %v, want the no-op probe logged once", lines)
 	}
+}
+
+// The same shutdown-interrupted relaunch (above), left exactly where launchAfter's own comment
+// says it should be — "launching with no process recorded, which the next boot launches again" —
+// must actually be relaunched once a restart arms its registration deadline again (armBoot,
+// NewMachine's restore path): probe's own nil-Locator guard alone would leave it stuck for ever,
+// since bootInterval and registrationDeadline both reach probe the same way closed does, and a
+// silent stall is worse than the crash it replaces. registrationDeadline resumes the interrupted
+// attempt directly (launchAfter, uncharged) instead of calling probe in that case: there is
+// nothing to suspend, and the charge the interrupted attempt already made must not be charged
+// again.
+func TestARestartAfterAnInterruptedRelaunchCompletesItUncharged(t *testing.T) {
+	h := newHarness(t)
+	h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom})
+	stopping, stop := context.WithCancel(h.ctx)
+	h.store.onPut = func(c Claim) {
+		if c.Budgets.LaunchFailures == 1 {
+			stop()
+		}
+	}
+	if err := h.m.Handle(stopping, RequestSpawn{Claim: testToken}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("spawn whose relaunch backoff the stop cut short = %v, want the stop's context error", err)
+	}
+	if h.claim().Locator != nil || h.claim().State != StateLaunching {
+		t.Fatalf("pre-restart claim %+v, want launching with no locator", h.claim())
+	}
+
+	// A restart: a fresh, uncancelled context (the new process's own), the in-memory timers gone
+	// with the old one, a new Machine built from what the store read back — h.restart() itself
+	// reuses h.ctx, which stays cancelled from the stop above, so this reassigns it first.
+	h.rt.ScriptSpawn() // the next try answers normally
+	h.ctx, h.cancel = context.WithCancel(context.Background())
+	h.clock.dropAll()
+	h.start(h.store.load(h.token))
+
+	h.advance(deadline)
+
+	h.wantCalls("Spawn", 2)
+	if loc := h.claim().Locator; loc == nil {
+		t.Fatalf("claim %+v after the restart's deadline, want relaunched with a new Locator", h.claim())
+	}
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{LaunchFailures: 1})
 }
 
 // The runtime's ProvisionBound adds onto the base Boot×RegistrationIntervals deadline while a

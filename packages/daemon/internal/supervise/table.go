@@ -940,9 +940,20 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 // suspension, it is retired, counted and relaunched. An operator suspension retained through a
 // rule-resuming launch instead completes here: no ready will arrive to run it, and relaunching
 // would drop the operator's hold.
+//
+// A claim can reach this deadline with no Locator at all: its own relaunch, charged at a previous
+// deadline, was itself interrupted by the daemon stopping before a new process could be spawned
+// (launchAfter's letGo then backOff, machine.go) — the comment at launchAfter's own context-ended
+// return describes exactly this, left for the next boot to launch again. That boot is what arms
+// this timer again (armBoot, NewMachine's restore path), so firing here with no Locator is not a
+// fresh failure to charge a second time (the charge the interrupted attempt already made stands):
+// there is nothing to suspend, and launchAfter completes that same interrupted attempt uncharged.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	if m.held != nil && m.held.By == SuspendedByOperator {
 		return m.suspendHeld(ctx)
+	}
+	if m.claim.Locator == nil {
+		return m.launchAfter(ctx, false)
 	}
 	never := "never registered"
 	if m.claim.State == StateRegistered {
