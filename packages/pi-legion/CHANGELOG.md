@@ -7,6 +7,20 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 29 and plugin interface version 3 (sjawhar/legion#1998): the daemon-launched
+  controller is told the project's Slack channels as `LEGION_SLACK_CHANNELS`, always set (empty for
+  none), and the plugin subscribes to each channel's mention topic while the session holds the
+  controller role, registering none with the listener. A resume first drops, from the listener and
+  from what it restores, every Slack topic an earlier session registered, a listed channel's
+  included, since a restored one would outlive the role; it hears the channels its launch names
+  and no others. A daemon restarted with a changed `slack_channels` relaunches the controller,
+  resuming its session, since the list is one of the addresses its generation records. Any other
+  controller ignores the variable. The controller skill answers each mention in its thread with
+  `slack_post` (`references/slack-mentions.md`). Under `runtime.kubernetes.agent_secrets` the
+  controller's pod is enrolled with the secrets broker. Install this release's pair with a daemon
+  at 29.
+- The `dispatch-envoy-tools` capability row expects `slack_post` among the Envoy tools, eleven in
+  all.
 - Every root architect's and phase worker's session measures six live capabilities as it boots
   and reports them with `POST /legion/v1/claims/ready` (`capabilities`, contract 21, LEGION-663),
   which the daemon renders in `legion state`: `subagents` (`pi.agents` exposed, `task` registered,
@@ -16,7 +30,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   connected — the check connects a second, short-lived client per configured server and
   disconnects it, since the session's own are the host's), `repository-extensions` (every
   `.omp/extensions/` module, `.omp/skills/*/SKILL.md` and `.claude/skills/*/SKILL.md` the
-  workspace carries is among what Oh My Pi discovers), `dispatch-envoy-tools` (the ten Envoy tools
+  workspace carries is among what Oh My Pi discovers), `dispatch-envoy-tools` (the Envoy tools
   registered and `dispatch read --issue <issue>` answering) and `github` (the role's App login
   through `gh api graphql {viewer{login}}`, since an App installation token may not call REST
   `GET /user`). The six checks run concurrently, each within 8 s and the whole report within 10 s;
@@ -45,27 +59,58 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- Daemon API contract 30 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
+- Daemon API contract 31 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
   `legion state --json` carry each recorded issue's `repo` and `defaultBranch`, its pull request's
   `repo`, and the state's `repositories` (the project's mapping as the daemon serves it: `owners`,
   `mapped`, and `refused` with each left-out repository's `reason`). The strict reader refuses a
   state without `repositories`. Install this release with a `legion` built from the same commit.
-- Daemon API contract 29 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+- Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
   tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
   issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
   first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
   owner a command names, and git answers from that owner's directory through `legion git-credential`.
   The controller's credential answer is per owner. An image built before it is refused by the
-  daemon's image probe. (This change took 28 while LEGION-694 was open; pi-legion v10.4.0 was
-  released declaring 28 without these shapes, so it takes 29, the number above the released one.)
-  Install this release with a `legion` built from the same commit.
+  daemon's image probe. (This change took 28, then 29 once LEGION-694 landed at 28; pi-legion
+  v10.5.0 was released declaring 29 for sjawhar/legion#1998 without these shapes, so it takes 30,
+  the number above the released one.) Install this release with a `legion` built from the same
+  commit.
+- The daemon refuses, at load and under `--check-config`, a `runtime.kubernetes.pod.env`
+  `DISPATCH_PUBLIC_URL` outside a rule narrower than the agents' URL parser (http or https, no
+  userinfo, a host that is a plain DNS name, a dotted-quad IPv4 or a bracketed IPv6 address, a
+  port from 1 to 65535), naming it, so a value it accepts never turns Dispatch off in an agent.
+- The controller skill's Slack replies give the link and assignee `dispatch` printed, never an
+  assumed one.
+- The `legion-worker` and `legion-architect` skills say how the daemon's submission of an accepted
+  READY's merge ends when someone removes what it armed (LEGION-800). Once the daemon has seen
+  READY's head in the merge queue or armed for auto-merge, it never submits that head again after a
+  removal it did not make: the merge queue taking the pull request out because the merge failed
+  (GitHub's reason `failed_checks`, or an unexplained reason with a check that failed, timed out,
+  failed to start, needed action or went stale on the commit the queue built for its `merge_group`
+  CI, every page of its checks read) sends the issue back to `implementing` with the failing run in
+  the implementer's task and the architect's `checks-red`, and any other removal (a person
+  dequeuing it, whose cancelled runs are no failure, a person or GitHub turning auto-merge off, the
+  queue finding a conflict) ends the submission and reaches the architect as the new
+  `merge-removed` notice, whose row says what to do; GitHub turning auto-merge off on its own reads
+  as GitHub's, though GitHub names the daemon's App. The daemon submits again only after its own
+  disarm that GitHub applied late, which takes that App and the reason its disarm leaves
+  (auto-merge `manually_disabled`, or a `manual` dequeue), and after auto-merge a close turned off,
+  which the reopen at READY's head undid. On a base with a merge queue the daemon enqueues the pull
+  request only once GitHub reports it mergeable, so it never arms auto-merge while a required check
+  still runs.
+  A daemon rolled back to a release before this one refuses two outbox payloads this one writes,
+  a `ready_merge` row's `armed` field and the `merge-removed` notice kind, on every retry (and the
+  notice holds every waiting notice of the project). Before starting the older daemon, run against
+  its database, with `<KEY>` the Dispatch project that daemon serves (the database can be shared):
+  `update outbox set payload = payload - 'armed' where kind = 'ready_merge' and payload ? 'armed' and split_part(issue, '-', 1) = '<KEY>';`
+  and
+  `update outbox set payload = jsonb_set(payload, '{kind}', '"merge-refused"') where kind = 'notice' and payload->>'kind' = 'merge-removed' and split_part(issue, '-', 1) = '<KEY>';`
 - The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
   allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
   reports it mergeable. An arm or queue entry is not the end: the daemon watches it until GitHub
-  reports the merge at READY's head, and submits again if it disappears while the issue still
-  awaits that READY. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  reports the merge at READY's head (a removal it did not make is the entry above). No role runs
+  `gh pr merge`, a design-gate READY needs nobody to submit it
   once the gate opens, and ordinary READY no longer waits for a required check still running or an
   unfinished disarm. A by-hand READY still waits for its pull request's unfinished disarm, so a
   stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new
@@ -113,6 +158,29 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   name nobody, and never asks for approval to deploy. `legion-architect`'s sign-off step,
   `legion-worker`'s merge-gate reference, `legion-retro`'s `Production check:` line and the
   daemon's implementer prompt say so in place of a deploy ask to a human.
+- The merger's role prompt, `legion-worker`'s merge-gate reference and the `legion-architect` and
+  `legion-retro` skills say the daemon, not the merger, holds the commits above the reviewer's
+  approved head to retro's: READY reads GitHub's compare of the round's approved head with READY's
+  head and refuses `READY_UNREVIEWED_CHANGE` when it shows any path outside `docs/solutions/` and
+  `.legion/<issue>/` (a rename's old name included), lists 300 files, the most that compare lists,
+  gives no file list, shows the approved head is not the head's ancestor, or does not know it, and
+  `READY_NOT_APPROVED` when the round
+  recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
+  `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
+  The merger's move back to `reviewing` names the refusal's code and what it found in its reason. A
+  reviewer whose task's `Reason:` names one of them runs a new round, never a fingerprint
+  confirmation: for `READY_UNREVIEWED_CHANGE` it requests changes naming what the refusal found; for
+  `READY_NOT_APPROVED` it compares its last approved commit with the head on GitHub and requests
+  changes when it finds no approval, a head off that commit's history, no file list, a 300-file
+  compare or a path (a rename's old name included) outside `docs/solutions/` and `.legion/<issue>/`.
+  Either request asks only that the implementer complete so the tester runs the head, and the
+  implementer's prompt says how; the round after it reviews the refused change in full from the last
+  approval, never continued by the fingerprint rule. The merge-gate reference and the architect and
+  retro skills say the same, and the architect's `review_round_cap` judgment does not count those
+  rounds as going in circles. A backward move's task no longer tells the role it starts to resume
+  the requester's phase work; it names that role's phase, the pull request and the move's reason,
+  with the requester's handoff commit when it has one, and a retried worker's task names the pull
+  request too.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the

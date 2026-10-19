@@ -542,6 +542,35 @@ row, taking `ACCESS SHARE` on the three tables it reads and `ROW EXCLUSIVE` on `
 alone. All five censuses answer `0`: `0095`-`0097` create functions and triggers and refuse or
 rewrite no row, and `0098` and `0099` write only the table `0095` creates.
 
+Migration `0113_repo_projects_default_and_issue_repo` adds `repo_projects.is_default` and
+`issues.repo` (`packages/envoy/AGENTS.md`). From its release on, an issue sits at most 32 links below
+its root, and the API refuses a write past that (`409 PARENT_INPUT`); the release before it did not,
+so `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent
+loop, naming up to 20 of them and the repair: `PATCH /api/v1/issues/<ancestor>` with
+`{"parent": null}`, on the release still running. Its census counts the same issues. It takes
+`repo_projects` and `issues` in `ACCESS EXCLUSIVE` before it counts and holds both to commit, so a
+write of the earlier release that commits while it waits is in the count.
+
+**Deploy `0113` with no server of the earlier release running, and never start one again after
+it applies.** Stop the earlier release, or scale it to zero, before the new release boots and
+migrates: a Kubernetes Deployment's `strategy: Recreate`, never `RollingUpdate`. A failed deploy
+recovers forward, not by rolling the image back. Only the new release's API holds the limit;
+nothing in the database does. Boot has
+no check that refuses a schema newer than the binary knows: the runner applies the versions it has
+not recorded and reads no other (`internal/dispatch/store/store.go`, `migrate`). So an earlier
+release left serving after `0113`, or started again over it by a rollback, writes as it always did,
+and can build a chain past the limit again. Such a chain, or one written by direct SQL, fails every
+read of its issues with `500`, a project's list included. The API repairs an acyclic one: `PATCH`
+an ancestor that still reads (its `GET` answers `200`) with `{"parent": null}`. The `PATCH` reads
+the issue it changes first (`api/issue_patch.go`), so a parent loop none of whose members reads,
+which only direct SQL can write, needs a database repair:
+`update issues set parent_key = null where key = '<a member>'`. The auto-deployer
+(`packages/envoy/deploy/README.md`) keeps both rules. Compose stops and removes the old `dispatch`
+container before it starts the new one. When a deploy fails, the auto-deployer stops the failed
+image and confirms the stop before it reads the schema, and when the schema has moved past the one
+the previous image runs against, it refuses to start that image again and exits `1` for a forward
+recovery.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

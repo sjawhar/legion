@@ -18,6 +18,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
+| `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
 ## TestRealGitHubCredentialSurface
 
@@ -32,6 +33,26 @@ App key through its `private_key_command`, mints each App's lease through the re
 writes the gh files the daemon would render for a pane, and drives the real `gh` and `git` against
 them. The test's temporary gh directories and clone directory are removed by Go's test cleanup;
 the GitHub operations are read-only except for locally cloning the smoke repository.
+
+## TestRealGitHubReadyHoldsTheHeadToRetrosCommits
+
+```sh
+LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
+LEGION_READY_SCOPE_REPO=<owner>/<repo> LEGION_READY_SCOPE_PR=<n> LEGION_READY_SCOPE_ISSUE=<KEY> \
+LEGION_READY_SCOPE_APPROVED=<approved sha> LEGION_READY_SCOPE_HEAD=<head sha> \
+[LEGION_READY_SCOPE_REFUSE=<path>] \
+  go -C packages/daemon test -count=1 ./internal/api \
+    -run '^TestRealGitHubReadyHoldsTheHeadToRetrosCommits$' -v
+```
+
+It records the issue at `merging` with the pull request at the head and the review round's
+approval of the approved sha, posts the merger's READY through the real route, and runs the check
+itself (`unreviewedChange`) on the same two heads with the implement App's token, since READY
+publishes a pull request already merged without reading it. With `LEGION_READY_SCOPE_REFUSE` set,
+both must be refused `READY_UNREVIEWED_CHANGE` naming that path. Unset, the check must pass, and
+READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a
+conflict, a by-hand file list or a required check. It only reads GitHub; the pull request and its
+two heads are the operator's to make and close.
 
 
 ## stage1-skeleton.sh

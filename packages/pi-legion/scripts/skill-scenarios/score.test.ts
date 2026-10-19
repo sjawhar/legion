@@ -159,7 +159,8 @@ const toolCall = (id: string, tool: string, args: object) => ({
 });
 const brainstormed = { "out.txt": "exit=0\n", "brainstorm.json": '{"issue":"TODO-3","asks":[]}\n' };
 // Dispatch's answer when it creates the issue, as `dispatch issue` prints it.
-const created = "Created TODO-3: Due dates (not subscribed to TODO-3)";
+const created =
+  "Created TODO-3: Due dates → http://dispatch.test/issues/TODO-3 (not subscribed to TODO-3)";
 const createIssue = [
   toolCall("call-2", "bash", {
     command: "dispatch issue --project TODO --title 'Due dates'",

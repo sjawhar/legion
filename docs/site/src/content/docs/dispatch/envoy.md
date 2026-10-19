@@ -1,12 +1,12 @@
 ---
 title: "Envoy: how events reach Dispatch, Legion and the agents"
-description: The Envoy listener and NATS under it, how GitHub webhooks and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
+description: The Envoy listener and NATS under it, how GitHub webhooks, Slack mentions and Dispatch events reach subscribers, replying in Slack, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
 sidebar:
   label: Envoy
   order: 9
 ---
 
-Envoy carries events between GitHub, Dispatch, Legion, and agent sessions. It has two parts:
+Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions. It has two parts:
 
 - **NATS JetStream** holds the events. Every event is a message on a subject under
   `notifications.`, kept for 72 hours in the `ENVOY_NOTIFICATIONS` stream. Envoy also keeps its
@@ -45,6 +45,45 @@ notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is
 `notifications.github.acme.site_io`. A redelivered webhook is recognised and stored once.
 
+## How Slack mentions arrive, and how an agent replies
+
+A Slack app sends its events to the listener's public route `/webhook/slack`, which the listener
+mounts when `ENVOY_WEBHOOKS` lists `slack`. Set the app's Event Subscriptions request URL to it, for
+example `https://envoy.internal.example/webhook/slack`, and subscribe it to the `app_mention` bot
+event (its `app_mentions:read` scope). The listener answers Slack's `url_verification` challenge,
+and checks every other delivery's signature against `ENVOY_SLACK_SIGNING_SECRET`, the app's
+signing secret, answering `401` to one that does not match. The repository's
+`deploy/slack/legion-app-manifest.yaml` creates such an app: the `app_mentions:read` and
+`chat:write` bot scopes and the `app_mention` bot event.
+
+A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
+thread a second time under the thread's root, its timestamp's dot written `_`:
+
+```text
+notifications.slack.<team>.<channel>.mention                  every mention in the channel
+notifications.slack.<team>.<channel>.thread.<root ts>.mention  a mention inside that thread
+```
+
+Its payload carries `channel_id`, `user_id`, `text`, `ts`, `thread_ts` (inside a thread) and
+`bot_id` (when a bot posted it). The controller the Legion daemon launches
+(`controller: daemon`) subscribes to `notifications.slack.*.<channel>.mention` for each channel its
+project's `slack_channels` names, for as long as it holds the controller role.
+
+An agent replies in a thread with the `slack_post` tool, as the same Slack app. The listener holds
+no Slack token: the tool asks the [Secrets Broker](/legion/broker/) for the agent secret
+`LEGION_SLACK_BOT_TOKEN`, the app's bot token (`xoxb-…`), through the broker's own client
+(`agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- <poster>`), which puts it in the
+environment of the one process that calls Slack's `chat.postMessage`, never the session's. Store
+the token in the broker's store with owner `legion-daemon` and tier `agent`, so the broker grants it
+at once to the pods the Legion daemon enrolls under the account `BROKER_SERVICES` binds to
+`legion-daemon`, its controller's included, and to no one else; the app needs the
+`chat:write` bot scope and must be added to each channel it answers in. A request still waiting
+for approval, or denied, posts nothing, and the tool says which; Slack's own refusal comes back as
+Slack's error code, such as `not_in_channel`. A reply is at most 4,000 characters, and the tool
+sends each one once, since a post whose answer was lost may already be in the thread. A session
+posts into any channel the app has been added to: the tool does not know which project a channel
+belongs to.
+
 ## How Dispatch's events arrive
 
 Dispatch publishes every change it records to NATS itself, under the thing it belongs to:
@@ -77,6 +116,7 @@ side.
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
+| `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
@@ -94,7 +134,7 @@ per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.i
 `legion-go-<project>-github` (filtering each of the project's repositories). It sends its own
 notices to roles and to the controller through the listener's HTTP API, not over NATS.
 
-So the NATS user the daemon connects as needs exactly these permissions:
+So the NATS user the daemon connects as needs these permissions:
 
 | Publish | Subscribe |
 | --- | --- |
@@ -107,14 +147,28 @@ So the NATS user the daemon connects as needs exactly these permissions:
 The last row is the subject a consumer acknowledges a message on. Replies to the API requests come
 back on `_INBOX.>`.
 
+The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
+not just the daemon's two: a holder of the daemon's seed can read, recreate with another filter,
+and drain any consumer of the stream, every host's listener consumer and another project's daemon
+consumers included. It can also create a push consumer whose delivery subject is any subject at
+all, so it can send the stream's messages to subjects it may not publish to itself: role lanes,
+other clients' inboxes, `agentstream.*.control`. Treat the daemon's seed as a credential of the
+whole stream and of every subject a push consumer can deliver to. Its `_INBOX.>` subscription
+also receives every reply any client on the server gets, key-value reads and watch updates
+included, such as the listener's `envoy_roles` and `envoy_sessions` watchers.
+
+When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
+`core.DaemonPermissions()` instead of a host's or an explicit user's grant.
+
 The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same two
 consumers written against another client library ask for different ones. So a grant is proven by
 running the daemon's consumers under exactly that grant, against a real server, and watching for a
 refusal: create both consumers, restart onto them, and have Dispatch and GitHub events
 acknowledged. The daemon logs every refusal at error as
 `NATS refused the daemon a permission: its NATS user lacks that grant`, with the operation and the
-subject. `docs/kubernetes.md` in the repository records the run that verified the list above and
-how the daemon's credential is configured.
+subject. `packages/daemon/internal/daemon/nats_permissions_test.go` in the repository runs that
+proof against the server images the hub runs, and `docs/kubernetes.md` says how the daemon's
+credential is configured.
 
 ## Running the listener
 
@@ -130,13 +184,18 @@ The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image.
 | `ENVOY_LISTEN_HOST`, `PORT` | Where to listen. Defaults: `127.0.0.1` and `9020`. |
 | `ENVOY_API_TOKEN` | The bearer token `/v1` callers must send. |
 | `ENVOY_OIDC_ISSUER`, `ENVOY_OIDC_AUDIENCE` | Also accept Kubernetes service-account tokens from that issuer for that audience. Set both or neither. |
+| `ENVOY_ALLOWED_HOSTS` | Comma-separated host names or addresses, with no port, that a listener with no bearer serves `/v1` to besides loopback. Set it to each name clients reach such a listener by, such as a forward to it. |
 | `ENVOY_WEBHOOKS` | Which webhook routes to mount, for example `github,slack`. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | The mention that publishes a `.mention` event. Defaults to `@legion`. |
+| `ENVOY_SLACK_SIGNING_SECRET` | Required with `slack`: the Slack app's signing secret. |
 
 A listener on anything but loopback refuses to start without `ENVOY_API_TOKEN` or the OIDC pair.
-Keep the API private: only `/webhook/...` needs to be reachable from GitHub.
+A listener with neither serves `/v1` only to a request whose `Host` is `localhost`, a loopback
+address or a name in `ENVOY_ALLOWED_HOSTS`, and answers any other `Host` with a JSON `421`, so a
+page that rebinds its own name to the listener's address cannot use the API.
+Keep the API private: only `/webhook/...` needs to be reachable from GitHub and Slack.
 
 ### With Pulumi
 

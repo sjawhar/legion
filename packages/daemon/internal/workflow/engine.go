@@ -110,6 +110,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.merged(ctx, tx, fact)
 	case intake.PullRequestClosed:
 		return e.closed(ctx, tx, fact)
+	case intake.MergeFailed:
+		return e.mergeFailed(ctx, tx, fact)
 	case intake.ClaimReady:
 		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
@@ -605,7 +607,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 			reason += ": " + r.reason
 		}
 	}
-	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, nil, reason), "")
+	return intake.Result{}, e.start(ctx, tx, *issue, RoleFor(from), task(*issue, record.PhaseRow{}, pr, reason), "")
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
@@ -631,7 +633,11 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, nil, fact.Reason)
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, pr, fact.Reason)
 }
 
 // signOff closes the issue once the implementer's production check was recorded: the merge started
@@ -737,8 +743,8 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 }
 
 // noticeFor is what a transition on trigger out of from tells the architect: that from finished,
-// with its worker's handoff, or, when CI stopped the phase or the head started conflicting with
-// its base (TriggerChecksRed), why.
+// with its worker's handoff, or, when CI stopped the phase, the head started conflicting with its
+// base, or the merge queue failed its merge (TriggerChecksRed), why.
 func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, reason string) record.Notice {
 	if trigger == TriggerChecksRed {
 		return record.Notice{Kind: "checks-red", Role: claim.RoleArchitect, Phase: from, Reason: reason}

@@ -50,16 +50,35 @@ type recordedAddress struct {
 	SHA256   string `json:"sha256"`
 }
 
-// environmentAddresses are handedAddresses carried in a generation of role's environment: every
-// one but the stream its launcher dials.
+// environmentAddresses are what a generation of role carries in its environment that a daemon
+// restarted under another configuration would hand otherwise: handedAddresses but the stream its
+// launcher dials, and, for the controller, the project's Slack channels (slackChannelsVariable),
+// so a changed list relaunches it, resuming its session, as a moved address does.
 func (r *Runtime) environmentAddresses(role claim.Role) []handedAddress {
-	return slices.DeleteFunc(r.handedAddresses(role), func(a handedAddress) bool { return a.name == connectFlag })
+	addresses := slices.DeleteFunc(r.handedAddresses(), func(a handedAddress) bool { return a.name == connectFlag })
+	if role == claim.RoleController {
+		addresses = append(addresses, handedAddress{slackChannelsVariable, r.slackChannelsValue()})
+	}
+	return addresses
 }
 
-// addressName is how an address handed now is named in a record and an observation's detail.
+// slackChannelsValue is LEGION_SLACK_CHANNELS as the controller is told it: the project's channels,
+// comma-joined, "" for none.
+func (r *Runtime) slackChannelsValue() string {
+	return strings.Join(r.controllerSlackChannels, ",")
+}
+
+// addressName is how an address handed now is named in a record and an observation's detail. The
+// channel list is no URL and no credential, so it is named as it is, "(none)" when empty.
 func (r *Runtime) addressName(a handedAddress) string {
-	if a.name == "ENVOY_NATS_URL" {
+	switch a.name {
+	case "ENVOY_NATS_URL":
 		return namedNATSURLs(r.natsURLs)
+	case slackChannelsVariable:
+		if a.value == "" {
+			return "(none)"
+		}
+		return a.value
 	}
 	return namedURL(a.value)
 }
@@ -186,10 +205,10 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 // the three fields the shim's token file depends on: its audience, expiry and path. Nothing else of
 // a stored volume is compared: a field the API server's defaulting or an admission webhook adds, or
 // another projection source beside the token's, changes nothing the shim reads, and reading it as a
-// lack would rebuild the pod and re-provision its workspace at every relaunch. A role that does not
-// enroll (enrolledWith) lacks nothing.
+// lack would rebuild the pod and re-provision its workspace at every relaunch. A runtime that
+// enrolls no pod lacks nothing.
 func (r *Runtime) movedEnrollment(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
-	broker := r.enrolledWith(role)
+	broker := r.agentSecrets
 	if broker == nil {
 		return movedAddress{}, false
 	}

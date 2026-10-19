@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -62,11 +64,12 @@ var (
 	})
 )
 
-// parseGhHelp reads gh's own help: a group by its COMMANDS section, with the gh aliases and
-// extensions it lists; a leaf's canonical path, a cobra alias its ALIASES section lists; every
-// option's arity, pflag's optional value, a shorthand taken by another option than --help; and the
-// arguments its USAGE names, each of a kind ghSlotKinds knows or none. It refuses a help it cannot
-// read whole, and the help a gh alias prints, its command's, which lists no such alias.
+// parseGhHelp reads gh's own help: a group by its COMMANDS section, with every command and help
+// topic it lists and the gh aliases and extensions among them; a leaf's canonical path, a cobra
+// alias its ALIASES section lists; every option's arity, pflag's optional value, a shorthand taken
+// by another option than --help, and what its value selects; and the arguments its USAGE names,
+// each of a kind the tables know or none. It refuses a help it cannot read whole, and the help a gh
+// alias prints, its command's, which lists no such alias.
 func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
 	read := func(path ...string) ghCommand {
 		t.Helper()
@@ -95,6 +98,9 @@ func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
 	if gh := read(); !gh.ghAliases["co"] || gh.ghAliases["pr"] || len(gh.extensions) != 0 {
 		t.Errorf("gh's own help lists the aliases %v and the extensions %v, want gh's default alias co alone", gh.ghAliases, gh.extensions)
 	}
+	if gh := read(); !gh.listed["pr"] || !gh.listed["api"] || !gh.listed["copilot"] || !gh.listed["environment"] || gh.listed["stack"] || gh.listed["cs"] {
+		t.Errorf("gh's own help lists %v, want its commands and help topics, and no official-extension stub or cobra alias", gh.listed)
+	}
 	view := read("pr", "view")
 	if _, h := view.shorts['h']; view.group || !view.flags["json"].value || view.flags["web"].value || !view.readsGHRepo() || view.shorts['R'] != "repo" || h {
 		t.Errorf("gh pr view reads as %+v", view)
@@ -108,14 +114,23 @@ func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
 	if add := read("repo", "deploy-key", "add"); !add.flags["title"].value || add.group {
 		t.Errorf("gh repo deploy-key add reads as %+v, want --title taking a value", add)
 	}
+	if view.flags["repo"].selects != "repository" || view.flags["json"].selects != "" || view.flags["web"].selects != "nothing" {
+		t.Errorf("gh pr view's -R selects %q, --json %q and --web %q, want a repository, none of the table's, and nothing", view.flags["repo"].selects, view.flags["json"].selects, view.flags["web"].selects)
+	}
+	if edit := read("issue", "edit"); edit.flags["add-blocked-by"].selects != "url" || edit.flags["parent"].selects != "url" || edit.flags["title"].selects != "" {
+		t.Errorf("gh issue edit's --add-blocked-by selects %q, --parent %q and --title %q, want an issue's URL, an issue's URL, and none of the table's", edit.flags["add-blocked-by"].selects, edit.flags["parent"].selects, edit.flags["title"].selects)
+	}
+	if create := read("repo", "create"); kind(create.slots[0]) != "new-repository" {
+		t.Errorf("gh repo create's argument reads as %+v, want the repository it creates", create.slots)
+	}
 	if clone := read("repo", "clone"); !clone.passthrough || len(clone.slots) != 2 || kind(clone.slots[0]) != "repository" || kind(clone.slots[1]) != "" {
 		t.Errorf("gh repo clone reads as %+v, want a repository slot, a directory and a -- passthrough", clone)
 	}
 	if transfer := read("issue", "transfer"); len(transfer.slots) != 2 || kind(transfer.slots[1]) != "second-repository" {
 		t.Errorf("gh issue transfer reads as %+v, want its destination a second repository", transfer.slots)
 	}
-	if browse := read("browse"); !browse.flags["commit"].value || !browse.flags["commit"].optional || browse.shorts['c'] != "commit" || kind(browse.slots[0]) != "" {
-		t.Errorf("gh browse reads as %+v, want -c, --commit taking a value only after = and an argument naming no repository", browse)
+	if browse := read("browse"); !browse.flags["commit"].value || !browse.flags["commit"].optional || browse.shorts['c'] != "commit" || kind(browse.slots[0]) != "number" {
+		t.Errorf("gh browse reads as %+v, want -c, --commit taking a value only after = and an argument naming a repository only as OWNER/REPO#N", browse)
 	}
 	if status := read("auth", "status"); status.shorts['h'] != "hostname" {
 		t.Errorf("gh auth status's -h reads as %q, want --hostname", status.shorts['h'])
@@ -161,21 +176,20 @@ func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
 	if count, err := parseGhHelp(prView, "USAGE\n  gh pr view [flags]\n\nFLAGS\n  -v, --verbose count   More\n\nINHERITED FLAGS\n  --help   Show help\n"); err != nil || !count.flags["verbose"].uncertain {
 		t.Errorf("a count option reads as %+v, %v; want an option whose arity its help does not say", count.flags, err)
 	}
+	if later, err := parseGhHelp(prView, "USAGE\n  gh pr view [flags]\n\nFLAGS\n  --mirror string   Read the pull request from this repository instead\n  --notes string   Notes\n\nINHERITED FLAGS\n  --help   Show help\n"); err != nil || later.flags["mirror"].selects != "unknown" || later.flags["notes"].selects != "" {
+		t.Errorf("a later gh's options read as %+v, %v; want --mirror, which names a repository, unknown and --notes none of the table's", later.flags, err)
+	}
 }
 
-// Every argument gh's usages name, across every command its reference lists, is of a kind
-// ghSlotKinds knows, but for the few ghTargetOf refuses on purpose: what `gh copilot` and `gh
-// extension exec` hand another program, codespace arguments of no fixed shape, and gh api's
-// endpoint, which it reads itself. So the pinned gh refuses no command for an argument this does
-// not know, and a later gh's new spelling is refused rather than read as naming nothing. Each
-// name's cardinality holds too: a plural name (`{<numbers> | <urls>}`, one or more issues) is one
-// ghSlotKinds takes as one or more arguments even with no `...`, and every slot taking more than
-// one fits one argument more than the usage has slots, wherever the slot stands.
+// Every argument gh's usages name, across every command its reference lists, is of a kind the
+// tables know, but for the few ghTargetOf refuses on purpose: what `gh copilot` and `gh extension
+// exec` hand another program, codespace arguments of no fixed shape, and gh api's endpoint, which
+// it reads itself. So the pinned gh refuses no command for an argument this does not know, and a
+// later gh's new spelling is refused rather than read as naming nothing. Each name's cardinality
+// holds too: a plural name (`{<numbers> | <urls>}`, one or more issues) is one the tables take as
+// one or more arguments even with no `...`, and every slot taking more than one fits one argument
+// more than the usage has slots, wherever the slot stands.
 func TestEveryArgumentGhsReferenceNamesIsOfAKnownKind(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(ghHelpDir, "reference.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	refused := map[string]bool{"args": true, "command": true, "flags": true, "...": true, "public": true, "private": true, "org": true, "endpoint": true}
 	for name := range refused {
 		if _, known := ghSlotKinds[name]; known {
@@ -185,36 +199,26 @@ func TestEveryArgumentGhsReferenceNamesIsOfAKnownKind(t *testing.T) {
 	// The one name gh spells ending in "s" that stands for one argument.
 	singular := map[string]bool{"alias": true}
 	leaves, many := 0, 0
-	for _, line := range strings.Split(string(data), "\n") {
-		words := strings.Fields(strings.Trim(strings.TrimSpace(strings.TrimLeft(line, "#")), "`"))
-		if !strings.HasPrefix(line, "#") || len(words) < 2 || words[0] != "gh" {
-			continue
-		}
-		n := 1
-		for n < len(words) && ghCommandWord.MatchString(words[n]) {
-			n++
-		}
-		args := strings.Join(words[n:], " ")
-		if ghUsageNamesSubcommands(args) {
+	for _, usage := range ghReferenceUsages(t) {
+		if ghUsageNamesSubcommands(usage.args) {
 			continue
 		}
 		leaves++
-		usage := strings.Join(words, " ")
-		slots, _ := ghSlots(args)
+		spelled := "gh " + strings.Join(usage.path, " ") + " " + usage.args
+		slots, _ := ghSlots(usage.path, usage.args)
 		for _, slot := range slots {
-			for _, name := range slot.names {
-				arg, known := ghSlotKinds[name]
+			for _, arg := range slot.args {
 				switch {
-				case !known && !refused[name]:
-					t.Errorf("`%s` names <%s>, of no kind ghSlotKinds knows", usage, name)
-				case known && strings.HasSuffix(name, "s") && !singular[name] && !arg.many:
-					t.Errorf("`%s` names <%s>, a plural, which ghSlotKinds takes as one argument", usage, name)
+				case !arg.known && !refused[arg.name]:
+					t.Errorf("`%s` names <%s>, of no kind the tables know", spelled, arg.name)
+				case arg.known && strings.HasSuffix(arg.name, "s") && !singular[arg.name] && !arg.kind.many:
+					t.Errorf("`%s` names <%s>, a plural, which the tables take as one argument", spelled, arg.name)
 				}
 			}
 			if slot.takesMany() {
 				many++
-				if placed, ok := (&ghCommand{slots: slots}).slotsFor(len(slots) + 1); !ok || !slices.ContainsFunc(placed, func(s ghSlot) bool { return slices.Equal(s.names, slot.names) }) {
-					t.Errorf("`%s` takes one or more arguments in %v, and %d arguments do not fit its usage there: %v", usage, slot.names, len(slots)+1, placed)
+				if placed, ok := (&ghCommand{slots: slots}).slotsFor(len(slots) + 1); !ok || !slices.ContainsFunc(placed, func(s ghSlot) bool { return slices.Equal(s.args, slot.args) }) {
+					t.Errorf("`%s` takes one or more arguments in %v, and %d arguments do not fit its usage there: %v", spelled, slot.args, len(slots)+1, placed)
 				}
 			}
 		}
@@ -224,20 +228,157 @@ func TestEveryArgumentGhsReferenceNamesIsOfAKnownKind(t *testing.T) {
 	}
 }
 
+// Every option of every command gh's reference lists whose help mentions a repository, an owner,
+// an organization or a URL is one ghOptionKinds holds, as a selector or as naming nothing, so the
+// pinned gh refuses no command for an option this does not know, and an option a later gh adds
+// that names one is refused rather than read as naming nothing. No entry names nothing while its
+// placeholder is a repository's, an owner's or an organization's.
+func TestEveryOptionGhsReferenceNamesARepositoryWithIsInTheTable(t *testing.T) {
+	options, mentioning := 0, 0
+	for _, usage := range ghReferenceUsages(t) {
+		for _, line := range usage.flags {
+			cmd := ghCommand{flags: map[string]ghFlag{}, shorts: map[byte]string{}}
+			if err := cmd.addFlag(line); err != nil {
+				t.Fatalf("gh %s: %v", strings.Join(usage.path, " "), err)
+			}
+			for name, flag := range cmd.flags {
+				options++
+				if flag.value && (ghMentionsSelector.MatchString(flag.description) || ghMentionsSelector.MatchString(flag.placeholder)) {
+					mentioning++
+				}
+				if kind := ghOptionKind(usage.path, name, flag); kind == "unknown" {
+					t.Errorf("gh %s's --%s %s (%q) names a repository, an owner or a URL, and ghOptionKinds holds no kind for it", strings.Join(usage.path, " "), name, flag.placeholder, flag.description)
+				}
+			}
+		}
+	}
+	for key, kind := range ghOptionKinds {
+		if kind == "nothing" && regexp.MustCompile(`(?i)repo|owner|org`).MatchString(key[strings.LastIndex(key, " ")+1:]) {
+			t.Errorf("ghOptionKinds names %q as naming nothing, while its placeholder names a repository or an owner", key)
+		}
+	}
+	if options < 1000 || mentioning < 50 {
+		t.Errorf("gh's reference lists %d options and %d naming a repository, an owner or a URL, want every one of its at least 1000 and 50", options, mentioning)
+	}
+}
+
+// ghReferenceUsage is one command of gh's reference (testdata/gh-help/reference.txt): its path,
+// the arguments its usage names after it, and its option lines.
+type ghReferenceUsage struct {
+	path  []string
+	args  string
+	flags []string
+}
+
+// ghReferenceUsages reads every command of gh's saved reference.
+func ghReferenceUsages(t *testing.T) []ghReferenceUsage {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(ghHelpDir, "reference.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usages []ghReferenceUsage
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "#") {
+			words := strings.Fields(strings.Trim(strings.TrimSpace(strings.TrimLeft(line, "#")), "`"))
+			if len(words) < 2 || words[0] != "gh" {
+				continue
+			}
+			n := 1
+			for n < len(words) && ghCommandWord.MatchString(words[n]) {
+				n++
+			}
+			usages = append(usages, ghReferenceUsage{path: words[1:n], args: strings.Join(words[n:], " ")})
+			continue
+		}
+		if len(usages) > 0 && ghFlagLine.MatchString(line) {
+			usages[len(usages)-1].flags = append(usages[len(usages)-1].flags, line)
+		}
+	}
+	return usages
+}
+
 // ghTargetOf reads the owner a gh command targets from every selector gh's own help names, and
 // fails closed: an argument it cannot place is refused, naming it, and so is a command naming two
-// owners; only a command naming no repository at all is not named, and a command gh only prints
-// the help of, its last --help true, sends nothing. GH_REPO names the owner only when nothing
-// explicit does, and only for a leaf that reads it.
+// owners; only a command naming no repository at all is not named, once the working directory's
+// git remotes name no owner but the token's, and a command gh only prints the help or version of
+// sends nothing. GH_REPO names the owner only when nothing explicit does, and only for a leaf that
+// reads it.
 func TestGhTargetOfFailsClosed(t *testing.T) {
 	acme := map[string]string{"GH_REPO": "acme/widgets"}
+	// A pane of the issue owner acme, whose GH_CONFIG_DIR is acme's directory of the bundle.
+	pane := map[string]string{"GH_CONFIG_DIR": "/owners/acme", "LEGION_GH_OWNERS_DIR": "/owners"}
+	paneWith := func(name, value string) map[string]string {
+		env := map[string]string{name: value}
+		maps.Copy(env, pane)
+		return env
+	}
+	remotes := func(listed ...ghRemote) func() ([]ghRemote, error) {
+		return func() ([]ghRemote, error) { return listed, nil }
+	}
+	acmeClone := ghRemote{name: "origin", url: "https://github.com/Acme/widgets.git"}
+	sjawharClone := ghRemote{name: "origin", url: "https://github.com/sjawhar/legion"}
+	// A gh whose pr view lists an option a later gh might add, naming a repository.
+	ghWithARepositoryOption := editedGhHelp(map[string][2]string{
+		"pr view": {"\nINHERITED FLAGS\n", "      --mirror string    Read the pull request from this repository instead\n\nINHERITED FLAGS\n"},
+	})
 	for _, tc := range []struct {
-		argv  []string
-		env   map[string]string
-		help  func([]string) (string, error) // savedGhHelp when nil
-		owner string                         // "" with no refusal: not named
-		err   string                         // a refusal containing this
+		argv    []string
+		env     map[string]string
+		help    func([]string) (string, error) // savedGhHelp when nil
+		remotes func() ([]ghRemote, error)     // a working directory that is no git repository when nil
+		owner   string                         // "" with no refusal: not named
+		err     string                         // a refusal containing this
 	}{
+		// The final gates' at 96e1672cd. A command naming no repository acts on the working
+		// directory's: every github.com remote and gh-resolved setting must be the token's owner's.
+		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(acmeClone)},
+		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "base"})},
+		{argv: []string{"pr", "view", "1"}, env: pane, remotes: remotes(sjawharClone), err: `the working directory's remote "origin" (https://github.com/sjawhar/legion) names sjawhar`},
+		{argv: []string{"repo", "view"}, env: pane, remotes: remotes(sjawharClone), err: "name the repository with -R <owner>/<repo>"},
+		{argv: []string{"api", "repos/{owner}/{repo}"}, env: pane, remotes: remotes(sjawharClone), err: "name it in the endpoint"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(ghRemote{name: "origin", url: "https://github.com/octocat/hello"}), err: "names octocat"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "upstream", url: "git@github.com:sjawhar/legion.git"}), err: `remote "upstream" (git@github.com:sjawhar/legion.git) names sjawhar`},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "origin", resolved: "sjawhar/legion"}), err: "remote.origin.gh-resolved sjawhar/legion names sjawhar"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "fork", url: "ssh://git@ssh.github.com:443/Sjawhar/legion"}), err: "names sjawhar"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "work", url: "git@gh-work:sjawhar/legion.git"}), err: "is an ssh remote whose host gh may read as github.com"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: remotes(acmeClone, ghRemote{name: "mirror", url: "https://gitlab.example.com/sjawhar/legion"}, ghRemote{name: "local", url: "/srv/legion"})},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_CONFIG_DIR": "/owners", "LEGION_GH_OWNERS_DIR": "/owners"}, remotes: remotes(acmeClone), err: "while it sends no owner's token"},
+		{argv: []string{"pr", "list"}, env: pane, remotes: func() ([]ghRemote, error) { return nil, fmt.Errorf("bad config line 3") }, err: "cannot be read (bad config line 3)"},
+		{argv: []string{"-R", "acme/widgets", "pr", "view", "1"}, env: pane, remotes: remotes(sjawharClone), owner: "acme"},
+		{argv: []string{"pr", "list"}, env: paneWith("GH_REPO", "acme/widgets"), remotes: remotes(sjawharClone), owner: "acme"},
+		{argv: []string{"pr", "view", "--help"}, env: pane, remotes: remotes(sjawharClone)},
+		// --version is gh's alone; before anything, gh reads the next word as a command, an
+		// alias's or an extension's among them.
+		{argv: []string{"--version"}},
+		{argv: []string{"--version", "hello"}, help: ghWithAnExtensionAndANestedAlias, err: `"--version" comes before the command's name`},
+		{argv: []string{"--version", "co"}, err: `"--version" comes before the command's name`},
+		{argv: []string{"-R", "sjawhar/legion", "--version", "hello"}, help: ghWithAnExtensionAndANestedAlias, err: `"--version" comes before the command's name`},
+		{argv: []string{"--help", "--version"}, err: `"--version" comes before the command's name`},
+		// A first word gh's own help does not list, whose help gh may answer by installing an
+		// extension, and the commands that run another program on gh's token.
+		{argv: []string{"stack", "view"}, err: `"stack" is no command gh's own help lists`},
+		{argv: []string{"ext", "exec", "hello"}, err: `"ext" is no command gh's own help lists`},
+		{argv: []string{"extension", "exec", "hello"}, err: "`gh extension exec` runs another program"},
+		{argv: []string{"help", "extension", "exec"}, err: "`gh extension exec` runs another program"},
+		// Options name a repository as arguments do: by ghOptionKinds, an issue by URL among them,
+		// a github.com URL given any other option, and one a later gh adds refused.
+		{argv: []string{"issue", "edit", "1", "--add-blocked-by", "https://github.com/sjawhar/legion/issues/2", "-R", "acme/widgets"}, err: "more than one owner"},
+		{argv: []string{"issue", "edit", "1", "--add-sub-issue", "2", "-R", "acme/widgets"}, owner: "acme"},
+		{argv: []string{"issue", "create", "--title", "t", "--body", "b", "--parent", "https://github.com/sjawhar/legion/issues/1"}, owner: "sjawhar"},
+		{argv: []string{"repo", "sync", "acme/widgets", "--source", "sjawhar/legion"}, err: "more than one owner"},
+		{argv: []string{"pr", "comment", "1", "--body", "https://github.com/sjawhar/legion/pull/2", "-R", "acme/widgets"}, err: "more than one owner"},
+		{argv: []string{"pr", "comment", "1", "--body", "https://example.com/sjawhar/legion", "-R", "acme/widgets"}, owner: "acme"},
+		{argv: []string{"repo", "edit", "acme/widgets", "--homepage", "https://github.com/sjawhar/legion"}, owner: "acme"},
+		{argv: []string{"pr", "view", "1", "--mirror", "sjawhar/legion", "-R", "acme/widgets"}, help: ghWithARepositoryOption, err: "names a repository, an owner or a URL in a way this does not know"},
+		// gh api's placeholders as gh reads them, the colon form too, in a typed field's value.
+		{argv: []string{"api", "graphql", "-F", "o=:owner", "-F", "r=:repo", "-f", "query=q"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
+		{argv: []string{"api", "repos/:owner/:repo/pulls"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
+		{argv: []string{"api", "graphql", "-f", "o=:owner", "-f", "query=q"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}},
+		{argv: []string{"api", "repos/{owner}/{repo}/commits/{branch}"}, env: map[string]string{"GH_REPO": "sjawhar/legion"}, owner: "sjawhar"},
+		// A number argument written OWNER/REPO#N names that repository.
+		{argv: []string{"agent-task", "view", "sjawhar/legion#1"}, owner: "sjawhar"},
+		{argv: []string{"pr", "view", "sjawhar/legion#1", "-R", "acme/widgets"}, err: "more than one owner"},
 		// The first re-review's reproductions.
 		{argv: []string{"-R", "sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
 		{argv: []string{"--repo=sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
@@ -360,7 +501,7 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"pr", "view", "1", "--bogus"}, err: `"--bogus" is no option`},
 		{argv: []string{"pr", "view", "1", "-Z"}, err: "names -Z"},
 		{argv: []string{"pr", "nonexist"}, err: "gh has no command `gh pr nonexist`"},
-		{argv: []string{"nonexist"}, err: "cannot read `gh nonexist`"},
+		{argv: []string{"nonexist"}, err: `"nonexist" is no command gh's own help lists`},
 		{argv: []string{"--bogus", "pr", "list"}, err: `"--bogus" comes before the command's name`},
 		{argv: []string{"api", "repositories/12345"}, err: "by its id"},
 		{argv: []string{"api", "https://ghe.example.com/api/v3/repos/acme/w"}, err: "another host"},
@@ -378,11 +519,14 @@ func TestGhTargetOfFailsClosed(t *testing.T) {
 		{argv: []string{"secret", "set", "TOKEN", "--org", "acme", "-R", "sjawhar/x"}, err: "more than one owner"},
 		{argv: []string{"auth", "status", "-h", "ghe.example.com"}, err: "another host"},
 	} {
-		help := tc.help
+		help, listed := tc.help, tc.remotes
 		if help == nil {
 			help = savedGhHelp
 		}
-		owner, err := ghTargetOf(tc.argv, tc.env, help)
+		if listed == nil {
+			listed = noGitRepository
+		}
+		owner, err := ghTargetOf(tc.argv, tc.env, help, listed)
 		switch {
 		case tc.err != "":
 			if err == nil || !strings.Contains(err.Error(), tc.err) {
@@ -406,19 +550,69 @@ func TestGhTargetOfRefusalsSayHowToNameTheRepository(t *testing.T) {
 		"search issues (repo:acme/w)":    "pass -R <owner>/<repo>",
 		"api search/issues?q=(repo:a/b)": "name it in the endpoint",
 	} {
-		_, err := ghTargetOf(strings.Fields(argv), nil, savedGhHelp)
+		_, err := ghTargetOf(strings.Fields(argv), nil, savedGhHelp, noGitRepository)
 		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "sends no token") {
 			t.Errorf("ghTargetOf(%q) = %v, want a refusal saying it sends no token and %q", argv, err, want)
 		}
 	}
 }
 
+// noGitRepository is the git remotes of a working directory that is no git repository: none.
+func noGitRepository() ([]ghRemote, error) { return nil, nil }
+
+// gh reads the repository of a command naming none from the working directory's git remotes, and
+// readGitRemotes reads them with git as gh does: every fetch and push URL `git remote -v` prints,
+// insteadOf applied, and every remote's gh-resolved setting; a directory that is no git repository
+// has none.
+func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git on this machine")
+	}
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Chdir(t.TempDir())
+	if remotes, err := readGitRemotes(); err != nil || remotes != nil {
+		t.Errorf("readGitRemotes outside a git repository = %v, %v; want none", remotes, err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"remote", "add", "origin", "https://github.com/acme/widgets.git"},
+		{"config", "remote.origin.pushurl", "https://github.com/acme/pushed.git"},
+		{"remote", "add", "upstream", "gh:sjawhar/legion"},
+		{"config", "url.git@github.com:.insteadOf", "gh:"},
+		{"config", "remote.origin.gh-resolved", "base"},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	remotes, err := readGitRemotes()
+	want := []ghRemote{
+		{name: "origin", url: "https://github.com/acme/widgets.git"},
+		{name: "origin", url: "https://github.com/acme/pushed.git"},
+		{name: "upstream", url: "git@github.com:sjawhar/legion"},
+		{name: "upstream", url: "git@github.com:sjawhar/legion"},
+		{name: "origin", resolved: "base"},
+	}
+	if err != nil || !slices.Equal(remotes, want) {
+		t.Errorf("readGitRemotes = %+v, %v; want %+v", remotes, err, want)
+	}
+}
+
 // legionGh runs this test binary as `legion gh args…` in its own process, since a run execs the
-// real gh in place of the process, with env (and nothing of this process's environment but PATH).
+// real gh in place of the process, with env (and nothing of this process's environment but PATH),
+// in a working directory that is no git repository.
 func legionGh(t *testing.T, env map[string]string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
+	return legionGhIn(t, t.TempDir(), env, args...)
+}
+
+// legionGhIn runs `legion gh args…` as legionGh does, in the working directory dir.
+func legionGhIn(t *testing.T, dir string, env map[string]string, args ...string) (code int, stdout, stderr string) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], append([]string{"gh"}, args...)...)
-	cmd.Env = []string{testMainEnv + "=1", "PATH=" + os.Getenv("PATH")}
+	cmd.Dir = dir
+	cmd.Env = []string{testMainEnv + "=1", "PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
 	for name, value := range env {
 		cmd.Env = append(cmd.Env, name+"="+value)
 	}
@@ -438,9 +632,10 @@ func legionGh(t *testing.T, env map[string]string, args ...string) (code int, st
 // GH_CONFIG_DIR pointed at the directory of the owner the command names, and at the issue's
 // owner's (the GH_CONFIG_DIR it was given) when it names none, reading --help=false as no help. It
 // reads each command from the real gh's own help. A command naming an owner the bundle holds no
-// directory for is refused, exit 2, naming the owner, and so are one it cannot read and a gh
-// alias; the real gh never runs. Each of the three variables it needs is required, and an unset
-// one is named with exit 2; --help with no real gh to hand it to is legion's usage.
+// directory for is refused, exit 2, naming the owner, and so are one it cannot read, a gh alias,
+// and one naming none run in a clone of another owner's repository; the real gh never runs. Each
+// of the three variables it needs is required, and an unset one is named with exit 2; --help with
+// no real gh to hand it to is legion's usage.
 func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 	root, defaultDir := gitCredentialBundle(t)
 	help, err := filepath.Abs(ghHelpDir)
@@ -490,6 +685,22 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 		if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
 			t.Errorf("legion gh %q = exit %d, stdout %q, stderr %q; want exit 2 containing %q and no gh run", tc.args, code, stdout, stderr, tc.want)
 		}
+	}
+
+	// In a clone of sjawhar's repository, a command naming none would send acme's token there.
+	clone := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"remote", "add", "origin", "https://github.com/sjawhar/legion-smoke"}} {
+		git := exec.Command("git", args...)
+		git.Dir, git.Env = clone, []string{"PATH=" + os.Getenv("PATH"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
+		if out, err := git.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if code, stdout, stderr := legionGhIn(t, clone, env, "pr", "list"); code != 2 || stdout != "" || !strings.Contains(stderr, `remote "origin" (https://github.com/sjawhar/legion-smoke) names sjawhar`) {
+		t.Errorf("legion gh pr list in a clone of sjawhar's repository = exit %d, stdout %q, stderr %q; want exit 2 naming the remote and no gh run", code, stdout, stderr)
+	}
+	if code, stdout, _ := legionGhIn(t, clone, env, "pr", "list", "-R", "sjawhar/legion-smoke"); code != 0 || !strings.Contains(stdout, filepath.Join(root, "sjawhar")) {
+		t.Errorf("legion gh pr list -R sjawhar/legion-smoke in that clone = exit %d, stdout %q; want sjawhar's directory", code, stdout)
 	}
 
 	for _, missing := range []string{"LEGION_GH_PATH", "GH_CONFIG_DIR", "LEGION_GH_OWNERS_DIR"} {

@@ -1713,8 +1713,10 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 		t.Fatalf("OMP's PATH = %q, want %q", env["PATH"], want)
 	}
 	// The agent's bash tool inherits OMP's environment: resolve and run `legion` and `gh` exactly
-	// there.
+	// there, in a directory that is no clone of another owner's repository, as the agent's
+	// workspace is not (this test's own directory is a clone of sjawhar's).
 	shell := exec.Command("/bin/sh", "-c", "command -v legion; legion version; command -v gh; gh api repos/sjawhar/legion-smoke --jq .full_name; gh pr list")
+	shell.Dir = t.TempDir()
 	for _, name := range []string{"PATH", "HOME", "GH_CONFIG_DIR", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH"} {
 		shell.Env = append(shell.Env, name+"="+env[name])
 	}

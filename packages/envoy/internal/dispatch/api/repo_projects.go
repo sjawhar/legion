@@ -142,9 +142,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	}
 	var events []model.Event
 	appendMappingEvent := func(mapping model.RepoProject, deleted bool) bool {
-		event, err := s.appendEvent(r.Context(), tx, projectOwner(mapping.Project).event(
-			"settings.repo_project.updated", actor, map[string]any{"mapping": mapping, "deleted": deleted},
-		))
+		event, err := s.appendEvent(r.Context(), tx, repoProjectEvent(mapping, actor, deleted))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return false
@@ -212,9 +210,7 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, projectOwner(previous.Project).event(
-		"settings.repo_project.updated", actor, map[string]any{"mapping": *previous, "deleted": true},
-	))
+	event, err := s.appendEvent(r.Context(), tx, repoProjectEvent(*previous, actor, true))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -336,9 +332,7 @@ func seedRepoProject(ctx context.Context, database *store.Store, broker *events.
 	if err != nil {
 		return err
 	}
-	event, err := broker.Append(ctx, tx, projectOwner(project).event(
-		"settings.repo_project.updated", actor, map[string]any{"mapping": mapping, "deleted": false},
-	))
+	event, err := broker.Append(ctx, tx, repoProjectEvent(mapping, actor, false))
 	if err != nil {
 		return err
 	}
@@ -347,6 +341,14 @@ func seedRepoProject(ctx context.Context, database *store.Store, broker *events.
 	}
 	broker.Publish(event)
 	return nil
+}
+
+// repoProjectEvent is settings.repo_project.updated for one mapping, on the mapping's project:
+// deleted when the mapping left that project (removed, or moved to another).
+func repoProjectEvent(mapping model.RepoProject, actor model.Actor, deleted bool) model.Event {
+	return projectOwner(mapping.Project).event(
+		"settings.repo_project.updated", actor, map[string]any{"mapping": mapping, "deleted": deleted},
+	)
 }
 
 // refuseRepoProjectInUse refuses to delete or move a mapping that issues of its project name as

@@ -47,6 +47,10 @@ All `/v1/*` endpoints answer 503 until NATS is connected and the interest and se
 Every `/v1` request with a body must set `Content-Type: application/json` (parameters such as
 `charset=utf-8` are accepted). The listener returns a JSON 415 error otherwise. Webhook routes
 retain their signature and content handling.
+A listener with no bearer configured serves `/v1` only to a `Host` that names it: loopback, or a
+name in `ENVOY_ALLOWED_HOSTS` (port stripped, case folded, one trailing dot dropped). Any other
+`Host` gets a JSON 421, so a DNS-rebinding page cannot reach the bearer-free API. A listener that
+requires a bearer checks no `Host`.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

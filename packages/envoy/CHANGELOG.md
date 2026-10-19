@@ -15,6 +15,14 @@
   boot seed included, takes one set of locks in one order, so concurrent writes neither lose an
   event nor fail, and the seed now announces each mapping it adds. Migration `0113` adds
   `repo_projects.is_default` and `issues.repo`.
+- An issue sits at most 32 links below its root: a create under a parent, or a reparent whose
+  subtree's deepest issue would sit deeper, is `409 PARENT_INPUT`. Creating an issue with a parent
+  now takes the project's dependency lock, as a reparent does, so two writes cannot together pass
+  the limit. An earlier release could build a deeper chain, so migration `0113` refuses to apply
+  while any issue sits more than 32 links below its root, or in a parent loop: its census counts
+  them, so the pre-deploy census refuses first, and the migration, holding `repo_projects` and
+  `issues` from before its count to its commit, names up to 20 of them and the repair, `PATCH` an
+  ancestor with `{"parent": null}` on the release still running.
 - The secrets broker reads its agent secrets from Google Cloud Secret Manager as well as AWS
   Secrets Manager. `BROKER_SECRETS_STORE` picks the store (`aws-secrets-manager`, the default when
   unset, or `gcp-secret-manager`); with the GCP store `BROKER_SECRETS_PREFIX` is
@@ -27,8 +35,9 @@
   `gcp_project` for GCP), the other store's omitted. `secrets.Store` is the one interface the
   policy and the value release read through, with `secrets.AWS` and `secrets.GCP` behind it;
   `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
-  `agent-secrets secret` manages AWS Secrets Manager only in this release and refuses a broker on
-  the GCP store by name; a Secret Manager secret is written with `gcloud secrets`.
+  `agent-secrets secret` manages both stores: against a GCP broker it reads and writes Secret
+  Manager itself under the person's own Application Default Credentials, refusing a service
+  account's.
 - `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
   `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
   dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the
@@ -395,6 +404,49 @@
 
 ### Changed
 
+- **Breaking:** deploy `0113` with no server of the earlier release running, and never start one
+  again after it applies. Stop it, or scale it to zero, before this release boots (a Recreate
+  rollout, never a rolling one), and recover a failed deploy forward rather than by rolling the
+  image back. Only this release's API holds the depth limit, so an earlier release serving over
+  `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
+  ancestor that still reads has its parent set to null.
+- **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
+  in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
+  optional query of `sslmode`, `connect_timeout` and `application_name`.
+  - The user, database and query values are ASCII letters, digits, `.`, `_` and `-`.
+  - The host is dot-separated labels of ASCII letters, digits and hyphens: a host name or an IPv4
+    address.
+  - The port is 1 to 65535.
+  - The password is ASCII unreserved characters and percent-escapes, so its `@ : / ? # [ ]`, `%`, a
+    space and any other character must be percent-encoded. `%00` is refused, and the decoded
+    password must be valid UTF-8.
+
+  The form is checked with ASCII ranges whatever the locale. Every other form is refused before
+  anything runs: a keyword/value string, a bracketed, IPv6, multi-host or socket host, any other
+  query key, or a password in the query. The refusal points to `deploy/README.md` and never prints
+  the URL. In that form the deployer, libpq and pgx all read the password from the same place, so
+  its `pg_dump` and `psql` get the URL without the password as their argument and the password as
+  `PGPASSWORD` alone. They run under `docker run --init` so a timeout ends them, and `psql`'s
+  stderr, which can quote the connection, is dropped.
+- The Dispatch auto-deployer no longer rolls a failed deploy back to the previous image once that
+  deploy has moved the database's schema. It records the schema version the deployed tag runs
+  against (`ENVOY_IMAGE_SCHEMA` in `compose/.env`) before it deploys. When a deploy fails, it stops
+  the failed image, confirms no `dispatch` container still runs, and reads the version again behind
+  the migration runner's advisory lock. If the stop or the read fails, or the schema moved past the
+  record, it starts nothing, logs `refusing to roll back` with both versions, and exits 1, leaving
+  the recovery to an operator, forward. It also stops before a deploy whose schema version it
+  cannot read, and a failed pull no longer restarts the service. CI runs its test
+  (`deploy/scripts/autodeploy_test.sh`) in the `envoy-go` job.
+- An unauthenticated listener (neither `ENVOY_API_TOKEN` nor the OIDC pair) serves `/v1` only to
+  a request whose `Host`, port stripped, ASCII case folded and one trailing dot dropped, is `localhost`,
+  a loopback address (`127.0.0.0/8`, `::1`) or a name in the new `ENVOY_ALLOWED_HOSTS`
+  (comma-separated names or addresses, no port; an entry that is not a host name or an address,
+  such as one with a port, scheme or path, refuses startup naming it).
+  Any other `Host`, an empty one included, is answered 421 with a JSON error naming it, so a
+  DNS-rebinding page can no longer drive the bearer-free API through a loopback port or a forward
+  that reaches it. A listener that requires a bearer checks no `Host`. `/healthz`, `/metrics` and
+  the webhook routes are unaffected. An unauthenticated listener clients reach by another name (a
+  tailnet forward to it) must list that name in `ENVOY_ALLOWED_HOSTS`, or those clients get the 421.
 - The secrets broker's policy keeps a single-name reread against a lagging listing only when the
   reread changed the live answer; a reread that confirms what the policy serves costs the next
   reloads nothing. A grant whose frozen source is no longer the one the policy serves its secret

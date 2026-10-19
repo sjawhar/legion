@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -131,26 +132,35 @@ func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 // Submit asks GitHub to merge pull request number of repo at head, the head an accepted READY
 // named, through github, a GraphQL client. It reads GitHub first and then asks keep for the READY
 // head the record still awaits, so a READY withdrawn or left between the two submits nothing. A
-// base that requires a merge queue gets the pull request enqueued, a pull request GitHub reports
-// mergeable now is merged, and a repository that allows auto-merge gets it armed; every mutation
-// carries head as GitHub's expected head. A repository that allows none of those waits until GitHub
-// reports the pull request mergeable (Unmergeable). GitHub's own rules decide each answer; Submit
-// bypasses none.
+// base that requires a merge queue gets the pull request enqueued once GitHub reports it mergeable
+// now, a pull request GitHub reports mergeable now is merged, and a repository that allows
+// auto-merge gets it armed; every mutation carries head as GitHub's expected head. A base with a
+// merge queue waits until GitHub reports the pull request mergeable (Unmergeable), a required check
+// still running among what holds it back: there GitHub's enable arms auto-merge on a pull request
+// it does not report mergeable rather than enqueueing it, and a required check may judge the arm,
+// so Submit never arms one. A repository that allows none of those waits the same way. GitHub's
+// own rules decide each answer; Submit bypasses none.
 //
 // Only GitHub merging the pull request at head ends a submission, or the record leaving that READY
-// (Stale). An arm or a merge-queue entry at head is a wait (Armed), not the end: a disarm sent
-// before READY can still land, or a merge queue drop the pull request, and the next run then
-// submits again. While the record still awaits head, a pull request GitHub shows closed, merged at
-// another head, or at another head is a wait too (Lagging): the webhook that moves the record has
-// not been applied yet, or GitHub's read is the one behind, and the next run decides again. GitHub
-// always answers updatedAt, so a read without it fails rather than leaving the wait unbounded.
+// (Stale). An arm or a merge-queue entry at head is a wait (Armed), not the end. armed says the row
+// has seen one at head before this run: an open pull request at head with nothing armed after that
+// is a removal someone made, which Submit reads from GitHub's timeline (removal) and never answers
+// with a second submission, which for a merge the queue failed would queue the same failure again
+// and rebuild every entry behind it. The merge queue taking the pull request out because its merge
+// failed is MergeFailed, and any other removal, a person's dequeue or turning auto-merge off, is
+// Removed; only a removal that restarts the submission submits again: the submitting App's own, the
+// daemon's disarm landing late, and auto-merge a close turned off, undone by the reopen at head.
+// While the record still awaits head, a pull request GitHub shows closed, merged at another head, or
+// at another head is a wait too (Lagging): the webhook that moves the record has not been applied
+// yet, or GitHub's read is the one behind, and the next run decides again. GitHub always answers
+// updatedAt, so a read without it fails rather than leaving the wait unbounded.
 //
 // A mutation GitHub refuses is read again: when GitHub still stands where it refused it (the same
 // open pull request at head, nothing armed, the same submission chosen), a retry would meet the
 // same refusal, and Submit returns it as *Refused. When that read fails, its error is returned,
 // the refusal as its context, so a rate limit it meets reaches the caller (githubrest.RetryAfter).
 // Any other failure, an HTTP or network one included, is returned as it is, for the row to retry.
-func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string, keep Keep) (Outcome, error) {
+func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string, armed bool, keep Keep) (Outcome, error) {
 	answer, err := readRepository(ctx, github, repo, number)
 	if err != nil {
 		return "", err
@@ -175,10 +185,14 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 		return "", &Lagging{Number: number, Head: head, State: pull.State, GitHubHead: pull.HeadRefOid, Since: pull.UpdatedAt}
 	case pull.armed():
 		return "", &Armed{Number: number, Repo: repo, Head: head}
+	case armed:
+		if err := removal(ctx, github, repo, number, head); err != nil {
+			return "", err
+		}
 	}
 	chosen, ok := choose(answer)
 	if !ok {
-		return "", &Unmergeable{Number: number, Repo: repo, Head: head, State: pull.MergeStateStatus}
+		return "", &Unmergeable{Number: number, Repo: repo, Head: head, State: pull.MergeStateStatus, Queue: pull.IsMergeQueueEnabled}
 	}
 	sent := github.GraphQL(ctx, chosen.mutation, map[string]any{"id": pull.ID, "head": head, "method": "SQUASH"}, nil)
 	switch {
@@ -261,15 +275,21 @@ func (l *Lagging) Is(target error) bool { return target == wait.ErrWaiting }
 func (l *Lagging) Stalled(now time.Time) bool { return now.Sub(l.Since) > LagBound }
 
 // Unmergeable is GitHub reporting pull request Number of Repo in merge State at READY's Head, not
-// mergeable yet, in a repository that allows no auto-merge: Submit merges it once GitHub reports it
-// mergeable. It is a wait (wait.ErrWaiting).
+// mergeable yet, on a base that requires a merge queue (Queue), where enabling auto-merge now would
+// arm it rather than enqueue it, or in a repository that allows no auto-merge: Submit enqueues or
+// merges it once GitHub reports it mergeable. It is a wait (wait.ErrWaiting).
 type Unmergeable struct {
 	Number      int
 	Repo        ghrepo.Repository
 	Head, State string
+	Queue       bool
 }
 
 func (u *Unmergeable) Error() string {
+	if u.Queue {
+		return fmt.Sprintf("pull request #%d of %s is %s at READY's head %s, and its base requires a merge queue, where enabling auto-merge before GitHub reports it mergeable arms it instead of enqueueing it: the daemon enqueues it once GitHub reports it mergeable",
+			u.Number, u.Repo, u.State, u.Head)
+	}
 	return fmt.Sprintf("pull request #%d of %s is %s at READY's head %s, and the repository allows no auto-merge: the daemon merges it once GitHub reports it mergeable",
 		u.Number, u.Repo, u.State, u.Head)
 }
@@ -285,7 +305,8 @@ func (u *Unmergeable) Routine() bool { return u.State == "BLOCKED" || u.State ==
 // Armed is pull request Number of Repo armed for auto-merge, or in its merge queue, at READY's
 // Head: GitHub merges it under the repository's own rules. It is a wait (wait.ErrWaiting) that
 // ends once GitHub reports the pull request merged at Head; an arm or entry that disappears
-// before then is submitted again.
+// before then is a removal (MergeFailed, Removed), never submitted again unless the submitting App
+// made it.
 type Armed struct {
 	Number int
 	Repo   ghrepo.Repository
@@ -302,6 +323,100 @@ func (a *Armed) Is(target error) bool { return target == wait.ErrWaiting }
 // Routine is always true: only the repository's own rules hold an armed pull request back.
 func (a *Armed) Routine() bool { return true }
 
+// MergeFailed is the merge queue taking pull request Number out at READY's Head because its merge
+// failed: GitHub's removal for Reason failed_checks, or for a reason GitHub gives no other meaning
+// with a run that failed on Commit, the commit the queue built for it (its merge_group runs ran on
+// gh-readonly-queue/<base>/pr-<n>-…, a branch GitHub deletes with the entry). Runs names each check
+// that failed there, with its run's URL; Event is GitHub's id for the removal, and At when it was
+// made. The submission is over: the issue goes back to implementing on it.
+type MergeFailed struct {
+	Number               int
+	Head, Reason, Commit string
+	Runs                 []string
+	Event                string
+	At                   time.Time
+}
+
+func (f *MergeFailed) Error() string {
+	text := fmt.Sprintf("the merge queue took pull request #%d out at READY's head %s at %s (%s)", f.Number, f.Head, f.At.UTC().Format(time.RFC3339), f.Reason)
+	switch {
+	case len(f.Runs) > 0:
+		return text + fmt.Sprintf(": its merge_group run on %s, the commit the queue built for it, failed: %s", f.Commit, strings.Join(f.Runs, "; "))
+	case f.Commit != "":
+		return text + fmt.Sprintf(": GitHub reported no failing run on %s, the commit the queue built for it", f.Commit)
+	default:
+		return text + ": GitHub named no commit the queue built for it"
+	}
+}
+
+// Removed is pull request Number taken out of the merge queue (Queue), or its auto-merge turned
+// off, at READY's Head without a merge, not because its merge failed (MergeFailed) and not by the
+// submitting App's own disarm: by a person, Actor, the account GitHub names ("" when it names none),
+// or by GitHub on its own (ByGitHub), which names the App that submitted the merge as Actor of its
+// own disables (a merge method the repository blocks, a base switch). Reason is GitHub's reason: a
+// queue removal's, or an auto-merge disable's reason code, with Detail its sentence for it (none for
+// a queue removal). At is when it was made. The submission is over: the removal stands, and the row
+// ends rather than undo it.
+type Removed struct {
+	Number                      int
+	Head, Actor, Reason, Detail string
+	Queue, ByGitHub             bool
+	At                          time.Time
+}
+
+func (r *Removed) Error() string {
+	at := r.At.UTC().Format(time.RFC3339)
+	text := fmt.Sprintf("turned off the auto-merge of pull request #%d at READY's head %s at %s (%s: %s)", r.Number, r.Head, at, r.Reason, r.Detail)
+	if r.Queue {
+		text = fmt.Sprintf("took pull request #%d out of the merge queue at READY's head %s at %s (%s)", r.Number, r.Head, at, r.Reason)
+	}
+	switch {
+	case r.ByGitHub:
+		text = fmt.Sprintf("GitHub %s on its own, naming %s, the App that submitted it,", text, r.Actor)
+	case r.Actor == "":
+		text = "someone " + text
+	default:
+		text = r.Actor + " " + text
+	}
+	return text + " without merging it: the daemon submits it no further, and the issue stays in awaiting_merge"
+}
+
+// Merging is the merge queue having taken pull request Number of Repo out at READY's Head to merge
+// it, after the row saw it queued there, while GitHub has yet to show it merged. It is a wait
+// (wait.ErrWaiting) on GitHub's own merge.
+type Merging struct {
+	Number int
+	Repo   ghrepo.Repository
+	Head   string
+}
+
+func (m *Merging) Error() string {
+	return fmt.Sprintf("the merge queue took pull request #%d of %s out at READY's head %s to merge it: the daemon waits for GitHub to show it merged",
+		m.Number, m.Repo, m.Head)
+}
+
+func (m *Merging) Is(target error) bool { return target == wait.ErrWaiting }
+
+// Routine is always true: only GitHub's own merge holds the wait back.
+func (m *Merging) Routine() bool { return true }
+
+// Disappeared is pull request Number of Repo open at READY's Head with nothing armed after the row
+// saw it armed or queued there, while GitHub's timeline names no removal since: none at all yet, or
+// GitHub's read of the pull request ahead of its timeline. It is a wait (wait.ErrWaiting), and not a
+// routine one: a removal the timeline never explains waits on someone.
+type Disappeared struct {
+	Number int
+	Repo   ghrepo.Repository
+	Head   string
+}
+
+func (d *Disappeared) Error() string {
+	return fmt.Sprintf("pull request #%d of %s is no longer armed or queued at READY's head %s, and its timeline names no removal since: the daemon waits for GitHub to record one",
+		d.Number, d.Repo, d.Head)
+}
+
+func (d *Disappeared) Is(target error) bool { return target == wait.ErrWaiting }
+
 // submission is the mutation Submit sends for a pull request, what it asks GitHub to do, and
 // whether GitHub's acceptance of it merges the pull request now.
 type submission struct {
@@ -310,13 +425,18 @@ type submission struct {
 }
 
 // choose is the submission GitHub's answer calls for: an enqueue on a base that requires a merge
-// queue, a merge of a pull request mergeable now, an arm in a repository that allows auto-merge,
-// and none otherwise.
+// queue once GitHub reports the pull request mergeable now, a merge of a pull request mergeable now
+// anywhere else, an arm in a repository that allows auto-merge, and none otherwise. A merge-queue
+// base gets no arm: GitHub's enable enqueues a pull request it reports mergeable now and arms
+// auto-merge on any other.
 func choose(answer repository) (submission, bool) {
+	pull := answer.PullRequest
 	switch {
-	case answer.PullRequest.IsMergeQueueEnabled:
+	case pull.IsMergeQueueEnabled && mergeableNow(pull.MergeStateStatus):
 		return submission{enable, "enqueue", false}, true
-	case mergeableNow(answer.PullRequest.MergeStateStatus):
+	case pull.IsMergeQueueEnabled:
+		return submission{}, false
+	case mergeableNow(pull.MergeStateStatus):
 		return submission{merge, "merge", true}, true
 	case answer.AutoMergeAllowed:
 		return submission{enable, "enable auto-merge for", false}, true
