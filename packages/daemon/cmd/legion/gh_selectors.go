@@ -515,8 +515,10 @@ func (s *selectors) fromWorkingDirectory(remotes func() ([]ghRemote, error)) err
 }
 
 // readGitRemotes is the working directory's git remotes as gh reads them, with git itself: every
-// fetch and push URL `git remote -v` prints, and every remote's gh-resolved setting; none for a
-// directory that is no git repository, or where no git runs, since gh then reads none either.
+// fetch and push URL `git remote -v` prints, a partial clone's fetch line included (git prints the
+// remote's filter after it, `(fetch) [blob:none]`, and gh reads the URL before it), and every
+// remote's gh-resolved setting; none for a directory that is no git repository, or where no git
+// runs, since gh then reads none either.
 func readGitRemotes() ([]ghRemote, error) {
 	lines, err := gitLines("remote", "-v")
 	if err != nil {
@@ -526,7 +528,8 @@ func readGitRemotes() ([]ghRemote, error) {
 	for _, line := range lines {
 		name, rest, _ := strings.Cut(line, "\t")
 		address, kind, found := strings.Cut(rest, " (")
-		if name == "" || !found || (kind != "fetch)" && kind != "push)") {
+		filtered := strings.HasPrefix(kind, "fetch) [") && strings.HasSuffix(kind, "]")
+		if name == "" || !found || (kind != "fetch)" && kind != "push)" && !filtered) {
 			return nil, fmt.Errorf("git remote -v printed %q", line)
 		}
 		remotes = append(remotes, ghRemote{name: name, url: address})

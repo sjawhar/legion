@@ -627,8 +627,9 @@ func noGitRepository() ([]ghRemote, error) { return nil, nil }
 
 // gh reads the repository of a command naming none from the working directory's git remotes, and
 // readGitRemotes reads them with git as gh does: every fetch and push URL `git remote -v` prints,
-// insteadOf applied, and every remote's gh-resolved setting; a directory that is no git repository
-// has none.
+// insteadOf applied, a partial clone's fetch line too (git prints its filter after it, as
+// `(fetch) [blob:none]`), and every remote's gh-resolved setting; a directory that is no git
+// repository has none.
 func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("no git on this machine")
@@ -646,6 +647,8 @@ func TestReadGitRemotesReadsWhatGhReads(t *testing.T) {
 		{"remote", "add", "upstream", "gh:sjawhar/legion"},
 		{"config", "url.git@github.com:.insteadOf", "gh:"},
 		{"config", "remote.origin.gh-resolved", "base"},
+		{"config", "remote.upstream.promisor", "true"},
+		{"config", "remote.upstream.partialclonefilter", "blob:none"},
 	} {
 		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v: %s", args, err, out)
