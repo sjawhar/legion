@@ -328,7 +328,7 @@ or `review`), with the ordinary `write` tool: a JSON object with `schemaVersion:
 phase's own fields exactly as your role prompt spells them — the planner's `requiredSkills`,
 `gapAnalysis`, `planReview` and `specDepartures` records; the implementer's `proof` array; the
 tester's `implementerProof`, `failures` and, whenever it reports no failure, its own `proof`; the
-reviewer's `verdict`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
+reviewer's `decision`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
 entry, in either phase, is an object of six non-empty strings: `criterion` (the acceptance line it
 proves), `surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
 A handoff built from the one already on disk (a test handoff that accumulates review rounds) is
@@ -342,10 +342,10 @@ cd -- "$LEGION_WORKSPACE" && \
 ```
 
 Then push (below) and report completion: call the `legion` tool with `op: "handoff_complete"` and
-`summary` (two sentences for the architect; the tester adds `verdict: "pass"` or `"fail"`, the
-merger `ready: true`). **Push before you complete is a hard rule.** `handoff_complete` finds, with
-your pane's jj, the newest commit on the issue branch that carries `.legion/<KEY>/<phase>.json`
-and reports it to the daemon, and refuses — posting nothing — while:
+`summary` (two sentences for the architect; the tester, and no other role, adds `verdict: "pass"`
+or `"fail"`; the merger `ready: true`). **Push before you complete is a hard rule.**
+`handoff_complete` finds, with your pane's jj, the newest commit on the issue branch that carries
+`.legion/<KEY>/<phase>.json` and reports it to the daemon, and refuses — posting nothing — while:
 
 - the file has a change still in the working copy: commit it, then complete again;
 - the file is missing from the workspace: write it, then commit and push it;

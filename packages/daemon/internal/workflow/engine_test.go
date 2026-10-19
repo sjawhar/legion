@@ -474,6 +474,54 @@ func TestTheMergerPromptReadsTheApprovedHeadLabel(t *testing.T) {
 	}
 }
 
+// A reviewer started on the tester's pass is told the tester's verdict as the tester's, never as a
+// bare "Handoff verdict" it could take for a field of its own completion, which the daemon refuses
+// from a reviewer (VERDICT_ROLE_FORBIDDEN).
+func TestAReviewerIsToldTheTestersVerdictAsTheTesters(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, Required: []string{}})
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "tester-passed", intake.HandoffComplete{
+		Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "passed", Verdict: "pass", Commit: "test-handoff",
+	}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact tester completion: %v", err)
+	}
+	task := startTask(t, pool, claim.RoleReviewer)
+	if want := "Phase: reviewing. Handoff commit: test-handoff. Tester's verdict: pass. Pull request: #42."; !strings.HasSuffix(task, want) {
+		t.Fatalf("reviewer task %q, want it to end with %q", task, want)
+	}
+	if strings.Contains(task, "Handoff verdict") {
+		t.Fatalf("reviewer task %q still names the verdict as the handoff's", task)
+	}
+}
+
+// The reviewer's prompt names the label its task's verdict carries as the tester's result and says
+// its own completion carries none, so a rename on either side alone fails here.
+func TestTheReviewerPromptNamesTheTestersVerdictLabel(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	parts, err := composer.Compose(claim.RoleReviewer, false)
+	if err != nil {
+		t.Fatalf("compose the reviewer's prompt: %v", err)
+	}
+	var prompt strings.Builder
+	for _, path := range parts.RolePromptPaths {
+		part, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read role prompt part %s: %v", path, err)
+		}
+		prompt.Write(part)
+	}
+	for _, want := range []string{"`" + testerVerdictLabel + ":`", "`VERDICT_ROLE_FORBIDDEN`"} {
+		if !strings.Contains(prompt.String(), want) {
+			t.Fatalf("the reviewer's prompt does not say %q", want)
+		}
+	}
+}
+
 // The architect learns what a phase produced from its phase-finished notice: the worker's own
 // summary, and beside it the verdict the tester gave. Neither stands in for the other; a notice
 // that carried the verdict in its summary told the architect "pass" and nothing the tester wrote.
