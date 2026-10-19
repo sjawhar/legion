@@ -468,6 +468,7 @@ func TestHandoffCompleteReadyReadsTheIssuesRecordedRepositoryAsItsOwner(t *testi
 	}); err != nil {
 		t.Fatal(err)
 	}
+	seedApproval(t, h, "LEGION-208", approvedSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY on zeta/tools", Ready: true, Commit: headSHA}))
 	if got := facts.recorded(); len(got) != 1 {

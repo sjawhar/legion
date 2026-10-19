@@ -164,13 +164,15 @@ func daemonGrantConfig(uri string) config.Config {
 }
 
 // grantWorkflow is the workflow the grant tests connect: its project's mapping serves
-// sjawhar/legion, the repository the GitHub fixture's event names, so GitHub intake hears it.
+// sjawhar/legion, the repository the fixtures' events name, so GitHub intake hears it, and a
+// stand-in GitHub names it, as preparing the Dispatch fixture's todo issue reads it.
 func grantWorkflow(t *testing.T, logs *syncBuffer) *workflowRuntime {
 	t.Helper()
 	repos := newRepositories("CAPTURE")
 	repos.set([]mappedRepository{{Repo: ghrepo.MustParse("sjawhar/legion"), Default: true}}, nil)
+	github := newNamedGitHub(t, map[string]string{"sjawhar/legion": "sjawhar/legion@main"})
 	return &workflowRuntime{pool: isolatedOutboxPool(t), records: projectRecords{Store: record.NewStore(), project: "CAPTURE"},
-		repositories: repos, log: grantLogger(logs)}
+		repositories: repos, defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: grantLogger(logs)}
 }
 
 func connectDaemonGrant(t *testing.T, uri, seed string, logs *syncBuffer) *workflowRuntime {

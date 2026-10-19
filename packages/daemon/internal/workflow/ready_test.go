@@ -217,10 +217,10 @@ func TestAMergeTheQueueFailedSendsTheAwaitedREADYBackToImplementing(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
-			issue := record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
+			issue := record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
 			if tc.lingers {
 				until, parent := time.Now().Add(time.Hour), "LEGION-207"
-				seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "closed root", Phase: phase.Done,
+				seedIssue(t, pool, record.Issue{Key: "LEGION-207", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-207", Project: "LEGION", Title: "closed root", Phase: phase.Done,
 					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
 				issue.Tree, issue.Parent, issue.Title = "LEGION-207", &parent, "child"
 			}
@@ -262,7 +262,7 @@ func TestAMergeTheQueueFailedSendsTheAwaitedREADYBackToImplementing(t *testing.T
 // one message, saying so, while the implementer's task, which no cap bounds, carries every run.
 func TestAWithdrawalOfAMergeTheQueueFailedFitsOneDispatchMessage(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})

@@ -310,8 +310,8 @@ func TestLoadReadsProjectSlackChannels(t *testing.T) {
 // slackChannelsFile is kubernetesFile with the project's slack_channels set to channels, under
 // `controller: daemon` when daemon is true and with an agent_secrets block when enrolled is.
 func slackChannelsFile(channels string, daemon, enrolled bool) string {
-	body := kubernetesWith("  LEGSMOKE: { repo: sjawhar/legion-smoke }\n",
-		"  LEGSMOKE: { repo: sjawhar/legion-smoke, slack_channels: "+channels+" }\n")
+	body := kubernetesWith("  LEGSMOKE: {}\n",
+		"  LEGSMOKE: { slack_channels: "+channels+" }\n")
 	if daemon {
 		body = "controller: daemon\n" + body
 	}
@@ -331,7 +331,7 @@ func TestSlackChannelsNeedTheDaemonsControllerEnrolledWithTheBroker(t *testing.T
 	for _, tc := range []struct {
 		name, body, want string
 	}{
-		{"under tmux", strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, slack_channels: [C00000000] }", 1), "projects.DEMO.slack_channels " + why},
+		{"under tmux", strings.Replace(minimalFile, "DEMO: {}", "DEMO: { slack_channels: [C00000000] }", 1), "projects.DEMO.slack_channels " + why},
 		{"the operator's controller", slackChannelsFile("[C00000000]", false, true), "projects.LEGSMOKE.slack_channels " + why},
 		{"no broker", slackChannelsFile("[C00000000]", true, false), "projects.LEGSMOKE.slack_channels " + why},
 		{"neither", slackChannelsFile("[C00000000]", false, false), "projects.LEGSMOKE.slack_channels " + why},
@@ -357,38 +357,38 @@ func TestLoadRefusesProjectSlackChannels(t *testing.T) {
 	for _, tc := range []struct{ name, projects, want string }{
 		{
 			name:     "not a list",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: C00000000 }\n",
+			projects: "projects:\n  DEMO: { slack_channels: C00000000 }\n",
 			want:     "projects.DEMO.slack_channels must be an array of non-empty strings",
 		},
 		{
 			name:     "not a channel id",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [general] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [general] }\n",
 			want:     `projects.DEMO.slack_channels entry "general" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
 		},
 		{
 			name:     "a direct message",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [D00000000] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [D00000000] }\n",
 			want:     `projects.DEMO.slack_channels entry "D00000000" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
 		},
 		{
 			name:     "a subject wildcard",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: ['C*'] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: ['C*'] }\n",
 			want:     `projects.DEMO.slack_channels entry "C*" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
 		},
 		{
 			name:     "twice in one project",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [C00000000, C00000000] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [C00000000, C00000000] }\n",
 			want:     `projects.DEMO.slack_channels names "C00000000" twice`,
 		},
 		{
 			name: "in two projects",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [C00000000] }\n" +
-				"  OTHER: { repo: acme/other, slack_channels: [C00000001, C00000000] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [C00000000] }\n" +
+				"  OTHER: { slack_channels: [C00000001, C00000000] }\n",
 			want: `projects.OTHER.slack_channels names "C00000000", which projects.DEMO.slack_channels already names: a channel's mentions reach one project's controller`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := strings.Replace(minimalFile, "projects:\n  DEMO: { repo: acme/widgets }\n", tc.projects, 1)
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", tc.projects, 1)
 			if body == minimalFile {
 				t.Fatal("the fixture's projects block was not replaced")
 			}

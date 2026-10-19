@@ -1033,7 +1033,7 @@ func randomSuffix(t *testing.T) string {
 // sent back by a READY refusal keys its new round on.
 func TestABackwardMovesTaskNamesThePullRequestAndTheReason(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "U"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: RoleFor(phase.Merging), Claim: "claim"})
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42})
 	reason := "READY_UNREVIEWED_CHANGE: src/x.go"
