@@ -321,7 +321,7 @@ grep -qF "[legion] the daemon has no GitHub App to act as; the controller's gh a
   fail "ctl1.stderr does not say the controller's gh acts as nobody: $(cat "$evidence/checks/ctl1.stderr")"
 [ -d "$ctl_state/gh" ] || fail "$ctl_state/gh does not exist"
 [ "$(stat -c %a "$ctl_state/gh")" = 700 ] || fail "$ctl_state/gh is not mode 0700: $(stat -c %a "$ctl_state/gh")"
-[ ! -e "$ctl_state/gh/hosts.yml" ] || fail "$ctl_state/gh/hosts.yml exists with no GitHub App configured"
+[ -z "$(ls -A "$ctl_state/gh")" ] || fail "$ctl_state/gh holds $(ls -A "$ctl_state/gh" | tr '\n' ' ')with no GitHub App configured, want nothing"
 [ ! -e "$ctl_state/github-credential.log" ] || fail "$ctl_state/github-credential.log exists with no GitHub App configured"
 note "no GitHub App: ctl1.stderr says the controller's gh acts as nobody; $ctl_state/gh is an empty 0700 directory and no credential log"
 pass

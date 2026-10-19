@@ -99,17 +99,49 @@ func (staticTokens) Token(_ context.Context, owner string) (string, error) {
 // staticCredentialExpiry is the lease expiry every rendered test credential carries.
 var staticCredentialExpiry = time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
 
-// staticCredentialToken is the token staticCredential renders for role: one per App, so a review
-// role's files and an implement role's differ as the two Apps' tokens do.
+// staticCredentialToken is the write token staticCredential renders for role: one per App, so a
+// review role's files and an implement role's differ as the two Apps' tokens do.
 func staticCredentialToken(role claim.Role) string {
 	return "ghs_" + string(appauth.AppRoleFor(role)) + "_token"
 }
 
-// staticCredential is the runtime's GitHubCredential in every test: the role's App's token
-// (appauth.AppRoleFor) rendered as gh's files, with a fixed expiry.
-func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
-	app := appauth.AppRoleFor(role)
-	return ghconfig.Render(staticCredentialToken(role), string(app), staticCredentialExpiry), nil
+// staticReadToken is the read-only token staticCredential renders for role on owner.
+func staticReadToken(role claim.Role, owner string) string {
+	return "ghs_" + string(appauth.AppRoleFor(role)) + "_read_" + owner
+}
+
+// staticCredential is the runtime's GitHubCredential in every test: a bundle of owner — sjawhar
+// when owner is empty, the controller's launch — holding the role's App's write token
+// (appauth.AppRoleFor), and acme holding its read token, rendered as gh's files with a fixed
+// expiry; owner is the bundle's default.
+func staticCredential(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	app := string(appauth.AppRoleFor(role))
+	if owner == "" {
+		owner = "sjawhar"
+	}
+	return ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{
+		"acme": ghconfig.Render(staticReadToken(role, "acme"), app, staticCredentialExpiry),
+		owner:  ghconfig.Render(staticCredentialToken(role), app, staticCredentialExpiry),
+	}}, nil
+}
+
+// staticOwners are the owners of every bundle staticCredential renders for the test specs, whose
+// repository's owner is sjawhar, sorted.
+var staticOwners = []string{"acme", "sjawhar"}
+
+// launchOf is r's launch of spec as a relaunch that replaces the pod builds it: prepared, with each
+// role's gh bundle minted (gitHubBundles), so the pod's gh volumes and its agents' GH_CONFIG_DIR
+// name the bundle's owners.
+func launchOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) launch {
+	t.Helper()
+	l, err := r.prepare(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.gitHubBundles(context.Background(), &l); err != nil {
+		t.Fatal(err)
+	}
+	return l
 }
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)

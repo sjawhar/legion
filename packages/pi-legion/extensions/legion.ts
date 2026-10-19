@@ -311,7 +311,9 @@ export default function legionExtension(pi: PiApi): void {
   });
 
   // The run is about to settle with nothing left for the host to continue: a phase still open
-  // gets its one follow-up, which the host sends as the next turn of this same session.
+  // gets its follow-up, one a stall, or two when the follow-up to a tool call written as text is
+  // answered with another (src/phase-stall.ts), which the host sends as the next turn of this same
+  // session.
   pi.on("session_stop", async (event, context) => {
     if (event.signal.aborted || !phaseWorkerSession(context)) return undefined;
     const followUp = advancePhaseStall({

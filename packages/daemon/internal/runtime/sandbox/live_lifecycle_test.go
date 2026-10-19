@@ -7,9 +7,11 @@
 package sandbox
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -1004,6 +1006,102 @@ func (r *liveRig) checkIndependentProvision() error {
 		note("operator", "exec %s -- ls %s: No such file or directory; the same path exists in %s's pod", SandboxName(own.token), theirs.Dir, other.name)
 	}
 	return nil
+}
+
+// second-owner: an issue on a repository of another owner (LEGION_E2E_REPO_SECOND_OWNER) gets an
+// issue pod whose workspace stands at that repository's default branch as GitHub names it, and
+// whose gh bundle holds a directory for each owner of the run's repositories: the agent is told the
+// bundle's root (LEGION_GH_OWNERS_DIR), its own owner's directory (GH_CONFIG_DIR) and the real gh
+// (LEGION_GH_PATH). Under the agent's own environment the image's gh, the `legion gh` wrapper,
+// reads LEGION_E2E_REPO from that owner's read-only directory, while the real gh with the issue
+// owner's directory cannot (404: the negative control that proves the wrapper's pick, since
+// LEGION_E2E_REPO is private to its owner); git, through the clone's `legion git-credential`
+// helper, lists LEGION_E2E_REPO's refs and is refused a push there (403: the token is read-only);
+// and GitHub, read with the operator's gh, holds no branch of that push. Nothing is pushed to the
+// second owner's repository.
+func (r *liveRig) checkSecondOwner() error {
+	c := r.claim("second-owner")
+	since := time.Now()
+	if _, err := r.spawn(c, true); err != nil {
+		return err
+	}
+	if _, err := r.awaitRunning(c, since); err != nil {
+		return err
+	}
+	log, err := r.initLog(SandboxName(c.token))
+	if err != nil {
+		return err
+	}
+	dir, _ := workspace.Location(TreeRoot, c.repo, c.issue)
+	if want := "workspace-init: " + dir.Dir + " on " + dir.Bookmark + " from " + r.secondDefaultBranch + "\n"; !strings.Contains(log, want) {
+		return fmt.Errorf("%s's init log lacks %q: %s", c.name, strings.TrimSpace(want), strings.TrimSpace(log))
+	}
+	note("runtime", "%s on %s: init log names %s from %s", c.name, c.repo, dir.Bookmark, r.secondDefaultBranch)
+	agent, err := r.agentEnviron(c)
+	if err != nil {
+		return err
+	}
+	own, other := strings.ToLower(c.repo.Owner()), strings.ToLower(r.env.repo.Owner())
+	for name, want := range map[string]string{
+		"LEGION_GH_OWNERS_DIR": GHConfigDir, "GH_CONFIG_DIR": GHConfigDir + "/" + own, "LEGION_GH_PATH": "/usr/local/bin/gh",
+	} {
+		if agent[name] != want {
+			return fmt.Errorf("%s's agent is told %s=%q, want %q", c.name, name, agent[name], want)
+		}
+	}
+	owners, err := r.asAgent(c, `ls "$LEGION_GH_OWNERS_DIR"`)
+	if err != nil {
+		return err
+	}
+	if got, want := strings.Fields(owners), []string{min(own, other), max(own, other)}; !slices.Equal(got, want) {
+		return fmt.Errorf("%s's LEGION_GH_OWNERS_DIR lists %v, want %v", c.name, got, want)
+	}
+	note("operator", "%s's agent: LEGION_GH_OWNERS_DIR=%s lists %v; GH_CONFIG_DIR=%s", c.name, GHConfigDir, strings.Fields(owners), agent["GH_CONFIG_DIR"])
+	read, err := r.asAgent(c, "gh api repos/"+r.env.repo.String()+" --jq .full_name")
+	if err != nil {
+		return fmt.Errorf("%s's gh could not read %s: %w", c.name, r.env.repo, err)
+	}
+	if read != r.env.repo.String() {
+		return fmt.Errorf("%s's gh api repos/%s answered %q, want %s", c.name, r.env.repo, read, r.env.repo)
+	}
+	note("operator", "%s's agent: gh api repos/%s --jq .full_name = %s (the wrapper picked %s's read-only directory)", c.name, r.env.repo, read, other)
+	out, err := r.asAgent(c, `env GH_CONFIG_DIR="$LEGION_GH_OWNERS_DIR/`+own+`" "$LEGION_GH_PATH" api repos/`+r.env.repo.String()+` 2>&1`)
+	if err == nil || !strings.Contains(out+err.Error(), "404") {
+		return fmt.Errorf("the real gh with %s's own directory read %s (%v): %s; want a 404, or the wrapper's pick proves nothing", c.name, r.env.repo, err, oneLine(out))
+	}
+	note("operator", "negative control: the real gh with GH_CONFIG_DIR=%s/%s on repos/%s: 404", GHConfigDir, own, r.env.repo)
+	clone := TreeRoot + "/repos/github.com/" + c.repo.Owner() + "/" + c.repo.Name()
+	url := "https://github.com/" + r.env.repo.String()
+	refs, err := r.asAgent(c, "git --git-dir="+clone+"/.git ls-remote "+url+" HEAD")
+	if err != nil || !strings.Contains(refs, "HEAD") {
+		return fmt.Errorf("%s's git ls-remote %s through the clone's helper = %q, %v; want its HEAD", c.name, url, refs, err)
+	}
+	note("operator", "%s's agent: git ls-remote %s HEAD: %s", c.name, url, oneLine(refs))
+	branch := "legion/" + strings.ToLower(c.issue) + "-must-not-land"
+	out, err = r.asAgent(c, "git --git-dir="+clone+"/.git push "+url+" HEAD:refs/heads/"+branch+" 2>&1")
+	if err == nil || !strings.Contains(out+err.Error(), "403") {
+		return fmt.Errorf("%s's git push to %s was not refused 403 (%v): %s", c.name, url, err, oneLine(out))
+	}
+	note("operator", "%s's agent: git push %s HEAD:refs/heads/%s: 403", c.name, url, branch)
+	ctx, cancel := context.WithTimeout(r.ctx, time.Minute)
+	defer cancel()
+	check := exec.CommandContext(ctx, "gh", "api", "repos/"+r.env.repo.String()+"/branches/"+branch)
+	if answer, err := check.CombinedOutput(); err == nil || !strings.Contains(string(answer), "404") {
+		return fmt.Errorf("the operator's gh reads branch %s on %s (%v): %s; want none", branch, r.env.repo, err, oneLine(string(answer)))
+	}
+	note("operator", "gh api repos/%s/branches/%s (the operator's gh): 404: no branch %s on %s", r.env.repo, branch, branch, r.env.repo)
+	return nil
+}
+
+// asAgent runs script with sh in the claim's container under its stub agent's own environment,
+// read from /proc/<pid>/environ, as the agent's bash tool would run it: an exec carries none of
+// the variables the agent's launcher start command told it.
+func (r *liveRig) asAgent(c *liveClaim, script string) (string, error) {
+	pid, err := r.agentPid(c)
+	if err != nil {
+		return "", err
+	}
+	return r.exec(c, "sh", "-c", `xargs -0 sh -c 'script=$1; shift; exec env -i "$@" sh -c "$script"' agent-env "$2" <"/proc/$1/environ"`, "as-agent", pid, script)
 }
 
 // templateNames are the names of a Sandbox's volume claim templates.

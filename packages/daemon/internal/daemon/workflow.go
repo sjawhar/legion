@@ -24,7 +24,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -48,7 +47,6 @@ type workflowRuntime struct {
 	handlers        []intake.Handler
 	dispatch        dispatch.Client
 	tokens          appauth.Tokens
-	owner           string
 	grants          *credential.Grants
 	project         config.Project
 	projectID       string
@@ -199,7 +197,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	// The rows the workflow writes through these records wake the outbox's lanes (projectRecords),
 	// through the runtime, since the outbox itself is built later (attach).
 	w := &workflowRuntime{
-		pool: st.Pool(), tokens: tokens, owner: owner, reviewAppLogin: reviewAppLogin,
+		pool: st.Pool(), tokens: tokens, reviewAppLogin: reviewAppLogin,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
@@ -374,29 +372,14 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 }
 
 // identity is the bot a role's commits are authored by: its App's, from the lease the token
-// source mints for the repository owner (the identity is fetched once per App and cached).
-func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtime.GitIdentity, error) {
-	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), w.owner)
+// source mints for owner, the owner of the repository the role works (the identity is fetched once
+// per App and cached).
+func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error) {
+	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), owner)
 	if err != nil {
-		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s: %w", appauth.AppRoleFor(role), role, err)
+		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s on %s: %w", appauth.AppRoleFor(role), role, owner, err)
 	}
 	return lease.Identity, nil
-}
-
-// gitHubCredential is the runtime's function for a tree role's gh files (runtime.GitHubCredential)
-// over the workflow's App tokens: the role's App's lease for the repository owner — the manager
-// holds the lease and re-mints it as it nears its expiry, so a launch and every refresher tick ask
-// GitHub only when the lease turns over — rendered as gh's hosts.yml and config.yml, named for the
-// App and its expiry so the runtime's log can say whose token it wrote.
-func gitHubCredential(tokens appauth.Tokens, owner string) runtime.GitHubCredential {
-	return func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
-		appRole := appauth.AppRoleFor(role)
-		lease, err := tokens.Token(ctx, appRole, owner)
-		if err != nil {
-			return ghconfig.Rendered{}, fmt.Errorf("mint the %s App lease for %s: %w", appRole, role, err)
-		}
-		return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), nil
-	}
 }
 
 func (w *workflowRuntime) attach(supervision *supervision) {

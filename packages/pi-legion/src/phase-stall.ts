@@ -14,9 +14,13 @@ import { LOCAL_ENVOY_NOTICE } from "@legion/pi-shared/interface";
  * `handoff_complete`:
  * - `closed`: no assignment since the last successful completion, or none seen yet;
  * - `open`: assigned and not completed, so a turn that settles now gets the follow-up;
- * - `quiet`: still open, and this stall already had its follow-up or a WAITING reply, so nothing
- *   more is sent until the next inbound event or assignment. */
-export type PhaseStall = "closed" | "open" | "quiet";
+ * - `text-call`: still open, and this stall's follow-up went to a final message holding a tool
+ *   call written as text, so a turn that settles on such a call again gets one more, the last;
+ * - `quiet`: still open, and this stall already had its follow-ups or a WAITING reply, so nothing
+ *   more is sent until the next inbound event or assignment.
+ * A stall is the span between two inbound events (an assignment or an Envoy delivery), which no
+ * follow-up causes, so it gets at most two follow-ups whatever the model answers. */
+export type PhaseStall = "closed" | "open" | "text-call" | "quiet";
 
 export type PhaseStallInput =
   | { readonly kind: "assignment" }
@@ -58,16 +62,22 @@ export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): Phase
     case "handoff-complete":
       return { state: "closed" };
     case "inbound-event":
-      return { state: state === "quiet" ? "open" : state };
-    case "settle":
-      if (state !== "open") return { state };
+      return { state: state === "quiet" || state === "text-call" ? "open" : state };
+    case "settle": {
+      if (state !== "open" && state !== "text-call") return { state };
       if (WAITING_REPLY.test(input.lastAssistantText)) return { state: "quiet" };
-      return {
-        state: "quiet",
-        followUp: TOOL_CALL_SHAPED.test(input.lastAssistantText)
-          ? TEXT_TOOL_CALL + FOLLOW_UP
-          : FOLLOW_UP,
-      };
+      const textCall = TOOL_CALL_SHAPED.test(input.lastAssistantText);
+      // A stall's one follow-up, unless that one answered a tool call written as text: then a
+      // second text call gets one more, since the call it failed to make is still the next step.
+      if (state === "text-call") {
+        return textCall
+          ? { state: "quiet", followUp: TEXT_TOOL_CALL + FOLLOW_UP }
+          : { state: "quiet" };
+      }
+      return textCall
+        ? { state: "text-call", followUp: TEXT_TOOL_CALL + FOLLOW_UP }
+        : { state: "quiet", followUp: FOLLOW_UP };
+    }
   }
 }
 
@@ -117,7 +127,7 @@ export function assistantText(message: unknown): string {
 }
 
 function isPhaseStall(value: unknown): value is PhaseStall {
-  return value === "closed" || value === "open" || value === "quiet";
+  return value === "closed" || value === "open" || value === "text-call" || value === "quiet";
 }
 
 /** The state the branch's last phase-stall entry recorded; `closed` when it holds none (a fresh

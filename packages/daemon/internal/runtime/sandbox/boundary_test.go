@@ -46,8 +46,9 @@ import (
 // container ever holds the implement App's token, which is what lets the reviewer's approval count
 // and the daemon's fix-attempt counting read a push's App from the App that made it. A plant that
 // a tree agent's own git triggers after provisioning runs under that agent's role: its clone's
-// helper is `gh auth git-credential` (workspace.GitHubCredentialHelper), which answers from the
-// GH_CONFIG_DIR of the process running it, and here, with none, answers nothing (exit 1).
+// helper is `legion git-credential` (workspace.GitHubCredentialHelper), which answers from the gh
+// files of the process running it (its LEGION_GH_OWNERS_DIR and GH_CONFIG_DIR), and here, with
+// none, answers nothing (exit 1).
 //
 // Provisioning also pins its git and jj — no hook, the git boot resolved, https alone, a credential
 // scoped to github.com, no working-copy snapshot in a credentialed fetch; internal/workspace's
@@ -224,13 +225,11 @@ func (rig *initRig) sunk() []string {
 	return strings.Split(strings.TrimSpace(string(body)), "\n")
 }
 
-// launch is a pod of spec's claim, as the runtime would create it.
+// launch is a pod of spec's claim, as the runtime would create it: its gh bundles minted, so each
+// role's gh volume projects its owners' files.
 func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
 	rig.t.Helper()
-	l, err := rig.r.prepare(spec)
-	if err != nil {
-		rig.t.Fatal(err)
-	}
+	l := launchOf(rig.t, rig.r, spec)
 	return rig.r.podTemplate(l).Spec
 }
 
@@ -278,7 +277,11 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 				if item.Key == provisionTokenKey {
 					value = canaryToken
 				}
-				if err := os.WriteFile(filepath.Join(dir, item.Path), []byte(value), 0o600); err != nil {
+				path := filepath.Join(dir, item.Path)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 					return err
 				}
 			}

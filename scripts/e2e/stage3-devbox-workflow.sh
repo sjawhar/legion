@@ -1078,32 +1078,49 @@ restart_scenarios() {
   pass
 
   begin in-agent-credentials
-  # One bash command on purpose. The pane's gh is a plain gh (the daemon's PATH's, mise's here: the
-  # daemon was started with its directory first, ahead of this box's gh wrapper), reading the role's
-  # App token from the gh files under GH_CONFIG_DIR, the claim's directory the daemon writes; no
-  # grant and no `legion gh` are in the path of a GitHub call, and GH_TOKEN is set empty so nothing
-  # outranks the file. Each output carries a marker the instruction itself cannot produce (the
-  # instruction holds the unexpanded command), so only the pane's own bash tool output satisfies a
-  # check.
-  send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-DIR=\$GH_CONFIG_DIR\"; echo \"CRED-TOKEN=\${GH_TOKEN-unset}.\"; echo \"CRED-VIEWER=\$(gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(gh pr view $pr_number --repo $repo --json url --jq .url)\". Wait after reporting."
-  until_true 240 "the real Go pane bash tool to resolve the daemon's gh" session_contains "$restart_issue" implementer "CRED-GH=$real_gh"
+  # One bash command on purpose. The pane's gh is the launcher directory's wrapper (`legion gh`),
+  # which runs the real gh the pane is told (LEGION_GH_PATH, mise's here: the daemon was started
+  # with its directory first, ahead of this box's gh wrapper) with GH_CONFIG_DIR at the directory of
+  # the owner the command names in the claim's gh bundle (LEGION_GH_OWNERS_DIR), which the daemon
+  # writes: the repository's owner's, with the role's App token; no grant is in the path of a
+  # GitHub call, and GH_TOKEN is set empty so nothing outranks the file. Each output carries a
+  # marker the instruction itself cannot produce (the instruction holds the unexpanded command), so
+  # only the pane's own bash tool output satisfies a check.
+  send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-REAL=\$LEGION_GH_PATH\"; echo \"CRED-DIR=\$GH_CONFIG_DIR\"; echo \"CRED-OWNERS=\$(ls \"\$LEGION_GH_OWNERS_DIR\" | tr '\\n' ' ')\"; echo \"CRED-TOKEN=\${GH_TOKEN-unset}.\"; echo \"CRED-VIEWER=\$(gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(gh pr view $pr_number --repo $repo --json url --jq .url)\". Wait after reporting."
+  owner=$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")
+  until_true 240 "the real Go pane bash tool to resolve the launcher directory's gh wrapper" session_contains "$restart_issue" implementer "CRED-GH=$state/bin/gh"
+  until_true 240 "the implementer pane to name the real gh its wrapper runs" session_contains "$restart_issue" implementer "CRED-REAL=$real_gh"
   until_true 240 "the implementer pane to name its claim's gh directory" session_contains "$restart_issue" implementer "CRED-DIR=$state/secrets/"
+  until_true 240 "the implementer pane to list the bundle's one owner" session_contains "$restart_issue" implementer "CRED-OWNERS=$owner "
   until_true 240 "the implementer pane to carry an empty GH_TOKEN" session_contains "$restart_issue" implementer "CRED-TOKEN=."
   implement_app=$(role_app implementer)
   until_true 240 "the implementer pane to authenticate as its App, $implement_app" session_contains "$restart_issue" implementer "CRED-VIEWER=$implement_app"
   until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
-  # The directory the agent printed is the one its OMP process was launched with, named for its
-  # claim, and holds the two gh files the daemon writes for the pane alone.
+  # The directory the agent printed is the one its OMP process was launched with: its repository's
+  # owner's directory of the bundle named for its claim, which holds the two gh files the daemon
+  # writes for the pane alone, and nothing else beside it.
   cred_pane_pid=$(claim_pane_pid "$restart_issue" implementer) || fail "the implementer pane on $restart_issue has no process locator"
   cred_omp=$(omp_descendant "$cred_pane_pid") || fail "the implementer pane on $restart_issue has no OMP process"
+  cred_root=$(pane_value "$cred_omp" LEGION_GH_OWNERS_DIR)
   cred_dir=$(pane_value "$cred_omp" GH_CONFIG_DIR)
-  [[ $cred_dir == "$state/secrets/"*-implementer-gh ]] || fail "the implementer's OMP carries GH_CONFIG_DIR=$cred_dir, want the claim's directory under $state/secrets"
+  [[ $cred_root == "$state/secrets/"*-implementer-gh ]] || fail "the implementer's OMP carries LEGION_GH_OWNERS_DIR=$cred_root, want the claim's bundle under $state/secrets"
+  [ "$cred_dir" = "$cred_root/$owner" ] || fail "the implementer's OMP carries GH_CONFIG_DIR=$cred_dir, want $owner's directory of $cred_root"
+  [ "$(pane_value "$cred_omp" LEGION_GH_PATH)" = "$real_gh" ] || fail "the implementer's OMP carries LEGION_GH_PATH=$(pane_value "$cred_omp" LEGION_GH_PATH), want $real_gh"
   session_contains "$restart_issue" implementer "CRED-DIR=$cred_dir" || fail "the implementer's bash printed another GH_CONFIG_DIR than its OMP carries ($cred_dir)"
-  [ "$(stat -c %a "$cred_dir")" = 700 ] || fail "$cred_dir is mode $(stat -c %a "$cred_dir"), want 700"
+  for dir in "$cred_root" "$cred_dir"; do
+    [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
+  done
+  [ "$(ls -A "$cred_root" | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(ls -A "$cred_root" | tr '\n' ' '), want $owner's directory alone"
   [ "$(ls -A "$cred_dir" | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(ls -A "$cred_dir" | tr '\n' ' '), want config.yml and hosts.yml alone"
   [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||
     fail "the daemon log has no 'github credential written' line for an implementer pane"
+  # git pushes through the shared clone's helper, `legion git-credential`, which the path of the
+  # repository git asks about routes to its owner's directory (credential.useHttpPath).
+  clone="$state/repos/github.com/$repo"
+  [ "$(git --git-dir="$clone/.git" config --get-all credential.helper | tail -1)" = '!legion git-credential' ] ||
+    fail "the shared clone's credential.helper is $(git --git-dir="$clone/.git" config --get-all credential.helper | tr '\n' ' '), want !legion git-credential last"
+  [ "$(git --git-dir="$clone/.git" config credential.useHttpPath)" = true ] || fail "the shared clone does not set credential.useHttpPath"
   # Negative control: a directory with no gh files is no credential — the same gh with it set is
   # refused by gh itself, naming GH_TOKEN, so the pane's identity comes from the daemon's files and
   # nothing else on this box.
@@ -1111,7 +1128,7 @@ restart_scenarios() {
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
-  note "real implementer pane ran $real_gh with GH_CONFIG_DIR=$cred_dir (0700; config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number"
+  note "real implementer pane ran $state/bin/gh, the wrapper, over $real_gh with GH_CONFIG_DIR=$cred_dir ($owner's directory of $cred_root; 0700, config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number; the shared clone's helper is !legion git-credential with credential.useHttpPath"
   pass
 
   begin pending-dispatch-status-write

@@ -1102,7 +1102,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	}
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
-		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
+		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", r.repo.Owner(), issue.Key, err)
 	}
 	base, err := r.defaultBranch(ctx, r.repo)
 	if err != nil {
@@ -1202,7 +1202,7 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	}
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
-		return fmt.Errorf("mint implement App token: %w", err)
+		return fmt.Errorf("mint the implement App token for %s: %w", r.repo.Owner(), err)
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue), base)

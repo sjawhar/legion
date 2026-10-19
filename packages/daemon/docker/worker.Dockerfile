@@ -6,9 +6,10 @@
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
 # Contents: pinned Bun; the Go `legion` (packages/daemon) compiled from this checkout at go.work's
-# Go version, static, at /opt/legion/bin/legion (one binary: worker-shim, workspace-init, credential,
-# gh, handoff, push, probe-image and the daemon's own commands), the first PATH entry and the
-# ENTRYPOINT name, with the `agent-secrets` client beside it; the pinned OMP fork build, resolved with
+# Go version, static, at /opt/legion/bin/legion (one binary: worker-shim, launcher, workspace-init,
+# gh, git-credential, probe-image and the daemon's own commands), the first PATH entry and the
+# ENTRYPOINT name, with the `agent-secrets` client and the `gh` that runs `legion gh` beside it; the
+# pinned OMP fork build, resolved with
 # mise's github backend exactly as a tmux host resolves an `omp_invocation` naming it;
 # @sjawhar/pi-envoy and @sjawhar/pi-legion packed from this checkout's packages/pi-envoy and
 # packages/pi-legion at /opt/legion/pi-envoy and /opt/legion/pi-legion, the two roots a pod names as
@@ -614,14 +615,20 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 # mainEnvironment sets in packages/daemon/internal/runtime/sandbox/manifest.go). The daemon's
 # Tools.AgentSecrets names this path.
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
+# gh in a pod is `legion gh`, first on the image PATH, which runs the real gh at /usr/local/bin/gh
+# (LEGION_GH_PATH, which every agent container is told) with GH_CONFIG_DIR at the gh directory of
+# the owner the command names: packages/daemon/docker/gh, the same script a tmux pane's launcher
+# directory holds (packages/daemon/internal/runtime/workerbin).
+COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
 # neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
 # ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
-# other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
-# pod environment can name all three. The Envoy plugin's `dispatch` shim runs its bundled CLI under
+# other path, so git's absolute path is as fixed as jj's and the real gh's (/usr/local/bin, copied
+# above) and a pod environment can name all three; gh resolves to the /opt/legion/bin/gh script and
+# the real gh behind it runs. The Envoy plugin's `dispatch` shim runs its bundled CLI under
 # the image's bun and prints its help, so a pi-envoy packed without bin/ or dist/dispatch.js, or an
 # image without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's
 # own test. Then `legion probe-image` runs the three launch probes through
@@ -660,6 +667,7 @@ RUN set -eu; \
     setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
+    gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
       /opt/legion/pi-envoy/bin/dispatch --help > /tmp/dispatch-help; \
     echo "dispatch: $(sed -n 1p /tmp/dispatch-help)"; grep -q '^Usage: dispatch ' /tmp/dispatch-help; \

@@ -268,10 +268,7 @@ func manifestCases(t *testing.T) map[string]struct {
 // the Running mode.
 func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) any {
 	t.Helper()
-	l, err := r.prepare(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := launchOf(t, r, spec)
 	s := r.sandboxManifest(l)
 	s.Spec.PodTemplate, s.Spec.OperatingMode = r.podTemplate(l), modeRunning
 	u, err := encodeSandbox(s)
@@ -394,10 +391,7 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 // podOf is the pod template a launch of spec runs.
 func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.PodSpec {
 	t.Helper()
-	l, err := r.prepare(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := launchOf(t, r, spec)
 	return r.podTemplate(l).Spec
 }
 
@@ -410,10 +404,7 @@ const workerContainer = string(claim.RoleTester)
 // own on, then the start command's.
 func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.Container {
 	t.Helper()
-	l, err := r.prepare(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
+	l := launchOf(t, r, spec)
 	c := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
 	start := launcherCommand(l, r)
 	c.Command = start.Argv

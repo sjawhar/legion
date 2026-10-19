@@ -112,6 +112,19 @@ function toolNames(request: Request): string[] {
   );
 }
 
+/** The description of the `legion` tool a Messages request offers the model. */
+function legionToolDescription(request: Request): string {
+  const tools = Array.isArray(request.body.tools) ? request.body.tools : [];
+  const tool = tools.find(
+    (candidate: unknown) =>
+      typeof candidate === "object" &&
+      candidate !== null &&
+      "name" in candidate &&
+      candidate.name === "legion"
+  );
+  return String(tool?.description ?? "");
+}
+
 /** How one pane differs from the implementer pane the phase-stall cases run: the runner's
  * `legion`, `quietMs` and `selfCheck`, and the stand-in's open-ask snapshot. */
 interface PaneOptions extends Pick<LegionPaneOptions, "legion" | "quietMs" | "selfCheck"> {
@@ -267,12 +280,53 @@ test.skipIf(omp === undefined && !onActions)(
     expect(turns).toHaveLength(3);
     // A Legion pane, both entries loaded: the host offers the model the `legion` tool.
     expect(toolNames(turns[0] as Request)).toContain("legion");
+    // Every role is offered the same tool text, and it gives a verdict to the tester alone.
+    expect(legionToolDescription(turns[0] as Request)).toContain(
+      "`verdict` pass|fail from the tester alone"
+    );
     expect(userText(turns[0] as Request)).not.toContain("handoff_complete");
     expect(userText(turns[1] as Request)).toContain("written as text");
     expect(userText(turns[1] as Request)).toContain("WAITING");
-    // The transcript holds every change, which a worker relaunched with --resume restores.
+    // The transcript holds every change, which a worker relaunched with --resume restores: the
+    // follow-up answered a text call, so the stall stands at `text-call` until the completion.
     expect(await pane.phaseEntries()).toEqual([
       { state: "open" },
+      { state: "text-call" },
+      { state: "closed" },
+    ]);
+  },
+  120_000
+);
+
+test.skipIf(omp === undefined && !onActions)(
+  "a follow-up for a text call answered with the same text call gets one more in the same run, and the call after it posts the completion",
+  async () => {
+    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
+    const textCall =
+      'court\n<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>\n<parameter name="summary">Stall proof done.</parameter>\n</invoke>';
+    const pane = await stallPane(omp, [
+      [{ type: "text", text: textCall }],
+      [{ type: "text", text: textCall }],
+      [
+        {
+          type: "tool_use",
+          name: "legion",
+          input: { op: "handoff_complete", summary: "Stall proof done." },
+        },
+      ],
+      [{ type: "text", text: "Reported." }],
+    ]);
+
+    expect(pane.completions()).toHaveLength(1);
+    const turns = pane.turns();
+    // Four turns in one run: the text call, the first follow-up's (answered with the text call
+    // again), the second follow-up's, and the reply to the tool result.
+    expect(turns).toHaveLength(4);
+    expect(userText(turns[1] as Request)).toContain("written as text");
+    expect(userText(turns[2] as Request)).toContain("written as text");
+    expect(await pane.phaseEntries()).toEqual([
+      { state: "open" },
+      { state: "text-call" },
       { state: "quiet" },
       { state: "closed" },
     ]);

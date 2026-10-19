@@ -15,14 +15,20 @@ import (
 // the bridge runs for a Claude Code worker, since no Oh My Pi hook runs there:
 //   - closed: no assignment since the last successful completion, or none seen yet;
 //   - open: assigned and not completed, so a run that settles now gets the follow-up;
-//   - quiet: still open, and this stall already had its follow-up or a WAITING reply, so nothing
+//   - text-call: still open, and this stall's follow-up went to a final message holding a tool
+//     call written as text, so a run that settles on such a call again gets one more, the last;
+//   - quiet: still open, and this stall already had its follow-ups or a WAITING reply, so nothing
 //     more is sent until the next inbound event or assignment.
+//
+// A stall is the span between two inbound events (an assignment or an Envoy delivery), which no
+// follow-up causes, so it gets at most two follow-ups whatever the model answers.
 type PhaseStall string
 
 const (
-	StallClosed PhaseStall = "closed"
-	StallOpen   PhaseStall = "open"
-	StallQuiet  PhaseStall = "quiet"
+	StallClosed   PhaseStall = "closed"
+	StallOpen     PhaseStall = "open"
+	StallTextCall PhaseStall = "text-call"
+	StallQuiet    PhaseStall = "quiet"
 )
 
 // waitingReply is a line of the final message that starts with WAITING (after any markdown emphasis
@@ -51,26 +57,34 @@ func (PhaseStall) assigned() PhaseStall { return StallOpen }
 // completed is a `handoff_complete` that succeeded: the phase is closed.
 func (PhaseStall) completed() PhaseStall { return StallClosed }
 
-// inbound is an Envoy delivery arriving: a quiet phase is open again, since the event may be what
-// it waited on.
+// inbound is an Envoy delivery arriving: a quiet or text-call phase is open again, since the event
+// may be what it waited on.
 func (s PhaseStall) inbound() PhaseStall {
-	if s == StallQuiet {
+	if s == StallQuiet || s == StallTextCall {
 		return StallOpen
 	}
 	return s
 }
 
 // settle is a run about to end with lastAssistantText as its final message: the next state, and the
-// follow-up to send as one more turn, or "" for none.
+// follow-up to send as one more turn, or "" for none. A stall's one follow-up, unless that one
+// answered a tool call written as text: then a second text call gets one more, since the call it
+// failed to make is still the next step.
 func (s PhaseStall) settle(lastAssistantText string) (PhaseStall, string) {
-	if s != StallOpen {
+	if s != StallOpen && s != StallTextCall {
 		return s, ""
 	}
 	if waitingReply.MatchString(lastAssistantText) {
 		return StallQuiet, ""
 	}
-	if toolCallShaped.MatchString(lastAssistantText) {
+	textCall := toolCallShaped.MatchString(lastAssistantText)
+	switch {
+	case s == StallTextCall && textCall:
 		return StallQuiet, textToolCall + FollowUp
+	case s == StallTextCall:
+		return StallQuiet, ""
+	case textCall:
+		return StallTextCall, textToolCall + FollowUp
 	}
 	return StallQuiet, FollowUp
 }
@@ -94,10 +108,10 @@ func readStall(path string) (PhaseStall, error) {
 		return "", fmt.Errorf("read the phase-stall state %s: %w", path, err)
 	}
 	switch record.State {
-	case StallClosed, StallOpen, StallQuiet:
+	case StallClosed, StallOpen, StallTextCall, StallQuiet:
 		return record.State, nil
 	}
-	return "", fmt.Errorf("read the phase-stall state %s: %q is not closed, open or quiet", path, record.State)
+	return "", fmt.Errorf("read the phase-stall state %s: %q is not closed, open, text-call or quiet", path, record.State)
 }
 
 // writeStall replaces path with state, through a temporary file renamed into place, so a relaunch

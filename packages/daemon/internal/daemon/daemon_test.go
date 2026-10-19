@@ -1154,6 +1154,12 @@ func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _
 	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-" + string(role) + "[bot]"}}, nil
 }
 
+func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := r.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 func (r *workflowTokenRecorder) Roles() []appauth.AppRole {
 	r.mu.Lock()
 	defer r.mu.Unlock()

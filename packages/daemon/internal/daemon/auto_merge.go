@@ -147,7 +147,7 @@ func readyMergeEnded(cause error) record.Notice {
 func (r *outbox) graphQL(ctx context.Context) (githubrest.Client, error) {
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
-		return githubrest.Client{}, fmt.Errorf("mint implement App token: %w", err)
+		return githubrest.Client{}, fmt.Errorf("mint the implement App token for %s: %w", r.repo.Owner(), err)
 	}
 	return githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}, nil
 }

@@ -180,9 +180,9 @@ func TestAReplacingLaunchMakesNoMoreCallsThanTheBoundCounts(t *testing.T) {
 	var mints, renders, reads atomic.Int32
 	g := newRig(t, nil, withOptions(func(o *Options) {
 		o.Tokens = countingTokens{&mints}
-		o.GitHubCredential = func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
+		o.GitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
 			renders.Add(1)
-			return staticCredential(ctx, role)
+			return staticCredential(ctx, role, owner)
 		}
 		o.Store = countingStore{Store: o.Store, reads: &reads}
 	}))
