@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/wait"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 // checkRoot is a closed root whose tree lingers for another hour: the state a production check's
@@ -225,6 +226,51 @@ func TestCheckLookAndCheckBoundRowsApplyTheirFacts(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("fact %d = %+v, want %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// A second production check of the same issue — a rerun's, after the first closed and its merge
+// opened another — counts its looks from one again, and its look 1 has a bound row of its own
+// (workflow.startLook). That row must end that look: the first check's look 1 ended at its own
+// bound long before, and nothing clears processed_events between the two checks, so the event the
+// row applies under must tell the two checks apart. Otherwise a silent implementer keeps its pod
+// for the whole of the rerun's check, the cost the look bound exists to remove.
+func TestACheckLookRowOfALaterCheckEndsThatChecksLook(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := checkRoot()
+	putOutboxIssue(t, pool, records, root)
+	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: 24 * time.Hour}, quietLogger())
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, handlers: []intake.Handler{engine}, log: quietLogger(), now: time.Now}
+
+	first := openCheck(root, "a1b2c3d4")
+	putProductionCheck(t, pool, records, first)
+	look := mustOutboxRow(t, root.Key, record.CheckLook{Look: 1}, time.Now())
+	look.ID = 61
+	if err := runner.execute(ctx, look); err != nil {
+		t.Fatalf("the first check's look bound = %v", err)
+	}
+	if got := readProductionCheck(t, pool, records, root.Key); got.LookOpen || !got.Open() {
+		t.Fatalf("the first check after its look bound = look open %t, closed %t; want the look ended and the check open", got.LookOpen, !got.Open())
+	}
+
+	// The first check closed at its bound as not run; the rerun's merge opened the second a day
+	// later, with its own look 1 and the look's own bound row.
+	closed := time.Now().UTC().Truncate(time.Microsecond)
+	first.ClosedAt, first.Outcome = &closed, record.CheckNotRun
+	putProductionCheck(t, pool, records, first)
+	second := openCheck(root, "f00dfeed")
+	reopened := closed.Add(24 * time.Hour)
+	second.OpenedAt, second.BoundAt, second.LookWakeAt, second.LastWakeAt, second.LastWakeDetail = reopened, reopened.Add(336*time.Hour), &reopened, &reopened, "f00dfeed"
+	putProductionCheck(t, pool, records, second)
+	later := mustOutboxRow(t, root.Key, record.CheckLook{Look: 1}, time.Now())
+	later.ID = 64
+	if err := runner.execute(ctx, later); err != nil {
+		t.Fatalf("the second check's look bound = %v", err)
+	}
+	if got := readProductionCheck(t, pool, records, root.Key); got.LookOpen {
+		t.Fatalf("the second check's look 1 is still open after its own bound row ran: the row's fact was taken as the first check's look 1 bound; want the look ended")
 	}
 }
 
