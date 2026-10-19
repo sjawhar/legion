@@ -410,7 +410,8 @@ package's job in `.github/workflows/release.yaml` (`.github/scripts/release-push
 locally) — the merger recomputes it at READY, and a drift that appears after
 approval is a one-line fast-follow, not a test FAIL. Note the merge queue's squash body is its READY packet, not the
 branch's commit subjects, so only the PR title's conventional-commit type classifies the bump, except that a change
-under `skills/` bumps at least the patch version whatever that type.
+under one of the package's `--patch-path` directories (its own skills among them) bumps at least the patch version
+whatever that type.
 
 **"Diff against `main`" is not the branch's diff once `main` has moved.** A fresh-eyes review of this branch reported
 that it "reverted" LEGION-11's `reconnectWorkers`-after-`api` fix and "deleted" its regression test. It had diffed the
@@ -443,11 +444,12 @@ pane's PATH and `PI_SHELL_PREFIX` keeps it first in the bash tool, `packages/dae
 An issue pod's `legion` is the worker image's `/opt/legion/bin/legion` and its `gh` the image's
 `/opt/legion/bin/gh`, which execs that binary's `legion gh` (`packages/daemon/docker/gh`). So every `gh` a pane runs
 goes through the deployed release's `legion gh`, and every git fetch or push through its `legion git-credential`:
-neither knows anything on your branch. A pane runs whatever file sits at the path the running daemon was started
-from: a change reaches it when the daemon restarts from the new release's path, or as soon as the file at that path
-is replaced in place, and a pod only when it runs the worker image of that release; the merge alone changes nothing.
-No worker pane runs `legion` from bash otherwise: the `legion` tool makes its daemon calls in-process (the
-controller's own session runs `legion status` and `legion claims`, through the operator's `legion`).
+neither knows anything on your branch. A pane runs whatever file sits at the path the daemon resolved for itself at
+boot (`os.Executable()`, symlinks resolved): a change reaches it when the daemon restarts from the new release's
+binary, or as soon as the file at that resolved path is replaced in place (re-pointing a symlink to it is not
+enough), and a pod only when it runs the worker image of that release; the merge alone changes nothing. No pane runs
+`legion` from bash otherwise: the `legion` tool makes its daemon calls in-process
+(`packages/daemon/internal/prompts/roles/mechanics/headless.md`, `controller-root.md`).
 
 To exercise the branch's build live, build it in the workspace and run it by path, in the pane's own environment
 (§17 has the Go to use when `go` is not on the pane's PATH):
@@ -473,7 +475,7 @@ cites the distinct Tests and PR Title run ids at the head
 ([text-only-skill-pr-mechanics](text-only-skill-pr-mechanics.md), §6).
 
 **A stale build does what the branch refuses (LEGION-78, sjawhar/legion#1015).** The branch made `legion gh` refuse
-a command the deployed build still forwarded. The tester ran the command once through the pane's `gh`, and it posted
+a command the deployed build still forwarded. The tester ran the command once through the pane's `legion`, and it posted
 a real comment on the PR (id 5652558869, deleted afterwards). Prove a refusal only through the branch's build, and
 run the positive control (a forwarded `pr view`) through the same binary, so the `E2E` line names one code path.
 

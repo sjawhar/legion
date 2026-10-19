@@ -12,7 +12,7 @@ tags:
   - argv
   - OMP_PROFILE
 date: 2026-09-13
-status: active
+status: superseded — the rig it describes (`setup.sh` with `RIG_LEGION_BUILD`, a daemon run from a bun export of a checkout) is gone with the TypeScript daemon; the Go daemon's live proofs of a pane's prompts and skills are `scripts/e2e/stage2-tmux-supervision.sh` and `stage3-devbox-workflow.sh`, and the two-leg rule (the released build first as the negative control, then the branch's) still stands
 module: pi-envoy
 applies_when:
   - A pull request changes `packages/daemon/internal/prompts/roles/*.md`, `skills/*/SKILL.md`, or anything else a pane receives through `--append-system-prompt` or resolves through `skill://`
