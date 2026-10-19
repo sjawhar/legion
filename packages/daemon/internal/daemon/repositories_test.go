@@ -11,9 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -215,5 +219,47 @@ func TestAnUnrecordedIssueWorksTheProjectsDefaultRepository(t *testing.T) {
 	want := "LEGION-9 is not recorded, so it works the project's default repository, and project LEGION serves none: set the project's default repository in Dispatch (Settings → Repositories → Projects) to one both GitHub Apps are installed on"
 	if repo, _, err := w.issueRepository(ctx, "LEGION-9"); err == nil || err.Error() != want {
 		t.Fatalf("an unrecorded issue with no default served works %s, %v; want %q", repo, err, want)
+	}
+}
+
+// A tmux pane adopted after a restart holds its write token for the owner of the repository its
+// claim's issue works, the owner its launch was minted for: its record's repository's, or, for an
+// issue the workflow does not record, the project's default's. A token no claim holds is refused.
+func TestAnAdoptedPanesWriteOwnerIsTheOwnerItsIssueWorks(t *testing.T) {
+	ctx := context.Background()
+	github := newNamedGitHub(t, map[string]string{"acme/widgets": "Acme/Widgets@main"})
+	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatchProject: "LEGION", repositories: newRepositories("LEGION"),
+		defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)}
+	w.repositories.set([]mappedRepository{{Repo: ghrepo.MustParse("acme/widgets"), Default: true}}, nil)
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		return w.records.PutIssue(ctx, tx, record.Issue{Key: "LEGION-2", Tree: "LEGION-2", Project: "LEGION", Title: "root", Phase: phase.Implementing,
+			Generation: 1, Status: "in_progress", Rank: "A", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools"})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	issues := map[claim.Token]string{}
+	for _, issue := range []string{"LEGION-2", "LEGION-9"} {
+		token, err := claim.NewToken("legion", issue, claim.RoleImplementer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		issues[token] = issue
+	}
+	issueOf := func(_ context.Context, token claim.Token) (string, error) {
+		issue, ok := issues[token]
+		if !ok {
+			return "", errors.New("no claim holds token " + string(token))
+		}
+		return issue, nil
+	}
+	owner := claimRepositoryOwner(issueOf, w.issueRepository)
+	want := map[string]string{"LEGION-2": "zeta", "LEGION-9": "Acme"}
+	for token, issue := range issues {
+		if got, err := owner(ctx, token); err != nil || got != want[issue] {
+			t.Errorf("the write owner of %s = %q, %v; want %q", token, got, err, want[issue])
+		}
+	}
+	if got, err := owner(ctx, claim.ControllerToken("legion")); err == nil {
+		t.Errorf("the write owner of a token no claim holds = %q, want a refusal", got)
 	}
 }

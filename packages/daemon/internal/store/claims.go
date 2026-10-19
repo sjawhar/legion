@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -146,22 +145,20 @@ func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bo
 	return exists, nil
 }
 
-// ClaimRepositoryOwner is the owner of the repository token's issue's record names, in the
-// spelling the record keeps (its caller lowercases it): what a tmux pane adopted after a restart
-// holds its write token for (tmux.Options.RepositoryOwner), read from the daemon's own record and
-// nothing a pane can write. It is "" for a claim whose issue the workflow does not record (an
-// operator's claim), a record not yet filled with its repository, and a token no claim holds.
-func (s *Store) ClaimRepositoryOwner(ctx context.Context, token claim.Token) (string, error) {
-	var repo string
-	err := s.pool.QueryRow(ctx, `select i.repo from claims c join issues i on i.key = c.issue where c.token = $1`, string(token)).Scan(&repo)
+// ClaimIssue is the issue the claim of token is on, from the daemon's own claims and nothing a pane
+// can write: what a tmux pane adopted after a restart is told its write owner by (the daemon's
+// claimRepositoryOwner), since a token spells its issue lowercased. A token no claim holds is
+// refused.
+func (s *Store) ClaimIssue(ctx context.Context, token claim.Token) (string, error) {
+	var issue string
+	err := s.pool.QueryRow(ctx, `select issue from claims where token = $1`, string(token)).Scan(&issue)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
+		return "", fmt.Errorf("no claim holds token %s", token)
 	}
 	if err != nil {
-		return "", fmt.Errorf("read the repository of claim %s: %w", token, err)
+		return "", fmt.Errorf("read the issue of claim %s: %w", token, err)
 	}
-	owner, _, _ := strings.Cut(repo, "/")
-	return owner, nil
+	return issue, nil
 }
 
 // claimMayRun is the stored claim that may still hold a process: one in a state that runs, or one
