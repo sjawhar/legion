@@ -44,7 +44,8 @@
 #     round trip (the pods run a stub agent, decision 7; Legion's own image probe makes none
 #     either), so the key need not be one a real Anthropic call would accept — only in place,
 #     reaching the agent's environment exactly as the live route delivers it. The `operator-token`
-#     check is SKIPPED-BLOCKED in this mode: there is no projected token for it to read.
+#     check's ServiceAccount, automount and no-API-token assertions still run and pass; only its
+#     one projected-token assertion is skipped, since there is no projected token for it to read.
 #
 # Every pod carries the operator route's pod fixture for the chosen mode. Legion holds none of it.
 # The run creates its own copy of the ConfigMap it mounts, named for the run's project, its
@@ -392,7 +393,7 @@ key-file)
   (umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$work/anthropic-api-key")
   anthropic_key_args=(--from-file=ANTHROPIC_API_KEY="$work/anthropic-api-key")
   note "[operator] ConfigMap $route_configmap: models-key-file.yml (Anthropic's own endpoint, no gateway) and overlay.yml from $operator_route, label legion.dev/project=$run_label"
-  note "operator pod: $work/pod.yml, the key-file fixture (no projected token: operator-token reports SKIPPED-BLOCKED)"
+  note "operator pod: $work/pod.yml, the key-file fixture (no projected token: operator-token's projected-token assertion is skipped, the rest still run and pass)"
   ;;
 esac
 op create configmap "$route_configmap" --from-file=models.yml="$work/models.yml" --from-file=overlay.yml="$operator_route/overlay.yml" \
