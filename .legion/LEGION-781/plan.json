@@ -1,0 +1,153 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-781",
+  "completed": "2026-10-19T06:29:30Z",
+  "plan": "dispatch://LEGION-781/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase worker's push, PR body, proof (references/pr-body.md), merge-gate and cleanup-deletion rules are what the implementer's completion is held to; production_check and its prompts are deleted",
+      "dispatch: every write to the issue (messages, the defect issue a fail files) follows it"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md says what the tester verifies and records; the tester re-runs Stage 3 and Stage 4b through done",
+      "dispatch: the tester's writes to the issue follow it"
+    ],
+    "review": [
+      "legion-worker: references/review-threads.md and references/merge-gate.md give the review's threads, the approval of the head by SHA and the merge gate's order",
+      "dispatch: the reviewer's writes to the issue follow it"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Done-when 2 has the child's Sandbox Suspended at the close while the design hands the check task to a live session in the pod and Done-when 3 releases the pod on pending.",
+        "answer": "Plan D2/D5 and departure 1: the close retires five claims and starts the first look with no issue_suspend row; the pending report writes suspend then issue_suspend{Release:false}. The workflow test asserts the rows at the close and after pending. The architect confirms the restated acceptance line."
+      },
+      {
+        "finding": "Nothing suspends the pod when the first look neither reports nor dies; the check start row defeats the close's suspension (issue_suspend.go:67-77 restarted).",
+        "answer": "Plan D6: every look is bounded by a check_look row (CheckLookBound 2 h) that ends a silent look as pending (suspend + keep), and as not_run for the last look; a ClaimFailed of the implementer ends the look the same way. Test: no report, clock advanced, the suspension rows are written."
+      },
+      {
+        "finding": "The phase-constraint migration needs a data move for issues.phase and issues.held_from rows holding production_check, or the daemon does not boot.",
+        "answer": "Plan D11: migration 0047 moves both columns to awaiting_merge before swapping the constraints; the DaemonBooted sweep closes awaiting_merge issues whose pull request is merged (a root with children still in the workflow waits for its last child); test migrateThrough(46) seeds both columns and asserts the move."
+      },
+      {
+        "finding": "A check report cannot travel as today's HandoffComplete fact: engine.go:362, 366-368 and 371-377 refuse it before any check logic.",
+        "answer": "Plan D5: the report is its own fact, intake.CheckReport, applied by engine.checkReported fenced on the open check and its look, not the generation or the tree's linger; handoff() keeps its three gates for phase completions. Test: a report while the root lingers is recorded."
+      },
+      {
+        "finding": "commit is required before the grant is redeemed (handoff.go:46-47) and typed non-empty in the TS contract, so 'commit not required' cannot be decided where the check is detected.",
+        "answer": "Plan D5: the route requires grantId and summary before redeem, then reads the issue and check, and requires commit only for a phase completion; LegionHandoffCompleteRequest.commit becomes optional; the api test covers a commit-less check report accepted and a commit-less phase completion refused."
+      },
+      {
+        "finding": "A check task with no phase must still carry a generation or ServingRun() is 0 (HANDOFF_NO_RUN), and re-admission bumps the root's generation.",
+        "answer": "Plan D4/D5: the check start row carries the issue's generation as read when written (the delivery's run marker) and CheckLook; the executor fences a check row on the open check and its look instead of the generation; the check report route does not apply HANDOFF_NO_RUN; re-admission leaves the record and its rows alone."
+      },
+      {
+        "finding": "A releasing issue_suspend for a root waits forever on its suspended architect claim (issue_suspend.go:104-113).",
+        "answer": "Plan D5 closeCheck: Release:true only for a child of a tree that does not linger; a root, or a child of a lingering tree, gets Release:false and the tree's close deletes the Sandbox and volume. Test asserts no releasing row for a root."
+      },
+      {
+        "finding": "An open-check test in the outbox executor races a merge that opens a check for a lingering member between the test and the apply.",
+        "answer": "Plan D8: the wait lives inside lingerExpired's transaction as wait.Until (a routine wait), which rolls the fact back so the linger:<issue>:<generation> id is not consumed; closeCheck re-arms a LingerClose row when the last check closes; duplicates are harmless."
+      },
+      {
+        "finding": "Holding the tree's close for an open check also holds the hand-overs of unfinished children and workspace removal for up to the bound.",
+        "answer": "Plan D8 keeps the close atomic as the spec's sentence has it and names the cost; section 4 gives the architect the split as an alternative."
+      },
+      {
+        "finding": "A second wake reaching a claim that still holds an undelivered check task is refused (ErrDeliveryPending), since the delivery-skip rule needs a phase.",
+        "answer": "Plan D5: a look starts only while look_open is false; a cause that arrives during an open look is kept in pending_cause_* and a pending report starts the next look with it at once. Test: a wake during an open look enqueues no start row."
+      },
+      {
+        "finding": "CI red in accepting would quiesce the architect through takenOver (engine.go:734-747).",
+        "answer": "Plan D1: takenOver returns no role when the leaving role is the architect; the accepting test asserts the implementer's start row has an empty Quiesce."
+      },
+      {
+        "finding": "A third e2e script (stage3-4b13b-acceptance.sh), lib/workflow.sh's helpers and the README rows drive production_check and are outside Done-when 5.",
+        "answer": "Plan T12 covers stage3-4b13b-acceptance.sh:530-531,1019,1027,1111,1115, lib/workflow.sh:971-974 and the README rows; the check is the repository-wide grep in T11."
+      },
+      {
+        "finding": "skills/legion-controller/SKILL.md:269-270 and docs/site/media/legion/journey.ts:279-283 state the old order and are outside Done-when 4's list.",
+        "answer": "Plan T11 adds both; the grep is the check."
+      },
+      {
+        "finding": "The daemon API version bump the phase enum forces is named nowhere.",
+        "answer": "Plan D5/T1/T9: DaemonAPIVersion 30 with its history paragraph, fixtures regenerated, pi-legion's legion.daemonApiVersion moved; legion-api.test.ts and daemon-api-version.test.ts are the checks."
+      },
+      {
+        "finding": "A Go constant is never empty, and two build paths stamp revision; if either is missed the production wake never fires.",
+        "answer": "Plan D9 and departure 3: a constant builtFromRepository plus the revision guard; both ldflags sites already stamp main.revision; the boot wakes nothing with an empty revision or a foreign configured repository, each covered by a daemon test."
+      },
+      {
+        "finding": "Dispatch's delivery intake and reconcile have no events broker or actor for appending issue.deployed.",
+        "answer": "Plan D12: newIntake/StartIntakes/NewReconcile take *events.Broker from cmd/dispatch/main.go:257; the actor is model.Actor{Kind: system, ID: delivery-timeline}; the publish does not depend on Broker.Notify."
+      },
+      {
+        "finding": "The legion tool cannot tell a check report from a phase completion and always computes a workspace commit.",
+        "answer": "Plan D5: tools.ts branches on the record's phase done plus a present check view; verdict required in pass|pending|fail, no handoffCommit call, no commit sent; pi-legion tests cover the call shape."
+      },
+      {
+        "finding": "The server.started durable's start position is unchosen; a Dispatch start while the daemon is down is never seen.",
+        "answer": "Plan D10: legion-go-<project>-dispatch-server with DeliverNewPolicy; the daemon's own boot covers its own build, and a missed Dispatch start is covered only by the bound, stated explicitly."
+      },
+      {
+        "finding": "The NATS wake test needs a stand-in for the GitHub compare; the harness exists and should be named.",
+        "answer": "Plan section 6.3: internal/daemon/check_wake_test.go on testnats (daemon_test.go:1164-1176 pattern) with an httptest GitHub (daemon_test.go:630-640 pattern) answering /repos/<repo>/compare/<merge>...<build>; ahead wakes, behind does not."
+      },
+      {
+        "finding": "legion-api.ts has two editable phase lists plus a derived one and a TS-only integrating phase.",
+        "answer": "Plan T9: accepting after reviewing in LEGION_WORKFLOW_PHASES and LEGION_PHASE_BACKWARD_TARGETS, production_check removed from both, LEGION_PHASES derived and integrating left as it is; phase_test.go and legion-api.test.ts against the regenerated fixtures are the checks."
+      },
+      {
+        "finding": "A merge while the tree lingers advances the phase by hand and does nothing else (pullrequest.go:222-239), so every close effect must be written into that branch.",
+        "answer": "Plan D2: the lingering branch writes Phase done, Status done, StatusWrite, disarmOpen, child-closed and opens the check with look 1 as a wake; a workflow test asserts each."
+      },
+      {
+        "finding": "A check start meeting an operator-suspended claim is an error retried on a capped backoff for the whole bound.",
+        "answer": "Plan D4/D6: on RuleHolds a check start finishes without acting and applies CheckLookEnded with cause operator hold; the look ends as pending (or not_run when last)."
+      },
+      {
+        "finding": "Done-when 5 and 6 contain criteria no machine checks; this issue's own close runs on the pre-deploy daemon.",
+        "answer": "Plan section 8: the observation protocol (the first issue merged after the deploy whose pull request an event reaches; the three reads; the Production line and one comment on this pull request; a refused kubectl recorded verbatim); this issue closes in today's order and its implementer's check is that protocol."
+      },
+      {
+        "finding": "Q1 and Q2 are the planner's to settle.",
+        "answer": "Plan D1: Reviewing to Accepting writes no status (the board already reads needs_review) and SignOff emits no phase-finished notice; the accepting test covers both and an invariant test over Table that every row into accepting leaves the board at needs_review."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Done-when 2: a child's close at the merge sets the Sandbox Suspended with the volume kept, so the pod goes.",
+      "plan": "The close retires five claims and hands the implementer the check task in its live session; the Sandbox is set Suspended (volume kept) when that first look reports pending, minutes later. No issue_suspend row is written at the close.",
+      "evidence": "The spec's design paragraph hands the task to a live session in the pod and Done-when 3 has pending release the pod; a pod that is gone can take no task. store/issue_suspend.go:67-77 (restarted) finishes a close's suspension written before a later start, so the suspension must follow the look.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "acceptance: line 2 reads 'the Sandbox Suspended with the volume kept once the first look reports pending'; Done-when 6's 'within 10 minutes of the merge' still holds."
+      }
+    },
+    {
+      "spec": "The daemon bounds the wait at 14 days from the close.",
+      "plan": "The bound is a legion.yaml setting, production_check_hours, 14 days (336) by default, parsed and bounded as linger_hours is; the Stage 3 and Stage 4b rigs set it to 0.1 so the bound's wake and the tree's close run inside one proof.",
+      "evidence": "stage4b-sandbox-tree.sh:1133 sets linger_hours: 0.3 for the same reason; a fixed 14 days leaves the tree's close (which waits for the open check) unprovable in a run.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "scope: one configuration key (config.go beside linger_hours, config_test.go's key table, running-legion.md's limits line); production keeps 14 days."
+      }
+    },
+    {
+      "spec": "The daemon's build compares its revision, linked in beside a constant naming the repository the binary is built from, sjawhar/legion; both empty outside a release build, where the boot wakes nothing.",
+      "plan": "builtFromRepository is a Go constant in cmd/legion/main.go; the guard is revision (empty outside a release build) and the configured project repository equalling the constant. A non-release boot and the smoke rig wake nothing, as the spec describes.",
+      "evidence": "A Go constant is never empty; cmd/legion/main.go:46-49 var revision is stamped by release.yaml:337 and worker.Dockerfile:251-253 and empty otherwise.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
