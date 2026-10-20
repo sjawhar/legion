@@ -1243,3 +1243,56 @@ test("a rebuilt transcript that dropped the reader's turn lands them at the newe
     await context.close();
   }
 });
+
+// The other half of a rebuild: the reader was at the live end when it landed. The replay drops
+// the oldest turns and carries two written while the connection was down, so a view that held
+// its `scrollTop` would sit short of the end with the newest text below the fold. Then the half
+// that matters as much: what the rebuild did is over, and the reader's next scroll back is
+// theirs alone - no compensation, the hook's or the browser's, may be read into it.
+test("a rebuilt transcript leaves a reader who was at the live end at the live end, and still sees their next scroll back", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the desktop layout runs on the desktop project");
+  const held: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-00000000a009" };
+  await setLiveSessions([planner, held]);
+  await publishAgentStreamFrame(held.session_id, longReplay(held.session_id), "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const jump = page.getByTestId("jump-to-latest");
+  try {
+    await page.goto(`/agents/${held.session_id}/live`);
+    await expect(page.getByText("Turn 39:")).toBeVisible();
+    await expectNewestTurnAboveComposer(page);
+    await expect(jump).toHaveCount(0);
+
+    await rebuildThroughReconnect(
+      held.session_id,
+      rebuiltReplay(held.session_id, 8, [
+        liveTurn(1, 41, "Written while they were away.", false),
+        liveTurn(2, 42, "And the one after it.", false),
+      ])
+    );
+    await expect(page.getByText("And the one after it.")).toBeVisible();
+
+    // Eight turns shorter at the top and two longer at the foot: the offset the reader had is a
+    // place well short of the end of what came back.
+    await expect(page.getByText("Turn 7:")).toHaveCount(0);
+    await expectNewestTurnAboveComposer(page);
+    await expect(jump).toHaveCount(0);
+
+    // Still following: the next turn the session writes arrives in view, with nothing to catch
+    // up on.
+    await publishAgentStreamFrame(held.session_id, liveTurn(3, 43, "And then this one.", false));
+    await expect(page.getByText("And then this one.")).toBeVisible();
+    await expectNewestTurnAboveComposer(page);
+    await expect(jump).toHaveCount(0);
+
+    // The reader goes back through the history after all that, and it is read as what it is:
+    // the way back is offered, and they are at the position they scrolled to.
+    await scrollThreadTo(page, 1_000);
+    await expect(jump).toHaveText("Jump to latest");
+    expect((await liveViewLayout(page)).threadScrollTop).toBe(1_000);
+  } finally {
+    await context.close();
+  }
+});

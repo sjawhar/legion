@@ -20,7 +20,7 @@ import type {
   SearchResult,
 } from "../../api/types";
 import { AgentThread } from "../agent-view/AgentThread";
-import { dispatchMetadata } from "../agent-view/dispatch-marks";
+import { dispatchMetadata, type KeyedMessage, turnKey } from "../agent-view/dispatch-marks";
 import { BroadcastsPage } from "../agents/BroadcastsPage";
 import { ReplyQuote } from "../conversation/ReplyQuote";
 import { ThreadCard } from "../margin/ThreadCard";
@@ -116,7 +116,7 @@ function Providers({ children }: { children: ReactNode }): ReactNode {
 
 /** The thread harness `AgentThread.boundary.test.tsx` uses: the real runtime over stored
  *  messages, so the text and reasoning parts go through the library's own part rendering. */
-function Transcript({ messages }: { messages: ThreadMessageLike[] }): ReactNode {
+function Transcript({ messages }: { messages: KeyedMessage[] }): ReactNode {
   const runtime = useExternalStoreRuntime({
     convertMessage: (message: ThreadMessageLike) => message,
     isRunning: false,
@@ -127,7 +127,7 @@ function Transcript({ messages }: { messages: ThreadMessageLike[] }): ReactNode 
     <AssistantRuntimeProvider runtime={runtime}>
       <AgentThread
         commands={undefined}
-        contentIds={messages.map((message) => message.id ?? "")}
+        contentIds={messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id))}
         empty="Nothing yet."
         ownSendCount={0}
         placeholder="Message the session…"
@@ -202,7 +202,7 @@ afterEach(() => {
 
 test("the agent transcript renders assistant and reasoning text as Markdown", async () => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const messages: ThreadMessageLike[] = [
+  const messages: KeyedMessage[] = [
     {
       content: [
         { text: FIXTURE, type: "reasoning" },
@@ -240,7 +240,7 @@ test("the agent transcript renders assistant and reasoning text as Markdown", as
 
 test("the agent transcript renders the viewer's turn, another sender's turn and a Dispatch reply as Markdown", async () => {
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const messages: ThreadMessageLike[] = [
+  const messages: KeyedMessage[] = [
     {
       content: [{ text: FIXTURE, type: "text" }],
       createdAt: new Date("2026-09-10T00:00:00Z"),
@@ -285,7 +285,7 @@ test("the agent transcript renders the viewer's turn, another sender's turn and 
 });
 
 test("a streaming assistant turn formats what has closed and shows the rest as it stands", async () => {
-  const partial: ThreadMessageLike[] = [
+  const partial: KeyedMessage[] = [
     {
       content: [{ text: "**Bold** so far, and a list:\n\n- first\n- sec", type: "text" }],
       createdAt: new Date("2026-09-10T00:00:00Z"),
@@ -317,7 +317,7 @@ test("a streaming assistant turn formats what has closed and shows the rest as i
 // breaks; a list or a paragraph separated by a blank line still formats as a block.
 test("a transcript turn keeps single newlines as line breaks and still formats blocks", async () => {
   const prose = "First, check the config file.\nThen, verify the credentials.\nFinally, run it.";
-  const messages: ThreadMessageLike[] = [
+  const messages: KeyedMessage[] = [
     {
       content: [{ text: `${prose}\n\n1. one\n2. two\n\n**done**`, type: "text" }],
       createdAt: new Date("2026-09-10T00:00:00Z"),
@@ -654,7 +654,7 @@ describe("a Dispatch picture on every surface", () => {
   });
 
   test("every kind of transcript turn shows it at the column's width", async () => {
-    const messages: ThreadMessageLike[] = [
+    const messages: KeyedMessage[] = [
       {
         content: [
           { text: PICTURE, type: "reasoning" },
@@ -705,7 +705,7 @@ describe("a Dispatch picture on every surface", () => {
   });
 
   test("a streaming assistant turn shows it at the column's width", async () => {
-    const partial: ThreadMessageLike[] = [
+    const partial: KeyedMessage[] = [
       {
         content: [{ text: `${PICTURE}\n\n- first\n- sec`, type: "text" }],
         createdAt: new Date("2026-09-10T00:00:00Z"),

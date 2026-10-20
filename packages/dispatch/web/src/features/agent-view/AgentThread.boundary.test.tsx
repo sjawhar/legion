@@ -10,6 +10,7 @@ import type { ReactNode } from "react";
 
 import { AgentThread } from "./AgentThread";
 import { applyFrames, EMPTY_CONVERSATION, toThreadMessages } from "./conversation";
+import { type KeyedMessage, turnKey } from "./dispatch-marks";
 
 /**
  * assistant-ui throws "Unsupported user message part type: reasoning" when a user message carries
@@ -43,7 +44,7 @@ const poisoned = [
   },
 ] as unknown as AgentStreamFrame[];
 
-function Harness({ messages }: { messages: ThreadMessageLike[] }): ReactNode {
+function Harness({ messages }: { messages: KeyedMessage[] }): ReactNode {
   const runtime = useExternalStoreRuntime({
     convertMessage: (message: ThreadMessageLike) => message,
     isRunning: false,
@@ -54,7 +55,7 @@ function Harness({ messages }: { messages: ThreadMessageLike[] }): ReactNode {
     <AssistantRuntimeProvider runtime={runtime}>
       <AgentThread
         commands={undefined}
-        contentIds={messages.map((message) => message.id ?? "")}
+        contentIds={messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id))}
         empty="Nothing yet."
         ownSendCount={0}
         placeholder="Message the session…"

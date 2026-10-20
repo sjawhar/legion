@@ -1,3 +1,5 @@
+import type { ThreadMessageLike } from "@assistant-ui/react";
+
 /**
  * What AgentRuntimeThread and the live stream's own conversion tell AgentThread about a message,
  * carried in assistant-ui's untyped `metadata.custom`: `dispatch` marks the session's own reply
@@ -33,12 +35,19 @@ export function readDispatchMarks(custom: Readonly<Record<string, unknown>>): Di
 }
 
 /**
+ * A message this view hands assistant-ui, carrying the id it was keyed by. The library leaves
+ * `id` optional for a caller that lets its runtime mint one; this view never does, because the
+ * key below is what the transcript is read back through.
+ */
+export type KeyedMessage = ThreadMessageLike & { readonly id: string };
+
+/**
  * The key a turn keeps across a rebuild of the transcript: the `turn` mark where a streamed turn
  * took a stored Dispatch message over, and the message's own id otherwise.
  * `AgentRuntimeThread` computes it for `useLiveFollow`'s `contentIds`, and `AgentThread` renders
  * it into every turn's `data-message-id`; the hook matches the two by string equality, so both
  * sides spell the key here rather than each in its own expression.
  */
-export function turnKey(custom: Readonly<Record<string, unknown>>, id: string | undefined): string {
-  return readDispatchMarks(custom).turn ?? id ?? "";
+export function turnKey(custom: Readonly<Record<string, unknown>>, id: string): string {
+  return readDispatchMarks(custom).turn ?? id;
 }

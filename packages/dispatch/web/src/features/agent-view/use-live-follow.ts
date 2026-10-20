@@ -5,17 +5,25 @@
  * to assistant-ui's viewport, whose auto-scroll yanks the reader to the bottom every time the
  * session starts a turn, so reading back through history while the session works is impossible.
  *
+ * It owns the anchoring too: the viewport carries `overflow-anchor: none`, so every adjustment
+ * the transcript makes is this hook's own and arrives nowhere as a scroll event it would have to
+ * tell from the reader's.
+ *
  * Deliberately not `features/conversation/use-follow-latest.ts`, the issue page's hook: that one
  * scrolls the window with the newest turn pinned at the top under the composer, this one scrolls
  * an element with the newest turn at the bottom, and only a live session rebuilds its whole
  * transcript from a replay (rule: `replayCount`). One shared hook would be a flag per difference.
  */
-import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /** assistant-ui's own tolerance: a sub-pixel remainder is still the end of the transcript. */
 const END_TOLERANCE_PX = 1;
 const TURN_ID_ATTRIBUTE = "data-message-id";
 const TURN_SELECTOR = `[${TURN_ID_ATTRIBUTE}]`;
+/** How far below the viewport's top edge the probe below walks, and in what steps, while it
+ *  lands on nothing a turn owns. */
+const PROBE_STEPS = 5;
+const PROBE_STEP_PX = 8;
 
 /** What the view renders its own scrolling from. */
 export interface LiveFollowControl {
@@ -41,19 +49,34 @@ function atLiveEnd(element: HTMLElement): boolean {
   );
 }
 
-/** The topmost turn the viewport shows any part of, with its offset from the viewport's top edge.
- *  `querySelectorAll` answers in document order, so the first hit is the topmost. */
+/**
+ * The topmost turn the viewport shows any part of, with its offset from the viewport's top edge.
+ * A hit test just inside that edge rather than a `getBoundingClientRect` scan over every turn,
+ * the choice `features/shell/ViewportAnchor.tsx`'s `rowAtCenter` documents for the issue list and
+ * for the same reason: this runs on every scroll event a scrolled-back reader makes, and a scan
+ * forces a layout read per turn above them. A point that lands between two turns walks downward
+ * in small steps, so the answer there is the turn below - the one being read into.
+ */
 function rememberTurn(element: HTMLElement): RememberedTurn | null {
-  const top = element.getBoundingClientRect().top;
-  const bottom = top + element.clientHeight;
-  for (const turn of element.querySelectorAll<HTMLElement>(TURN_SELECTOR)) {
-    const box = turn.getBoundingClientRect();
-    const id = turn.getAttribute(TURN_ID_ATTRIBUTE);
-    if (box.bottom > top && box.top < bottom && id !== null) {
-      return { id, top: box.top - top };
-    }
+  const rect = element.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const hit = (offset: number): HTMLElement | null => {
+    const at = document.elementFromPoint(x, rect.top + offset);
+    const turn = at?.closest<HTMLElement>(TURN_SELECTOR) ?? null;
+    return turn !== null && element.contains(turn) ? turn : null;
+  };
+  let found = hit(END_TOLERANCE_PX);
+  for (let step = 1; found === null && step <= PROBE_STEPS; step += 1) {
+    found = hit(END_TOLERANCE_PX + step * PROBE_STEP_PX);
   }
-  return null;
+  // Every probe missing is a viewport nothing can hit-test - one scrolled off the screen, or a
+  // DOM with no layout at all - where the first turn is still a place to remember: losing the
+  // place outright would send the reader to the live end at the next rebuild.
+  const turn = found ?? element.querySelector<HTMLElement>(TURN_SELECTOR);
+  const id = turn?.getAttribute(TURN_ID_ATTRIBUTE) ?? null;
+  return turn === null || id === null
+    ? null
+    : { id, top: turn.getBoundingClientRect().top - rect.top };
 }
 
 function renderedIds(element: HTMLElement): readonly string[] {
@@ -83,8 +106,10 @@ export function useLiveFollow({
   /** Bumped once per rebuild of the whole transcript from the session's replay. */
   replayCount: number;
   sessionId: string;
-  /** The scroller. */
-  viewport: RefObject<HTMLElement | null>;
+  /** The scroller itself, not a ref holding it: the view renders it inside an error boundary,
+   *  which replaces the node when a reset clears the error it held, and every listener below
+   *  binds to the node it is given rather than to the first one there was. */
+  viewport: HTMLElement | null;
 }): LiveFollowControl {
   // A fresh mount - an open, a reload - follows.
   const [atEnd, setAtEnd] = useState(true);
@@ -102,12 +127,6 @@ export function useLiveFollow({
   const previousSends = useRef(ownSendCount);
   const previousReplays = useRef(replayCount);
   const previousSession = useRef(sessionId);
-  // The `scrollHeight` the hook left behind when it last put the reader back after a rebuild.
-  // The browser answers that same rebuild a frame later, by subtracting the height it dropped
-  // above the reader (scroll anchoring), and by then the settle has recorded the new height, so
-  // there is no shrink left for the arriving event to see. The height identifies that one event;
-  // any other scroll, and any later one, is the reader's.
-  const settleHeight = useRef<number | null>(null);
   // A rebuild waiting for its turns to reach the DOM, with the ids that were on screen when it
   // arrived: the watcher below settles it as soon as they differ.
   const pendingRebuild = useRef(false);
@@ -148,51 +167,40 @@ export function useLiveFollow({
   }, []);
 
   const jumpToEnd = useCallback(() => {
-    const element = viewport.current;
-    if (element === null) {
+    if (viewport === null) {
       return;
     }
-    element.scrollTop = element.scrollHeight;
-    record(element);
+    viewport.scrollTop = viewport.scrollHeight;
+    record(viewport);
     follow();
   }, [follow, record, viewport]);
 
   /**
    * What the viewport's current geometry says about following, recording it for the next reading.
-   * A fall in `scrollTop` is the one signal that the reader took over: growth never lowers it, so
-   * nothing but a reader moves it down - except a shrink (a fold collapsing, a shorter rebuild),
-   * which clamps it, and the scroll anchoring that answers a rebuild the hook has just settled,
-   * which subtracts the height the rebuild dropped above the reader (measured in Chromium on
-   * this view: a jump to the end of a rebuilt transcript came back as `scrollTop` 0). Neither is
-   * the reader, so neither stops following, and whatever they did to the position a following
-   * viewport takes back. Deliberately not assistant-ui's rule, which also demands `scrollHeight`
-   * be *unchanged* and so misses the reader who scrolls back while a turn is streaming, this
-   * view's whole complaint.
+   * A fall in `scrollTop` is the one signal that the reader took over: growth never lowers it,
+   * and with `overflow-anchor: none` on the viewport the browser adjusts nothing of its own, so
+   * the only fall no reader made is a shrink's clamp (a fold collapsing, a shorter rebuild),
+   * which by definition lands at the live end and is answered there. Deliberately not
+   * assistant-ui's rule, which also demands `scrollHeight` be *unchanged* and so misses the
+   * reader who scrolls back while a turn is streaming, this view's whole complaint.
    */
   const observe = useCallback(
     (element: HTMLElement): boolean => {
       const fell = lastScrollTop.current - element.scrollTop > END_TOLERANCE_PX;
-      const shrank = element.scrollHeight < lastScrollHeight.current;
-      const settling = settleHeight.current === element.scrollHeight;
-      settleHeight.current = null;
-      const excused = shrank || settling;
       record(element);
       if (atLiveEnd(element)) {
         follow();
         return true;
       }
-      if (following.current && fell && !excused) {
+      if (following.current && fell) {
         following.current = false;
         remembered.current = rememberTurn(element);
         setAtEnd(false);
         return false;
       }
-      if (following.current) {
-        // Still following and off the end: nothing the reader did put it there, so take the end
-        // back rather than leave the newest text below the fold until the next arrival.
-        element.scrollTop = element.scrollHeight;
-        record(element);
-      }
+      // A following viewport off the end is left to the callers that can put it back: the layout
+      // effect below jumps to the end on what it is told, and the resize observer does it as a
+      // turn grows. A scroll event has nothing of its own to answer there.
       return following.current;
     },
     [follow, record]
@@ -214,18 +222,35 @@ export function useLiveFollow({
       );
       if (place === null || turn === undefined) {
         jumpToEnd();
-      } else {
-        // The turn survived: put it back where the reader had it, the compensation
-        // `features/shell/ViewportAnchor.tsx` performs for the issue list.
-        const wanted = element.getBoundingClientRect().top + place.top;
-        element.scrollTop += turn.getBoundingClientRect().top - wanted;
-        record(element);
-        countUnseen();
+        return;
       }
-      settleHeight.current = element.scrollHeight;
+      // The turn survived: put it back where the reader had it, the compensation
+      // `features/shell/ViewportAnchor.tsx` performs for the issue list.
+      const wanted = element.getBoundingClientRect().top + place.top;
+      element.scrollTop += turn.getBoundingClientRect().top - wanted;
+      record(element);
+      countUnseen();
     },
     [countUnseen, jumpToEnd, record]
   );
+
+  // The scroller is a node this hook can be handed more than once: the view renders it inside an
+  // `ErrorBoundary`, whose reset replaces it with a fresh one, at `scrollTop` 0 and carrying none
+  // of the old one's position. Re-baseline before the effect below reads that 0 as the reader
+  // scrolling back: a viewport that was following takes the live end, and one the reader had
+  // scrolled back in has their turn put back where they had it.
+  useLayoutEffect(() => {
+    const element = viewport;
+    if (element === null) {
+      return;
+    }
+    record(element);
+    if (following.current) {
+      jumpToEnd();
+    } else {
+      settleRebuild(element);
+    }
+  }, [jumpToEnd, record, settleRebuild, viewport]);
 
   // The turns are not always this hook's to await: assistant-ui applies a rebuilt transcript in a
   // passive effect, one commit after the render that carried the new ids
@@ -234,7 +259,7 @@ export function useLiveFollow({
   // against the DOM still on screen moves the reader by nothing and leaves their place to the
   // browser. The watcher runs only between a rebuild and its turns, never while one streams.
   useEffect(() => {
-    const element = viewport.current;
+    const element = viewport;
     if (element === null) {
       return;
     }
@@ -254,16 +279,15 @@ export function useLiveFollow({
   }, [settleRebuild, viewport]);
 
   useEffect(() => {
-    const element = viewport.current;
+    const element = viewport;
     if (element === null) {
       return;
     }
     const onScroll = () => {
-      // Always current when a rebuild lands: the reader's place is re-read on every scroll they
-      // make away from the live end, not only on the scroll that stopped following - which is
-      // the one scroll `observe` has already read it on itself.
-      const wasFollowing = following.current;
-      if (!observe(element) && !wasFollowing) {
+      // The reader's place is re-read on every scroll they make away from the live end, not only
+      // on the one that stopped following: `rememberTurn` is a hit test, so taking the place
+      // again on an event `observe` has already read it on costs one layout read.
+      if (!observe(element)) {
         remembered.current = rememberTurn(element);
       }
     };
@@ -275,7 +299,7 @@ export function useLiveFollow({
   // of this hook's: without the observer the newest line settles just below the fold and stays
   // there. The first element child is the content wrapper, whose height is the transcript's.
   useEffect(() => {
-    const element = viewport.current;
+    const element = viewport;
     if (element === null) {
       return;
     }
@@ -298,7 +322,7 @@ export function useLiveFollow({
   // viewport rather than trusting the last scroll event, because a server push can commit before
   // the browser has dispatched the reader's preceding scroll.
   useLayoutEffect(() => {
-    const element = viewport.current;
+    const element = viewport;
     if (element === null) {
       return;
     }

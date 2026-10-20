@@ -372,7 +372,10 @@ export function AgentThread({
   /** The session being read: moving to another one lands at its live end. */
   sessionId: string;
 }): ReactNode {
-  const viewport = useRef<HTMLDivElement | null>(null);
+  // The element itself, not a ref held once: this viewport is inside the boundary below, which
+  // renders a fresh node once a reset clears the error it was holding, and the hook binds its
+  // listener and its observers to whichever node it is given.
+  const [viewport, setViewport] = useState<HTMLDivElement | null>(null);
   const follow = useLiveFollow({ contentIds, ownSendCount, replayCount, sessionId, viewport });
   return (
     <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col">
@@ -392,12 +395,17 @@ export function AgentThread({
               asking where the reader is, which is this view's whole complaint; its scroll-up
               detector requires `scrollHeight` to be unchanged, so it never notices a reader who
               scrolls back while a turn streams; and the flag it would then keep is internal, so
-              nothing outside the library can clear it. */}
+              nothing outside the library can clear it.
+
+              `[overflow-anchor:none]` (the sidebar's precedent in `app.tsx`) leaves the hook's
+              own compensation the only one there is: the browser's anchoring would adjust a
+              rebuild a frame after the hook already had, hiding that compensation and arriving
+              as a scroll event nothing can tell from the reader's own. */}
           <ThreadPrimitive.Viewport
             autoScroll={false}
-            className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 pl-1"
+            className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1 pl-1 [overflow-anchor:none]"
             data-testid="agent-thread"
-            ref={viewport}
+            ref={setViewport}
             scrollToBottomOnInitialize={false}
             scrollToBottomOnRunStart={false}
             scrollToBottomOnThreadSwitch={false}

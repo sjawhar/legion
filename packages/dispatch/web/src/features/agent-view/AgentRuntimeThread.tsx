@@ -11,7 +11,7 @@ import { compareTimestamps } from "../../lib/timestamps";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
-import { dispatchMetadata, turnKey } from "./dispatch-marks";
+import { dispatchMetadata, type KeyedMessage, turnKey } from "./dispatch-marks";
 
 /** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
 function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
@@ -104,7 +104,7 @@ export function AgentRuntimeThread({
     // stream's times are whole milliseconds, so the merge below compares milliseconds; the stored
     // messages carry microseconds, so they are put in time order first, and the stable merge keeps
     // that order between two stored messages in one millisecond.
-    const dispatch: ThreadMessageLike[] = storedMessages
+    const dispatch: KeyedMessage[] = storedMessages
       .filter((message) => !taken.has(message.id))
       .sort((left, right) => compareTimestamps(left.created_at, right.created_at))
       .map((message) => {
