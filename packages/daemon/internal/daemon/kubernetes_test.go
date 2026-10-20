@@ -511,6 +511,34 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 	}
 }
 
+// runtime.kubernetes.setup reaches sandbox.Options unchanged: every role's launcher receives this
+// argv, while leaving the setting out keeps the runtime setup-free.
+func TestKubernetesSetupReachesTheSandboxRuntime(t *testing.T) {
+	cfg := config.Config{Project: "TEST", Projects: map[string]config.Project{"TEST": {}}}
+	k := config.Kubernetes{
+		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
+		StorageClass: "gp2", IssueVolume: "20Gi", Resources: config.DefaultResources(), RepositoryCache: config.DefaultRepositoryCache(),
+	}
+	want := []string{"/bin/sh", "-c", "omp plugin install agent-skills"}
+	k.Setup = want
+	opts, err := sandboxOptions(cfg, k, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if !slices.Equal(opts.Setup, want) {
+		t.Errorf("Options.Setup = %q, want %q", opts.Setup, want)
+	}
+
+	k.Setup = nil
+	opts, err = sandboxOptions(cfg, k, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions without setup: %v", err)
+	}
+	if len(opts.Setup) != 0 {
+		t.Errorf("Options.Setup = %q without runtime.kubernetes.setup, want none", opts.Setup)
+	}
+}
+
 // runtime.kubernetes.repository_cache reaches the runtime's Options as its volume, its intervals and
 // its container's requirements, a settled reservation's lower memory request under its limit.
 func TestTheRepositoryCacheReachesTheSandboxRuntime(t *testing.T) {

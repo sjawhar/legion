@@ -159,6 +159,11 @@ type Options struct {
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
+	// Setup is the deployment's setup command (runtime.kubernetes.setup), an argv every role's
+	// container runs before each start of its Oh My Pi — after a stale-plugin relaunch's install,
+	// in the container's working directory and with the environment Oh My Pi gets — through the
+	// start wrapper (startArgv); Oh My Pi starts only once it exits 0. Nil runs none.
+	Setup []string
 	// BootTimeout bounds each wait of a relaunch, its wait for the API server to answer one of its
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).

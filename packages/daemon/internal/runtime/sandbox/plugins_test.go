@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,11 +19,12 @@ func testPlugins() *runtime.PluginInstall {
 	return &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 }
 
-// An installing launch's agent argv (launcherCommand) becomes `/bin/sh -c '<script>' legion-
-// plugins <agent argv…>`: the agent argv rides after the script as legion-plugins's own positional
-// parameters, never quoted into the script, and the script names both sources, the generation
-// directory under the role's state home, and the contract, ends `exec "$@"`, and the agent argv it
-// wraps carries the two installed --extension roots rather than the image's.
+// An installing launch's agent argv (launcherCommand) becomes `/bin/sh -c '<script>' legion-start
+// 0 <agent argv…>`: with no setup command the count is 0, the agent argv rides after it as
+// legion-start's own positional parameters, never quoted into the script, and the script names
+// both sources, the generation directory under the role's state home, and the contract, runs the
+// install in a subshell on stderr, ends `exec "$@"`, and the agent argv it wraps carries the two
+// installed --extension roots rather than the image's.
 func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -39,21 +42,21 @@ func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 		t.Fatalf("argv %q carries no -- separator", start.Argv)
 	}
 	agent := start.Argv[i+1:]
-	if len(agent) < 4 || agent[0] != "/bin/sh" || agent[1] != "-c" || agent[3] != "legion-plugins" {
-		t.Fatalf("an installing launch's agent command is %q, want /bin/sh -c <script> legion-plugins ...", agent)
+	if len(agent) < 5 || agent[0] != "/bin/sh" || agent[1] != "-c" || agent[3] != startName || agent[4] != "0" {
+		t.Fatalf("an installing launch's agent command is %q, want /bin/sh -c <script> %s 0 ...", agent, startName)
 	}
 	script := agent[2]
 	stateHome := roleStateHome(claim.RoleTester)
 	genDir := pluginGenDir(stateHome, spec.Generation)
 	for _, want := range []string{
 		spec.Plugins.PiLegion, spec.Plugins.PiEnvoy, genDir, "/g*",
-		"exec \"$@\"", "} 1>&2", "set -eu",
+		"exec \"$@\"", ") 1>&2", "set -eu",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("install script does not name %q:\n%s", want, script)
 		}
 	}
-	rest := agent[4:]
+	rest := agent[5:]
 	plain := l.agentArgv(r.agent)
 	// The agent argv the script wraps is the same shape a plain launch's is, less its roots,
 	// which name the installed pair instead of the image's.
@@ -104,13 +107,13 @@ func TestInstallScriptQuotesShellUnsafeSources(t *testing.T) {
 		t.Skip("no /bin/sh in this environment")
 	}
 	plugins := &runtime.PluginInstall{PiLegion: "/tmp/odd dir/pi-legion's.tgz", PiEnvoy: "/tmp/another 'one'.tgz", Contract: 24}
-	script := installScript("/home/legion/.local/state/tester", 3, plugins)
+	script := startScript("/home/legion/.local/state/tester", 3, plugins)
 	// The two sources carry a space and a single quote; verified below (sh -n) rather than as a
 	// literal substring, since the quoting itself breaks one.
 	if !strings.Contains(script, "pi-legion") || !strings.Contains(script, "another") {
 		t.Fatalf("script does not carry the sources it quotes:\n%s", script)
 	}
-	cmd := exec.Command("sh", "-n", "-c", script, "legion-plugins")
+	cmd := exec.Command("sh", "-n", "-c", script, startName)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("sh -n the rendered script: %v\n%s\nscript:\n%s", err, out, script)
 	}
@@ -131,12 +134,12 @@ func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := installScript(filepath.Join(dir, "state"), 3, plugins)
+	script := startScript(filepath.Join(dir, "state"), 3, plugins)
 	if !strings.Contains(script, "/usr/local/bin/bun") {
 		t.Fatalf("the install script does not call bun by the image path:\n%s", script)
 	}
 	script = strings.Replace(script, "/usr/local/bin/bun", stub, 1)
-	out, err := exec.Command("sh", "-c", script, "legion-plugins", "true").CombinedOutput()
+	out, err := exec.Command("sh", "-c", script, startName, "0", "true").CombinedOutput()
 	if err == nil {
 		t.Fatalf("the script ran on past a failed install:\n%s", out)
 	}
@@ -183,11 +186,214 @@ func TestAnUppercaseSchemeReachesBunVerbatim(t *testing.T) {
 	}
 }
 
-// installArgv returns agent unchanged when plugins is nil: a plain launch's argv is never wrapped.
-func TestInstallArgvIsAgentUnchangedWithoutPlugins(t *testing.T) {
+// startArgv returns agent unchanged with neither plugins nor a setup command: a plain launch's
+// argv is never wrapped.
+func TestStartArgvIsAgentUnchangedWithoutPluginsOrSetup(t *testing.T) {
 	agent := []string{"/opt/omp/bin/omp", "--mode", "rpc"}
-	got := installArgv("/home/legion/.local/state/tester", 1, nil, agent)
-	if !slices.Equal(got, agent) {
-		t.Fatalf("installArgv(nil) = %q, want %q unchanged", got, agent)
+	for name, setup := range map[string][]string{"nil": nil, "empty": {}} {
+		if got := startArgv("/home/legion/.local/state/tester", 1, nil, setup, agent); !slices.Equal(got, agent) {
+			t.Fatalf("startArgv(nil plugins, %s setup) = %q, want %q unchanged", name, got, agent)
+		}
 	}
 }
+
+// testSetup is a deployment's setup command as these tests configure it: one shell command, as the
+// loader admits runtime.kubernetes.setup.
+var testSetup = []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"}
+
+// A deployment's setup command wraps every start of every role, a fresh one's, a resumed one's
+// and the controller's: the agent command becomes `/bin/sh -c '<script>' legion-start <n>
+// <setup…> <agent argv…>`, the setup words and the agent argv riding as positional parameters
+// after their count, never quoted into the script, and the agent argv exactly the plain launch's,
+// the image's two extension roots included, since setup installs nothing of Legion's.
+func TestASetupCommandWrapsEveryStartOfEveryRole(t *testing.T) {
+	opts := goldenOptions()
+	opts.Setup = testSetup
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := workerSpec(t)
+	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
+	for name, spec := range map[string]runtime.SpawnSpec{"a fresh role": workerSpec(t), "a resumed role": resume, "the controller": controllerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			l, err := r.prepare(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := launcherCommand(l, r)
+			agent := start.Argv[slices.Index(start.Argv, "--")+1:]
+			if len(agent) < 5 || agent[0] != "/bin/sh" || agent[1] != "-c" || agent[3] != startName || agent[4] != "3" {
+				t.Fatalf("the agent command is %q, want /bin/sh -c <script> %s 3 <setup…> <agent…>", agent, startName)
+			}
+			if got := agent[5:8]; !slices.Equal(got, testSetup) {
+				t.Errorf("the setup words are %q, want %q", got, testSetup)
+			}
+			if got, want := agent[8:], l.agentArgv(r.agent); !slices.Equal(got, want) {
+				t.Errorf("the wrapped agent argv is %q, want the plain launch's %q", got, want)
+			}
+			if script := agent[2]; strings.Contains(script, "acme/agent-skills") || strings.Contains(script, "bun add") {
+				t.Errorf("the script quotes the setup command or installs plugins it was not asked to:\n%s", script)
+			}
+		})
+	}
+}
+
+// startRun is one run of the start wrapper as a role's shim starts it: the argv startArgv renders,
+// run under /bin/sh from start, its own directory, with stdin holding what the shim would write
+// the agent, bin first on PATH, and bun's image path replaced by bun when bun is set.
+type startRun struct {
+	exit           int
+	stdout, stderr string
+}
+
+func runStart(t *testing.T, start, bin, bun string, plugins *runtime.PluginInstall, setup, agent []string) startRun {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no /bin/sh in this environment")
+	}
+	argv := startArgv(filepath.Join(t.TempDir(), "state"), 3, plugins, setup, agent)
+	if bun != "" {
+		argv[2] = strings.Replace(argv[2], "/usr/local/bin/bun", bun, 1)
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Dir = start
+	cmd.Stdin = strings.NewReader("frame\n")
+	cmd.Env = append(os.Environ(), "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var exit *exec.ExitError
+	switch {
+	case err == nil:
+		return startRun{0, stdout.String(), stderr.String()}
+	case errors.As(err, &exit):
+		return startRun{exit.ExitCode(), stdout.String(), stderr.String()}
+	}
+	t.Fatalf("run the start wrapper: %v", err)
+	return startRun{}
+}
+
+// recorder is a command that appends its working directory, each of its arguments, and what it
+// read on stdin to the file at log, one per line, then prints out on stdout: the stand-in for the
+// setup command and for Oh My Pi.
+func recorder(log, out string, args ...string) []string {
+	script := `log=$1; out=$2; shift 2; { pwd; printf 'arg %s\n' "$@"; printf 'stdin %s\n' "$(cat)"; } >>"$log"; echo "$out"`
+	return append([]string{"/bin/sh", "-c", script, "recorder", log, out}, args...)
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+}
+
+// A setup command that succeeds runs in the directory the wrapper started in, with every word as
+// the daemon handed it — spaces, quotes, `$` and globs reach it unexpanded — with nothing on stdin
+// and its stdout on stderr, so the shim's RPC frames reach the agent alone and nothing of the setup
+// enters the frame stream the shim reads; then Oh My Pi starts there with its own argv, and stdin.
+func TestASucceedingSetupCommandRunsBeforeTheAgentInTheStartDirectory(t *testing.T) {
+	dir := t.TempDir()
+	start := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(start, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	setupLog, agentLog := filepath.Join(dir, "setup.log"), filepath.Join(dir, "agent.log")
+	words := []string{"a b", "it's", "$HOME", "*", "--"}
+	got := runStart(t, start, dir, "", nil,
+		recorder(setupLog, "setup-stdout", words...),
+		recorder(agentLog, "agent-stdout", "--mode", "rpc", "$PATH"))
+	if got.exit != 0 {
+		t.Fatalf("the wrapper exited %d:\n%s", got.exit, got.stderr)
+	}
+	want := append([]string{start}, "arg a b", "arg it's", "arg $HOME", "arg *", "arg --", "stdin ")
+	if lines := readLines(t, setupLog); !slices.Equal(lines, want) {
+		t.Errorf("the setup command recorded %q, want %q", lines, want)
+	}
+	if lines, want := readLines(t, agentLog), []string{start, "arg --mode", "arg rpc", "arg $PATH", "stdin frame"}; !slices.Equal(lines, want) {
+		t.Errorf("the agent recorded %q, want %q", lines, want)
+	}
+	if got.stdout != "agent-stdout\n" {
+		t.Errorf("the wrapper's stdout is %q, want the agent's alone", got.stdout)
+	}
+	if !strings.Contains(got.stderr, "setup-stdout") {
+		t.Errorf("the setup command's stdout is not on stderr: %q", got.stderr)
+	}
+}
+
+// A setup command that fails, or cannot be run at all, ends the wrapper with its status before Oh
+// My Pi starts: the agent never runs, the wrapper's exit is the command's, and stderr — the role's
+// log — carries the command's own output and the line saying Oh My Pi was not started.
+func TestAFailingSetupCommandNeverStartsTheAgent(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup  []string
+		exit   int
+		output string
+	}{
+		"a non-zero exit": {[]string{"/bin/sh", "-c", "echo boom >&2; exit 7"}, 7, "boom"},
+		"no such command": {[]string{"/nonexistent/legion-setup"}, 127, "/nonexistent/legion-setup"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			agentLog := filepath.Join(dir, "agent.log")
+			got := runStart(t, dir, dir, "", nil, tc.setup, recorder(agentLog, "agent-stdout"))
+			if got.exit != tc.exit {
+				t.Errorf("the wrapper exited %d, want %d:\n%s", got.exit, tc.exit, got.stderr)
+			}
+			if _, err := os.Stat(agentLog); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the agent ran (%v)", err)
+			}
+			if got.stdout != "" {
+				t.Errorf("the wrapper wrote %q to stdout, the shim's frame stream", got.stdout)
+			}
+			line := fmt.Sprintf("legion setup: runtime.kubernetes.setup exited %d; not starting Oh My Pi", tc.exit)
+			if !strings.Contains(got.stderr, tc.output) || !strings.Contains(got.stderr, line) {
+				t.Errorf("stderr is %q, want the command's %q and %q", got.stderr, tc.output, line)
+			}
+		})
+	}
+}
+
+// An installing launch with a setup command installs the pair first, in its generation
+// directory, then runs the setup command and then the agent, both in the directory the wrapper
+// started in: the install's cd into its generation directory ends with the install. bun and node
+// are stand-ins that record their order and directory.
+func TestAnInstallRunsBeforeTheSetupCommandAndLeavesTheStartDirectory(t *testing.T) {
+	dir := t.TempDir()
+	start := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(start, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	order := filepath.Join(dir, "order")
+	stub := "#!/bin/sh\necho \"$(basename \"$0\") $(pwd)\" >>" + shellQuote(order) + "\n"
+	for _, name := range []string{"bun", "node"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(stub), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record := func(what string) []string {
+		return []string{"/bin/sh", "-c", `echo "$1 $(pwd)" >>"$0"`, order, what}
+	}
+	got := runStart(t, start, dir, filepath.Join(dir, "bun"), testPlugins(), record("setup"), record("agent"))
+	if got.exit != 0 {
+		t.Fatalf("the wrapper exited %d:\n%s", got.exit, got.stderr)
+	}
+	lines := readLines(t, order)
+	if len(lines) != 4 {
+		t.Fatalf("the run recorded %q, want bun, node, setup, agent", lines)
+	}
+	for i, want := range []string{"bun ", "node ", "setup " + start, "agent " + start} {
+		if !strings.HasPrefix(lines[i], want) {
+			t.Errorf("step %d is %q, want %q", i, lines[i], want)
+		}
+	}
+	if strings.HasSuffix(lines[0], " "+start) || !strings.Contains(lines[0], "/legion-plugins/g3") {
+		t.Errorf("bun ran in %q, want the generation directory", lines[0])
+	}
+}
+
+// shellQuote is value as one single-quoted shell word.
+func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }

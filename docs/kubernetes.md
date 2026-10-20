@@ -1048,8 +1048,10 @@ refuses leaves the claim live and stale, so the orphan sweep — the one periodi
 reads every claim — posts it again until one attempt starts).
 
 Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
-replacing it: the role container's shim runs an install script,
-`/bin/sh -c '<install script>' legion-plugins <omp argv…>`, which runs
+replacing it: the role container's shim runs the start wrapper,
+`/bin/sh -c '<start script>' legion-start <n> <setup command…> <omp argv…>` (`startArgv`,
+`internal/runtime/sandbox/plugins.go`; `<n>` is the setup command's word count, 0 with none),
+whose install step runs
 `bun add --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a tarball path or
 URL source is handed to `bun add` as written) into a fresh generation directory,
 `$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/home/legion/.local/state/<role>/legion-plugins/g<N>/`),
@@ -1144,6 +1146,7 @@ runtime:
       refresh_minutes: 10       # default 10; how long between the cache's fetches from GitHub
       retain_hours: 168         # default 168; how long a cache outlives its repository leaving the mapping
       resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # the defaults
+    setup: [/bin/sh, -c, '<command>']   # optional: run in every role's container before each start of its Oh My Pi (below)
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
 worker_stream_port: <the port advertise_host or bind serves it on>
@@ -1226,6 +1229,9 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 - `agent_secrets.operator`, removed with LEGION-664: the daemon logs in with its own ServiceAccount
   token (`token_file`), which no person approves, so it names no approver;
 - an image that is not pinned by digest;
+- a `setup` that is not a list of non-empty strings (`runtime.kubernetes.setup must be an array
+  of non-empty strings`), or an empty list (`runtime.kubernetes.setup must name a command: leave it
+  out to run none`);
 - `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
   one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
   `pvc` (an inert key is refused, never ignored). At boot the daemon also refuses a
@@ -1260,6 +1266,42 @@ Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.ym
 overlay, and the pod that mounts them; the operator keeps their own copies of the two files in a
 directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
 proofs run on the example, each with its own copy of its ConfigMap.
+
+`setup` is the deployment's setup command, an argv run in every role's container — each workflow
+role's in an issue pod, and the controller's under `controller: daemon` — before each start of
+that role's Oh My Pi: a fresh role's, a resumed one's and a replaced pod's alike, since a relaunch
+may come up in a new pod, whose filesystem outside its volumes is new. It is one command for every
+role; a shell command is `[/bin/sh, -c, '<command>']`. It runs as the role's
+user (uid 1000), in the container's working directory (the issue's workspace, or the controller's
+`/legion`), with the environment Oh My Pi gets: the role's gh files and the git credential
+entries ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so a `git clone` of a repository
+one of the project's owners holds, which the role's App is installed on, is answered with the
+role's own token. It runs after the install a stale-plugin relaunch makes
+([Contract discipline](#contract-discipline)), with stdin from `/dev/null` and its stdout on
+stderr, so neither touches the RPC stream the shim and Oh My Pi share; its output is in the role
+container's log. Oh My Pi starts only once it exits 0. A non-zero exit ends the start with
+`legion setup: runtime.kubernetes.setup exited <status>; not starting Oh My Pi` on stderr and the
+command's own exit status, which the launcher reports as the generation's exit: the daemon reads
+the role as gone, charges a launch failure, and retries until the budget ends the claim in a
+`worker-died`, as it does an install that fails. Its run counts against the launch's registration
+deadline (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, 360 s by
+default) and adds to every start's time. The container's filesystem keeps what an earlier start
+in the same pod wrote, so a command that installs something should succeed when it is already
+there. An Oh My Pi plugin from a marketplace repository, for example:
+
+```yaml
+runtime:
+  kubernetes:
+    setup:
+      - /bin/sh
+      - -c
+      - '{ omp plugin marketplace update acme-skills || omp plugin marketplace add acme/agent-skills; } && omp plugin install agent-skills@acme-skills --force'
+```
+
+`acme-skills` is the `name` the repository's marketplace file gives; `omp plugin marketplace add`
+refuses a name already added, and `omp plugin install` an installed plugin without `--force`. On a
+container's first start the `update` finds no such marketplace, so the role's log shows one
+`Failed to update marketplace … not found` line before the `add` succeeds; that line is expected.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
@@ -1732,11 +1774,21 @@ directory of the owner the command targets, read as gh reads it from the real gh
 docs/deployment.md, "What a pane's gh, git and jj are"), and at the issue owner's when the command
 names no repository at all; a command it cannot read for certain, one naming two owners, and one
 naming an owner the bundle holds no directory for are refused with exit 2 and send nothing. `git`
-reads the same files through the shared clone's
-`credential.helper`, `!legion git-credential`, with `credential.useHttpPath` on, so the helper
-answers from the `hosts.yml` of the owner in the path git asks about and from nothing else;
-`workspace-init provision` is passed it as `--credential-helper '!legion git-credential'`, and the
-`legion` in it resolves on the PATH of whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
+reads the same files through `!legion git-credential`
+(`workspace.GitHubCredentialHelper`) with `credential.useHttpPath` on, so the helper answers from
+the `hosts.yml` of the owner in the path git asks about and from nothing else. The shared clone
+names it as its `credential.helper`: `workspace-init provision` is passed it as
+`--credential-helper '!legion git-credential'`. Every role container is also told it outside any
+clone, as three git configuration entries git reads after every configuration file
+(`gitCredentialEnv`, `manifest.go`): `GIT_CONFIG_COUNT=3`,
+`credential.https://github.com.helper` reset to empty and then set to `!legion git-credential`,
+and `credential.https://github.com.useHttpPath=true`. So every git a role runs, the setup
+command's ([Configuration](#configuration)) and an agent's own clone of another repository
+included, answers `https://github.com/<owner>/…` from the role's own files when `<owner>` is an
+owner the bundle holds a directory for (one of the project's) and the role's App is installed on
+that repository; git in the shared clone asks the same helper it asked before, and every other
+host is left to the configuration files. The `legion` in the helper resolves on the PATH of
+whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
 `GH_HOST` are set to the empty string, which gh ignores, so no value the image or an operator's rc
 file leaves in the environment outranks the files. No container is told `LEGION_GIT_PATH`,
 `LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a grant file (the `legion` tool mints the grants for
@@ -3506,8 +3558,9 @@ controller as an address that moved and relaunches it, resuming its session;
 `legion controller start` drops an inherited value, and any controller but this one ignores it),
 the launch secrets' `<NAME>_FILE` pointers, and the six gh variables exactly as an issue pod's role
 container is told them (`LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, `GH_CONFIG_DIR` its first owner's
-directory there, `LEGION_GH_PATH=/usr/local/bin/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`),
-and nothing of
+directory there, `LEGION_GH_PATH=/usr/local/bin/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`)
+and the git credential entries every role container is told
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
 prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, the
 project's repositories sentence, the project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
