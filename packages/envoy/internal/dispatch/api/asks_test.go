@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -101,5 +102,143 @@ func TestCreateAskRejectsApprovalKind(t *testing.T) {
 	})
 	if created.Code != http.StatusBadRequest || !strings.Contains(created.Body.String(), `"code":"ASK_KIND_INPUT"`) {
 		t.Fatalf("create client approval ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+}
+
+// issueAskListThread is an issue ask row's thread as a client reads it, and the same four keys
+// the single-ask read returns at its top level, so the two can be compared.
+type issueAskListThread struct {
+	Replies   []model.Comment     `json:"replies"`
+	Edits     []model.AskEdit     `json:"edits"`
+	Answers   []model.AskAnswer   `json:"answers"`
+	Followers []model.AskFollower `json:"followers"`
+}
+
+// issueAskListRow names the ask fields a reader had before the row carried a thread, so
+// decoding proves they are still at the row's own top level, beside the two new keys.
+type issueAskListRow struct {
+	ID            string              `json:"id"`
+	State         string              `json:"state"`
+	Question      string              `json:"question"`
+	OpenedEventID *int64              `json:"opened_event_id"`
+	LastReply     *model.AskLastReply `json:"last_reply"`
+	Thread        issueAskListThread  `json:"thread"`
+}
+
+func listIssueAskRows(t *testing.T, handler http.Handler, issueKey, query string) []issueAskListRow {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/asks"+query, nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("list issue asks %q: status=%d body=%s", query, response.Code, response.Body.String())
+	}
+	return decodeBody[[]issueAskListRow](t, response)
+}
+
+// An issue's ask list carries what a client would otherwise fetch once per ask: the newest
+// reply to order by, and the thread to render. Every state is listed, each row is still the
+// ask it was before, and each thread is the one the single-ask read hands back.
+func TestIssueAskListCarriesLastReplyAndThread(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue ask rows", "A spec")
+
+	open := createEditableAsk(t, handler, issue.Key)
+	replyToAskAs(t, handler, issue.Key, open.ID, "session-open-replier", "Still deciding.")
+	if edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+open.ID, map[string]any{
+		"question": "Which transport should we implement?",
+		"actor":    sessionActor(),
+	}); edited.Code != http.StatusOK {
+		t.Fatalf("reword the open ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+
+	answeredID := openAskAs(t, handler, issue.Key, "session-answered", "Ship it?")
+	replyToAskAs(t, handler, issue.Key, answeredID, "session-answer-replier", "The release note is ready.")
+	if answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answeredID+"/answer", map[string]any{
+		"selected": []string{"Yes"},
+	}, "alice"); answered.Code != http.StatusOK {
+		t.Fatalf("answer ask: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+
+	retractedID := openAskAs(t, handler, issue.Key, "session-retracted", "Rename the component?")
+	if retracted := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+retractedID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "No longer needed",
+		"actor": map[string]any{"kind": "session", "id": "session-retracted"},
+	}); retracted.Code != http.StatusOK {
+		t.Fatalf("retract ask: status=%d body=%s", retracted.Code, retracted.Body.String())
+	}
+
+	rows := listIssueAskRows(t, handler, issue.Key, "")
+	byID := make(map[string]issueAskListRow, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	if len(rows) != 3 || len(byID) != 3 {
+		t.Fatalf("issue ask list = %#v, want the open, answered and retracted asks", rows)
+	}
+
+	openRow, answeredRow, retractedRow := byID[open.ID], byID[answeredID], byID[retractedID]
+	// Every field a reader already had is still the row's own, not nested under the ask.
+	if openRow.State != "open" || openRow.Question != "Which transport should we implement?" || openRow.OpenedEventID == nil {
+		t.Fatalf("open ask row = %#v, want the ask's own fields at the row's top level", openRow)
+	}
+	if answeredRow.State != "answered" || retractedRow.State != "resolved" {
+		t.Fatalf("listed states = %q and %q, want answered and resolved", answeredRow.State, retractedRow.State)
+	}
+
+	// The newest reply is the one a client sorts by; an ask nobody replied to has none.
+	if openRow.LastReply == nil || openRow.LastReply.Author.ID != "session-open-replier" || openRow.LastReply.CreatedAt == "" {
+		t.Fatalf("open ask last_reply = %#v, want the replying session's reply", openRow.LastReply)
+	}
+	if answeredRow.LastReply == nil || answeredRow.LastReply.Author.ID != "session-answer-replier" {
+		t.Fatalf("answered ask last_reply = %#v, want the replying session's reply", answeredRow.LastReply)
+	}
+	if retractedRow.LastReply != nil {
+		t.Fatalf("retracted ask last_reply = %#v, want null on an ask nobody replied to", retractedRow.LastReply)
+	}
+
+	if len(openRow.Thread.Replies) != 1 || openRow.Thread.Replies[0].Body != "Still deciding." {
+		t.Fatalf("open ask replies = %#v, want the one reply", openRow.Thread.Replies)
+	}
+	if len(openRow.Thread.Edits) != 1 || openRow.Thread.Edits[0].Previous.Question != "Which implementation?" {
+		t.Fatalf("open ask edits = %#v, want the rewording it went through", openRow.Thread.Edits)
+	}
+	if got := followerSessions(openRow.Thread.Followers); !strings.Contains(strings.Join(got, ","), "session-open-replier") {
+		t.Fatalf("open ask followers = %v, want the replying session among them", got)
+	}
+	if len(answeredRow.Thread.Answers) != 1 || answeredRow.Thread.Answers[0].User != "alice" ||
+		len(answeredRow.Thread.Answers[0].Selected) != 1 || answeredRow.Thread.Answers[0].Selected[0] != "Yes" {
+		t.Fatalf("answered ask answers = %#v, want Alice's one answer", answeredRow.Thread.Answers)
+	}
+	if openRow.Thread.Answers == nil || retractedRow.Thread.Replies == nil ||
+		retractedRow.Thread.Edits == nil || retractedRow.Thread.Answers == nil || retractedRow.Thread.Followers == nil {
+		t.Fatalf("empty thread parts = %#v and %#v, want arrays rather than null", openRow.Thread, retractedRow.Thread)
+	}
+
+	// The thread the list carries is the one the per-ask fetch it replaces would have returned.
+	for _, askID := range []string{open.ID, answeredID, retractedID} {
+		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")
+		if read.Code != http.StatusOK {
+			t.Fatalf("read ask %q: status=%d body=%s", askID, read.Code, read.Body.String())
+		}
+		if expected := decodeBody[issueAskListThread](t, read); !reflect.DeepEqual(byID[askID].Thread, expected) {
+			t.Fatalf("listed thread for %q = %#v, want the ask read's %#v", askID, byID[askID].Thread, expected)
+		}
+	}
+
+	// ?state= still narrows the same list.
+	if filtered := listIssueAskRows(t, handler, issue.Key, "?state=open"); len(filtered) != 1 || filtered[0].ID != open.ID {
+		t.Fatalf("?state=open = %#v, want the open ask alone", filtered)
+	}
+	if filtered := listIssueAskRows(t, handler, issue.Key, "?state=answered"); len(filtered) != 1 || filtered[0].ID != answeredID {
+		t.Fatalf("?state=answered = %#v, want the answered ask alone", filtered)
+	}
+}
+
+func TestIssueAskListWithoutAsksIsAnEmptyArray(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "No asks", "A spec")
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/asks", nil, "alice")
+	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "[]" {
+		t.Fatalf("list an issue with no asks: status=%d body=%s, want []", response.Code, response.Body.String())
 	}
 }

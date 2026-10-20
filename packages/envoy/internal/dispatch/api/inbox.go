@@ -21,7 +21,10 @@ type inboxDocument struct {
 	Name    string `json:"name"`
 }
 
-type inboxAskThread struct {
+// askThread is the initial data a card renders beside an ask: its reply chain, the rewordings
+// the question went through, its answers, and the sessions it reaches. The Inbox and an issue's
+// ask list both carry one per ask, so a client renders a thread without a fetch per ask.
+type askThread struct {
 	Replies   []model.Comment     `json:"replies"`
 	Edits     []model.AskEdit     `json:"edits"`
 	Answers   []model.AskAnswer   `json:"answers"`
@@ -38,7 +41,7 @@ type inboxAsk struct {
 	// It is surfaced, never filtered: the row stays in everyone's inbox including its snoozer's,
 	// who folds it away while this moment is still ahead and sees it again once it passes.
 	SnoozedUntil *string        `json:"snoozed_until"`
-	Thread       inboxAskThread `json:"thread"`
+	Thread       askThread      `json:"thread"`
 }
 
 // inboxAssigneeFilter turns ?assignee= into the SQL mode and email the inbox query binds:
