@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -11,14 +12,14 @@ import (
 )
 
 func TestParseSetupMarker(t *testing.T) {
-	line := "setup:architect:pod-1/3 cwd=/legion/workspaces/sjawhar/legion-smoke/s4a-1 uid=1000 ppid=41 git_from=/tmp helper=expected helper_count=1 git=ok"
+	line := "setup:architect:pod-1/3 cwd=/legion/workspaces/sjawhar/legion-smoke/s4a-1 uid=1000 ppid=41 git_from=/tmp helper=expected helper_count=1 helper_lines=2 git=ok"
 	got, err := parseSetupMarker(line)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := (setupMarker{
 		role: "architect", incarnation: "pod-1/3", cwd: "/legion/workspaces/sjawhar/legion-smoke/s4a-1",
-		uid: "1000", ppid: "41", gitFrom: "/tmp", helper: "expected", helperCount: "1", git: "ok",
+		uid: "1000", ppid: "41", gitFrom: "/tmp", helper: "expected", helperCount: "1", helperLines: "2", git: "ok",
 	}); got != want {
 		t.Errorf("parseSetupMarker(%q) = %#v, want %#v", line, got, want)
 	}
@@ -59,8 +60,12 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir, bin := t.TempDir(), t.TempDir()
-	marker, agentPID, gitCWD, gitEnv, gitRemoteEnv, global := filepath.Join(dir, "marker"), filepath.Join(dir, "agent-pid"), filepath.Join(dir, "git-cwd"), filepath.Join(dir, "git-env"), filepath.Join(dir, "git-remote-env"), filepath.Join(dir, "gitconfig")
+	marker, agentPID, gitCWD, gitRemoteEnv, global := filepath.Join(dir, "marker"), filepath.Join(dir, "agent-pid"), filepath.Join(dir, "git-cwd"), filepath.Join(dir, "git-remote-env"), filepath.Join(dir, "gitconfig")
 	git := `#!/bin/sh
 audit() {
   home=nonempty
@@ -72,10 +77,7 @@ audit() {
   printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "${GIT_ASKPASS-unset}" "${SSH_ASKPASS-unset}" "${GH_TOKEN-unset}" "${GITHUB_TOKEN-unset}" "${GIT_CONFIG_GLOBAL-unset}" "${GIT_CONFIG_PARAMETERS-unset}" "$GIT_CONFIG_NOSYSTEM" "$GIT_CONFIG_COUNT" "$home" "$keys" >"$1"
 }
 if [ "$1" = config ]; then
-  audit "$LIVE_SETUP_GIT_ENV"
-  printf 'command\tcredential.https://github.com.helper\t\n'
-  printf 'command\tcredential.https://github.com.helper\t!legion git-credential\n'
-  exit 0
+  exec "$LIVE_SETUP_REAL_GIT" "$@"
 fi
 audit "$LIVE_SETUP_GIT_REMOTE_ENV"
 printf '%s\n' "$PWD" >"$LIVE_SETUP_GIT_CWD"
@@ -98,14 +100,10 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	t.Setenv("GITHUB_TOKEN", "must-be-unset")
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'http.extraheader'='Authorization: bearer fake-token'")
-	t.Setenv("GIT_CONFIG_COUNT", "3")
-	t.Setenv("GIT_CONFIG_KEY_0", "credential.https://github.com.helper")
-	t.Setenv("GIT_CONFIG_VALUE_0", "")
-	t.Setenv("GIT_CONFIG_KEY_1", "credential.https://github.com.helper")
-	t.Setenv("GIT_CONFIG_VALUE_1", "!legion git-credential")
-	t.Setenv("GIT_CONFIG_KEY_2", "credential.https://github.com.useHttpPath")
-	t.Setenv("GIT_CONFIG_VALUE_2", "true")
-	t.Setenv("LIVE_SETUP_GIT_ENV", gitEnv)
+	for _, variable := range gitCredentialEnv() {
+		t.Setenv(variable.Name, variable.Value)
+	}
+	t.Setenv("LIVE_SETUP_REAL_GIT", realGit)
 	t.Setenv("LIVE_SETUP_GIT_REMOTE_ENV", gitRemoteEnv)
 	agent := []string{"/bin/sh", "-c", `printf '%s\n' "$$" >"$1"; printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER"`, "agent", agentPID}
 	if got := runStart(t, dir, bin, "", nil, liveSetup(repo), agent); got.exit != 0 {
@@ -135,14 +133,11 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	if setup.gitFrom != "/tmp" || setup.git != "ok" {
 		t.Errorf("setup git record = from %q, result %q; want /tmp and ok", setup.gitFrom, setup.git)
 	}
-	if setup.helper != "expected" || setup.helperCount != "1" {
-		t.Errorf("setup helper record = classification %q, count %q; want expected and one", setup.helper, setup.helperCount)
+	if setup.helper != "expected" || setup.helperCount != "1" || setup.helperLines != "2" {
+		t.Errorf("setup helper record = classification %q, count %q, lines %q; want expected, one and two", setup.helper, setup.helperCount, setup.helperLines)
 	}
 	if got, err := os.ReadFile(gitCWD); err != nil || strings.TrimSpace(string(got)) != "/tmp" {
 		t.Errorf("git cwd = %q, %v; want /tmp", got, err)
-	}
-	if got, err := os.ReadFile(gitEnv); err != nil || strings.TrimSpace(string(got)) != "unset|unset|unset|unset|unset|unset|1|3|empty|preserved" {
-		t.Errorf("git environment = %q, %v; want the neutralized askpass, token, global-config and parameter environment with an empty temporary HOME and preserved command config", got, err)
 	}
 	if got, err := os.ReadFile(gitRemoteEnv); err != nil || strings.TrimSpace(string(got)) != "unset|unset|unset|unset|unset|unset|1|3|empty|preserved" {
 		t.Errorf("git ls-remote environment = %q, %v; want the same neutralized credential environment", got, err)
@@ -158,12 +153,15 @@ func TestLiveSetupNeverRecordsAHelperValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
 	dir, bin := t.TempDir(), t.TempDir()
 	marker, agentPID := filepath.Join(dir, "marker"), filepath.Join(dir, "agent-pid")
 	git := `#!/bin/sh
 if [ "$1" = config ]; then
-  printf 'command\tcredential.https://github.com.helper\t!legion git-credential token=` + poison + `\n'
-  exit 0
+  exec "$LIVE_SETUP_REAL_GIT" "$@"
 fi
 printf '0123456789012345678901234567890123456789\tHEAD\n'
 `
@@ -174,6 +172,11 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	t.Setenv("LEGION_ROLE", "architect")
 	t.Setenv("POD_UID", "pod-1")
 	t.Setenv("LEGION_GENERATION", "3")
+	for _, variable := range gitCredentialEnv() {
+		t.Setenv(variable.Name, variable.Value)
+	}
+	t.Setenv("GIT_CONFIG_VALUE_1", "!legion git-credential\tfuture="+poison)
+	t.Setenv("LIVE_SETUP_REAL_GIT", realGit)
 	agent := []string{"/bin/sh", "-c", `printf '%s\n' "$$" >"$1"; printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER"`, "agent", agentPID}
 	got := runStart(t, dir, bin, "", nil, liveSetup(repo), agent)
 	if got.exit != 0 {
@@ -190,8 +193,8 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	if err != nil {
 		t.Fatal(err)
 	}
-	if setup.helper != "other" || setup.helperCount != "1" {
-		t.Fatalf("setup classification = %q with count %q, want other and one", setup.helper, setup.helperCount)
+	if setup.helper != "other" || setup.helperCount != "1" || setup.helperLines != "2" {
+		t.Fatalf("setup classification = %q with count %q and lines %q, want other, one and two", setup.helper, setup.helperCount, setup.helperLines)
 	}
 	err = setupHelperProblem(setup)
 	if err == nil {
@@ -200,4 +203,71 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	if strings.Contains(err.Error(), poison) {
 		t.Fatalf("setup helper error leaks helper text %q: %q", poison, err)
 	}
+	if !strings.Contains(err.Error(), "lines 2") {
+		t.Fatalf("setup helper error %q does not name helper_lines", err)
+	}
+}
+
+func TestLiveSetupClassifiesGitCredentialEnv(t *testing.T) {
+	for name, changed := range map[string]bool{
+		"the runtime helper": false,
+		"a changed helper":   true,
+	} {
+		t.Run(name, func(t *testing.T) {
+			setup := runSetupWithGitCredentialEnv(t, changed)
+			want := "expected"
+			if changed {
+				want = "other"
+			}
+			if setup.helper != want || setup.helperCount != "1" || setup.helperLines != "2" {
+				t.Errorf("setup classification = %q with count %q and lines %q, want %q, one and two", setup.helper, setup.helperCount, setup.helperLines, want)
+			}
+		})
+	}
+}
+
+func runSetupWithGitCredentialEnv(t *testing.T, changed bool) setupMarker {
+	t.Helper()
+	repo, err := ghrepo.Parse("repo", "sjawhar/legion-smoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, bin := t.TempDir(), t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	git := `#!/bin/sh
+if [ "$1" = config ]; then
+  exec "$LIVE_SETUP_REAL_GIT" "$@"
+fi
+printf '0123456789012345678901234567890123456789\tHEAD\n'
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(git), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LEGION_E2E_MARKER", marker)
+	t.Setenv("LEGION_ROLE", "architect")
+	t.Setenv("POD_UID", "pod-1")
+	t.Setenv("LEGION_GENERATION", "3")
+	for _, variable := range gitCredentialEnv() {
+		t.Setenv(variable.Name, variable.Value)
+	}
+	if changed {
+		t.Setenv("GIT_CONFIG_VALUE_1", "!different git-credential")
+	}
+	t.Setenv("LIVE_SETUP_REAL_GIT", realGit)
+	if got := runStart(t, dir, bin, "", nil, liveSetup(repo), []string{"/bin/true"}); got.exit != 0 {
+		t.Fatalf("the wrapper exited %d: %s", got.exit, got.stderr)
+	}
+	line := readLines(t, marker)
+	if len(line) != 1 {
+		t.Fatalf("marker lines = %q, want its setup line alone", line)
+	}
+	setup, err := parseSetupMarker(line[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return setup
 }
