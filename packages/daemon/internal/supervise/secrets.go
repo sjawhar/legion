@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -197,20 +198,9 @@ func podTokenExpiry(token string) (time.Time, bool) {
 	return time.Unix(claims.Exp, 0), true
 }
 
-// revoke ends the let-go process's enrollment at the broker: the first attempt on a goroutine of
-// the machine's (counted like a send, so Wait covers it), each later one in a clock callback
-// revokeRetryDelay after the last failure, revokeAttempts in all. No goroutine waits on a broker
-// outage, and a fake clock drives the retries in tests. Past the last attempt the lease ends the
-// enrollment; the give-up line says so. A permanent refusal (PermanentError) is not retried: the
-// broker ends a pod enrollment only for the launcher credential that made it. A daemon's token
-// login keeps its account's one credential across restarts, so the refusal NOT_ENROLLING_CREDENTIAL
-// reaches only an enrollment another credential made (one a person approved before token logins),
-// which ends one lease after its pod stops renewing.
+// revoke ends the let-go process's enrollment at the broker on a goroutine of the machine's. Each
+// later attempt is a clock callback; Wait covers only the first call.
 func (m *Machine) revoke(e Enrollment) {
-	if m.deps.Secrets == nil {
-		m.log.Warn("supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it", "enrollment", e.ID)
-		return
-	}
 	m.goroutines++
 	go func() {
 		defer func() {
@@ -219,29 +209,38 @@ func (m *Machine) revoke(e Enrollment) {
 			m.idle.Broadcast()
 			m.mu.Unlock()
 		}()
-		m.revokeAttempt(e, 1)
+		RevokeEnrollment(m.ctx, m.deps, m.log, e)
 	}()
 }
 
-// revokeAttempt is one DELETE of the enrollment. It reads nothing the lock guards — deps, the
-// logger, and the machine's context are fixed at construction — so a clock callback may run it.
-func (m *Machine) revokeAttempt(e Enrollment, attempt int) {
-	revoking, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-	err := m.deps.Secrets.Revoke(revoking, e.ID)
+// RevokeEnrollment ends a stale enrollment, retrying transient failures on deps.Clock. It is shared
+// by a machine that lets a process go and boot repair that finds an enrollment whose process was
+// never recorded.
+func RevokeEnrollment(ctx context.Context, deps Deps, log *slog.Logger, e Enrollment) {
+	if deps.Secrets == nil {
+		log.Warn("supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it", "enrollment", e.ID)
+		return
+	}
+	revokeEnrollmentAttempt(ctx, deps, log, e, 1)
+}
+
+func revokeEnrollmentAttempt(ctx context.Context, deps Deps, log *slog.Logger, e Enrollment, attempt int) {
+	revoking, cancel := context.WithTimeout(ctx, deps.Timeouts.RPC)
+	err := deps.Secrets.Revoke(revoking, e.ID)
 	cancel()
 	if err == nil {
-		m.log.Info("supervise: agent-secrets: enrollment revoked", "enrollment", e.ID, "incarnation", e.Incarnation, "attempt", attempt)
+		log.Info("supervise: agent-secrets: enrollment revoked", "enrollment", e.ID, "incarnation", e.Incarnation, "attempt", attempt)
 		return
 	}
 	var permanent PermanentError
 	if errors.As(err, &permanent) && permanent.Permanent() {
-		m.log.Warn("supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing", "enrollment", e.ID, "error", err)
+		log.Warn("supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing", "enrollment", e.ID, "error", err)
 		return
 	}
-	m.log.Warn("supervise: agent-secrets: revocation failed", "enrollment", e.ID, "attempt", attempt, "error", err)
-	if attempt >= revokeAttempts || m.ctx.Err() != nil {
-		m.log.Error("supervise: agent-secrets: enrollment not revoked after every attempt; the lease ends it", "enrollment", e.ID, "attempts", attempt)
+	log.Warn("supervise: agent-secrets: revocation failed", "enrollment", e.ID, "attempt", attempt, "error", err)
+	if attempt >= revokeAttempts || ctx.Err() != nil {
+		log.Error("supervise: agent-secrets: enrollment not revoked after every attempt; the lease ends it", "enrollment", e.ID, "attempts", attempt)
 		return
 	}
-	m.deps.Clock.AfterFunc(revokeRetryDelay, func() { m.revokeAttempt(e, attempt+1) })
+	deps.Clock.AfterFunc(revokeRetryDelay, func() { revokeEnrollmentAttempt(ctx, deps, log, e, attempt+1) })
 }

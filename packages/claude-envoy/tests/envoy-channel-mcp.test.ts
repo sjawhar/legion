@@ -59,6 +59,9 @@ test("over MCP the server offers only the Envoy tools, refuses dispatch_ask, poi
       ENVOY_URL: `http://127.0.0.1:${listener.port}`,
       CLAUDE_CODE_SESSION_ID: "ses_mcp",
       CLAUDE_PLUGIN_DATA: stateDirectory,
+      // The test runner, not `claude --channels`, starts this server, so the channel gate
+      // (`src/claude-channel.ts`) would find no channel and advertise nothing.
+      ENVOY_CHANNEL_LOADED: "1",
       DISPATCH_URL: `http://127.0.0.1:${dispatch.port}`,
       DISPATCH_TOKEN: "test-token",
     },

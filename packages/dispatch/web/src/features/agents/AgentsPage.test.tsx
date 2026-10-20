@@ -241,6 +241,40 @@ test("Agents lists live session activity and capability-aware actions", async ()
   }
 });
 
+// A Claude Code session takes Aside but not Send: the card's plain message goes as an Aside and
+// says so, rather than warning that the Send it would have been records a failed attempt. A
+// session that advertises no mode at all says on its card that it takes no messages.
+test("an agent card sends a plain message in the mode the session takes", async () => {
+  const deaf = { ...agents[1], capabilities: [], session_id: "deaf-session", title: "Deaf" };
+  const page = renderAgents({ listedAgents: [...agents, deaf] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const reviewer = card(region, "Reviewer");
+    expand(reviewer, "Reviewer");
+    fireEvent.change(within(reviewer).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Is the review done?" },
+    });
+    expect(
+      within(reviewer).getByText("Sending as Aside: Reviewer does not advertise Send.")
+    ).toBeTruthy();
+    fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
+    await waitFor(() =>
+      expect(page.createAgentMessage).toHaveBeenCalledWith("reviewer-session", {
+        body: "Is the review done?",
+        delivery: "aside",
+      })
+    );
+
+    const silent = card(region, "Deaf");
+    expand(silent, "Deaf");
+    expect(within(silent).getByText("Takes no messages")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents collapses every card by default and expands each one independently", async () => {
   const page = renderAgents();
 
@@ -791,9 +825,10 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
     });
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
+      // Planner takes Aside and BTW but not Send, so the plain message is an Aside.
       expect(page.createComment).toHaveBeenCalledWith("CORE-1", {
         body: "@Planner Track this under Core",
-        delivery: "steer",
+        delivery: "aside",
         mentions: [{ target: "session:planner-session" }],
       })
     );
@@ -1485,6 +1520,49 @@ test("an exchange answered within the Clear's millisecond but after it stays vis
   }
 });
 
+// A Claude Code session takes Aside alone: a reply into an exchange whose last attempt was a
+// Send it refused goes as an Aside, not as a BTW it refuses too.
+test("a reply to an Aside-only agent after a refused Send goes as an Aside", async () => {
+  const root = message("Can this ship?", {
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: recentAttemptAt,
+        delivery: "steer",
+        envelope_id: null,
+        error: "session reviewer-session () does not advertise steer",
+        message_id: "message-1",
+        reply_id: null,
+        session_id: "reviewer-session",
+        state: "failed",
+      },
+    ],
+    target: "session:reviewer-session",
+  });
+  const page = renderAgents({ messages: [{ message: root, replies: [] }] });
+
+  try {
+    const reviewer = card(await screen.findByRole("region", { name: "Agents" }), "Reviewer");
+    expand(reviewer, "Reviewer");
+    await within(reviewer).findByText("Can this ship?");
+    fireEvent.click(within(reviewer).getByRole("button", { name: "Reply" }));
+    fireEvent.change(within(reviewer).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Can this ship now?" },
+    });
+    fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
+    await waitFor(() =>
+      expect(page.createAgentMessage).toHaveBeenCalledWith("reviewer-session", {
+        body: "Can this ship now?",
+        delivery: "aside",
+        in_reply_to: "message-1",
+      })
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents replies to an issue-less exchange through the agent route, threaded under the answer", async () => {
   const root = message("Can this ship?", {
     deliveries: [
@@ -1825,6 +1903,46 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
   }
 });
 
+test("a broadcast whose selection holds an Aside-only session goes as an Aside until the sender picks a mode, and says so", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    let broadcast = within(region).getByRole("region", { name: "Broadcast" });
+    const mode = () =>
+      within(broadcast).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
+    // The Planner takes BTW: the broadcast's usual default, named by nothing.
+    expect(mode().value).toBe("btw");
+    expect(within(broadcast).queryByText(/Sending as Aside/)).toBeNull();
+    // The Reviewer advertises `aside` only, so the selection's mode becomes Aside and reaches both.
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    broadcast = within(region).getByRole("region", { name: "Broadcast" });
+    expect(mode().value).toBe("aside");
+    expect(
+      within(broadcast).getByText("Sending as Aside: Reviewer does not advertise BTW.")
+    ).toBeTruthy();
+    expect(within(broadcast).queryByText(/Excluded:/)).toBeNull();
+    fireEvent.change(within(broadcast).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Report status." },
+    });
+    fireEvent.click(within(broadcast).getByRole("button", { name: "Send to 2" }));
+    await waitFor(() =>
+      expect(page.createBroadcast).toHaveBeenCalledWith({
+        body: "Report status.",
+        delivery: "aside",
+        idempotency_key: expect.any(String),
+        session_ids: ["planner-session", "reviewer-session"],
+      })
+    );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("a broadcast composer labels a mode-mismatched recipient", () => {
   const [, reviewer] = agents;
   const composer = broadcastPlan(new Set([reviewer.session_id]), [reviewer], "btw");
@@ -1971,6 +2089,84 @@ test("Restore draft re-sends the refused request word for word, and the first ed
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
     expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
     expect(posted(page, 2).body).toBe("Keep this!");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Restore draft keeps a mode the sender did not pick unpicked, so it still follows the selection", async () => {
+  const page = renderAgents();
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const broadcast = () => within(region).getByRole("region", { name: "Broadcast" });
+    const mode = () =>
+      within(broadcast()).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
+    // The Reviewer takes Aside alone, so the selection's own mode is Aside.
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    fireEvent.change(within(broadcast()).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Report status." },
+    });
+    expect(mode().value).toBe("aside");
+    fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+
+    expect(mode().value).toBe("aside");
+    expect(within(broadcast()).getByText(/^Sending as Aside: Reviewer/)).toBeTruthy();
+    // Still the selection's: with only the Planner, which takes BTW, it is BTW again.
+    fireEvent.click(within(region).getByRole("checkbox", { name: "Select Planner for broadcast" }));
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    expect(mode().value).toBe("btw");
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a restored broadcast shows the mode it re-sends, even after the selection's own mode changed", async () => {
+  const [planner, reviewer] = agents;
+  const page = renderAgents({ listedAgents: [planner, reviewer] });
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const composer = () => within(region).getByRole("region", { name: "Broadcast" });
+    const mode = () =>
+      within(composer()).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Report status." },
+    });
+    expect(mode().value).toBe("aside");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
+
+    // The Reviewer now takes BTW too, so the selection's own mode would be BTW.
+    page.listAgents.mockResolvedValue([planner, { ...reviewer, capabilities: ["aside", "btw"] }]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+
+    // Held word for word, the request shows its own mode and goes in it.
+    expect(mode().value).toBe("aside");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(posted(page, 1)).toEqual(posted(page, 0));
   } finally {
     page.view.unmount();
     page.restore();
@@ -2315,6 +2511,13 @@ test("the header checkbox follows the filters and its count never hides a select
     // Everything, then narrow: the header counts the matching row and names the other one.
     fireEvent.click(header);
     expect(within(region).getByText("2 of 2 matching selected")).toBeTruthy();
+    // Picked, so the Aside-only Reviewer is left out of the count below.
+    fireEvent.change(
+      within(within(region).getByRole("region", { name: "Broadcast" })).getByRole("combobox", {
+        name: "Delivery mode",
+      }),
+      { target: { value: "btw" } }
+    );
     fireEvent.change(search, { target: { value: "PLANNER" } });
     await waitFor(() =>
       expect(within(region).queryByRole("heading", { level: 2, name: "Reviewer" })).toBeNull()

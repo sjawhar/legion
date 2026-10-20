@@ -428,6 +428,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       edit: undefined,
       kind,
       owner: { issueKey: "CORE-1", kind: "issue" },
+      plainDelivery: "steer",
       replyTo: null,
     });
   };

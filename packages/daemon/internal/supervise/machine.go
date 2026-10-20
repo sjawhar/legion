@@ -430,6 +430,10 @@ type Machine struct {
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
 	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
+	// relaunch is the relaunch relaunchLater left waiting, tried again when TimerRelaunch fires; it
+	// lives as long as that timer, which letGo disarms with it. It is memory only, as the timer is: a
+	// restart launches that claim again as an unfinished launch.
+	relaunch func(context.Context) error
 	// identity is the latest hello2 identity for the claim's current incarnation,
 	// kept until its enrollment lands; enrollmentSent is whether that enrollment has been handed
 	// to the shim over the claim's current connection.
@@ -733,6 +737,14 @@ func (m *Machine) Wait() {
 // about, the generation of a hello or a prompt outcome or a request, the session a request comes
 // from, the delivery a turn or a refusal or a timer names, and the arming a timer came from. It
 // reports whether the event goes on to the table.
+//
+// A hello and a registration are the two events that move a launch on (helloed, register), and a
+// live claim past launching records its process. So neither reaches the table while the claim is
+// a launch that records none (launchRecordsNoProcess): a hello is dropped, and a registration is
+// refused. The process that sent it is not the claim's: its launch was cut short by the daemon's
+// stop, which the next boot launches again once its orphan reconciliation has reaped every process
+// no claim records, or it is the process a relaunch waiting at the probe interval let go
+// (relaunchLater), which the relaunch waits out.
 func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	pending := m.claim.Pending
 	switch ev := ev.(type) {
@@ -748,6 +760,10 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 	case StreamHello:
 		if ev.Generation != m.claim.Generation {
 			m.dropStale("StreamHello", "generation", fmt.Sprint(ev.Generation), fmt.Sprint(m.claim.Generation))
+			return false, nil
+		}
+		if m.launchRecordsNoProcess() {
+			m.dropStale("StreamHello", "process", fmt.Sprint(ev.Generation), "none")
 			return false, nil
 		}
 	case StreamTurnStart:
@@ -779,7 +795,15 @@ func (m *Machine) fence(ctx context.Context, ev Event) (bool, error) {
 		}
 		delete(m.timers, ev.Kind)
 	case RequestRegister:
-		return m.fenceRequest("register", ev.Generation, ev.Session)
+		if pass, err := m.fenceRequest("register", ev.Generation, ev.Session); !pass {
+			return false, err
+		}
+		if m.launchRecordsNoProcess() {
+			m.log.Warn("supervise: refused a registration: the launch at its generation records no process",
+				"generation", ev.Generation, "session", ev.Session)
+			return false, &RefusedError{State: m.claim.State, Request: "register", Reason: "the launch records no process"}
+		}
+		return true, nil
 	case RequestReady:
 		return m.fenceRequest("ready", ev.Generation, ev.Session)
 	case RequestExit:
@@ -825,6 +849,13 @@ func (m *Machine) fenceRequest(request string, generation uint64, session string
 	return true, nil
 }
 
+// launchRecordsNoProcess is whether the claim is launching with no process recorded: a launch
+// written launching before it starts (launchAfter) and cut short, or a relaunch waiting at the
+// probe interval (relaunchLater). Every other live state records its process.
+func (m *Machine) launchRecordsNoProcess() bool {
+	return m.claim.State == StateLaunching && m.claim.Locator == nil
+}
+
 // dropStale logs a stale event the first time it is seen. The sweep observes every thirty seconds
 // and a shim replays its backlog on every reconnect, so the same stale fact arrives again and
 // again; the operator needs it once.
@@ -845,19 +876,22 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // failure and is tried again after the backoff (backOff), waiting out the same process, until the
 // budget runs out; only a start that succeeds forgets it. A launch that fails stops the process it
 // let go (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch)
-// starts nothing and is charged nothing, and so is one whose context ended under it — the daemon's
-// stop. A runtime waits out a cluster that answers a launch's requests overloaded inside the
-// launch's own deadline, so what reaches here failed the launch.
+// starts nothing and is charged nothing (relaunchRefused), and so is one whose context ended under
+// it — the daemon's stop. A runtime waits out a cluster that answers a launch's requests overloaded
+// inside the launch's own deadline, so what reaches here failed the launch.
 func (m *Machine) launch(ctx context.Context) error {
 	return m.launchAfter(ctx, false)
 }
 
 // launchAfter is launch, whose first try waits the backoff when charged: the launch follows a
 // launch failure charged just before it (relaunchAfterFailure). Each try is written launching, at
-// its generation and with every charge so far, before its backoff waits.
+// its generation and with every charge so far, before its backoff waits. A try whose write fails
+// has started nothing and is tried again at the probe interval (relaunchLater), the process it let
+// go stopped: by then the claim records no process, so nothing else would launch it before a
+// restart. One the daemon's stop cut short is left to the next boot, as a start it cut short is.
 func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 	if err := m.checkLaunch(ctx); err != nil {
-		return err
+		return m.relaunchRefused(ctx, func(ctx context.Context) error { return m.launchAfter(ctx, charged) }, err)
 	}
 	m.letGo()
 	for {
@@ -867,7 +901,14 @@ func (m *Machine) launchAfter(ctx context.Context, charged bool) error {
 
 		m.claim.State = StateLaunching
 		if err := m.persist(ctx); err != nil {
-			return errors.Join(err, m.stopPrevious(ctx))
+			err = errors.Join(err, m.stopPrevious(ctx))
+			if ctx.Err() != nil {
+				return err
+			}
+			m.log.Warn("supervise: the launch could not be written; trying it again at the probe interval",
+				"generation", m.claim.Generation, "error", err)
+			m.relaunchLater(func(ctx context.Context) error { return m.launchAfter(ctx, charged) })
+			return err
 		}
 		if charged {
 			if err := m.backOff(ctx); err != nil {
@@ -1065,19 +1106,19 @@ func (m *Machine) retire(ctx context.Context) error {
 	return m.persist(ctx)
 }
 
-// letGo ends what the machine had with the claim's process: no timer watches it, no send talks to
-// it, no suspension is held for its turn and no turn of it is interrupted any more (the interrupt's
-// start finds it over, quiesced), and the process the claim records, when it records one, moves
-// into previous — the claim no longer runs it (it was stopped, found dead, or left behind), and the
-// next launch of the same session waits it out.
+// letGo ends what the machine had with the claim's process: no timer watches it, no relaunch waits
+// on one (relaunchLater), no send talks to it, no suspension is held for its turn and no turn of it
+// is interrupted any more (the interrupt's start finds it over, quiesced), and the process the
+// claim records, when it records one, moves into previous — the claim no longer runs it (it was
+// stopped, found dead, or left behind), and the next launch of the same session waits it out.
 func (m *Machine) letGo() {
 	m.disarmAll()
+	m.relaunch = nil
 	m.forgetSend()
 	m.held = nil
 	m.interruptOver()
-	if e := m.claim.Enrollment; e != nil {
-		m.revoke(*e)
-		m.claim.Enrollment = nil
+	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
+		m.revoke(*enrollment)
 	}
 	m.identity, m.enrollmentSent = nil, false
 	if m.claim.Locator != nil {
@@ -1189,41 +1230,56 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
-// persist writes the claim alone. A capability belongs to a registered agent whose process runs,
-// so a claim in any other state — relaunching after a death, suspended, failed, or retired — gives
-// its capability up here, on the machine's own claim, which is what the capability check reads
-// (api/claims.go): the old secret authenticates nothing and every grant it minted fails its fence,
-// as the shipped daemon revokes a session's capability and its grants on death, retirement, and
-// teardown. Who suspended the claim is kept only while it is suspended: a claim that runs again, or
-// ends, was suspended by nobody. A confirmation and a retire write the claim together with the
-// delivery they change, each in one transaction, and every write hands the store the same shape
-// (stored).
+// persist writes the claim alone. Every write first normalizes state that is valid only while the
+// claim records a running process: a capability belongs to a registered agent, a suspension source
+// belongs to a suspended claim, and an enrollment belongs to the process it names. A confirmation
+// and a retire write the claim together with the delivery they change, each in one transaction.
 func (m *Machine) persist(ctx context.Context) error {
-	if !HoldsCapability(m.claim.State) {
-		m.claim.CapabilityHash = nil
-	}
-	if m.claim.State != StateSuspended {
-		m.claim.SuspendedBy = ""
-	}
+	c := m.stored()
 	// Published here as well as when the decision ends: a launch writes the claim before it waits
 	// in the runtime, and View then shows the launch rather than what it replaced.
 	m.publish()
-	return m.deps.Store.PutClaim(ctx, m.stored())
+	return m.deps.Store.PutClaim(ctx, c)
 }
 
-// stored is the claim as a write hands it to the store: without its pending delivery, which has a
-// table of its own, without a capability once the claim no longer holds one, and without a
-// suspend's source once it is not suspended. It is a copy and changes nothing; revoking the live
-// capability is persist's.
-func (m *Machine) stored() Claim {
-	c := m.claim
-	c.Pending = nil
+// NormalizeClaim clears state a claim can hold only while it records a compatible running process.
+// It returns an enrollment that lost that process so callers can revoke it at the broker.
+func NormalizeClaim(c *Claim) *Enrollment {
 	if !HoldsCapability(c.State) {
 		c.CapabilityHash = nil
 	}
 	if c.State != StateSuspended {
 		c.SuspendedBy = ""
 	}
+	if c.Locator == nil {
+		return ClearEnrollment(c)
+	}
+	return nil
+}
+
+// ClearEnrollment removes c's enrollment and returns the broker record that must be revoked.
+func ClearEnrollment(c *Claim) *Enrollment {
+	if c.Enrollment == nil {
+		return nil
+	}
+	enrollment := *c.Enrollment
+	c.Enrollment = nil
+	return &enrollment
+}
+
+// stored normalizes the machine's live claim, revoking any enrollment it detached, then returns the
+// form a claim write hands the store. A pending delivery has a table of its own.
+func (m *Machine) stored() Claim {
+	if enrollment := NormalizeClaim(&m.claim); enrollment != nil {
+		m.revoke(*enrollment)
+	}
+	return StoredClaim(m.claim)
+}
+
+// StoredClaim is c in the form a claim write hands the store: a pending delivery has a table of
+// its own. Call NormalizeClaim before this when c will also construct a machine.
+func StoredClaim(c Claim) Claim {
+	c.Pending = nil
 	return c
 }
 

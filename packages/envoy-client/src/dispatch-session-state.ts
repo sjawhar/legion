@@ -61,8 +61,13 @@ const PICTURE_EXTENSIONS: Record<PictureType, string> = {
 
 /** `DISPATCH_STATE_DIR`, else `<XDG_STATE_HOME or ~/.local/state>/dispatch`. Empty counts as unset. */
 export function sessionStateRoot(env: Readonly<Record<string, string | undefined>>): string {
-  if (env.DISPATCH_STATE_DIR) return env.DISPATCH_STATE_DIR;
-  return join(env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "dispatch");
+  // Bracket access, not a dot: claude-envoy type-checks this source under
+  // noPropertyAccessFromIndexSignature, which refuses a dot on an index signature.
+  // biome-ignore-start lint/complexity/useLiteralKeys: claude-envoy's tsconfig refuses dot access
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir) return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
+  // biome-ignore-end lint/complexity/useLiteralKeys: see above
 }
 
 /** `<root>/sessions/<id>`; an id that is not one plain path segment is refused. */

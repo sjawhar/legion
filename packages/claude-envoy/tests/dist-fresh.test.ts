@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test"
+import { existsSync } from "node:fs"
 import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
@@ -93,6 +94,93 @@ test("the committed bundle starts without node_modules and, with no envoy.json, 
       `envoy-channel: no envoy.json at ${join(scratch, ".config", "legion", "envoy.json")}: Dispatch and Envoy are off`,
     )
     expect(exitCode).toBe(0)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("with Envoy off the bundle still writes the session title the dispatch command stamps", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-dist-"))
+  try {
+    await cp(distDirectory, join(scratch, "dist"), { recursive: true })
+    const run = Bun.spawn(["bun", join(scratch, "dist", "envoy-channel.js")], {
+      cwd: scratch,
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HOME: scratch,
+        CLAUDE_CODE_SESSION_ID: "ses-off",
+        CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+        DISPATCH_STATE_DIR: join(scratch, "dispatch-state"),
+        // Dispatch on, with no Envoy section: Envoy is off.
+        DISPATCH_URL: "http://127.0.0.1:9",
+        DISPATCH_TOKEN: "test-token",
+        ENVOY_SESSION_TITLE: "off but named",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(await run.exited).toBe(0)
+    expect(
+      await readFile(join(scratch, "dispatch-state", "sessions", "ses-off", "title"), "utf8"),
+    ).toBe("off but named")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("the bundle stamps nothing with Dispatch off, or under the QA override ENVOY_SESSION_ID", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-dist-"))
+  try {
+    await cp(distDirectory, join(scratch, "dist"), { recursive: true })
+    const start = (env: Record<string, string>) =>
+      Bun.spawn(["bun", join(scratch, "dist", "envoy-channel.js")], {
+        cwd: scratch,
+        env: {
+          PATH: process.env["PATH"] ?? "",
+          HOME: scratch,
+          CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+          DISPATCH_STATE_DIR: join(scratch, "dispatch-state"),
+          ENVOY_SESSION_TITLE: "named",
+          ...env,
+        },
+        stdin: "ignore",
+        stdout: "pipe",
+        stderr: "pipe",
+      }).exited
+    // No envoy.json: Dispatch and Envoy are off.
+    expect(await start({ CLAUDE_CODE_SESSION_ID: "ses-dispatch-off" })).toBe(0)
+    expect(
+      await start({
+        CLAUDE_CODE_SESSION_ID: "ses-claude",
+        ENVOY_SESSION_ID: "ses-override",
+        DISPATCH_URL: "http://127.0.0.1:9",
+        DISPATCH_TOKEN: "test-token",
+      }),
+    ).toBe(0)
+    expect(existsSync(join(scratch, "dispatch-state", "sessions"))).toBe(false)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("with Envoy off and no session id the bundle still serves the Envoy-off server and exits 0", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-dist-"))
+  try {
+    await cp(distDirectory, join(scratch, "dist"), { recursive: true })
+    const run = Bun.spawn(["bun", join(scratch, "dist", "envoy-channel.js")], {
+      cwd: scratch,
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        HOME: scratch,
+        DISPATCH_URL: "http://127.0.0.1:9",
+        DISPATCH_TOKEN: "test-token",
+      },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    expect(await run.exited).toBe(0)
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }

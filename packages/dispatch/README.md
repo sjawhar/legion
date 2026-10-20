@@ -33,7 +33,7 @@ bun run dev
 bun run build:web
 bun run typecheck
 bun run lint
-bun test
+bun run test
 ```
 
 `bun run build:web` produces `web/dist` for the Dispatch server. `bun run dev`

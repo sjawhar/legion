@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Proves a tmux stage proof's agents reached the model only through the Hawk model gateway: every
+# Proves a tmux stage proof's agents reached the model only through its configured route: every
 # agent turn its OMP profile recorded, each subagent's included, was served by the anthropic
-# provider, the one lib/install-model-gateway.sh routes to the gateway and leaves enabled. Oh My Pi
-# falls back without a word: with its key command failing, a Go pane answered as
+# provider, the one lib/install-model-gateway.sh (the Hawk gateway) or
+# lib/install-key-file-model-route.sh (a local key file) routes and leaves enabled. Oh My Pi falls
+# back without a word: with its key command failing, a Go pane answered as
 # amazon-bedrock/us.anthropic.claude-opus-4-8 on the devbox's instance role, and a Stage 3 retro's
 # scout subagent ran on amazon-bedrock/openai.gpt-oss-120b. Here a turn on any other provider fails
 # the proof, whatever put it there.
@@ -78,7 +79,7 @@ subagents=$(find "$sessions" -mindepth 3 -type f -name '*.jsonl' | wc -l)
 turns=$(turn_count "${files[@]}")
 [ "$turns" -gt 0 ] || fail "no agent session under $sessions holds an assistant turn"
 off=$(off_route "${files[@]}")
-[ -z "$off" ] || fail "agent sessions off the $provider route (the gateway):"$'\n'"$off"
+[ -z "$off" ] || fail "agent sessions off the $provider route:"$'\n'"$off"
 
 # The control: the first session holding a turn, that turn alone rewritten as Bedrock's.
 first=
@@ -101,4 +102,4 @@ refused=$(off_route "$copy")
 [ "$refused" = "$copy: turn on $control_model" ] ||
   fail "the negative control passed: $copy, $first with turn $line rewritten as $control_model, was not refused (the check printed '${refused}')"
 
-echo "$turns assistant turns in ${#files[@]} agent sessions ($subagents of them subagents'), every one on the $provider provider (the gateway); negative control: $copy ($first with turn $line on $control_model) refused"
+echo "$turns assistant turns in ${#files[@]} agent sessions ($subagents of them subagents'), every one on the $provider provider; negative control: $copy ($first with turn $line on $control_model) refused"

@@ -2245,11 +2245,15 @@ volume to detach from the old one, which shows as transient `FailedAttachVolume`
 events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
-from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) and `/proc/meminfo`'s
-`MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's
-whole reservation while its siblings idle. The reservation is the pod's working set, not one
-container's; each container's own request and limit are what the API shows, and its requests are
-what the scheduler counts.
+from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) — except on GKE Autopilot,
+confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md): there `nproc` reflects
+gVisor's own host-vCPU presentation instead, a known gap
+([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the
+pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu
+limits there — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers,
+and an active role may use the pod's whole reservation while its siblings idle. The reservation is
+the pod's working set, not one container's; each container's own request and limit are what the
+API shows, and its requests are what the scheduler counts.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum of requests: at the defaults, two pods fit a floor
@@ -2307,6 +2311,20 @@ ephemeral storage is about 629 GiB of it; with CPU and memory placing about two 
 their limits sum to about 160Gi of those 629 GiB, so the bound has room before any request is
 raised. An operator with a known root volume raises `ephemeral_storage_request` toward the role's
 expected use so the scheduler reserves disk and places no pod a full node could not hold.
+
+**GKE Autopilot's bound is per pod, not per node.** The node-disk framing above is AWS/self-managed
+EKS's: ephemeral storage there is the shared node's own root volume, and raising
+`ephemeral_storage_request` toward a role's real use is an operator's own call, bounded only by
+what the node has. GKE Autopilot has no such headroom: Warden, its admission webhook, refuses a
+pod outright once its containers' *summed ephemeral-storage requests* pass 10Gi — a hard ceiling
+*per pod*, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md) raising every role's
+request to its configured limit (the defaults above: 80Gi summed, two init containers' 10Gi each
+beside them) and having the webhook refuse to schedule the pod at all
+(`autogke-pod-limit-constraints`). Because Legion runs every role of one issue as containers of a
+single pod, that 10Gi is a budget shared across all six roles together: no `legion.yaml`
+`ephemeral_storage_request` can raise more than a small fraction of them past today's 1Gi-request
+default on GKE Autopilot without hitting it — unlike the per-node bound above, this is not
+something an operator's own configuration can size around.
 
 ### Volume retention
 
@@ -3505,15 +3523,17 @@ pool cannot place leaves the probe, and the boot, unaffected
 
 The Sandbox is the claim's alone, where an issue's is its tree's. A release of the claim (a switch
 back, or `legion claims stop`) deletes it, and its role Secret and volume with it. The orphan sweep
-keeps it while the daemon knows the claim, running or suspended, so a suspended controller's
-session survives, and deletes it once the claim is retired. Either delete runs under the pod's
-launch turn and only at the version of the Sandbox it was decided on: a controller relaunched into
-the Sandbox since has written it, so the delete is refused, the daemon logs `sandbox runtime: kept a
-sandbox written since its delete was decided; the orphan sweep decides it again` naming it, and the
-next sweep decides again on the claims known then. The controller Sandbox a daemon made before the
-controller ran in a launcher pod (`role=controller`, one `worker` container), and the one a daemon
-of the tree-volume layout made (a claim template named `tree`), are refused at boot like every
-Sandbox of a layout before this one, each named: remove it before enabling issue pods
+keeps it while the controller's claim is not retired, running or suspended, so a suspended
+controller's session survives, and deletes it once the claim is retired. The sweep reads the claim
+from the store again under the pod's launch turn, so a controller launched after the sweep read the
+daemon's claims keeps its Sandbox. Either delete runs under the pod's launch turn and only at the
+version of the Sandbox it was decided on: a controller relaunched into the Sandbox since has written
+it, so the delete is refused, the daemon logs `sandbox runtime: kept a sandbox written since its
+delete was decided; the orphan sweep decides it again` naming it, and the next sweep decides again.
+The controller Sandbox a daemon made before the controller ran in a launcher pod (`role=controller`,
+one `worker` container), and the one a daemon of the tree-volume layout made (a claim template named
+`tree`), are refused at boot like every Sandbox of a layout before this one, each named: remove it
+before enabling issue pods
 ([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees), step 3).
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a

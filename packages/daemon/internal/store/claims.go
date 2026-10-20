@@ -178,6 +178,19 @@ func (s *Store) StoredClaimMayRun(ctx context.Context, token claim.Token, row in
 	return may, nil
 }
 
+// ClaimUnretired is whether the store holds token's claim in any state but retired: the claims the
+// daemon's orphan sweep knows (knownClaims), read at the moment the runtime decides rather than when
+// the sweep read its claims. A token no claim holds is not unretired.
+func (s *Store) ClaimUnretired(ctx context.Context, token claim.Token) (bool, error) {
+	var unretired bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1 and state <> $2)`,
+		string(token), string(supervise.StateRetired)).Scan(&unretired)
+	if err != nil {
+		return false, fmt.Errorf("read whether claim %s is retired: %w", token, err)
+	}
+	return unretired, nil
+}
+
 // runsNothingStates is supervise's runs-nothing set (supervise.RunsNothingStates), as the text
 // array a query binds: the store names no state of that set itself.
 func runsNothingStates() []string {

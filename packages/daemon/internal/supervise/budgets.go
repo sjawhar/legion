@@ -47,10 +47,11 @@ type Limits struct {
 // relaunchAfterFailure charges one launch failure for a process that did not survive, and
 // relaunches the same session after it, once the backoff for the failures charged so far has
 // passed (backOff) — or fails the claim when the budget is spent. A relaunch the tree lifecycle
-// refuses (its cleanup reserved) is checked before the charge, so it costs none.
+// refuses (its cleanup reserved) is checked before the charge, so it costs none; one whose process
+// is already stopped is relaunchRefused's.
 func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 	if err := m.checkLaunch(ctx); err != nil {
-		return err
+		return m.relaunchRefused(ctx, m.relaunchAfterFailure, err)
 	}
 	m.claim.Budgets.LaunchFailures++
 	if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
@@ -74,8 +75,9 @@ func (m *Machine) chargeDeath() bool {
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
 // session kept — and the same session relaunched, or, once retirements run out too, the claim
 // fails with its prompt count left at the limit. A suspension that fails charges nothing: the next
-// failure reaches the limit again and retries the retirement. A retirement while a suspension is
-// held is that suspension's stop instead, charged nothing (suspendHeld).
+// failure reaches the limit again and retries the retirement. So does a relaunch the tree lifecycle
+// refuses, checked before the suspension so the process is kept (checkLaunch). A retirement while a
+// suspension is held is that suspension's stop instead, charged nothing (suspendHeld).
 func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	failures := m.claim.Budgets.PromptFailures + 1
 	if failures < m.deps.Limits.PromptFailures {
@@ -92,6 +94,8 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	retirement := m.suspendProcess
 	if last {
 		retirement = m.endProcess // the last retirement fails the claim, which does not run again
+	} else if err := m.checkLaunch(ctx); err != nil {
+		return fmt.Errorf("retire %s after %d prompt failures: %w", m.claim.Token, failures, err)
 	}
 	if err := retirement(ctx); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)

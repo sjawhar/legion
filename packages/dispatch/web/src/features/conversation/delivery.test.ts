@@ -2,9 +2,11 @@ import { expect, test } from "bun:test";
 import { DELIVERY_DUPLICATE_WINDOW_MS, RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 
 import {
+  broadcastDelivery,
   type DeliveryOutcome,
   duplicateText,
   isSafeRetry,
+  plainDelivery,
   receiptAnsweredWithError,
   rowAnsweredWithError,
   safeRetryGuidance,
@@ -139,4 +141,32 @@ test("every single-delivery promise names the restart it does not survive", () =
   ]) {
     expect(promise).toContain("unless the session restarted since it was sent");
   }
+});
+
+test("a plain message is a Send unless every addressed session takes Aside and one refuses Send", () => {
+  const omp = ["aside", "btw", "steer"];
+  const claude = ["aside"];
+  expect(plainDelivery([])).toBe("steer");
+  expect(plainDelivery([omp])).toBe("steer");
+  expect(plainDelivery([claude])).toBe("aside");
+  expect(plainDelivery([omp, claude])).toBe("aside");
+  // BTW is never picked for the reader, and a session with no mode takes none, so it decides
+  // nothing for the rest; alone, it leaves Send to be warned about.
+  expect(plainDelivery([["btw"]])).toBe("steer");
+  expect(plainDelivery([claude, []])).toBe("aside");
+  expect(plainDelivery([[]])).toBe("steer");
+});
+
+test("a broadcast is a BTW unless every selected session takes Aside and one refuses BTW", () => {
+  const omp = ["aside", "btw", "steer"];
+  const claude = ["aside"];
+  expect(broadcastDelivery([])).toBe("btw");
+  expect(broadcastDelivery([omp])).toBe("btw");
+  expect(broadcastDelivery([claude])).toBe("aside");
+  expect(broadcastDelivery([omp, claude])).toBe("aside");
+  // A session with no mode decides nothing for the rest; one that takes neither leaves BTW, which
+  // the composer names as leaving it out.
+  expect(broadcastDelivery([claude, []])).toBe("aside");
+  expect(broadcastDelivery([[]])).toBe("btw");
+  expect(broadcastDelivery([claude, ["steer"]])).toBe("btw");
 });

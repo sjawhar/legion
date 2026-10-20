@@ -22,17 +22,18 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
-// operator-token: the root pod runs as the operator's ServiceAccount with no API server token, and
-// holds the one projected token the operator's pod asks for — its audience, its lifetime, at its
-// mount. Every expected value is the fixture's. The token is read into the harness's memory and only
-// its claims are printed.
+// operator-token: the root pod runs as the operator's ServiceAccount with no API server token —
+// asserted in every mode, LEGION_E2E_MODEL_ROUTE=key-file included, since neither fact depends on
+// which model route the operator pod fixture carries. Under gateway, it also holds the one
+// projected token the operator's pod asks for — its audience, its lifetime, at its mount, read
+// into the harness's memory with only its claims printed — which key-file's pod-key-file.yml
+// mounts none of (no gateway to authenticate to), so that part is skipped under key-file alone,
+// never because the fixture happens to lack a token for some other reason: a fixture that claims
+// gateway but ships no projected token is a real bug this check must still catch, not a reason to
+// skip silently.
 func (r *liveRig) checkOperatorToken() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
-		return err
-	}
-	want, err := projectedToken(r.pod)
-	if err != nil {
 		return err
 	}
 	name := SandboxName(root.token)
@@ -46,6 +47,22 @@ func (r *liveRig) checkOperatorToken() error {
 			name, pod.Spec.ServiceAccountName, pod.Spec.AutomountServiceAccountToken, r.pod.ServiceAccount)
 	}
 	note("runtime", "pod %s: serviceAccountName %s, automountServiceAccountToken false", name, pod.Spec.ServiceAccountName)
+	apiToken, err := r.exec(root, "sh", "-c", "test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo present || echo absent")
+	if err != nil {
+		return err
+	}
+	note("operator", "exec test -e /var/run/secrets/kubernetes.io/serviceaccount/token: %s", apiToken)
+	if apiToken != "absent" {
+		return errors.New("the pod holds the API server's service account token")
+	}
+	if r.env.modelRoute == "key-file" {
+		note("operator", "LEGION_E2E_MODEL_ROUTE=key-file: no projected ServiceAccount token to check (pod-key-file.yml mounts none)")
+		return nil
+	}
+	want, err := projectedToken(r.pod)
+	if err != nil {
+		return fmt.Errorf("LEGION_E2E_MODEL_ROUTE=%s: %w", r.env.modelRoute, err)
+	}
 	token, err := r.exec(root, "cat", want.file)
 	if err != nil {
 		return err
@@ -76,14 +93,6 @@ func (r *liveRig) checkOperatorToken() error {
 		return fmt.Errorf("the token's subject is %s, want %s", claims.Sub, sub)
 	case lifetime != want.lifetime:
 		return fmt.Errorf("the token lives %s, want %s", lifetime, want.lifetime)
-	}
-	apiToken, err := r.exec(root, "sh", "-c", "test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo present || echo absent")
-	if err != nil {
-		return err
-	}
-	note("operator", "exec test -e /var/run/secrets/kubernetes.io/serviceaccount/token: %s", apiToken)
-	if apiToken != "absent" {
-		return errors.New("the pod holds the API server's service account token")
 	}
 	return nil
 }
@@ -273,7 +282,10 @@ func (r *liveRig) procCmdline(c *liveClaim, pid string) ([]string, error) {
 
 // provider-key: the root's shim hands its agent the providers Secret's key (--provider-env-dir) and
 // never holds it: the agent's environment carries the Secret's value under the variable
-// provider_keys names, and the shim's (the agent's parent) carries no such variable.
+// provider_keys names, and the shim's (the agent's parent) carries no such variable. Under
+// LEGION_E2E_MODEL_ROUTE=key-file, the same holds for ANTHROPIC_API_KEY (liveAnthropicKeyVariable,
+// runtimeOptions's doc comment), the providers Secret's own second key in that mode: the agent's
+// environment carries the Secret's value under that exact name, and the shim's does not.
 func (r *liveRig) checkProviderKey() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -312,6 +324,25 @@ func (r *liveRig) checkProviderKey() error {
 		return fmt.Errorf("the shim (pid %s) holds %s (%d bytes), want the agent's environment alone to", shimPid, liveProviderKey, len(held))
 	}
 	note("operator", "/proc/%s/environ (the shim): no %s", shimPid, liveProviderKey)
+	if r.env.modelRoute != "key-file" {
+		return nil
+	}
+	anthropicEncoded, err := r.kubectl("get", "secret", secret, "-o", "jsonpath={.data."+liveAnthropicKeyVariable+"}")
+	if err != nil {
+		return err
+	}
+	anthropicValue, err := base64.StdEncoding.DecodeString(anthropicEncoded)
+	if err != nil || len(anthropicValue) == 0 {
+		return fmt.Errorf("secret %s's key %s reads %q (%v), want the placeholder the script wrote", secret, liveAnthropicKeyVariable, anthropicEncoded, err)
+	}
+	if agent[liveAnthropicKeyVariable] != string(anthropicValue) {
+		return fmt.Errorf("the agent (pid %s) has %s of %d bytes, want secret %s's key %s (%d bytes)", pid, liveAnthropicKeyVariable, len(agent[liveAnthropicKeyVariable]), secret, liveAnthropicKeyVariable, len(anthropicValue))
+	}
+	note("operator", "/proc/%s/environ (the agent): %s equals secret %s's key %s (%d bytes, not printed)", pid, liveAnthropicKeyVariable, secret, liveAnthropicKeyVariable, len(anthropicValue))
+	if held, ok := shim[liveAnthropicKeyVariable]; ok {
+		return fmt.Errorf("the shim (pid %s) holds %s (%d bytes), want the agent's environment alone to", shimPid, liveAnthropicKeyVariable, len(held))
+	}
+	note("operator", "/proc/%s/environ (the shim): no %s", shimPid, liveAnthropicKeyVariable)
 	return nil
 }
 
