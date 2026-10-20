@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-20T00:13:59Z",
+  "completed": "2026-10-20T05:29:02Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "22817ba1d2a3791a0bb228552dd8317403561436",
+  "head": "14cf83289f745dd39ca0d141c1cbdfac015423fd",
   "proof": [
+    {
+      "criterion": "Done-when 5 (the proof's own step): Stage 4b and Stage 3 send the implementer of a just-closed issue nothing at a look of its production check - a closed issue takes no Dispatch write (409 ISSUE_CLOSED) - and the look acts on the daemon's task as written, the fixtures' instructions stating the production rule (no production, no deploy role: Production: pending deploy of <merge commit>, the last look writing that the check did not run within the bound, verdict pending, no commit); the following check_look_reported / check_closed waits are the observation",
+      "surface": "the two proof scripts and the README, read as text and under bash -n; the lib suite's pins on the instructions heredoc (stage4b-hold.test.ts:216,228); the tester's Stage 4b artifact at 22817ba1 for the failure and the try-2 artifact for the WAITING reply",
+      "command": "grep -n 'send_agent' scripts/e2e/stage4b-sandbox-tree.sh scripts/e2e/stage3-devbox-workflow.sh scripts/e2e/lib/*.sh (every send after a close); bash -n scripts/e2e/stage4b-sandbox-tree.sh scripts/e2e/stage3-devbox-workflow.sh; bun test scripts/e2e/lib; .github/scripts/check-private-names.sh; gh api repos/sjawhar/legion/compare/22817ba1...14cf8328 --jq '[.files[].filename]'",
+      "observed": "Four post-close sends found and deleted with their wait_for_worker: stage4b :5838-5841 (look 1) and :6065-6068 (the bound's last look), stage3 :993-996 and :1023-1026; no other send_agent in scripts/e2e targets a role of a closed issue (Stage 3's acceptance script sends to the root architect about closed children, the root open). The fixtures' instructions rewritten: Stage 4b's sentence 'reply WAITING at once and wait for the targeted message, which says what the look writes and reports' - the sentence the try-2 implementer obeyed (its 23:05:32.8Z reply: 'Production check task received ... reply WAITING ... the targeted message says what this look writes and reports', artifact stage4b-2059-4ab26ee5-try2.tgz, session 01a155ef), so that sentence and not the daemon held the look - now says a check task waits for no targeted message and states the production rule; Stage 3's heredoc, which had no check sentence and told every agent to act on nothing but a targeted message, gains the same rule. bash -n clean on both; bun test scripts/e2e/lib 494 pass (stage4b-hold.test.ts 8/8: the two pinned sentences byte-identical), only nats-stream's 2 Docker cases failing in the pod; private-names clean; the compare 22817ba1...14cf8328 lists .legion/LEGION-781/implement.json, .legion/LEGION-781/test.json, scripts/e2e/README.md, scripts/e2e/stage3-devbox-workflow.sh, scripts/e2e/stage4b-sandbox-tree.sh and nothing else, so the 22817ba1 image (sha256:a5f7c68a) stands for the rerun",
+      "headSha": "14cf83289f745dd39ca0d141c1cbdfac015423fd",
+      "negativeControl": "The tester's artifact at 22817ba1 (stage4b-2059-22817ba1-tgz): the daemon side complete (LEGSMOKE-836 awaiting_merge -> done at 04:32:29Z, the check open at look 1, five claims suspended, the implementer resumed by start row 268 with the task text in its session at 04:32:31Z) and the checkpoint failing only at stage4b-sandbox-tree.sh:5840's send_agent, curl exit 22 on Dispatch's 409 ISSUE_CLOSED (transcript.log:877); grep -c 'proof production check' is 0 in both scripts after the edit where it was 2 each before"
+    },
     {
       "criterion": "The forward merge of main (3442ab02; #2042 phase workers on Claude Code behind a harness abstraction, #2018 the issue's repository in every role's prompt) keeps the spec's design on the merged head: accepting replaces production_check, the legion tool carries the production-check report (pass|pending|fail, no commit), the pending refusal on a phase completion and the architect's issue on request_backward_move - now in the shared executor @legion/pi-shared/legion-phase-ops both hosts (pi-legion, claude-envoy) serve - and every suite the pod can run is green",
       "surface": "the merged working copy: Go build/vet/test on the pod's Postgres, the four TypeScript packages' bun suites with their pinned description and schema text, claude-envoy's committed bundle check, biome, tsc, the e2e lib suite, and GitHub's mergeability and workflow starts at the pushed head",
@@ -81,7 +89,10 @@
     "packages/pi-legion/src/tools.test.ts: description and schema pins (accepting, pass|pending|fail) (round 8)",
     "packages/claude-envoy/{package.json,tests/legion-tool.test.ts,CHANGELOG.md,dist/envoy-channel.js,legion/skills/**}: contract 33, pins, rebuilt bundle and skills snapshot (round 8)",
     "packages/pi-shared/src/handoff-commit{,.test}.ts: the branch's production_check removal carried to the moved module (round 8)",
-    "skills/legion-controller/SKILL.md: the merged bullet re-wrapped under the 500-line guard (round 8)"
+    "skills/legion-controller/SKILL.md: the merged bullet re-wrapped under the 500-line guard (round 8)",
+    "scripts/e2e/stage4b-sandbox-tree.sh: the instructions heredoc's check-task sentence states the production rule and waits for no targeted message; the two post-close send_agent blocks (look 1, the bound's last look) and their wait_for_worker deleted; comments at the first and last look (round 9)",
+    "scripts/e2e/stage3-devbox-workflow.sh: the same two blocks deleted; the instructions heredoc gains the check-task rule; comments (round 9)",
+    "scripts/e2e/README.md: the Stage 3 narrative and the Stage 4b done and production-check-bound rows no longer say the implementer is told its look (round 9)"
   ],
   "trickyParts": [
     "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
@@ -109,16 +120,17 @@
     "round 5: the forward merge of main at a5b302e4 (#2063, e2e scripts only) and the handoff, nothing else; fingerprint db81dd90 \u2192 d21fbe60 (changed by #2063's lines alone), the comment on #2059",
     "round 6: the race fix's shape differs from the one the architect first named (a started channel Run closes and DispatchPosition waits on) because the boot's admission probe reads the position before Run starts (daemon.go:364 vs :1442) and pollHoldRelease runs beside Run; DispatchPosition reads through a fresh stream.Consumer handle instead, which the architect accepted; a change under packages/daemon, so the Worker Image run builds this head's image and Stage 4b runs at this head with it",
     "Round 7 carries the tester's suggestion no further: naming the claim states in the done checkpoint's failure message (first_look_claims is read only after success) is left out on the architect's ruling that this round is the jq fix, the red test, bash -n and the handoff alone, so the 4ab26ee5 image stands for the stage rerun",
-    "Round 8 touched one line outside the merge's mechanics: packages/claude-envoy/CHANGELOG.md's unreleased entry said the manifest pins contract 32, which the merge moved to 33 (a sentence about the pin, kept true)"
+    "Round 8 touched one line outside the merge's mechanics: packages/claude-envoy/CHANGELOG.md's unreleased entry said the manifest pins contract 32, which the merge moved to 33 (a sentence about the pin, kept true)",
+    "Round 9 went one step past 'delete the if-block': the fixtures' instructions had to change too, since Stage 4b's heredoc told the implementer to reply WAITING and wait for the targeted message on a check task (the try-2 WAITING reply at 23:05:32Z is the evidence) and Stage 3's told every agent to act on nothing but a targeted message; with the sends gone and the sentences unchanged every look would wait out :5852's 600 s. Agreed with the architect before the task arrived."
   ],
   "openQuestions": [
-    "Stage 4b's run at 4ab26ee5 by the devbox holder (this head's own worker image): its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for",
-    "The Go race lane (go test -race ./internal/daemon/ ./internal/record/) cannot run in the pod (no gcc for cgo); Tests run 39346167688's race step is its proof at 22817ba1"
+    "The Go race lane (go test -race ./internal/daemon/ ./internal/record/) cannot run in the pod (no gcc for cgo); Tests run 39346167688's race step is its proof at 22817ba1",
+    "No pull_request CI run started for 14cf8328: main moved again (61552da1, #2024 and seven more) and GitHub reports mergeable false/dirty; a local git merge-tree conflicts in AGENTS.md alone (the Stage 2 and 3 command lines #2024 prefixed with LEGION_E2E_MODEL_ROUTE=gateway), everything else auto-merging, #2024 touching scripts/e2e/lib, stage2, stage3 and stage4a. A forward merge would rebuild the worker image (main's b8139a2b touches packages/envoy and dd2a55b6 packages/claude-envoy/package.json, both in worker-image.yaml's paths), so whether to merge before or after the stage rerun at the 22817ba1 image is the architect's call"
   ],
   "discoveredComplexity": [
     "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 8
+  "round": 9
 }
