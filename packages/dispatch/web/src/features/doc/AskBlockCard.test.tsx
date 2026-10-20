@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
@@ -119,6 +119,9 @@ function threadRead(of: Ask, replies: Comment[] = []): AskRead {
 }
 
 // The block reaches the API only through the shared card; each test says what the server answers.
+// Every test file shares one process and one `api`, so these spies are put back once the file is
+// done: a spy left on `api.getAsk` answers every later file's card, and a later `spyOn` of the
+// same method hands back this spy with those calls already counted.
 const answerAsk = spyOn(api, "answerAsk");
 const getAsk = spyOn(api, "getAsk");
 const createComment = spyOn(api, "createComment");
@@ -129,6 +132,13 @@ afterEach(() => {
   getAsk.mockReset();
   createComment.mockReset();
   createArtifactComment.mockReset();
+});
+
+afterAll(() => {
+  answerAsk.mockRestore();
+  getAsk.mockRestore();
+  createComment.mockRestore();
+  createArtifactComment.mockRestore();
 });
 
 function renderCard({
