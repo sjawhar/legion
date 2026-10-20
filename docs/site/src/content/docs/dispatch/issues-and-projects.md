@@ -161,9 +161,10 @@ still clamps a title shows the whole of it on hover.
 - **Artifacts** lists the issue's documents and files, with a count. Pick a file, or drop one on the
   tab, add an optional summary, and choose **Upload**. Uploading a file with the same name adds a
   new version.
-- **Activity** is everything else that happened to the issue, one line each, newest first:
-  status moves, claims, document versions, uploads, subscriptions, changes to child issues. It
-  has **Load older** at the bottom, a divider for each day, and a mark where your last read ends.
+- **Activity** is the issue's whole history, one line each, newest first: every comment, ask and
+  message as it was posted, and everything else that happened to the issue — status moves,
+  claims, document versions, uploads, subscriptions, changes to child issues. It has **Load
+  older** at the bottom, a divider for each day, and a mark where your last read ends.
 
 Press `t` and then `s`, `c`, `h`, `a`, or `v` to switch to Spec, Conversation, Children,
 Artifacts, or Activity.

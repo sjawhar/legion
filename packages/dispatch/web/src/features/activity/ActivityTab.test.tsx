@@ -1,10 +1,11 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
-import type { Actor, Agent, Event, UserState } from "../../api/types";
+import { prependEventToLog } from "../../api/sse";
+import type { Actor, Agent, Event, UserIssueState, UserState } from "../../api/types";
 import { ActivityTab } from "./ActivityTab";
 
 function message(seq: number, by?: Actor): Event {
@@ -30,16 +31,20 @@ function message(seq: number, by?: Actor): Event {
   };
 }
 
-function renderTab(state: UserState) {
+function newQueryClient(): QueryClient {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+}
+
+function issueState(lastReadSeq = 0): UserIssueState {
+  return { dismissed: [], last_read_seq: lastReadSeq, pinned: false, seq: 0 };
+}
+
+function renderTab(state: UserState, queryClient: QueryClient = newQueryClient()) {
   return render(
     <MemoryRouter>
-      <QueryClientProvider
-        client={
-          new QueryClient({
-            defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
-          })
-        }
-      >
+      <QueryClientProvider client={queryClient}>
         <ActivityTab issueKey="CORE-1" state={state} visible />
       </QueryClientProvider>
     </MemoryRouter>
@@ -135,5 +140,140 @@ test("ActivityTab names a session author by its registered title", async () => {
     view.unmount();
     getIssueEvents.mockRestore();
     listAgents.mockRestore();
+  }
+});
+
+// Event pinning moved here from the Conversation, where a write the server refuses raises a
+// banner the reader must answer. Reverting the optimistic pin with nothing said reads as a
+// broken Pin button, so both tabs draw their pin through the one pin-write surface
+// (`features/issue/usePinWrites.tsx`): the refusal is on screen here too, it holds every further
+// pin write until it is answered, and Retry re-sends exactly the write that was refused.
+test("a pin the server refuses raises the retry banner, and Retry re-sends it", async () => {
+  const originalGetMyState = api.getMyState;
+  const originalPutIssueState = api.putIssueState;
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([message(1)]);
+  const writes: string[][] = [];
+  let refuse = true;
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getMyState = async () => ({ "CORE-1": issueState(9) });
+    api.putIssueState = async (_issueKey, input) => {
+      const dismissed = input.dismissed ?? [];
+      writes.push(dismissed);
+      if (refuse) {
+        throw new Error("offline");
+      }
+      return { ...issueState(9), dismissed, seq: input.seq ?? 1 };
+    };
+    unmount = renderTab({ "CORE-1": issueState(9) }).unmount;
+    fireEvent.click(await screen.findByRole("button", { name: "Pin" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("Couldn't save pin — retry")
+    );
+    expect(screen.getByRole("button", { name: "Pin" }).hasAttribute("disabled")).toBe(true);
+
+    refuse = false;
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(writes).toEqual([["pinned_items:event:1"], ["pinned_items:event:1"]]);
+    expect(screen.getByRole("button", { name: "Pin" }).hasAttribute("disabled")).toBe(false);
+  } finally {
+    unmount?.();
+    api.getMyState = originalGetMyState;
+    api.putIssueState = originalPutIssueState;
+    getIssueEvents.mockRestore();
+  }
+});
+
+const ROW_HEIGHT = 40;
+const LIST_TOP = 100;
+
+function setScrollY(value: number): void {
+  Object.defineProperty(window, "scrollY", { configurable: true, value, writable: true });
+}
+
+/** The geometry `ViewportAnchor` reads, faked as `ViewportAnchor.test.tsx` fakes it: every row
+ *  is `ROW_HEIGHT` tall, stacked from `LIST_TOP` in DOM order, and the page scrolls through them
+ *  with `window.scrollY`. Anything that is not a row measures as the list's own box. */
+function installRowLayout(): { restore: () => void } {
+  const rows = () => [...document.querySelectorAll<HTMLElement>("[data-event-seq]")];
+  const rect = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element
+  ) {
+    const all = rows();
+    const index = all.indexOf(this as HTMLElement);
+    const top = LIST_TOP + (index < 0 ? 0 : index * ROW_HEIGHT) - window.scrollY;
+    const height = index < 0 ? all.length * ROW_HEIGHT : ROW_HEIGHT;
+    return {
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 100,
+      toJSON: () => ({}),
+      top,
+      width: 100,
+      x: 0,
+      y: top,
+    } as DOMRect;
+  });
+  const point = spyOn(document, "elementFromPoint").mockImplementation(
+    (_x, y) => rows()[Math.floor((window.scrollY + y - LIST_TOP) / ROW_HEIGHT)] ?? null
+  );
+  const originalScrollBy = window.scrollBy;
+  window.scrollBy = ((x: number | ScrollToOptions, y?: number) => {
+    const top = typeof x === "number" ? y : x.top;
+    if (top !== undefined) setScrollY(window.scrollY + top);
+  }) as typeof window.scrollBy;
+  return {
+    restore: () => {
+      rect.mockRestore();
+      point.mockRestore();
+      window.scrollBy = originalScrollBy;
+    },
+  };
+}
+
+// The tab reads `["events", <key>]`, the query the stream prepends every published event into at
+// the front of page 0 (`prependEventToLog`), and it renders newest first: each arrival pushes a
+// reader who is down in the history one row further down unless something compensates. Each row
+// carries `data-event-seq`, which is the row identity the anchor follows.
+test("an event arriving while the reader is in the history leaves their row where it was", async () => {
+  const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue(
+    Array.from({ length: 12 }, (_, index) => message(12 - index))
+  );
+  const layout = installRowLayout();
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    unmount = renderTab({ "CORE-1": issueState(99) }, queryClient).unmount;
+    await screen.findByRole("list", { name: "Issue activity" });
+    setScrollY(300);
+    const reading = document.querySelectorAll<HTMLElement>("[data-event-seq]")[8];
+    const seq = reading?.getAttribute("data-event-seq");
+    const before = reading?.getBoundingClientRect().top;
+
+    act(() => {
+      prependEventToLog(queryClient, message(13));
+    });
+    await waitFor(() => expect(document.querySelectorAll("[data-event-seq]")).toHaveLength(13));
+
+    expect(document.querySelector(`[data-event-seq="${seq}"]`)?.getBoundingClientRect().top).toBe(
+      before
+    );
+    // The row it held onto moved down one place in the list, so the page scrolled by one row.
+    expect(window.scrollY).toBe(300 + ROW_HEIGHT);
+  } finally {
+    unmount?.();
+    layout.restore();
+    getIssueEvents.mockRestore();
+    if (scrollY === undefined) {
+      Reflect.deleteProperty(window, "scrollY");
+    } else {
+      Object.defineProperty(window, "scrollY", scrollY);
+    }
   }
 });

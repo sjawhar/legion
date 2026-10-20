@@ -117,10 +117,10 @@ function usableControl(selector: string): HTMLElement | null {
 /**
  * Whether focus is outside every `<input>` and outside every ask card. `0`-`3` and `Shift+P` are
  * the two keys that write the issue without focusing a control, so they are the two that have to
- * say where the reader is not: a digit typed straight after ticking `Show activity` or picking an
- * ask's option belongs to that control's own surface, not to the issue's priority. The registry
- * passes single keys through every control that takes no typed text, so this is the page's own
- * question to answer.
+ * say where the reader is not: a digit typed straight after pressing the Conversation's `Open`
+ * filter or picking an ask's option belongs to that control's own surface, not to the issue's
+ * priority. The registry passes single keys through every control that takes no typed text, so
+ * this is the page's own question to answer.
  *
  * A focused `<button>` is deliberately not excluded. Every single-key binding in the registry
  * fires from one: a digit has no native meaning on a button, and after any click - a tab, a

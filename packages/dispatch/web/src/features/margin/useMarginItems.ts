@@ -9,7 +9,12 @@ import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { rootOf } from "../conversation/conversation-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
-import { type ConversationPinKind, pinnedConversations, pinnedEventIds } from "../issue/pins";
+import {
+  type ConversationPinKind,
+  conversationItemId,
+  pinnedConversations,
+  pinnedEventIds,
+} from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 import { type CommentAction, useCommentActionQueue } from "./useCommentActionQueue";
@@ -334,7 +339,7 @@ export function useMarginItems(
           at: row.created_at,
           author: row.author,
           body: "question" in row ? row.question : row.body,
-          id: `${kind}:${id}`,
+          id: conversationItemId(kind, id),
           kind,
         },
       ];

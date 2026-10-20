@@ -1,14 +1,9 @@
 import { expect, test } from "bun:test";
 
-import {
-  balanceCutMarkdown,
-  replyPreviewMarkdown,
-  searchSnippetMarkdown,
-} from "./markdown-fragment";
+import { balanceCutMarkdown, searchSnippetMarkdown } from "./markdown-fragment";
 
 // The shapes come from `ts_headline` with search.go's own options (`MaxWords=24, MinWords=12,
-// MaxFragments=1`) run on a real Postgres, and from `reply_body`'s 160-rune head
-// (`messageReplyPreview` in packages/envoy/internal/dispatch/api/messages.go).
+// MaxFragments=1`) run on a real Postgres.
 
 test("a snippet cut after a bold span opened loses only the delimiter the cut left open", () => {
   // `ts_headline` on `… twenty **anchor** after the mark …` with a 24-word window: the window
@@ -70,21 +65,9 @@ test("a fragment whose marks are balanced is left exactly as it is", () => {
   expect(balanceCutMarkdown("")).toBe("");
 });
 
-test("a reply preview cut at 160 runes inside a code span drops the open backtick", () => {
+test("a fragment cut inside a code span drops the open backtick", () => {
   const head = "Before the cut `dispatch-deploy.y";
   expect(balanceCutMarkdown(head)).toBe("Before the cut dispatch-deploy.y");
-});
-
-test("a reply preview is balanced only when the server cut it: exactly 160 runes long", () => {
-  // Under the limit, `HeadRunes` returns the body unchanged: a complete message, whose author's
-  // literal `**` is theirs to keep.
-  expect(replyPreviewMarkdown("Use ** for bold")).toBe("Use ** for bold");
-  // At the limit it was cut (or is exactly 160 runes, which the balancer leaves alone when its
-  // marks are balanced): a `**bold` opened before the cut loses the opener.
-  const cut = `${"word ".repeat(30)}and then **bold text that the`.slice(0, 160);
-  expect(cut.length).toBe(160);
-  expect(replyPreviewMarkdown(cut)).toBe(cut.replace("**", ""));
-  expect(replyPreviewMarkdown(undefined)).toBe("");
 });
 
 test("a search snippet is balanced only when the headline window cut it: exactly 24 words", () => {

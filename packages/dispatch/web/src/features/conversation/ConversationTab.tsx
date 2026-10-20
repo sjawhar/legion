@@ -11,7 +11,6 @@ import type {
   Message,
   MessageDelivery,
   MessageDeliveryMode,
-  UserIssueState,
   UserState,
 } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -38,12 +37,7 @@ import {
 import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
 import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
-import {
-  applyPinStateOperation,
-  issueStateTransport,
-  type PinStateOperation,
-  sharedIssueStateWrites,
-} from "../issue/state-write-queue";
+import { usePinWrites } from "../issue/usePinWrites";
 import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
@@ -64,9 +58,9 @@ import {
   type Conversation,
   type ConversationFilter,
   commentDeliveries,
-  filterConversations,
   focusConversation,
   type MessageConversation,
+  matchesFilter,
 } from "./conversation-model";
 import { duplicateText, failureGuidance, isSafeRetry, MODE_LABELS, withGuidance } from "./delivery";
 import {
@@ -82,12 +76,6 @@ import { capabilitiesForTarget, TargetedMessageCard } from "./TargetedMessageCar
 import { useFollowLatest } from "./use-follow-latest";
 import { useAgents } from "./useAgents";
 import { threadRepliesSendKey, threadReplySendKey, usePhoneThread } from "./usePhoneThread";
-
-interface FailedStateOperations {
-  authoritativeState: UserIssueState | undefined;
-  issueKey: string;
-  operations: PinStateOperation[];
-}
 
 interface ConversationTabProps {
   /** Every artifact on the issue by id - uploads and images as well as documents, which is
@@ -811,9 +799,8 @@ export function ConversationTab({
   const store = useHeldSends();
   // Comments whose card's own reply the store holds, out or refused.
   const heldCardReplies = useHeldSendsUnder(threadRepliesSendKey(sendKey));
-  const [failedOps, setFailedOps] = useState<FailedStateOperations>();
+  const pins = usePinWrites(issueKey);
   const viewer = useQuery(whoAmIQuery());
-  const [retryingFailedOps, setRetryingFailedOps] = useState(false);
   // The three reads the list is built from, each the issue's whole set: a conversation is listed
   // however old it is, which no window of the event log could promise.
   // The comments are the read the margin already holds for this issue, under the key it owns
@@ -860,7 +847,6 @@ export function ConversationTab({
       }),
     [asks.data, comments.data, messages.data, unreadFrom]
   );
-  const unreadCount = conversations.filter((conversation) => conversation.unread).length;
   const [filter, setFilter] = useState<ConversationFilter>("all");
   const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
   const phone = usePhoneThread({ isPhoneViewport, sendKey, sendingNow });
@@ -887,23 +873,25 @@ export function ConversationTab({
   );
   const shown = useMemo(
     () =>
-      filterConversations(conversations, filter).concat(
-        // A conversation the reader has in hand stays listed whatever the filter would do with
-        // it - its thread open inline or full-screen, the phone thread composer holding a reply
-        // to it, or its card's own reply held, out or refused, for its thread to show again.
-        filter === "all"
-          ? []
-          : conversations.filter(
-              (conversation) =>
-                conversation.kind === "comment" &&
-                conversation.closed === (filter === "open") &&
-                (openThreads.has(conversation.root.id) ||
-                  phone.holds(conversation.root.id) ||
-                  heldCardReplies.some((held) => held.request.replyTo?.id === conversation.root.id))
-            )
+      // One pass over the list in the order `buildConversations` gave it, newest activity first:
+      // a conversation the reader has in hand is kept wherever the filter would have dropped it -
+      // its thread open inline or full-screen, the phone thread composer holding a reply to it,
+      // or its card's own reply held, out or refused, for its thread to show again - and keeps
+      // its place in that order rather than falling in behind the conversations the filter took.
+      conversations.filter(
+        (conversation) =>
+          matchesFilter(conversation, filter) ||
+          (conversation.kind === "comment" &&
+            (openThreads.has(conversation.root.id) ||
+              phone.holds(conversation.root.id) ||
+              heldCardReplies.some((held) => held.request.replyTo?.id === conversation.root.id)))
       ),
     [conversations, filter, heldCardReplies, openThreads, phone.holds]
   );
+  // Counted over the list as shown, which is the list the pill acts on: it jumps to the first
+  // card on the page, so a count taken over the whole set would name unread conversations the
+  // filter is hiding and land on a card carrying no `New` mark.
+  const unreadCount = shown.filter((conversation) => conversation.unread).length;
   // A landing overrides the filter: arriving at a conversation the current bucket hides resets
   // it to All, so a link never fails to land.
   useEffect(() => {
@@ -959,23 +947,37 @@ export function ConversationTab({
   const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
   const follow = useFollowLatest({ enabled: visible, latestItemSeq, ownSendCount });
   const { agents, titles } = useAgents(visible);
-  const hasFailedOps = failedOps?.issueKey === issueKey;
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     if (!visible || focus === undefined || scrolledToFocus.current === focus.id) {
       return;
     }
+    // Nothing to anchor on until the card the link names is on the page; the landing effect
+    // resets the filter for one the current bucket hides, and `shown` brings this effect back.
+    // `shown` also changes whenever a thread opens (`openThreads` is one of its inputs), which
+    // is when a named reply's own row mounts.
+    if (!shown.some((conversation) => conversation.id === focus.id)) {
+      return;
+    }
     // The reply the link names is the anchor when it names one; a card with no reply named, or
-    // one whose reply is inside a collapsed thread, anchors on the card itself.
-    const anchor =
-      document.querySelector<HTMLElement>(`[data-reply][aria-current="true"]`) ??
-      document.querySelector<HTMLElement>(`[data-turn="${focus.id}"]`);
+    // one whose reply is inside a collapsed thread, anchors on the card itself. Only the anchor
+    // of the kind the link named ends the search: the effect below opens the named comment's
+    // thread a commit later, so the first pass over a reply link finds the card alone, scrolls
+    // there, and tries again - otherwise a marked reply far down a long thread would be left
+    // below the fold.
+    const reply =
+      focus.replyId === undefined
+        ? null
+        : document.querySelector<HTMLElement>(`[data-reply][aria-current="true"]`);
+    const anchor = reply ?? document.querySelector<HTMLElement>(`[data-turn="${focus.id}"]`);
     if (anchor !== null) {
       anchor.scrollIntoView({ block: "center" });
-      scrolledToFocus.current = focus.id;
+      if (focus.replyId === undefined || reply !== null) {
+        scrolledToFocus.current = focus.id;
+      }
     }
-  }, [focus, visible]);
+  }, [focus, shown, visible]);
 
   // A link to a comment (`/issues/<key>/comments/<id>`, from a Replies row, the Inbox, search or
   // a copied reference) opens that comment's thread as it lands, so its replies are on screen:
@@ -1025,107 +1027,11 @@ export function ConversationTab({
     shouldDwell: () => headSeq > lastRead.current,
   });
 
-  const applyOptimisticOperations = (operations: PinStateOperation[]) => {
-    queryClient.setQueryData<UserState>(["user-state"], (current) => {
-      let next = stateForIssue(current, issueKey);
-      for (const operation of operations) {
-        next = {
-          ...next,
-          dismissed: applyPinStateOperation(next.dismissed, operation),
-        };
-      }
-      return { ...current, [issueKey]: next };
-    });
-  };
-
-  const enqueuePinOperations = (operations: PinStateOperation[]) => {
-    for (const operation of operations) {
-      void sharedIssueStateWrites
-        .enqueue(issueKey, operation, {
-          ...issueStateTransport,
-          onDrained: (key, next) => {
-            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-              ...current,
-              [key]: next,
-            }));
-            setFailedOps((current) => (current?.issueKey === key ? undefined : current));
-            setRetryingFailedOps(false);
-          },
-          onError: (key, failedOperations, next) => {
-            if (next === undefined) {
-              void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-            } else {
-              queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-                ...current,
-                [key]: next,
-              }));
-            }
-            setFailedOps({
-              authoritativeState: next,
-              issueKey: key,
-              operations: failedOperations,
-            });
-            setRetryingFailedOps(false);
-          },
-        })
-        .catch(() => {});
-    }
-  };
-
-  const updatePins = (
-    operation: PinStateOperation | ((dismissed: string[]) => PinStateOperation)
-  ) => {
-    if (hasFailedOps) {
-      return;
-    }
-    let nextOperation: PinStateOperation | undefined;
-    queryClient.setQueryData<UserState>(["user-state"], (current) => {
-      const currentIssueState = stateForIssue(current, issueKey);
-      nextOperation =
-        typeof operation === "function" ? operation(currentIssueState.dismissed) : operation;
-      return {
-        ...current,
-        [issueKey]: {
-          ...currentIssueState,
-          dismissed: applyPinStateOperation(currentIssueState.dismissed, nextOperation),
-        },
-      };
-    });
-    if (nextOperation !== undefined) {
-      enqueuePinOperations([nextOperation]);
-    }
-  };
-
   const pinConversation = (id: string) =>
-    updatePins((dismissed) => ({
+    pins.updatePins((dismissed) => ({
       id,
       op: isPinnedConversation(dismissed, id) ? "unpin" : "pin",
     }));
-
-  const retryFailedOperations = () => {
-    if (failedOps === undefined || failedOps.issueKey !== issueKey || retryingFailedOps) {
-      return;
-    }
-    setRetryingFailedOps(true);
-    applyOptimisticOperations(failedOps.operations);
-    enqueuePinOperations(failedOps.operations);
-  };
-
-  const dismissFailedOperations = () => {
-    if (failedOps === undefined || failedOps.issueKey !== issueKey || retryingFailedOps) {
-      return;
-    }
-    const authoritativeState = failedOps.authoritativeState;
-    if (authoritativeState === undefined) {
-      void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-    } else {
-      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-        ...current,
-        [issueKey]: authoritativeState,
-      }));
-    }
-    setFailedOps(undefined);
-  };
 
   if (asks.isPending || comments.isPending || messages.isPending) {
     return <p className={textMutedOnCanvas}>Loading conversation…</p>;
@@ -1145,27 +1051,7 @@ export function ConversationTab({
       item="data-turn"
       label="Conversation"
     >
-      {hasFailedOps ? (
-        <div className={`flex items-center gap-3 text-sm ${dangerText}`} role="alert">
-          <p>Couldn't save pin — retry</p>
-          <button
-            className="font-medium underline disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={retryingFailedOps}
-            onClick={retryFailedOperations}
-            type="button"
-          >
-            Retry
-          </button>
-          <button
-            className="underline disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={retryingFailedOps}
-            onClick={dismissFailedOperations}
-            type="button"
-          >
-            Close
-          </button>
-        </div>
-      ) : null}
+      {pins.banner}
       {/* Mounted, and hidden, while a phone thread covers it: its draft, a send it has out, that
           send's refusal and its reply are all still there on Back. Mounted on a closed issue too,
           where it shows only a send of its own still out or its refusal (`closed`), so an issue
@@ -1268,7 +1154,7 @@ export function ConversationTab({
                 issueKey={issueKey}
                 current={current}
                 currentReplyId={currentReplyId}
-                disabled={hasFailedOps}
+                disabled={pins.blocked}
                 isClosed={isClosed}
                 item={item}
                 key={item.id}
@@ -1297,7 +1183,7 @@ export function ConversationTab({
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
                 current={current}
                 currentReplyId={currentReplyId}
-                disabled={hasFailedOps}
+                disabled={pins.blocked}
                 expanded={openThreads.has(item.root.id)}
                 onRetryAction={commentActions.retryItem}
                 pendingAction={commentActions.pendingActionIds.has(item.root.id)}
@@ -1347,7 +1233,7 @@ export function ConversationTab({
                 />
               </div>
               <TurnPin
-                disabled={hasFailedOps}
+                disabled={pins.blocked}
                 onPin={() => pinConversation(item.id)}
                 pinned={pinned}
               />
@@ -1391,7 +1277,7 @@ export function ConversationTab({
                 current={phoneThread.id === focus?.id}
                 currentReplyId={phoneThread.id === focus?.id ? focus?.replyId : undefined}
                 viewerLogin={viewer.data?.login ?? ""}
-                disabled={hasFailedOps}
+                disabled={pins.blocked}
                 expanded={openThreads.has(phoneThread.root.id)}
                 forceExpanded
                 hideReplyComposer={phoneReplyTargetsThread}

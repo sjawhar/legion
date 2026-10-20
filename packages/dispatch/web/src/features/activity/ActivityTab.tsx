@@ -1,4 +1,4 @@
-import { replaceEqualDeep, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { replaceEqualDeep, useInfiniteQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 
 import { api } from "../../api/client";
@@ -17,13 +17,9 @@ import {
 import { resolveAuthor } from "../conversation/authors";
 import { useAgents } from "../conversation/useAgents";
 import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
-import {
-  applyPinStateOperation,
-  issueStateTransport,
-  type PinStateOperation,
-  sharedIssueStateWrites,
-} from "../issue/state-write-queue";
+import { usePinWrites } from "../issue/usePinWrites";
 import { Timestamp } from "../refs/Timestamp";
+import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { ActivityLine } from "./ActivityLine";
 import { buildActivityItems, dateKey } from "./activity-model";
 
@@ -41,7 +37,7 @@ interface ActivityTabProps {
  * filters: this is the record, not a place to write.
  */
 export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): ReactNode {
-  const queryClient = useQueryClient();
+  const pins = usePinWrites(issueKey);
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
     queryKey: ["events", issueKey],
@@ -91,40 +87,11 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
     [events, issueState.last_read_seq, titles, today]
   );
 
-  const togglePin = (eventId: number) => {
-    let operation: PinStateOperation | undefined;
-    queryClient.setQueryData<UserState>(["user-state"], (current) => {
-      const currentIssueState = stateForIssue(current, issueKey);
-      operation = {
-        id: eventItemId({ id: eventId }),
-        op: isPinnedEvent(currentIssueState.dismissed, eventId) ? "unpin" : "pin",
-      };
-      return {
-        ...current,
-        [issueKey]: {
-          ...currentIssueState,
-          dismissed: applyPinStateOperation(currentIssueState.dismissed, operation),
-        },
-      };
-    });
-    if (operation === undefined) {
-      return;
-    }
-    void sharedIssueStateWrites
-      .enqueue(issueKey, operation, {
-        ...issueStateTransport,
-        onDrained: (key, next) => {
-          queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-            ...current,
-            [key]: next,
-          }));
-        },
-        onError: () => {
-          void queryClient.invalidateQueries({ queryKey: ["user-state"] });
-        },
-      })
-      .catch(() => {});
-  };
+  const togglePin = (eventId: number) =>
+    pins.updatePins((dismissed) => ({
+      id: eventItemId({ id: eventId }),
+      op: isPinnedEvent(dismissed, eventId) ? "unpin" : "pin",
+    }));
 
   if (log.isPending) {
     return <p className={textMutedOnCanvas}>Loading activity…</p>;
@@ -133,8 +100,17 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
     return <p className={dangerText}>Could not load the activity.</p>;
   }
 
+  // The stream prepends each published event to the front of page 0 (`prependEventToLog`) and
+  // this list is newest first, so an arrival pushes every row below it down. The anchor holds
+  // the row the reader is on - each row carries its own `data-event-seq` - where it was.
   return (
-    <section className="flex min-h-[60dvh] flex-col gap-3 pb-16">
+    <ViewportAnchor
+      as="section"
+      className="flex min-h-[60dvh] flex-col gap-3 pb-16"
+      item="data-event-seq"
+      label="Activity"
+    >
+      {pins.banner}
       <ol aria-label="Issue activity" className="flex flex-col gap-1">
         {items.map((item) => {
           if (item.kind === "day-divider" || item.kind === "unread-divider") {
@@ -186,6 +162,7 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
                 />
               </span>
               <PinButton
+                disabled={pins.blocked}
                 label={pinned ? "Unpin" : "Pin"}
                 onClick={() => togglePin(item.event.id)}
                 pinned={pinned}
@@ -208,6 +185,6 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
           </button>
         </div>
       ) : null}
-    </section>
+    </ViewportAnchor>
   );
 }

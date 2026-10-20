@@ -213,14 +213,13 @@ export function buildConversations({
   );
 }
 
-export function filterConversations(
-  conversations: readonly Conversation[],
-  filter: ConversationFilter
-): Conversation[] {
-  if (filter === "all") {
-    return [...conversations];
-  }
-  return conversations.filter((conversation) => conversation.closed === (filter === "closed"));
+/** Whether `conversation` belongs in the bucket `filter` names: an ask is closed once it is
+ *  answered, resolved or retracted, a comment thread once it is resolved or its suggestion is
+ *  decided, and a message thread never is. A predicate rather than a list pass, so a caller
+ *  that also keeps conversations of its own (the Conversation's threads held in hand) walks
+ *  the list once and keeps its order. */
+export function matchesFilter(conversation: Conversation, filter: ConversationFilter): boolean {
+  return filter === "all" || conversation.closed === (filter === "closed");
 }
 
 /** Where a deep link lands: the conversation that holds the item, and the reply inside it when

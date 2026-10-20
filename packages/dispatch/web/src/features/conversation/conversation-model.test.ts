@@ -9,7 +9,7 @@ import type {
   MessageRead,
 } from "../../api/types";
 import { activityDescription } from "../activity/activity-model";
-import { buildConversations, filterConversations, focusConversation } from "./conversation-model";
+import { buildConversations, focusConversation, matchesFilter } from "./conversation-model";
 
 const session: Actor = { id: "session-1", kind: "session" };
 const bob: Actor = { id: "bob", kind: "user" };
@@ -169,14 +169,13 @@ test("an open ask is Open; an answered one and a retracted one are Closed and st
     ],
   });
 
-  expect(filterConversations(conversations, "open").map((item) => item.id)).toEqual([
-    "ask:ask-open",
-  ]);
-  expect(filterConversations(conversations, "closed").map((item) => item.id)).toEqual([
-    "ask:ask-retracted",
-    "ask:ask-answered",
-  ]);
-  expect(filterConversations(conversations, "all")).toHaveLength(3);
+  expect(
+    conversations.filter((item) => matchesFilter(item, "open")).map((item) => item.id)
+  ).toEqual(["ask:ask-open"]);
+  expect(
+    conversations.filter((item) => matchesFilter(item, "closed")).map((item) => item.id)
+  ).toEqual(["ask:ask-retracted", "ask:ask-answered"]);
+  expect(conversations.filter((item) => matchesFilter(item, "all"))).toHaveLength(3);
 });
 
 test("a comment thread closes when it is resolved or its suggestion is decided", () => {
@@ -203,15 +202,12 @@ test("a comment thread closes when it is resolved or its suggestion is decided",
     ],
   });
 
-  expect(filterConversations(conversations, "open").map((item) => item.id)).toEqual([
-    "comment:undecided",
-    "comment:open",
-  ]);
-  expect(filterConversations(conversations, "closed").map((item) => item.id)).toEqual([
-    "comment:rejected",
-    "comment:accepted",
-    "comment:resolved",
-  ]);
+  expect(
+    conversations.filter((item) => matchesFilter(item, "open")).map((item) => item.id)
+  ).toEqual(["comment:undecided", "comment:open"]);
+  expect(
+    conversations.filter((item) => matchesFilter(item, "closed")).map((item) => item.id)
+  ).toEqual(["comment:rejected", "comment:accepted", "comment:resolved"]);
 });
 
 test("a root comment nobody replied to is a conversation of its own", () => {
@@ -268,8 +264,8 @@ test("a targeted message and its replies are one card, answered by the first ses
   expect(card.answer?.id).toBe("message-3");
   expect(card.at).toBe("2026-09-10T09:02:00Z");
   // Never closed: a message thread is listed under All and under Open.
-  expect(filterConversations(conversations, "open")).toHaveLength(1);
-  expect(filterConversations(conversations, "closed")).toHaveLength(0);
+  expect(conversations.filter((item) => matchesFilter(item, "open"))).toHaveLength(1);
+  expect(conversations.filter((item) => matchesFilter(item, "closed"))).toHaveLength(0);
 });
 
 test("a conversation is unread from the boundary on, and read below it", () => {

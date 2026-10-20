@@ -1319,6 +1319,58 @@ test(
   })
 );
 
+// The pill scrolls to the first card on the page and labels itself with a count: both have to
+// read the same list. With the filter on Open and the only unread conversation resolved, a count
+// taken over the whole set would promise `· 1 new` and land the reader on a card carrying no
+// `New` mark, with the conversation it counted not on the page at all.
+test(
+  "Jump to latest counts the unread conversations the filter leaves on the page",
+  withScrollY(async () => {
+    const layout = installScrollLayoutMocks();
+    const stub = stubLists({
+      comments: [
+        comment("comment-1", { body: "An open comment", created_at: "2026-09-20T00:00:00Z" }),
+        comment("comment-2", {
+          body: "A resolved comment",
+          created_at: "2026-09-20T00:05:00Z",
+          resolved: true,
+          resolved_at: "2026-09-20T00:06:00Z",
+          resolved_by: alice,
+        }),
+      ],
+      unread: [headEvent(9, "2026-09-20T00:05:00Z")],
+    });
+    const queryClient = newQueryClient();
+    const view = render(tab({ "CORE-1": issueState([], 3) }, true, queryClient));
+
+    try {
+      await screen.findByText("A resolved comment");
+      await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
+      Object.defineProperty(window, "scrollY", {
+        configurable: true,
+        value: 4_500,
+        writable: true,
+      });
+      act(() => {
+        window.dispatchEvent(new Event("scroll"));
+      });
+      expect((await screen.findByTestId("jump-to-latest")).textContent).toBe(
+        "Jump to latest · 1 new"
+      );
+
+      const filters = screen.getByRole("group", { name: "Conversations" });
+      fireEvent.click(within(filters).getByRole("button", { name: "Open" }));
+      await waitFor(() => expect(screen.queryByText("A resolved comment")).toBeNull());
+
+      expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest");
+    } finally {
+      view.unmount();
+      layout.restore();
+      stub.restore();
+    }
+  })
+);
+
 test(
   "a reader pinned to the top stays pinned when a conversation arrives",
   withScrollY(async () => {
