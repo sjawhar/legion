@@ -90,9 +90,10 @@ export interface SeededWorkspace {
   >;
   readonly broadcast: { readonly id: string; readonly sessionIds: readonly string[] };
   readonly directMessage: string;
-  /** Rows alice's Inbox lists (open asks on open issues and documents); the snoozed one is among
-   *  them, under Later. The Inbox opens on Mine, which shows alice's issues' asks and the
-   *  Unassigned band, and every issue here is alice's. */
+  /** Rows the server lists for alice (open asks on open issues and documents); the snoozed one
+   *  is among them, under Later. The Inbox page opens on the reader's own work - every issue
+   *  here is alice's - so her default list is these rows less the document's, which nobody
+   *  holds and `?assignee=unassigned` lists. */
   readonly inboxRows: number;
 }
 

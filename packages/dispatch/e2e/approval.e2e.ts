@@ -591,26 +591,25 @@ test("an approval request for an unassigned issue's non-primary document remains
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    await page.goto("/?view=mine");
+    // Nobody holds the shared-token issue, so its request is nobody's own work: the reader's
+    // default list does not hold it. An unassigned issue's request reaches a person through the
+    // Unassigned filter, where it is as answerable as anywhere, or through the issue itself
+    // (the margin below).
+    await page.goto("/");
+    await expect(page.getByTestId(`ask-${nonPrimary.ask.id}`)).toHaveCount(0);
+    await expect(page.getByText("Nothing needs you")).toBeVisible();
 
-    // The shared-token issue has no assignee, so Mine retains the request in its Unassigned band
-    // rather than making the human hunt in Everyone.
-    const unassigned = page.locator('[data-inbox-section="unassigned"]');
-    await expect(unassigned.getByTestId(`ask-${nonPrimary.ask.id}`)).toBeVisible();
-    await expect(unassigned.getByTestId(`ask-${nonPrimary.ask.id}`)).toContainText(
-      "Approval requested"
-    );
-    await expect(unassigned.getByTestId(`ask-${nonPrimary.ask.id}`).getByRole("radio")).toHaveCount(
-      2
-    );
+    await page.goto("/?assignee=unassigned");
+    const card = page.getByTestId(`ask-${nonPrimary.ask.id}`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText("Approval requested");
+    await expect(card.getByRole("radio")).toHaveCount(2);
     const inboxShot = testInfo.outputPath("approval-non-primary-inbox-1280.png");
     await page.screenshot({ path: inboxShot, fullPage: true });
-    await testInfo.attach("non-primary approval in Inbox", {
+    await testInfo.attach("non-primary approval under the Unassigned filter", {
       contentType: "image/png",
       path: inboxShot,
     });
-    await page.getByRole("button", { name: "Everyone" }).click();
-    await expect(page.getByTestId(`ask-${nonPrimary.ask.id}`)).toBeVisible();
 
     // Every open issue ask remains visible in the issue margin; the target being a secondary
     // document must not hide this decision while the primary approval stays draft.
@@ -643,10 +642,9 @@ test("an approval ask's Inbox row, drawer link and bare ask route land on the sp
   browser,
 }) => {
   await createProject({ key: "GATE", name: "Gate" });
-  const issue = await createIssue(
-    { project: "GATE", spec: "The plan.", title: "Design gate" },
-    session
-  );
+  // Alice's own issue, so the request is in her Inbox and her drawer, which both open on the
+  // reader's own work; the agent still requests the approval.
+  const issue = await createIssue({ project: "GATE", spec: "The plan.", title: "Design gate" });
   const requested = await requestApproval(issue.primary_artifact_id, {}, session);
   const specPath = `/issues/${issue.key}/spec?ask=${requested.ask.id}`;
 
@@ -753,8 +751,9 @@ test("an open approval ask's document link reaches the issue's Conversation, and
       await page.getByRole("button", { name: "Close review panel (1 open ask)" }).click();
     }
 
-    // A project-level document's approval request links its own document the same way.
-    await page.goto("/");
+    // A project-level document's approval request links its own document the same way. A
+    // document has no assignee, so the Unassigned filter is where the Inbox lists it.
+    await page.goto("/?assignee=unassigned");
     const inboxCard = page.getByTestId(`ask-${docApproval.ask.id}`);
     await expect(inboxCard.getByRole("link", { name: "runbook.md, version 1" })).toHaveAttribute(
       "href",

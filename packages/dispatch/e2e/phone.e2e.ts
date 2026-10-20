@@ -686,7 +686,9 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(artifactLink);
     await expect.soft(artifactLink.locator("[title]")).toHaveAttribute("title", longName);
 
-    await page.goto("/?view=everyone");
+    // The long name belongs to a project document, whose ask nobody holds: the cleared filter
+    // is where the Inbox lists it.
+    await page.goto("/?assignee=everyone");
     const inboxOwner = page.locator("[data-inbox-owner]", { hasText: longName });
     await expectEllipsis(inboxOwner);
     // The row already opens a RefPreview hover card (referenceTriggerProps); a native title

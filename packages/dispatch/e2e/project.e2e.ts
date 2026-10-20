@@ -52,6 +52,10 @@ test("project page groups issues by status in board order; filters narrow issues
   await patchIssue(child.key, { status: "testing" });
   await patchIssue(done.key, { status: "done" });
   await createAsk(needsYou.key, { question: "Does this need review?" }, session);
+  // The negative control for the header's pill: another person's question in this same project.
+  const bobs = await createIssue({ project: "CORE", title: "Bob's work" }, { login: "bob" });
+  await patchIssue(bobs.key, { status: "in_progress" });
+  await createAsk(bobs.key, { question: "Does Bob need to answer this?" }, session);
   for (const issue of [triage, icebox, backlog, parent, needsYou, child, done]) {
     const latest = await getIssue(issue.key);
     await putIssueState(issue.key, { last_read_seq: latest.last_seq });
@@ -67,6 +71,8 @@ test("project page groups issues by status in board order; filters narrow issues
     await page.goto("/projects/CORE");
     await expect(page).toHaveTitle("CORE · Core · Dispatch");
     await expect(page.getByRole("heading", { name: "Core" })).toBeVisible();
+    // The pill counts this project's questions waiting on the reader themselves: one, Bob's
+    // not among them.
     const blockedOnYou = page.getByRole("link", { name: "Blocked on you · 1" });
     await expect(blockedOnYou).toHaveAttribute("href", "/");
     if (testInfo.project.name === "chromium") {
@@ -97,7 +103,7 @@ test("project page groups issues by status in board order; filters narrow issues
       "Icebox (1)",
       "Backlog (1)",
       "Todo (2)",
-      "In progress (1)",
+      "In progress (2)",
       "Testing (1)",
       "Done (1)",
     ]);
