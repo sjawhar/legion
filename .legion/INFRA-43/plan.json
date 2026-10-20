@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-43",
+  "completed": "2026-10-20T06:03:00Z",
+  "plan": "dispatch://INFRA-43/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase contract: the shared workspace, the push procedure, the handoff and the completion gate.",
+      "skill://legion-worker/references/pr-body.md — this issue's proof is a browser run on the live page; the PR body's E2E (implementer) line and the handoff's proof array carry its command, observation, head SHA and negative control, and the negative control here is the plan's step 2, the same checks run before the fix.",
+      "skill://ce-simplify-code — mandatory once in the first implementing round, at the proved head, since the diff is runtime code.",
+      "skill://dispatch and skill://dispatch-first — any write to the issue (a question to the architect goes over Envoy, a human to-do is a dispatch ask).",
+      "skill://legion-worker/references/review-threads.md — the implementer answers and resolves each review thread itself in later rounds."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's phase contract and the test.json handoff fields (implementerProof, failures, proof).",
+      "skill://legion-worker/references/pr-body.md — the tester drives the live page itself rather than re-running CI, verifies the implementer's proof, and records its own E2E (tester) line; the plan's harness section is the recipe it re-runs with.",
+      "skill://dispatch and skill://dispatch-first — for anything it must put on the issue."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's round order (read the code commit's checks, push the handoff, review the head that push made, then complete).",
+      "skill://legion-worker/references/merge-gate.md — the approval, retro, READY order this issue ends in.",
+      "skill://legion-worker/references/review-threads.md — one disposition reply per thread, never in bulk.",
+      "skills/thermonuclear-deep-review and skills/thermonuclear-code-quality — the diff-scoped pair the reviewer runs at the head each round, recorded in the PR body's Thermo line."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "1. The spec's reconnect bullet ('a reconnect takes your place away, and this issue does not change that') is new work described as no change: useAgentStream.ts:56-64 replaces the conversation atomically, the message list never empties, so scrollToBottomOnInitialize never re-arms (useThreadViewportAutoScroll.ts:255-268) and the only thing that moves a scrolled-back reader today is the run-start scroll this issue removes.",
+        "answer": "The plan builds the behaviour the spec promises the reader: D4 adds a `replays` counter to AgentStreamState, incremented on every replay event, and the follow hook jumps to the end when it changes. Acceptance line A8 proves it by re-publishing the replay while the reader is scrolled back. Recorded as spec departure 1 and sent to the architect, with the alternative (a reconnect keeps the reader's place, which deletes the counter and A8) named for the human to choose."
+      },
+      {
+        "finding": "2. 'Position unchanged while text streams into the turn being written' is not delivered by removing the run-start scroll alone: @assistant-ui/store's isUserScrollUp requires scrollHeight to be unchanged, so a scroll-back whose event lands on a frame where the text also grew never clears followBottomRef, and the next growth scrolls the reader back down.",
+        "answer": "D1 turns the library's autoscroll off entirely (autoScroll, scrollToBottomOnInitialize, scrollToBottomOnRunStart, scrollToBottomOnThreadSwitch all false) and D2 rule 3 gives Dispatch its own rule: following stops on any scrollTop decrease whose content did not shrink, so a scroll-up that coincides with growth is kept. Acceptance line A2 scrolls back during an active stream, not only while idle."
+      },
+      {
+        "finding": "3. 'Run first against today's code' has two readings, names an artifact no machine checks, and a characterization check committed to the branch would leave a deliberately red `dispatch` CI job.",
+        "answer": "Pinned to one reading in task 2: the new checks are written first and run in this workspace with no source change, their verbatim failure captured, and the fix written after. The capture is quoted in the PR body and is the negative control of the implementer's proof entry, so no red commit is ever pushed and the artifact is a recorded command with its output."
+      },
+      {
+        "finding": "4. The control's placement, stacking, touch size, label and accessible name are unspecified, and the route already carries the shell's connection pill, the chord indicator and the composer's slash popover near the same corner.",
+        "answer": "D3 fixes them: inside the thread box, absolute bottom-centre, z-10, out of flow, the issue page's own classes (min-h-11 touch floor, rounded-full, shadow-lg) and its exact label and data-testid=jump-to-latest. Acceptance lines A9 (uncovered composer at both widths, scrollHeight unchanged) and A13 (the slash popover's rows stay clickable) check it."
+      },
+      {
+        "finding": "5. What counts as a 'message' is undecided for the runtime's optimistic placeholder, a turn streamed under one id across many snapshots, an untagged direct message shown twice, and ids that disappear when a replay shrinks the transcript.",
+        "answer": "D2 rule 5 states the rule: the count is the ids of AgentRuntimeThread's merged list that are not in the snapshot taken while following. Counting from that list and never from thread.messages excludes the placeholder by construction; one streaming id counts once; a disappeared id is simply absent. The unit rows in task 4 cover each case."
+      },
+      {
+        "finding": "6. 'Scrolling to the end yourself' rests on a geometric predicate the reader cannot see, and the spec does not say the pill's visibility and the count's reset use the same one.",
+        "answer": "D2 rule 1 makes one predicate (scrollHeight - scrollTop - clientHeight <= 1, or no overflow at all) the whole of 'at the live end', and D3 renders the control only while it is false, so visibility, the reset and following can never disagree. A12 checks that a transcript shorter than the viewport shows no control."
+      },
+      {
+        "finding": "7. The send bullet does not say whether the reader moves at the press or at the server's answer, and the composer is disabled while a turn streams.",
+        "answer": "D4 pins it to the send the session accepted, matching ConversationTab's onSent precedent; a refused send leaves the reader where they are and shows agent-send-error above the thread. Recorded as spec departure 2. A6 proves both halves, and its setup uses a session with no streaming turn so Send is enabled."
+      },
+      {
+        "finding": "8. The page's non-transcript states (the empty note, the unavailable banner, a caught render) are not covered, and a viewport provider hoisted above the ErrorBoundary would strand a live control over a dead scroller.",
+        "answer": "D3 renders the control inside the existing ErrorBoundary and drops the hoisted-provider design altogether: the hook owns the state, so a caught render removes the control with the scroller, and an empty or non-overflowing transcript is at the end by rule 1 and shows none."
+      },
+      {
+        "finding": "9. Arrowing through the slash-command popover calls scrollIntoView on the highlighted row (AgentThread.tsx:255-260), which is safe today only because the composer is a sibling of the scroller.",
+        "answer": "D3 keeps that topology: the new relative wrapper goes around the viewport only, inside the ErrorBoundary, and the composer and its popover stay siblings below it. The invariant is written into the AGENTS.md paragraph task 9 extends."
+      },
+      {
+        "finding": "10. Three existing browser checks interact with the change: expectViewportBound runs with the thread at scrollTop 0 (so with the control on screen) and asserts the composer's box; expectNewestTurnAboveComposer cannot see a control covering the newest turn; and the webkit-iphone project runs only titles matching its allowlist.",
+        "answer": "D3 keeps the control out of flow so the composer does not move, A9 adds the uncovered assertions expectNewestTurnAboveComposer cannot make and requires the new phone row's title to contain both 'on a phone the live view' and 'covers none of' so WebKit runs it, and A10 keeps the whole existing file green."
+      },
+      {
+        "finding": "11. Session switch and reload are promised but rest on an undocumented side effect: the merged list passes through empty on a switch, which is the only thing that re-arms the library's initialize scroll.",
+        "answer": "The plan no longer depends on it: with the library's autoscroll off, D2 rule 7 makes sessionId one of the three signals that force the end, and the new session's replay bumps replayCount as well. A7 checks open, switch and reload; the invariant is recorded in AGENTS.md by task 9."
+      },
+      {
+        "finding": "12. The spec says nothing about the count while the tab is hidden.",
+        "answer": "No code: the count keeps rising, matching the live view's existing policy that a hidden tab keeps marking replies read. Written into the docs by task 9 and listed under Risks."
+      },
+      {
+        "finding": "13. Neither the spec nor the sketch says whether this reuses useFollowLatest or adds a second follow implementation, and the spec's proof list carries no unit or documentation row.",
+        "answer": "D5 states why the two cannot share geometry (window scroller, newest at top versus element scroller, newest at bottom) and what they do share (the label and the testid). Acceptance line A14 adds the unit rows and task 9 the documentation, both absent from the spec's own list."
+      },
+      {
+        "finding": "14. Claim audit: 'a reconnect takes your place away' is unsupported (finding 1); 'expanding a folded tool call does not move you' holds only for a scrolled-back reader and no existing check proves it, since the tool-expand check runs on a two-turn fixture that does not overflow; 'a message landing above you still shifts the text' depends on the engine's scroll anchoring and is demonstrated nowhere.",
+        "answer": "A11 adds the tool-call check on an overflowing transcript with the reader scrolled back. The scroll-anchoring claim stays out of scope, as the spec says, and is listed under Risks as unproven rather than asserted. Finding 1's claim is spec departure 1."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 2 },
+  "specDepartures": [
+    {
+      "spec": "'If the live connection drops, the page rebuilds the transcript from whatever the session can still replay and lands you at the newest text. A reconnect is the one event that takes your place away, and this issue does not change that.'",
+      "plan": "The plan builds that landing instead of inheriting it: useAgentStream gains a `replays` counter incremented on every replay event, and the follow hook jumps to the live end when it changes. A new acceptance line (A8) proves it by re-publishing the replay while the reader is scrolled back.",
+      "evidence": "useAgentStream.ts:56-64 replaces the conversation atomically, so the message list never passes through empty; useThreadViewportAutoScroll.ts:255-268 re-arms the initialize scroll only when the list empties; the only remaining thing that moves a scrolled-back reader is the run-start scroll at :274-278, which this issue removes. With no new code, a reconnect after this change would leave the reader where they are.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Adds: after a reconnect rebuilds the transcript, a reader who was scrolled back is at the newest text with no count shown (A8)."
+        ]
+      }
+    },
+    {
+      "spec": "'Sending a message from the composer takes you to the live end, so you see what you sent and the answer to it, as sending a message on an issue does today.'",
+      "plan": "Only a send the session accepted takes the reader to the live end. A send that fails leaves them where they are and shows its reason above the transcript.",
+      "evidence": "AgentConversationPage.tsx:111-128 awaits api.createAgentMessage and sets sendError on failure, and :194-198 renders agent-send-error above the thread, outside the scroller, so a scrolled-back reader reads it without being moved. The issue page the spec compares against bumps its own-send counter in the composer's onSent (ConversationTab.tsx:1279-1283), that is, on the server's answer.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Narrows: 'sending takes you to the live end' is proved for an accepted send, and a refused send is proved to leave the reader's place unchanged (A6)."
+        ]
+      }
+    }
+  ]
+}
