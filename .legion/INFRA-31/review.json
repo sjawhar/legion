@@ -2,91 +2,67 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T21:40:00Z",
+  "completed": "2026-10-20T22:18:00Z",
   "decision": "changes_requested",
-  "round": 5,
+  "round": 6,
   "previousRound": {
-    "head": "df06f2b5ef8ff0e6076882f3878fc64e6633df94",
+    "head": "493a32d1c91f0c99fb89126c9cfc3bb9ab573be3",
     "decision": "changes_requested",
-    "findings": 6,
-    "outcome": "All six fixed, and the blocking one proven both directions by me on the rendered script rather than on a hand-typed command, which is the standard I set before the push. I rendered this head's installScript through the real renderer, gave six copies their own generation directory and one empty shared BUN_INSTALL_CACHE_DIR, and ran them concurrently. After, at this head: 0 of 6 reached the install failure branch. Before, the same rendered script with the flock and the second call stripped and nothing else changed: 3 of 6 hit 'legion plugins: installing … failed' with bun's ENOENT on both @sjawhar packages. I also confirmed the pieces rather than assuming them — /usr/bin/flock is present in this image, it excludes on a directory as well as on a regular file (a holder blocked a waiter until `timeout 3` killed it, exit 124, for both), and with the binary absent the chain is two `not found` lines, the failure branch and exit 1. The five statement corrections landed: worker_shim.go:82 and plugins.go:92 state the shared rule, the ~400 MB Chromium moved into the shared cache-home term, TestEachRolesAgentIsToldAStateHomeOfItsOwn regained the mount and overlap assertions podsafety.go cites, the three socket sites derive from /legion/scratch/tmp, and operatorpod.go's row no longer names a container an operator's mount cannot reach."
+    "findings": 5,
+    "outcome": "All five answered. The lock is bounded (`-w installLockWaitSeconds`). `/usr/bin/flock` is declared in every place I named and three I did not: the Dockerfile's apt line, the image's toolchain capability summary, `toolchain()`'s own list, the capability test stubs, the image test's expected detail, the build-time `flock --version` step, and the third-party notices. The two rate sentences are corrected — `plugins.go` now says several of the six and records the four runs as 3, 4, 2 and 3, and points at the chalk/lodash probe where its rate is scoped; `plugins_test.go`'s invented rates are gone — and the correct `docs/kubernetes.md` paragraph was left alone, which I checked rather than assumed. The cache default is dropped for `cache=\"$BUN_INSTALL_CACHE_DIR\"`, so `set -u` aborts rather than a fallback silencing it. And `bunInstallArgs` now skips without `/usr/bin/flock` and pins `BUN_INSTALL_CACHE_DIR` under `t.TempDir()`, so the suite no longer locks the issue's shared cache when it runs in a pod."
   },
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:140",
-      "description": "The lock has no wait bound, so the fix turns one role's stalled install into the whole pod's. `/usr/bin/flock -- \"$cache\" /usr/local/bin/bun add …` blocks forever by default, and `legion_install || legion_install` makes each waiter queue twice. Measured here rather than read: with a holder running under flock, a waiter was still blocked when `timeout 3` killed it — exit 124 — on a directory and on a regular file alike. Before this push the six installs ran concurrently and failed or succeeded independently; after it, five roles queue behind the first with no bound, charged to the registration deadline (worker_boot_timeout_seconds 120 x worker_boot_registration_deadline_intervals 3 = 360 s), and a relaunch renders the same script and queues again. The normal case is unaffected — my six-way cold run was 6/6 and seconds long — so this is the tail, but the tail is a pod-wide launch failure under a message that mentions no lock, in exactly the plugin-bump scenario the lock was added for. `flock -w <seconds>` bounds it and exits 1, which falls into the retry and then the named failure branch already there, so the failure stays the one the script reports; the bound wants stating against the 360 s deadline in the comment that already discusses the lock's scope. Neither that comment nor docs/kubernetes.md:1856-1869 currently says the wait is unbounded."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/docker/worker.Dockerfile:483",
-      "description": "The install now cannot run without `/usr/bin/flock`, and that dependency is declared nowhere the image's other tools are. The apt line installs `ca-certificates chromium curl git jq openssh-client python3 socat wget` — no util-linux — and the `toolchain` capability `legion probe-image` asserts lists 'go, curl, wget, python3, node, bun, uv, kubectl, jq and ssh-keygen' (capabilities.go:96), so neither the build nor the probe would notice its absence. It is present today only because Debian's required set drags util-linux into the base. I traced the failure: with the binary gone the chain is two `not found` lines, the failure branch and exit 1 — so every installing launch fails, everywhere, under a message that blames the install rather than the missing tool. That matters more than it would for a degradable dependency, because the retry alone does not reliably survive the race (the tester's flock-removed, retry-kept control failed 2 of 6 on a cold run), so a silent fallback to retry-only would look fine and be the bug. Name it in both lists."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:106",
-      "description": "A rate from one experiment is stated as the race's outcome, and plugins_test.go then transfers it to a scenario nothing measured. plugins.go:104-108 says six concurrent `bun add --backend=copyfile --exact` against one empty cache 'leave one exit 0 and five exit 1', naming no packages; plugins_test.go:32-33 goes further — 'without the lock a bump fails five of six launches, and without the retry an agent's own bun install racing the same cold entry fails one'. The five-of-six split belongs to the chalk/lodash probe, which docs/kubernetes.md:1853-1857 scopes correctly, names its packages and says 'measured twice', and which does reproduce. Every measurement of the rendered pair disagrees: the implementer's 3 of 6, the tester's 4 of 6 then 2 of 6, and my own 3 of 6 today. 'Fails one' has no measurement behind it at all — the tester's control was flock-removed with the retry kept, and gave 2 of 6. Only the failure is reliable; the split is not, and this is the sentence a future reader uses to decide whether the lock still earns its keep. Keep the measured numbers in docs, which already scopes its experiment, and let the code and test comments state the rule and what the test pins."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins_test.go:135",
-      "description": "The one test that executes the rendered script now hard-requires `/usr/bin/flock` by absolute path and inherits the ambient cache. `bunInstallArgs` guards only on `exec.LookPath(\"sh\")`, so on a machine without flock — a developer's Mac, a platform this pull request names twice at worker_shim_test.go:23 and shim_test.go:389 — the script exits 127 and the three callers fail at the second check with 'the script never ran bun', which points at the wrong cause. The package already has the shape for an OS guard at launcher/namespace_test.go:49. Separately the test inherits BUN_INSTALL_CACHE_DIR: unset in CI, so the `${…:-<genDir>}` default is what CI exercises, but set inside a role container, where running the suite mkdirs and takes a real exclusive flock on the issue's shared cache. Pin it under t.TempDir() with cmd.Env and the two environments stop exercising different code."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:137",
-      "description": "The cache default cannot fire, and its stated purpose argues against the discipline the rest of the package keeps. `installScript` runs only in a Kubernetes role container — installArgv returns the agent unchanged whenever plugins is nil, which is every tmux launch (plugins.go:160-163) — and there BUN_INSTALL_CACHE_DIR is always set, fenced by runtimeOwned and by TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes, with EnsureScratch having already made the directory before the shim execs the script. So neither `${BUN_INSTALL_CACHE_DIR:-<genDir>}` nor the `mkdir -p` can do anything in production. The comment says the default exists to keep the script 'from aborting if it is somehow unset' — which is to disable, for this one variable, the `set -u` that would otherwise catch the invariant the package spends a coupling test enforcing. It also puts the script in the position of making a scratch directory in the same push that has worker_shim.go assert nothing else makes them. I asked for the mkdir and stand by it; the default is the part worth reconsidering. Either use the variable directly and let `set -u` abort loudly, or keep the mkdir and drop the default with its paragraph."
+      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:91",
+      "description": "The wait is a constant correct only at the daemon's defaults, and its comment presents the arithmetic as unconditional. `installLockWaitSeconds = 120` is sized against worker_boot_timeout_seconds 120 x worker_boot_registration_deadline_intervals 3 = 360, and two waits of 120 leave 120 for the install and the agent's start. Both are operator-settable. At a halved boot timeout the deadline is 180 and two waits are 240, so the bound cannot fire before the deadline retires the role — which is the failure the bound exists to prevent, arriving silently by arithmetic on a tuned deployment. TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline reads the deadline from `config.LoadForValidation` of a minimal file, so it catches a change to the *defaults* and cannot catch an operator who sets either value, which is the case that matters. The architect has ruled the derivation rather than a documented conditional, and reports the values reachable: `sandbox.Options.BootTimeout` is already set from `cfg.WorkerBootTimeout`, and the intervals need one new field beside it from the same config, derived through `runtime.RegistrationDeadline` so it survives the deadline ceasing to be a plain product. Two things to carry with it, both measured here rather than assumed: a derived wait can round to zero and `-w 0` is byte-for-byte `-n` — against a held lock `-w 0` returned exit 1 after 0s where `-w 3` waited its full 3s — so it must be floored at a positive value, and the assertion has to become a property over several configurations including a deliberately small one rather than the single-constant check it is today. The comment should argue the proportion before stating the sum: a third of the deadline is right because it scales, not because it is 120."
     }
   ],
+  "checksApplied": {
+    "standard": "The architect set round six as the closing round with five checks: the five round-5 findings answered, the lock bounded, flock declared in both lists, the two rate sentences corrected with the correct docs paragraph untouched, the serialisation test judged on three points with the mutation run, and the wait-bound conditionality.",
+    "result": "Four hold. The fifth is the finding above, which the architect had already ruled and whose answer the implementer has ready; this round exists to let it land."
+  },
+  "serialisationTest": {
+    "verdict": "It pins behaviour the substring assertions could not, and I proved that by mutation rather than reading it.",
+    "mutation": "With `installLockWaitSeconds = 0` and nothing else changed: TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript PASSES (its assertion is built with fmt.Sprintf over the constant, so it follows the mutation and cannot see it), TestTwoRenderedInstallsSerialiseOnTheSharedBunCache FAILS ('the log is not two completed installs: [start a, end a]' — at -w 0 the second install never gets the lock and never runs bun), and TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline FAILS naming the non-positive bound. Restored, all three pass (1.234s), workspace unchanged. That is the claim made and it is the direction claimed: the new tests catch what the old ones could not.",
+    "threePoints": [
+      "The substitution leaves the lock in the text under test: installLockProbe replaces `/usr/local/bin/bun` alone, so `/usr/bin/flock -w N -- \"$cache\"` is in what runs; the control strips the lock explicitly, from flock's own path through the locked directory so it survives the wait being respelled, and t.Fatal's if that prefix is not there.",
+      "The vacuity guard fails rather than skips: a control that never interleaves in five attempts is a t.Fatalf saying the locked run passed vacuously, not a quiet green. Five attempts is a bound, not a loop that can report success on the fifth — it returns on the first interleave and falls through to the Fatalf.",
+      "The harness is honest about what it ignores: exit codes, because the contract check's node has no package.json, so the proof is the log alone — two appends per process to a file opened in append mode."
+    ]
+  },
   "ci": {
     "verdict": "every required check green at the code head",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "5edffedf9a11a59eb46333cf7a00f9064bfe87d6",
-    "read": "Read with per_page=100 and --paginate. lint, typecheck and test are one run each, completed and success. pr-title has sixteen runs on this head, every one success — the workflow fires on each pull-request edit and the newest decides. gh api compare 5edffedf9a11...1d8c64541109 prints true for all paths under .legion/."
-  },
-  "thermonuclear": {
-    "ranAt": "1d8c64541109d2f0507a0178f50dffc158677191",
-    "deepReview": "Six findings, none blocking. Carried: the unbounded flock, the undeclared /usr/bin/flock, and the stated rates. It read the rendered shell rather than the Go format string and confirmed the construct is correct — the `||` chain under `set -eu`, the line continuation, the quoted default inside `${…:-}` expanding to the literal path, flock holding for the whole `bun add`, and the function form not changing exit-status propagation. It reproduced the chalk/lodash probe independently at 5 of 6 and 40 of 48 across eight rounds, which is why I treat that figure as sound for that payload and wrong only where it is transferred to the launch case.",
-    "codeQuality": "Seven findings. Carried: the unbounded flock, the rates, the unreachable default, and bunInstallArgs's flock dependency. Not carried: that the regained state-home assertions are a copy of the sibling test's, which I noted on the thread as work for the scratch.go extraction rather than a round; that the operatorpod row now reserves a name rather than guarding a failure, which I also left on its thread as a judgment for whoever next touches the file, since round 4 asked only that the reason be corrected and it was; and three small wrapping and wording regressions. It confirms independently that the five statement corrections each landed and that socketpath_test.go lost no guard — both hunks touch comment lines only."
+    "ciHead": "9f809c186bfd34e65340e104cc2bc494a1a482db",
+    "read": "Read with per_page=100 and --paginate. All four required names completed and success. gh api compare 9f809c186bfd...07e9b30a21d4 prints true for all paths under .legion/."
   },
   "verifiedByRunning": [
-    "The fix, both directions, on the rendered script: 0 of 6 install failures at this head against a cold shared cache; 3 of 6 with the flock and the retry stripped and nothing else changed.",
-    "/usr/bin/flock is present in this image and excludes on a directory as well as a regular file: a holder blocked a waiter until `timeout 3` killed it, exit 124, for both.",
-    "The missing-binary path: two `not found` lines, the failure branch, exit 1 — every installing launch, under a message that blames the install.",
-    "The image's declarations: the Dockerfile apt line and the toolchain capability row, neither naming util-linux or flock."
+    "The installLockWaitSeconds = 0 mutation, both directions, with the three tests' pass/fail recorded above.",
+    "`-w 0` is non-blocking: against a held lock it returned exit 1 after 0s where `-w 3` waited 3s — which is why a derived wait must be floored.",
+    "The flock declaration sweep, read in each file rather than taken from the commit message."
   ],
   "threads": {
-    "roundFour": 6,
+    "roundFive": 5,
     "allAnsweredAndResolvedByImplementer": true,
-    "reviewerRepliesPosted": [4330210850, 4330211119, 4330211409, 4330211643, 4330211900, 4330212118],
-    "botThreads": 0,
-    "note": "All six round-4 threads carry my own disposition reply at this head, each accepted; the plugins.go one accepts the fix and names the three things about that hunk that stand. No bot has opened a thread on this pull request."
-  },
-  "closingRound": {
-    "standard": "The architect set this as a closing round and asked me to judge two items he had ordered after the tester's round nine rather than let an approval close over them.",
-    "applied": "Both are findings and both are mine on the evidence rather than on his word: the undeclared /usr/bin/flock, whose failure path I traced, and the stated rate, which my own run of the rendered pair contradicts at 3 of 6. The unbounded lock is the round's own new finding and the one I would not let through, since it converts one role's stalled install into six failed launches and the fix is one flag that lands in the failure path already there. The two minors travel with them. Nothing in the round questions the human's decisions or the direction, and the mechanism is clear for the fifth time."
+    "botThreads": 0
   },
   "fastFollow": [
     "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy.",
-    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
-    "A test that proves the two installs actually serialise rather than that the text is present: a stub bun appending start and end markers, two rendered scripts run concurrently against one cache directory, asserting no interleaving. The current substring assertions would pass unchanged if someone added -n or -w 0.",
-    "The drift fence's reverse walk over every role rather than one rendered spec."
+    "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23, measured at 103 bytes against sun_path's 107 and further from it now that the shared TMPDIR is 19 bytes.",
+    "The drift fence's reverse walk over every role rather than one rendered spec: no gap today, since the enumeration of every variable the runtime sets under /legion gives exactly ten and no kind-specific value is among them."
   ],
   "forTheMerger": {
     "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the review body.",
     "ciShapes": [
       "The default check-runs page is 30 and these commits carry 25 to 39; read with per_page=100 and --paginate or required names fall off it.",
       "A push that carries code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
-      "A required workflow can have many runs on one head — pr-title has sixteen on this one — because it fires on every pull-request edit; the newest decides, and a cancelled run superseded by a later success leaves no verdict rather than a red one.",
+      "A required workflow can have many runs on one head — pr-title has had sixteen on one — because it fires on every pull-request edit; the newest decides, and a cancelled run superseded by a later success leaves no verdict rather than a red one.",
       "The non-required `dispatch` lane has rarely settled on this branch, and envoy-smoke was red at an earlier head on a live envoy-infra listener step this diff cannot reach."
     ]
   },
-  "verifiedOnGitHub": [
-    "E2E (implementer) and E2E (tester) both present at this head",
-    "CI read from the forge with per_page=100 and newest-run-per-workflow semantics, not from a handoff",
-    "Review threads and replies read in gh api graphql and the comments API, not from the body's Threads section"
-  ]
+  "note": "Written and pushed ahead of a planned pod replacement at about 22:25Z, so the round's proof is committed rather than left in a session. The review submission, the thread replies and the pull request body follow."
 }
