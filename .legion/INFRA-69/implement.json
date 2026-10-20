@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-69",
+  "completed": "2026-10-20T23:05:00Z",
+  "proof": [
+    {
+      "criterion": "The note's cause is the measured one, and a reader following it puts large writes on the issue volume rather than anywhere the container filesystem holds.",
+      "surface": "A live Legion role container — this issue's own implementer container in its Agent Sandbox issue pod on the production cluster, the exact surface the note is about.",
+      "command": "cat /proc/mounts; stat -c '%n dev=%d' /tmp /home/legion /home/legion/.cache /home/legion/.config /legion /var/run/legion/state /var/run/legion/private /var/run/legion/gh /home/legion/.local/state; then, around each 200 MiB write, df -k --output=used / with dd if=/dev/zero of=<path>/probe bs=1M count=200 for <path> in /tmp, /home/legion/.cache, /legion and /home/legion/.config",
+      "observed": "/proc/mounts carries no /tmp line. stat gives device 114 for /tmp, /home/legion, /home/legion/.cache and /home/legion/.local/state alike; 118 for /legion; 56 for /home/legion/.config; 128 for /var/run/legion/state; 130 for /var/run/legion/private; 124 for /var/run/legion/gh. df -k --output=used / reads 14392 KiB at rest, 219192 KiB with the 200 MiB file under /tmp, 14392 KiB again once it is removed, and 219192 KiB with the same file under /home/legion/.cache. So /tmp and the home directory are one charged container filesystem, which is what the note now says and the opposite of the cluster read's one wrong sentence.",
+      "headSha": "62539c0449d752fdefe2fcafdd6a2f6d1c29b010",
+      "negativeControl": "The same 200 MiB written under /home/legion/.config (device 56, an in-memory volume) left / at 14392 KiB and grew that volume to 204808 KiB, and the write under /legion left / at 14392 KiB while /legion grew to 839284 KiB. The method therefore distinguishes a memory-backed or volume-backed path from a charged one and would have shown /tmp as uncharged had it been memory-backed. A second control on the instrument: du -sx / reported no change for any of these writes (gVisor's overlay reports 0 blocks for such a file), which is why the note cites df on / rather than du."
+    },
+    {
+      "criterion": "A reader can tell from the note which directories are charged and which are not.",
+      "surface": "The committed note as the branch carries it, read the way a reader meets it.",
+      "command": "for p in /tmp /home/legion /home/legion/.cache /home/legion/.local/state /legion /legion/feed /home/legion/.omp/profiles/legion/agent/sessions /home/legion/.config /var/run/legion/private /var/run/legion/state /var/run/legion/launcher /var/run/legion/gh; do grep -c -F -- \"$p\" docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md; done",
+      "observed": "All twelve paths are present (counts 11, 11, 3, 2, 17, 1, 1, 4, 2, 2, 1, 2), and reading the two lists shows each on the correct side: /tmp, /home/legion, /home/legion/.cache, the Go caches and /home/legion/.local/state/<role> under 'Charged'; /legion, /legion/feed, /home/legion/.omp/profiles/legion/agent/sessions, /home/legion/.config, /var/run/legion/private, /var/run/legion/state, /var/run/legion/launcher and /var/run/legion/gh under 'Not charged'.",
+      "headSha": "62539c0449d752fdefe2fcafdd6a2f6d1c29b010",
+      "negativeControl": "jj file show -r main@origin <note> | grep -c -F '/home/legion/.local/state' returns 0 — the note as main carries it names no state home at all — so the check tells the corrected note from the old one rather than passing on any markdown file."
+    },
+    {
+      "criterion": "The change is documentation only: no code and no test; the Tests workflow's lint, typecheck and test jobs pass, and every path and reference the note cites resolves.",
+      "surface": "The pushed branch on GitHub (pull request sjawhar/legion#2088) and the workspace at the same head.",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --name-only; bash .github/scripts/check-private-names.sh; test -e for each docs/… and packages/… path the note cites; gh run list --commit 62539c0449d752fdefe2fcafdd6a2f6d1c29b010",
+      "observed": "jj diff --name-only prints exactly docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md and nothing else. check-private-names.sh exits 0 over 4686 files. All nine cited repository paths exist (the INFRA-43 note the Extends line names, podkind.go, names.go, testdata/golden/root.json, config/kubernetes.go, live_lifecycle_test.go, docs/kubernetes.md, packages/dispatch/e2e and its run-server.sh). CI at this head: Tests run 39510384794 — jobs lint, typecheck and test all completed success; PR Title run 39510384776 — success.",
+      "headSha": "62539c0449d752fdefe2fcafdd6a2f6d1c29b010",
+      "negativeControl": "check-private-names.sh is the job that can bite a markdown file here, and it fails any text naming a *.ts.net host: that is why the note cites dispatch://INFRA-51 rather than the Dispatch web address, and grep -i -E 'ts\\.net|dispatch\\.tail|https?://dispatch' over the note returns nothing."
+    }
+  ],
+  "filesChanged": [
+    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — rewritten in place: the eviction mechanism stated once, an explicit charged / not-charged list of twelve paths, why a role container has no /tmp mount, why the admitted bound is 1 GiB and not the configured 20/10 GiB, the TMPDIR bullet's reason restated, and three evidence blocks added below the existing Evidence paragraph. Front matter gains the tag `eviction` and `\"INFRA-69\"` in related_issues; title, H1, path and the Extends line are unchanged."
+  ],
+  "trickyParts": [
+    "The note is edited in place rather than superseded. skill://legion-retro tells a retro that finds a note wrong to write a successor with `supersedes:`; the architect decided (Envoy, 2026-10-20T22:34Z) that this is an implementing diff on the very file the issue exists to correct, not a retro writing over another tree's learning, so the file keeps its path and no `supersedes:` field was added. Keeping the path also keeps docs/solutions/legion/a-capability-a-plan-declares-unavailable-is-a-claim-until-someone-tried-it-INFRA-44.md:52 resolving, so no other file needed editing.",
+    "du is the wrong instrument on this runtime. A 200 MiB file under /tmp shows 0 blocks to `du` on the pod's gVisor overlay, so `du -sx /` reports no change at all; only `df -k --output=used /` sees the charge. A proof of this criterion written with `du` would have produced a false negative in both directions.",
+    "`bunx biome check .` is not a usable local check in a role container with no node_modules: bunx resolves an unrelated registry package named `biome` (version 0.3.3) and exits 0 having checked nothing. Biome 2.4.11 has no markdown rules anyway, so the authoritative check for this diff is CI's lint job, which is what the proof cites. `bun install` was deliberately not run — its node_modules would be a large write onto exactly the charged filesystem this note is about.",
+    "The golden pod JSON gives each role container four /var/run/legion/* mounts (launcher, private, state, gh), not the three an earlier reading reported; the note says four."
+  ],
+  "deviations": [
+    "None against spec v3. The planner's two recorded departures were both resolved by the architect before this phase started: the spec was rewritten at version 3 to follow the in-pod measurement (so the note nowhere says /tmp is safe), and its acceptance now names the Tests workflow's jobs plus a hand path check in place of a link check that does not exist for docs/solutions/.",
+    "The plan's point 6 said the existing Evidence paragraph stays word for word. One phrase in it was changed: 'it is why this is worth the two lines above' became 'it is why the rules above are worth their space', because the note no longer has two lines above it. Every figure in that paragraph (159 passed; 299 passed, 21 skipped, 0 failed in 16.1 minutes; seventeen probes) is untouched.",
+    "The plan's point 4 attributed the configured 20 GiB / 10 GiB limits to `legion.yaml`. The note attributes them to `defaultResources` in packages/daemon/internal/config/kubernetes.go, which is what this workspace can actually verify; what this deployment's own legion.yaml sets is not readable from here, so the note says an operator's runtime.kubernetes.resources may raise them rather than asserting a file it cannot read."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Three places outside this issue's one-file scope still carry the corrected claim or its consequence, all reported to the architect and deliberately untouched: docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md:37 tells a role to build its Postgres harness under /tmp; docs/kubernetes.md:1167-1184 presents the configured 20/10 GiB limits without the GKE clamp that makes the admitted bound 1 GiB; and dispatch://INFRA-51 carries the sentence this change corrects (the planner has already replied there with the measurement, dispatch://INFRA-51/comment/0ce1448c-ccbc-4b5f-aaaf-60dce4c5eb05).",
+    "Nobody inside a role container can read the kubelet's own per-container ephemeral-storage accounting — the cluster refuses nodes/proxy — so the charge is measured from inside by df on / and the eviction itself only from the pod's Kubernetes events. The note states that limit rather than implying a reader can watch their own budget."
+  ]
+}
