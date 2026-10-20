@@ -99,12 +99,22 @@ export function isBareReferenceBody(body: string): boolean {
   return bareReferenceBodyPattern.test(body.trim());
 }
 
+/**
+ * The most cards one body unfurls. Each card fetches what it names, a GitHub card through
+ * Dispatch's GitHub proxy, for every reader. A person's comment may hold `HUMAN_BODY_MAX` units,
+ * room for some 2,500 GitHub links, where a 2,000-unit body held at most about 66; past this many, the
+ * references still render inline in the body, which the card would only repeat.
+ */
+export const MAX_UNFURL_CARDS = 64;
+
 export function Unfurl({ body }: UnfurlProps): ReactNode {
-  const dispatch = composerReferences(body);
-  const github = referenceSpans(body, "https://github.com/").flatMap(({ value }) => {
-    const path = githubReference(value);
-    return path === undefined ? [] : [{ href: value, path }];
-  });
+  const dispatch = composerReferences(body).slice(0, MAX_UNFURL_CARDS);
+  const github = referenceSpans(body, "https://github.com/")
+    .flatMap(({ value }) => {
+      const path = githubReference(value);
+      return path === undefined ? [] : [{ href: value, path }];
+    })
+    .slice(0, MAX_UNFURL_CARDS - dispatch.length);
 
   if (dispatch.length === 0 && github.length === 0) {
     return null;

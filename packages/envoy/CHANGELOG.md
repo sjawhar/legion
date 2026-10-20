@@ -417,6 +417,23 @@
   image back. Only this release's API holds the depth limit, so an earlier release serving over
   `0113` can build a deeper chain again, and every read of that chain's issues fails (500) until an
   ancestor that still reads has its parent set to null.
+- A person's comment or message body is at most 65,536 UTF-16 units (`contracts.HumanBodyMax`,
+  GitHub's comment limit), where it was 2,000, the cap an agent's still is
+  (`contracts.DispatchBodyMax`). Both caps were literals in the handlers, one 2,000 for every
+  writer: a comment, reply, suggestion's explanation or edit, an issue message, a direct message
+  to a session or a broadcast written on the dashboard past 2,000 was refused, and the composer's
+  `maxLength` cut a longer paste at 2,000 without a word. On those routes the server now holds a
+  cookie or trusted-header caller to the person's cap and a bearer caller, a session or a service,
+  to the agent's, and a refusal names the writer's own cap; a session's reply to a delivery is
+  checked against no length, as before. The dashboard composer takes the person's cap as its
+  `maxLength`. A person's body at the cap is at most 192 KiB of UTF-8, so a comment at it fits a
+  document's 256 KiB margin record on its own (its thread's replies share that record, and every
+  anchored comment the document has had its 1 MiB margin), and at most 384 KiB of JSON, inside the
+  1 MiB request limit; saving one of pathological text is held to linear growth up to the cap
+  (`TestSavingAPathologicalBodyIsBounded`), as rendering one is (`isBareReferenceBody`). A body of
+  nothing but references unfurls at most 64 cards (`MAX_UNFURL_CARDS`), about as many GitHub links
+  as a 2,000-character body held, since each card fetches its target for every reader; the rest
+  stay inline in the body.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.

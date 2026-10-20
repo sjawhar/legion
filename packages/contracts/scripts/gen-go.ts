@@ -16,6 +16,8 @@ import {
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
 import {
+  DISPATCH_BODY_MAX,
+  HUMAN_BODY_MAX,
   PROJECT_KEY_PATTERN,
   PROJECT_KEY_RULE,
   SEARCH_KIND_DEPTH,
@@ -112,6 +114,13 @@ const ReceiptTimeoutCause = ${JSON.stringify(RECEIPT_TIMEOUT_CAUSE)}
 // MAX_BROADCAST_RECIPIENTS in packages/contracts so the server's limit and the dashboard's
 // cannot drift apart.
 const MaxBroadcastRecipients = ${MAX_BROADCAST_RECIPIENTS}
+
+// DispatchBodyMax is the longest comment or message body, in UTF-16 units, that Dispatch's comment
+// and message routes accept from a bearer caller (an agent's session or a service), and
+// HumanBodyMax the longest they accept from a person. Generated from DISPATCH_BODY_MAX and HUMAN_BODY_MAX in packages/contracts so the
+// server's refusals, the Dispatch tools' schemas and the dashboard's composer cannot drift apart.
+const DispatchBodyMax = ${DISPATCH_BODY_MAX}
+const HumanBodyMax = ${HUMAN_BODY_MAX}
 
 // SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
 // SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the \`dispatch search\`

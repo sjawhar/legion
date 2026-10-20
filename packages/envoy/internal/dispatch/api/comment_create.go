@@ -18,8 +18,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
-const maxCommentBody16 = 2000
-
 type commentInput struct {
 	Body     string             `json:"body"`
 	Anchor   *model.AnchorInput `json:"anchor"`
@@ -347,8 +345,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := len16(input.Body); length > maxCommentBody16 {
-		capExceeded(w, "body", length, maxCommentBody16)
+	if length, limit := len16(input.Body), bodyCap(actor); length > limit {
+		capExceeded(w, "body", length, limit)
 		return
 	}
 	delivery, mentionTargets, err := validateCommentMentions(input)

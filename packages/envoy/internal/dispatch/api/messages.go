@@ -16,8 +16,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
-const maxMessageBody16 = 2000
-
 const maxMessageReplyPreview16 = 160
 
 type createMessageInput struct {
@@ -55,7 +53,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	delivery, err := validateCreateMessage(&input)
+	delivery, err := validateCreateMessage(&input, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -87,7 +85,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	messageInput := createMessageInput{
 		Body: input.Body, InReplyTo: input.InReplyTo, Target: &target, Delivery: &input.Delivery,
 	}
-	delivery, err := validateCreateMessage(&messageInput)
+	delivery, err := validateCreateMessage(&messageInput, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -208,12 +206,12 @@ func messageEvent(message model.Message, eventType string, actor model.Actor, pa
 	return model.Event{Type: eventType, Actor: actor, Payload: payload}
 }
 
-func validateCreateMessage(input *createMessageInput) (string, error) {
+func validateCreateMessage(input *createMessageInput, actor model.Actor) (string, error) {
 	if strings.TrimSpace(input.Body) == "" {
 		return "", errorf(http.StatusBadRequest, "INVALID_MESSAGE", "message body is required")
 	}
-	if length := len16(input.Body); length > maxMessageBody16 {
-		return "", capExceededError("body", length, maxMessageBody16)
+	if length, limit := len16(input.Body), bodyCap(actor); length > limit {
+		return "", capExceededError("body", length, limit)
 	}
 	target, delivery, err := validateMessageDelivery(input.Target, input.Delivery)
 	if err != nil {

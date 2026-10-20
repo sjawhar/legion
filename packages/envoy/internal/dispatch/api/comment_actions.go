@@ -138,8 +138,8 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "comment body is required")
 		return
 	}
-	if length := len16(input.Body); length > maxCommentBody16 {
-		capExceeded(w, "body", length, maxCommentBody16)
+	if length, limit := len16(input.Body), bodyCap(actor); length > limit {
+		capExceeded(w, "body", length, limit)
 		return
 	}
 	tx, err := s.begin(r.Context())

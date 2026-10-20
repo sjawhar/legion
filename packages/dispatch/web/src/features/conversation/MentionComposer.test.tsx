@@ -1,4 +1,5 @@
 import { expect, jest, spyOn, test } from "bun:test";
+import { ASK_QUESTION_MAX, DISPATCH_BODY_MAX, HUMAN_BODY_MAX } from "@legion/contracts";
 import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
@@ -119,6 +120,31 @@ function holdControls(): HTMLFieldSetElement {
     throw new Error("expected composer control fieldset");
   return controls;
 }
+
+// A person's comment, reply, reason or edit stops at a person's cap, which the server holds a
+// cookie caller to, not the agent cap the Dispatch tools hold an agent to; a question stops at the
+// ask cap.
+test("the body stops at a person's cap, and a question at the ask cap", () => {
+  expect(HUMAN_BODY_MAX).toBeGreaterThan(DISPATCH_BODY_MAX);
+  for (const [kind, label, cap] of [
+    ["comment", "Comment", HUMAN_BODY_MAX],
+    ["suggestion", "Reason", HUMAN_BODY_MAX],
+    ["ask", "Question", ASK_QUESTION_MAX],
+  ] as const) {
+    const { view } = renderComposer({ kind });
+    try {
+      expect(screen.getByLabelText(label)).toHaveProperty("maxLength", cap);
+    } finally {
+      view.unmount();
+    }
+  }
+  const { view } = renderComposer({ edit: { body: "before", id: "comment-1" } });
+  try {
+    expect(screen.getByLabelText("Edit comment")).toHaveProperty("maxLength", HUMAN_BODY_MAX);
+  } finally {
+    view.unmount();
+  }
+});
 
 test("a comment without a surviving mention preserves /btw and omits delivery", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);

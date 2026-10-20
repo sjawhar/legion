@@ -201,8 +201,28 @@ export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 /** Longest ask question the Dispatch server accepts, in characters. */
 export const ASK_QUESTION_MAX = 800;
 
-/** Longest message or comment body the Dispatch tools send, in characters. */
+/**
+ * Longest message or comment body an agent may write, in UTF-16 units: what the Dispatch tools
+ * send, and what the server's comment and message routes accept from a bearer caller (a session
+ * or a service). It keeps an agent's comments and messages short enough to read at a glance;
+ * longer findings belong in a document. Generated into Go as `contracts.DispatchBodyMax`, which
+ * the server enforces. A session's reply to a delivery (`POST /api/v1/comments/{id}/reply` and
+ * `/api/v1/messages/{id}/reply`) is checked against no length, as it was before this constant.
+ */
 export const DISPATCH_BODY_MAX = 2000;
+
+/**
+ * Longest message or comment body a person may write, in UTF-16 units: a comment, reply or
+ * suggestion's explanation, an edit of one, an issue message, a direct message to a session, or a
+ * broadcast, sent from the dashboard. It is GitHub's comment limit, which the threads Dispatch
+ * replaced had. A body at it is at most 192 KiB of UTF-8, so a comment at it fits a document's
+ * 256 KiB margin record on its own (its thread's replies share that record, and every anchored
+ * comment the document has had shares its 1 MiB margin), and at most 384 KiB of JSON, inside the
+ * server's 1 MiB request. Generated
+ * into Go as `contracts.HumanBodyMax`, which the server enforces, and the dashboard's composer
+ * takes it as its `maxLength`.
+ */
+export const HUMAN_BODY_MAX = 65_536;
 
 /**
  * Longest `dispatch_search` query (`GET /api/v1/search`'s `q`, trimmed), in UTF-16 units. The

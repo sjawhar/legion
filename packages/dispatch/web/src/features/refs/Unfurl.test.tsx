@@ -1,11 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
+import { HUMAN_BODY_MAX } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Artifact, AskRead, CommentRead, IssueDetails } from "../../api/types";
-import { isBareReferenceBody, Unfurl } from "./Unfurl";
+import { isBareReferenceBody, MAX_UNFURL_CARDS, Unfurl } from "./Unfurl";
 
 test("Unfurl trims terminal punctuation before resolving a GitHub reference", async () => {
   const githubRest = spyOn(api, "githubRest").mockResolvedValue(
@@ -327,14 +328,15 @@ test("isBareReferenceBody accepts only whitespace-joined bare references", () =>
   expect(isBareReferenceBody("")).toBe(false);
 });
 
-// Every comment body and ask question passes this check as it renders, and a comment holds up to
-// 2,000 UTF-16 units. A body of repeated schemes splits into references in exponentially many
-// ways, and a pattern that tried them ran for minutes in V8 on one of these bodies, hanging every
-// reader's tab; JavaScriptCore, which runs these tests, gives up after a second or so per body.
-test("isBareReferenceBody reads 2,000-character bodies of repeated schemes in one pass", () => {
+// Every comment body and ask question passes this check as it renders, and a person's comment
+// holds up to HUMAN_BODY_MAX UTF-16 units. A body of repeated schemes splits into references in
+// exponentially many ways, and a pattern that tried them ran for minutes in V8 on a 2,000-unit
+// body, hanging every reader's tab; JavaScriptCore, which runs these tests, gives up after a second
+// or so per body.
+test("isBareReferenceBody reads bodies of repeated schemes at a person's cap in one pass", () => {
   const start = performance.now();
   for (const scheme of ["http://", "https://", "dispatch://"]) {
-    const references = scheme.repeat(Math.floor(1998 / scheme.length));
+    const references = scheme.repeat(Math.floor((HUMAN_BODY_MAX - 2) / scheme.length));
     expect(isBareReferenceBody(`${references} x`)).toBe(false);
     expect(isBareReferenceBody(`${references}\nx`)).toBe(false);
     expect(isBareReferenceBody(references)).toBe(true);
@@ -362,6 +364,39 @@ test("Unfurl resolves a bold GitHub link without its emphasis", async () => {
     expect(within(view.container).getByRole("link").getAttribute("href")).toBe(
       "https://github.com/owner/repository/pull/2"
     );
+  } finally {
+    githubRest.mockRestore();
+    view.unmount();
+  }
+});
+
+// A body of nothing but GitHub links at a person's cap holds some 2,500 of them, and every card
+// fetches its own: the cards stop at MAX_UNFURL_CARDS, and the links stay inline in the body.
+test("Unfurl shows at most MAX_UNFURL_CARDS cards for a body at a person's cap", () => {
+  const githubRest = spyOn(api, "githubRest").mockResolvedValue(
+    new Response(JSON.stringify({ title: "Pull title" }), {
+      headers: { "Content-Type": "application/json" },
+    })
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const links: string[] = [];
+  for (let pull = 1; links.join(" ").length < HUMAN_BODY_MAX - 64; pull++) {
+    links.push(`https://github.com/owner/repository/pull/${pull}`);
+  }
+  const body = links.join(" ");
+  expect(body.length).toBeLessThanOrEqual(HUMAN_BODY_MAX);
+  expect(isBareReferenceBody(body)).toBe(true);
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body={body} />
+    </QueryClientProvider>
+  );
+
+  try {
+    const cards = within(view.container).getAllByRole("link");
+    expect(links.length).toBeGreaterThan(MAX_UNFURL_CARDS);
+    expect(cards).toHaveLength(MAX_UNFURL_CARDS);
+    expect(cards[0]?.getAttribute("href")).toBe(links[0]);
   } finally {
     githubRest.mockRestore();
     view.unmount();

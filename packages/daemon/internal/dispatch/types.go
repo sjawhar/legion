@@ -10,9 +10,11 @@ import (
 	"unicode/utf16"
 )
 
-// MessageBodyLimit is the longest message body Dispatch accepts, in UTF-16 code units: the server
-// refuses a longer one with CAP_EXCEEDED on every attempt (packages/envoy/internal/dispatch/api/
-// messages.go maxMessageBody16, counted by server.go len16).
+// MessageBodyLimit is the longest message body Dispatch accepts from the daemon, a bearer caller, in
+// UTF-16 code units: the server refuses a longer one with CAP_EXCEEDED on every attempt
+// (contracts.DispatchBodyMax, generated from DISPATCH_BODY_MAX in packages/contracts, which
+// packages/envoy/internal/dispatch/api/server.go bodyCap holds every bearer caller to, counted by
+// len16; a person's cap, contracts.HumanBodyMax, is longer).
 const MessageBodyLimit = 2000
 
 // MessageBodyLength is body's length as Dispatch counts it against MessageBodyLimit: UTF-16 code

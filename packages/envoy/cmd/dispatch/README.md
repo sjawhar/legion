@@ -804,6 +804,19 @@ one title; a candidate's snippet marks the words its title shares with the new o
 adds to every later creation in its project, and how long that message can be: beside 2,000 stored
 titles at the cap, a check takes 56–95 ms, where parsing every title as it ran took 2.1–7.6 s.
 
+A comment or message body is held to its writer's cap, in UTF-16 units: a person's (a cookie or
+trusted-header caller) at most 65,536 (`contracts.HumanBodyMax`, the dashboard composer's
+`maxLength`), and a bearer caller's, an agent's session or a service, at most 2,000
+(`contracts.DispatchBodyMax`, the cap the Dispatch tools hold their callers to). A longer one is
+`400 CAP_EXCEEDED` naming the writer's own cap. That covers a comment, reply or suggestion's
+explanation and an edit of one, an issue message, a direct message to a session and a broadcast;
+a session's reply to a delivery (`POST /api/v1/comments/{id}/reply`, `/api/v1/messages/{id}/reply`)
+is checked against no length, as before these caps. A person's body at the cap is at most 192 KiB
+of UTF-8, so a comment at it fits a document's 256 KiB margin record on its own; its thread's
+replies share that record, and every anchored comment the document has had its 1 MiB margin, each
+still `413 CAP_EXCEEDED` past its bound. It is at most 384 KiB of JSON, inside the 1 MiB request
+limit.
+
 `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
 also return, under `advice.suggestions` and never blocking or slowing the write past
 `writeSuggestionTimeout` (300ms), the three fused search hits most like what was just filed

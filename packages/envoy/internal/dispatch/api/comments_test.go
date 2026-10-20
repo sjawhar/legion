@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -504,7 +505,7 @@ func TestEditCommentIsAuthorOnly(t *testing.T) {
 		t.Fatalf("bearer edit: status=%d body=%s", bearer.Code, bearer.Body.String())
 	}
 	overCap := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/comments/"+comment.ID, map[string]string{
-		"body": strings.Repeat("a", maxCommentBody16+1),
+		"body": strings.Repeat("a", contracts.HumanBodyMax+1),
 	}, "alice")
 	if overCap.Code != http.StatusBadRequest || !strings.Contains(overCap.Body.String(), `"code":"CAP_EXCEEDED"`) {
 		t.Fatalf("over-cap edit: status=%d body=%s", overCap.Code, overCap.Body.String())

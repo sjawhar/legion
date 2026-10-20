@@ -4,6 +4,10 @@
 
 ### Added
 
+- `HUMAN_BODY_MAX` (65,536), the longest comment or message body in UTF-16 units Dispatch accepts
+  from a person, generated into Go as `contracts.HumanBodyMax`; `DISPATCH_BODY_MAX` (2,000), the
+  cap the Dispatch tools hold an agent to, is generated as `contracts.DispatchBodyMax`, which the
+  server now enforces for every bearer caller.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

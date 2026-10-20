@@ -446,7 +446,7 @@ func TestBroadcastRejectsMalformedInput(t *testing.T) {
 		"no sessions":  {map[string]any{"body": "hi", "delivery": "btw", "session_ids": []string{" "}}, "BROADCAST_INPUT"},
 		"over the cap": {map[string]any{"body": "hi", "delivery": "btw", "session_ids": tooMany}, "BROADCAST_INPUT"},
 		"over the body cap": {
-			map[string]any{"body": strings.Repeat("x", maxMessageBody16+1), "delivery": "btw", "session_ids": []string{"planner"}},
+			map[string]any{"body": strings.Repeat("x", contracts.HumanBodyMax+1), "delivery": "btw", "session_ids": []string{"planner"}},
 			"CAP_EXCEEDED",
 		},
 		"key with a space": {

@@ -731,6 +731,16 @@ func countExceededError(code, field string, count, limit int) *apiError {
 		"%s is %d over the %d-item limit (%d/%d)", field, count-limit, limit, count, limit)
 }
 
+// bodyCap is the longest comment or message body actor may write, in UTF-16 units (len16): a
+// person's is contracts.HumanBodyMax, and an agent's session or a service, which writes with a
+// bearer token, contracts.DispatchBodyMax, the cap the Dispatch tools hold their callers to.
+func bodyCap(actor model.Actor) int {
+	if actor.Kind == "user" {
+		return contracts.HumanBodyMax
+	}
+	return contracts.DispatchBodyMax
+}
+
 func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 	err := capExceededError(field, length, limit)
 	writeError(w, err.code, err.status, err.message)

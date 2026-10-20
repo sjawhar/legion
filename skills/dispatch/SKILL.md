@@ -12,10 +12,10 @@ each one's flags and an example. A field is a flag (`--issue LEGION-3`); long te
 quoted here-document (`<<'EOF'` … `EOF`), and an object or list field takes JSON (`--ops-json`). What it prints is the result; it
 exits 0 when it wrote or read, 1 when Dispatch refused, and 2 on a usage error.
 
-The server enforces high signal: an ask question is at most 800 characters with at most eight options; comment and message bodies are at
-most 2,000 characters; a markdown document is at most 1 MiB and any other file at most 25 MiB. It refuses over-limit input with the number
-to trim (`question is 50 characters over the 800-character limit (850/800)`); it never truncates it. A command with several problems is
-refused once, every problem listed (`dispatch <command> was not called: N problems`), so one corrected call lands.
+The server enforces high signal: an ask question is at most 800 characters with at most eight options; your comment and message bodies are at
+most 2,000 characters (a person's, on the dashboard, 65,536); a markdown document is at most 1 MiB and any other file at most 25 MiB. It refuses
+over-limit input with the number to trim (`question is 50 characters over the 800-character limit (850/800)`); it never truncates it. A command
+with several problems is refused once, every problem listed (`dispatch <command> was not called: N problems`), so one corrected call lands.
 
 ## Where the detail lives
 

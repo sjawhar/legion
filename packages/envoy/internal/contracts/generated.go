@@ -154,6 +154,13 @@ const ReceiptTimeoutCause = "The listener didn't answer within the send window; 
 // cannot drift apart.
 const MaxBroadcastRecipients = 100
 
+// DispatchBodyMax is the longest comment or message body, in UTF-16 units, that Dispatch's comment
+// and message routes accept from a bearer caller (an agent's session or a service), and
+// HumanBodyMax the longest they accept from a person. Generated from DISPATCH_BODY_MAX and HUMAN_BODY_MAX in packages/contracts so the
+// server's refusals, the Dispatch tools' schemas and the dashboard's composer cannot drift apart.
+const DispatchBodyMax = 2000
+const HumanBodyMax = 65536
+
 // SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
 // SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the `dispatch search`
 // command's cannot drift apart.

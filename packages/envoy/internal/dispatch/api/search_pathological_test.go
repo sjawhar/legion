@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/cputest"
 )
 
@@ -31,12 +32,16 @@ import (
 // linear-time test holds the parser on the same runs. The `)_` ladder stops at 256 KiB, as before
 // the element limit. `)_` saved in linear time before the fix too and is held to the same growth.
 //
-// Comment and message text is capped at 2,000 characters, an ask question at 800 and an issue title
-// at 1,000 (contracts.IssueTitleMax), too short for a ladder to tell the code before the fix from
-// the code after it: their removed timings measured a 2,000-character `a_` comment at 51 ms before
-// the fix and 56 ms after. The title's ladders, and the duplicate check's against a stored title,
-// went with the title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
-// is indexed through the search_text the document ladders time.
+// An agent's comment and message text is capped at 2,000 characters (contracts.DispatchBodyMax),
+// an ask question at 800 and an issue title at 1,000 (contracts.IssueTitleMax), too short for a
+// ladder to tell the code before the fix from the code after it: their removed timings measured a
+// 2,000-character `a_` comment at 51 ms before the fix and 56 ms after. The title's ladders, and
+// the duplicate check's against a stored title, went with the title cap
+// (TestIssueTitlesAreCappedOnCreateAndRetitle). A person's comment and message text is capped at
+// 65,536 (contracts.HumanBodyMax), long enough for a ladder to tell them apart (64 KiB of `a_`
+// saved as a document in 46 s before the fix), so a person's comment has ladders of its own, up
+// to that cap. Every one of these texts is indexed through the search_text the document ladders
+// time.
 //
 // Settlement is held off. A document's settlement holds its issue's row while it renders, so a
 // save timed while one ran would count the wait for it; and the test server's shutdown, which
@@ -66,6 +71,20 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 				elapsed := time.Since(started)
 				if response.Code != http.StatusCreated {
 					t.Fatalf("upload %s of %q: status=%d body=%.200s", sizeText(size), test.shape, response.Code, response.Body.String())
+				}
+				return elapsed
+			})
+		})
+	}
+	for _, shape := range []string{"a_", "a_b*"} {
+		t.Run("comment "+shape, func(t *testing.T) {
+			growsLinearly(t, "saving a person's comment of `"+shape+"`", []int{2 << 10, 16 << 10, contracts.HumanBodyMax}, func(size int) time.Duration {
+				body := strings.Repeat(shape, size/len(shape))
+				started := time.Now()
+				response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]string{"body": body}, "alice")
+				elapsed := time.Since(started)
+				if response.Code != http.StatusCreated {
+					t.Fatalf("comment %s of %q: status=%d body=%.200s", sizeText(size), shape, response.Code, response.Body.String())
 				}
 				return elapsed
 			})
