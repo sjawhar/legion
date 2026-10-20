@@ -88,6 +88,24 @@ func (m *Mocks) One(t testing.TB, typ string) Registration {
 	return found[0]
 }
 
+// Named returns the single registration of type typ and name name, failing the test when there is
+// none or more.
+func (m *Mocks) Named(t testing.TB, typ, name string) Registration {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var found []Registration
+	for _, r := range m.registered {
+		if r.Type == typ && r.Name == name {
+			found = append(found, r)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("%d registrations of %s named %s, want 1", len(found), typ, name)
+	}
+	return found[0]
+}
+
 // Registrations returns every registration, in order.
 func (m *Mocks) Registrations() []Registration {
 	m.mu.Lock()

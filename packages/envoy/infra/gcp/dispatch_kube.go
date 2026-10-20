@@ -122,6 +122,14 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	}}, child...); err != nil {
 		return nil, err
 	}
+	// The listener's bearer is a Secret of its own: its pod names this one and never the
+	// component's dispatch Secret, which holds DATABASE_URL and DISPATCH_SIGNING_KEY.
+	listenerSecretName := s.hostname + "-listener"
+	if _, err := corev1.NewSecret(ctx, listenerSecretName, &corev1.SecretArgs{
+		Metadata: metadata(listenerSecretName), StringData: pulumi.StringMap{"ENVOY_API_TOKEN": cloud.listenerToken.Result},
+	}, child...); err != nil {
+		return nil, err
+	}
 	serveName := s.hostname + "-serve"
 	if _, err := corev1.NewConfigMap(ctx, serveName, &corev1.ConfigMapArgs{Metadata: metadata(serveName), Data: pulumi.StringMap{"serve.json": pulumi.String(s.serveConfig)}}, child...); err != nil {
 		return nil, err

@@ -192,7 +192,7 @@ func TestDispatchRegistersItsCloudResources(t *testing.T) {
 		"gcp:servicenetworking/connection:Connection":       1,
 		"gcp:container/cluster:Cluster":                     1,
 		"gcp:sql/databaseInstance:DatabaseInstance":         1,
-		"random:index/randomPassword:RandomPassword":        3,
+		"random:index/randomPassword:RandomPassword":        4,
 		"gcp:sql/database:Database":                         1,
 		"gcp:sql/user:User":                                 1,
 		"gcp:secretmanager/secretIamMember:SecretIamMember": 1,
@@ -290,13 +290,28 @@ func TestDispatchRegistersKubernetesResources(t *testing.T) {
 	require.Positive(t, kubernetesResources)
 }
 
+// The listener binds 0.0.0.0 in a pod of its own, where its API refuses to start without a
+// bearer, so its credential is a Secret of its own: the listener's pod must not name the Secret
+// holding DATABASE_URL and DISPATCH_SIGNING_KEY.
+func TestDispatchListenerSecretHoldsOnlyItsAPIToken(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	secret := m.Named(t, "kubernetes:core/v1:Secret", "example-dispatch-listener")
+	require.Equal(t, "example-dispatch-listener", secret.Inputs.Mappable()["metadata"].(map[string]any)["name"])
+	// The mock engine computes a password's result as <name>-result, so the value names the
+	// listener's own token and no other password the component registers.
+	data, _ := pulumitest.Plain(secret.Inputs["stringData"])
+	require.Equal(t, map[string]any{"ENVOY_API_TOKEN": "example-dispatch-listener-token-result"}, normalizedProperty(data))
+}
+
 // One replica is the default, and its Deployment carries no rollingUpdate at all: Kubernetes
 // refuses a rollingUpdate block on a Recreate Deployment.
 func TestDispatchDeploymentRecreatesOneReplicaByDefault(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	spec := m.One(t, "kubernetes:apps/v1:Deployment").Inputs.Mappable()["spec"].(map[string]any)
+	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
 	require.EqualValues(t, 1, spec["replicas"])
 	strategy := spec["strategy"].(map[string]any)
 	require.Equal(t, "Recreate", strategy["type"])
@@ -309,7 +324,7 @@ func TestDispatchDeploymentRollsSeveralReplicas(t *testing.T) {
 	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 
-	spec := m.One(t, "kubernetes:apps/v1:Deployment").Inputs.Mappable()["spec"].(map[string]any)
+	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").Inputs.Mappable()["spec"].(map[string]any)
 	require.EqualValues(t, 3, spec["replicas"])
 	strategy := spec["strategy"].(map[string]any)
 	require.Equal(t, "RollingUpdate", strategy["type"])
@@ -322,7 +337,7 @@ func TestDispatchServiceExposesPort8766(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	service := m.One(t, "kubernetes:core/v1:Service")
+	service := m.Named(t, "kubernetes:core/v1:Service", "example-dispatch")
 	inputs := service.Inputs.Mappable()
 	metadata := inputs["metadata"].(map[string]any)
 	require.Equal(t, "example-dispatch", metadata["name"])
@@ -339,7 +354,7 @@ func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	policy := m.One(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy")
+	policy := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", "example-dispatch")
 	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
 	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
 	require.Empty(t, spec["ingress"], "an ingress rule with no from would admit every pod in the cluster")
@@ -351,7 +366,7 @@ func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
 	m, err := runDispatch(t, args, true)
 	require.NoError(t, err)
 
-	policy := m.One(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy")
+	policy := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", "example-dispatch")
 	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
 	ingress := spec["ingress"].([]any)[0].(map[string]any)
 	from := ingress["from"].([]any)
@@ -417,7 +432,7 @@ func normalizedProperty(value resource.PropertyValue) any {
 func TestDispatchPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	deployment := m.One(t, "kubernetes:apps/v1:Deployment")
+	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
 	template := deployment.Inputs["spec"].ObjectValue()["template"]
 	got, err := json.MarshalIndent(normalizedProperty(template), "", "  ")
 	require.NoError(t, err)
