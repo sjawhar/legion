@@ -1866,11 +1866,18 @@ only how files leave the cache. The install Legion renders for an installing lau
 anything fills the cache, and retries the install once (`installScript`,
 `packages/daemon/internal/runtime/sandbox/plugins.go`), so a plugin-version bump, which makes the
 pair cold for every role of a kept pod at once, does not fail their launches. That wait is
-bounded (`installLockWaitSeconds`), since `flock` otherwise waits forever and one stalled install
-would be charged to every role of the pod: the bound is long enough for the last of six roles to
-queue behind five serialised installs of the pair, and short enough that two timed-out waits still
-leave the install and the agent's start inside the daemon's registration deadline
-(`worker_boot_timeout_seconds` times `worker_boot_registration_deadline_intervals`). A wait that
+bounded (`installLockWait`), since `flock` otherwise waits forever and one stalled install
+would be charged to every role of the pod: the bound is a third of the registration deadline that
+configuration gives — `worker_boot_timeout_seconds` times
+`worker_boot_registration_deadline_intervals`, so 120 seconds at the defaults — floored at one
+second, since a wait that rounded down to zero would render `-w 0`, which is `-n`: no wait at all,
+and the cold-fill race back. A proportion rather than a fixed number because it has to hold at
+whatever the operator sets: the script runs the install twice, so two waits take two thirds of the
+deadline and the remaining third is left for the install and the agent's start at every
+configuration, where a constant sized for the defaults would be two waits of 240 seconds against
+the 180 second deadline of a halved boot timeout and could never fire before the deadline retired
+the role. The bound is also long enough for the last of six roles to queue behind five serialised
+installs of the pair. A wait that
 times out exits 1, so it takes the retry and then the script's named failure — that one bump's
 launch fails the way it did before the lock existed, rather than hanging. `flock` is advisory
 and per-inode, which holds exactly where this needs it — the six containers of one pod share a

@@ -159,6 +159,10 @@ type Options struct {
 	// requests other than overloaded included (resend), and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
+	// RegistrationIntervals is worker_boot_registration_deadline_intervals: BootTimeout times it is
+	// the registration deadline the daemon retires an unregistered role at, and the bound the
+	// runtime sizes the plugin install lock's wait against (installLockWait, plugins.go).
+	RegistrationIntervals int
 	// BusyBackoff is the first wait before a launch's request the API server answered overloaded is
 	// sent again, doubled for each such answer after it up to 32 times (resend, backoff.Wait), which
 	// BootTimeout bounds.

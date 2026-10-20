@@ -3,6 +3,7 @@ package sandbox
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -78,17 +79,46 @@ if (got !== want) {
 }
 `
 
-// installLockWaitSeconds is how long installScript's flock waits for the shared bun install cache
-// before giving up. Two timed-out waits have to fit inside the daemon's registration deadline with
-// room left over for the install that then runs and for the agent to start, since a timeout exits
-// 1 and the script runs the install twice: the deadline is worker_boot_timeout_seconds (120 by
-// default) times worker_boot_registration_deadline_intervals (3 by default), 360 seconds, so
-// 2 x 120 = 240 seconds of waiting leaves 120 seconds for the install and the agent's start, and
-// the launch fails by its own failure branch rather than being retired by the deadline. The bound
-// is at the same time generous for the legitimate case it must not cut short: the last of a pod's
-// six roles queues behind five serialised installs of the plugin pair, which 120 seconds allows 24
-// seconds each.
-const installLockWaitSeconds = 120
+// installLockWait is how long installScript's flock waits for the shared bun install cache before
+// giving up, in whole seconds (flock -w takes seconds): a third of the registration deadline the
+// daemon would retire the role at, floored at one second.
+//
+// It is a proportion rather than a number because the bound only does its work while it stays in
+// proportion to that deadline. The script runs the install twice, so two timed-out waits have to
+// fit inside the deadline with room left over for the install that then runs and for the agent to
+// start: a third each leaves a third of remainder at every configuration — 120 seconds at the
+// defaults, 60 at a halved worker_boot_timeout_seconds — so the margin shrinks with everything
+// else instead of being generous at one setting and impossible at another. A constant cannot do
+// that: 120 is right only at the defaults, and at a halved boot timeout it would mean two waits
+// of 240 seconds against a 180 second deadline, so the bound could never fire before the deadline
+// retired the role, which is the failure the bound exists to prevent.
+//
+// The sum at the defaults is the sanity check: worker_boot_timeout_seconds (120) times
+// worker_boot_registration_deadline_intervals (3) is a 360 second deadline, two waits take two
+// thirds of it, and the remaining third is 120 seconds for the install and the agent's start — so
+// a stalled lock fails the launch by the script's own named failure branch, loudly and while the
+// daemon is still watching, rather than being retired by the deadline. What makes that check
+// meaningful is the size of the install it has to cover: a cold install of the plugin pair into
+// an empty cache measured 505 milliseconds in an issue pod of this cluster (32 warm). The claim
+// is the order of magnitude, not the milliseconds — a pod on a cold node pulling from npm is
+// slower — and at two orders of magnitude of headroom it says plainly that the install side is
+// not what constrains this bound; the deadline side is.
+//
+// The floor is a fence, not tidiness. A derived wait that rounds down to zero renders `-w 0`,
+// which is byte for byte `-n`: measured against a held lock it exits 1 after no wait at all, so
+// the cold-fill race would be back by arithmetic with every assertion over the script still
+// green.
+//
+// The wait is a parameter of the render rather than a package constant because an operator's
+// configuration determines it, which is what a production shape is for — deliberately unlike a
+// test's convenience, which earlier in this branch was refused as a reason to widen a signature
+// (the serialisation test substitutes its stub into the rendered text instead). The third is
+// taken through runtime.RegistrationDeadline, the one computation that owns the deadline, rather
+// than by re-multiplying boot by intervals here, so the wait follows the deadline if it ever
+// stops being a plain product.
+func installLockWait(boot time.Duration, intervals int) int {
+	return max(int(runtime.RegistrationDeadline(boot, intervals, 0)/3/time.Second), 1)
+}
 
 // installScript is the install wrapper an installing launch's agent argv runs before Oh My Pi
 // starts (LEGION-164): it drops any earlier generation's install under the role's plugins
@@ -128,7 +158,8 @@ const installLockWaitSeconds = 120
 // for all six at once; a failed `bun add` here takes the failure branch and the role's agent
 // never execs.
 //   - The lock, /usr/bin/flock on the cache directory, covers the installs Legion itself renders,
-//     which is the case that reaches production. It waits at most installLockWaitSeconds, because
+//     which is the case that reaches production. It waits at most lockWait seconds, which the
+//     runtime derives from the registration deadline (installLockWait), because
 //     a wait with no bound charges one stalled install to every role of the pod and to every
 //     relaunch, which renders the same script and queues again: a timed-out wait exits 1, falls
 //     into the retry below and then into the named failure branch, so the launch fails loudly,
@@ -145,7 +176,7 @@ const installLockWaitSeconds = 120
 //     the `set -u` abort that is how a broken invariant should announce itself.
 //   - The retry covers what no lock of ours can reach: an agent's own `bun install` filling the
 //     same cold entry at the same moment. One retry, then the failure branch.
-func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
+func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall, lockWait int) string {
 	root, genDir := pluginsRoot(stateHome), pluginGenDir(stateHome, generation)
 	legionSpec := bunSpec("@sjawhar/pi-legion", plugins.PiLegion)
 	envoySpec := bunSpec("@sjawhar/pi-envoy", plugins.PiEnvoy)
@@ -167,7 +198,7 @@ exec "$@"
 `,
 		shellprefix.Literal(root),
 		shellprefix.Literal(genDir), shellprefix.Literal(genDir),
-		installLockWaitSeconds,
+		lockWait,
 		shellprefix.Literal(legionSpec), shellprefix.Literal(envoySpec),
 		shellprefix.Literal(failMsg),
 		shellprefix.Literal(pluginCheckScript),
@@ -180,11 +211,12 @@ exec "$@"
 // argv rides as positional parameters after $0 (legion-plugins), never quoted into the script
 // itself, so none of it is reparsed by the shell. plugins is nil for a plain launch, which
 // installArgv returns agent unchanged for — every tmux launch, and every Kubernetes launch that
-// is not installing a stale-plugin relaunch's pair into a kept pod (relaunch.go).
-func installArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, agent []string) []string {
+// is not installing a stale-plugin relaunch's pair into a kept pod (relaunch.go). lockWait is the
+// script's flock bound in seconds (installLockWait), which only an installing launch renders.
+func installArgv(stateHome string, generation uint64, plugins *runtime.PluginInstall, agent []string, lockWait int) []string {
 	if plugins == nil {
 		return agent
 	}
-	script := installScript(stateHome, generation, plugins)
+	script := installScript(stateHome, generation, plugins, lockWait)
 	return append([]string{"/bin/sh", "-c", script, "legion-plugins"}, agent...)
 }

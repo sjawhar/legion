@@ -35,11 +35,14 @@ func testPlugins() *runtime.PluginInstall {
 // cache to destination`, where the same six against the cache they just filled all succeed. So the
 // script reads BUN_INSTALL_CACHE_DIR with no default, which leaves `set -u` to abort if the
 // runtime ever stops setting it, makes that directory (mkdir -p) so the lock's inode exists before
-// anything fills the cache, takes /usr/bin/flock on it with a bounded wait
-// (installLockWaitSeconds, since an unbounded one would charge a stalled holder to every role of
-// the pod), and runs the install twice before the failure branch.
+// anything fills the cache, takes /usr/bin/flock on it with a bounded wait (installLockWait, a
+// third of the registration deadline the runtime's own settings give, since an unbounded one
+// would charge a stalled holder to every role of the pod), and runs the install twice before the
+// failure branch. The expected wait is built from that derivation over the options this spec
+// configured, not written here as a number.
 func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
-	r, err := configure(goldenOptions())
+	opts := goldenOptions()
+	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +68,7 @@ func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 		spec.Plugins.PiLegion, spec.Plugins.PiEnvoy, genDir, "/g*",
 		"--backend=copyfile", "exec \"$@\"", "} 1>&2", "set -eu",
 		"cache=\"$BUN_INSTALL_CACHE_DIR\"", "mkdir -p -- \"$cache\"",
-		fmt.Sprintf("/usr/bin/flock -w %d -- \"$cache\" /usr/local/bin/bun add", installLockWaitSeconds),
+		fmt.Sprintf("/usr/bin/flock -w %d -- \"$cache\" /usr/local/bin/bun add", installLockWait(opts.BootTimeout, opts.RegistrationIntervals)),
 		"legion_install || legion_install",
 	} {
 		if !strings.Contains(script, want) {
@@ -123,7 +126,7 @@ func TestInstallScriptQuotesShellUnsafeSources(t *testing.T) {
 		t.Skip("no /bin/sh in this environment")
 	}
 	plugins := &runtime.PluginInstall{PiLegion: "/tmp/odd dir/pi-legion's.tgz", PiEnvoy: "/tmp/another 'one'.tgz", Contract: 24}
-	script := installScript("/home/legion/.local/state/tester", 3, plugins)
+	script := installScript("/home/legion/.local/state/tester", 3, plugins, installLockWait(2*time.Second, 3))
 	// The two sources carry a space and a single quote; verified below (sh -n) rather than as a
 	// literal substring, since the quoting itself breaks one.
 	if !strings.Contains(script, "pi-legion") || !strings.Contains(script, "another") {
@@ -167,7 +170,7 @@ func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
 	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := installScript(filepath.Join(dir, "state"), 3, plugins)
+	script := installScript(filepath.Join(dir, "state"), 3, plugins, installLockWait(2*time.Second, 3))
 	if !strings.Contains(script, "/usr/local/bin/bun") {
 		t.Fatalf("the install script does not call bun by the image path:\n%s", script)
 	}
@@ -224,7 +227,7 @@ func TestAnUppercaseSchemeReachesBunVerbatim(t *testing.T) {
 // installArgv returns agent unchanged when plugins is nil: a plain launch's argv is never wrapped.
 func TestInstallArgvIsAgentUnchangedWithoutPlugins(t *testing.T) {
 	agent := []string{"/opt/omp/bin/omp", "--mode", "rpc"}
-	got := installArgv("/home/legion/.local/state/tester", 1, nil, agent)
+	got := installArgv("/home/legion/.local/state/tester", 1, nil, agent, installLockWait(2*time.Second, 3))
 	if !slices.Equal(got, agent) {
 		t.Fatalf("installArgv(nil) = %q, want %q unchanged", got, agent)
 	}
@@ -255,7 +258,7 @@ func installLockProbe(t *testing.T, unlock bool) []string {
 	}
 	var wg sync.WaitGroup
 	for _, id := range []string{"a", "b"} {
-		script := installScript(filepath.Join(dir, "state-"+id), 3, testPlugins())
+		script := installScript(filepath.Join(dir, "state-"+id), 3, testPlugins(), installLockWait(2*time.Second, 3))
 		script = strings.Replace(script, "/usr/local/bin/bun", stub, 1)
 		if unlock {
 			// Everything from flock's own path through the locked directory goes, so the control
@@ -363,17 +366,22 @@ func TestTwoRenderedInstallsSerialiseOnTheSharedBunCache(t *testing.T) {
 	t.Fatalf("the lockless control never interleaved in %d attempts: the harness proves nothing, so the locked run above passed vacuously", controlAttempts)
 }
 
-// installLockWaitSeconds is a real bound: positive, so the lock blocks rather than failing at once
-// (`-w 0` is non-blocking, and would restore the race the lock is for while every substring
-// assertion over the script still passed), and small enough that the two waits the script can make
-// — it runs the install twice — still fit inside the daemon's registration deadline, with room
-// left for the install that then runs. The deadline is read from the daemon's own defaults
-// (worker_boot_timeout_seconds x worker_boot_registration_deadline_intervals) rather than written
-// here as a number, so a change to either default is what fails.
-func TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline(t *testing.T) {
-	if installLockWaitSeconds <= 0 {
-		t.Fatalf("installLockWaitSeconds = %d, want a positive bound: a non-positive wait makes the lock non-blocking and restores the cold-entry race", installLockWaitSeconds)
-	}
+// The install lock's wait is a bound in proportion to the registration deadline, at every
+// configuration an operator can set rather than only at the defaults: positive, so the lock
+// blocks rather than failing at once (`-w 0` is byte for byte `-n`, which would restore the race
+// the lock is for while every substring assertion over the script still passed); never more than
+// its third of that configuration's deadline; and, where the deadline leaves room, small enough
+// that the two waits the script can make — it runs the install twice — plus a second of install
+// still fit inside the deadline, so a stalled lock fails the launch by the script's own branch
+// rather than being retired. The defaults are read from the daemon's own defaults rather than
+// written here as numbers, so a change to either default is what fails.
+//
+// The tiny configuration is the honest case, not an excluded one: below a deadline of about three
+// seconds the one-second floor dominates and two waits cannot fit. That is deliberate — being
+// serialised and then retired by the deadline is no worse than racing, since an unserialised cold
+// fill fails the launch anyway — so the property drops only its last clause there, which is why
+// that clause is conditional on the deadline rather than on the configuration's name.
+func TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legion.yaml")
 	body := "project: demo\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\n"
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -383,8 +391,31 @@ func TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline(t *testi
 	if err != nil {
 		t.Fatalf("LoadForValidation: %v", err)
 	}
-	deadline := int(cfg.WorkerBootTimeout/time.Second) * cfg.WorkerBootRegistrationDeadlineIntervals
-	if 2*installLockWaitSeconds >= deadline {
-		t.Fatalf("two waits of %ds do not fit the %ds registration deadline, so a stalled lock is retired by the deadline rather than failing the launch by its own branch", installLockWaitSeconds, deadline)
+	for _, tc := range []struct {
+		name      string
+		boot      time.Duration
+		intervals int
+	}{
+		{"the daemon's defaults", cfg.WorkerBootTimeout, cfg.WorkerBootRegistrationDeadlineIntervals},
+		{"a halved boot timeout", cfg.WorkerBootTimeout / 2, cfg.WorkerBootRegistrationDeadlineIntervals},
+		{"fewer intervals", cfg.WorkerBootTimeout, 2},
+		{"a deadline small enough that the floor bites", 800 * time.Millisecond, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deadline := runtime.RegistrationDeadline(tc.boot, tc.intervals, 0)
+			wait := installLockWait(tc.boot, tc.intervals)
+			if wait <= 0 {
+				t.Fatalf("the wait at boot %s x %d intervals is %ds, want a positive bound: a non-positive wait renders -w 0, which is -n, and restores the cold-entry race", tc.boot, tc.intervals, wait)
+			}
+			if wait > 1 && time.Duration(wait)*time.Second*3 > deadline {
+				t.Errorf("the wait at boot %s x %d intervals is %ds, more than its third of the %s deadline", tc.boot, tc.intervals, wait, deadline)
+			}
+			if deadline < 3*time.Second {
+				return
+			}
+			if spent := time.Duration(2*wait)*time.Second + time.Second; spent > deadline {
+				t.Errorf("two waits of %ds and a second of install take %s, past the %s registration deadline, so a stalled lock is retired by the deadline rather than failing the launch by its own branch", wait, spent, deadline)
+			}
+		})
 	}
 }
