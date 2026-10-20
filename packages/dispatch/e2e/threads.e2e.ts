@@ -592,12 +592,23 @@ test("two suggestions on one block are each accepted from their collapsed card",
     expect(ins.y).toBeGreaterThanOrEqual(del.y + del.height);
     expect(note.y).toBeGreaterThanOrEqual(ins.y + ins.height);
 
+    // An accept decides the thread; it does not take the card off the Conversation. The card
+    // stays listed under All - the filter every visit opens on - with its Accept and Reject
+    // gone, and it is the Open bucket it leaves and the Closed one it joins.
     await firstCard.getByRole("button", { name: "Accept suggestion" }).click();
-    await expect(firstCard).toHaveCount(0);
+    await expect(firstCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(firstCard).toHaveCount(1);
     await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(secondCard).toHaveAttribute("aria-expanded", "false");
     await secondCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(secondCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(secondCard).toHaveCount(1);
+    await conversationFilter(page, "Open").click();
+    await expect(firstCard).toHaveCount(0);
     await expect(secondCard).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    await expect(firstCard).toHaveCount(1);
+    await expect(secondCard).toHaveCount(1);
     await expect
       .poll(() =>
         listComments(issue.key, issue.primary_artifact_id).then((items) =>
@@ -638,14 +649,19 @@ test("accepting a later suggestion over an earlier one's text leaves the earlier
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await page
+    const laterCard = page
       .locator(`[data-turn="comment:${later.id}"]`)
-      .getByTestId(`margin-comment-${later.id}`)
-      .getByRole("button", { name: "Accept suggestion" })
-      .click();
-    await expect(
-      page.locator(`[data-turn="comment:${later.id}"]`).getByTestId(`margin-comment-${later.id}`)
-    ).toHaveCount(0);
+      .getByTestId(`margin-comment-${later.id}`);
+    await laterCard.getByRole("button", { name: "Accept suggestion" }).click();
+    // The accept decides the later thread without taking its card off the Conversation: it
+    // stays listed under All with its Accept and Reject gone, leaves Open and joins Closed.
+    await expect(laterCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(laterCard).toHaveCount(1);
+    await conversationFilter(page, "Open").click();
+    await expect(laterCard).toHaveCount(0);
+    await conversationFilter(page, "Closed").click();
+    await expect(laterCard).toHaveCount(1);
+    await conversationFilter(page, "All").click();
     await expect
       .poll(() =>
         listComments(issue.key, issue.primary_artifact_id).then(
@@ -780,8 +796,17 @@ test("a failed queued Conversation comment action keeps its thread and reply, cl
     await expect(firstReply).toHaveValue("Half a reply");
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);
+    // The retried Resolve is taken, so the first thread closes: its card collapses and leaves
+    // the Open bucket for Closed. It is still listed under All - a decided thread stays on the
+    // Conversation - and the second, whose queued click was cleared, is still open.
+    await expect(threadCard(page, first.id)).toHaveAttribute("aria-expanded", "false");
+    await expect(threadCard(page, first.id)).toHaveCount(1);
+    await expect(threadCard(page, second.id)).toBeVisible();
+    await conversationFilter(page, "Open").click();
     await expect(threadCard(page, first.id)).toHaveCount(0);
     await expect(threadCard(page, second.id)).toBeVisible();
+    await conversationFilter(page, "Closed").click();
+    await expect(threadCard(page, first.id)).toBeVisible();
   } finally {
     await alice.close();
   }

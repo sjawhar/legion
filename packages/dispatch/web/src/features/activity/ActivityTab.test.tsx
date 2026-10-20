@@ -4,11 +4,11 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
-import type { Event, UserState } from "../../api/types";
+import type { Actor, Agent, Event, UserState } from "../../api/types";
 import { ActivityTab } from "./ActivityTab";
 
-function message(seq: number): Event {
-  const actor = { id: "alice", kind: "user" as const };
+function message(seq: number, by?: Actor): Event {
+  const actor = by ?? { id: "alice", kind: "user" as const };
   return {
     actor,
     created_at: "2026-09-09T00:00:00Z",
@@ -96,5 +96,44 @@ test("ActivityTab's Load older fetches the page before the oldest event it holds
   } finally {
     view.unmount();
     getIssueEvents.mockRestore();
+  }
+});
+
+/** One live session, as `GET /api/v1/agents` lists it. */
+function running(sessionId: string, title: string): Agent {
+  return {
+    capabilities: [],
+    dir: "/w",
+    host: "host",
+    last_activity: null,
+    last_seen: 1,
+    machine_id: "host",
+    open_asks: 0,
+    roles: [],
+    session_id: sessionId,
+    title,
+  };
+}
+
+// Every row names its author, and a session's name is its live registry title. The tab read the
+// registry only for a history that held a claim, so a row a session wrote on an issue nobody had
+// claimed read as the raw `session:<id>` - the registry was never fetched to resolve it.
+test("ActivityTab names a session author by its registered title", async () => {
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockResolvedValue([
+    message(1, { id: "e2e-long-title-session", kind: "session" }),
+  ]);
+  const listAgents = spyOn(api, "listAgents").mockResolvedValue([
+    running("e2e-long-title-session", "Reviewing PR #1478"),
+  ]);
+  const view = renderTab({});
+
+  try {
+    const list = await screen.findByRole("list", { name: "Issue activity" });
+    await waitFor(() => expect(within(list).getByText("Reviewing PR #1478")).toBeDefined());
+    expect(within(list).queryByText(/^session:/)).toBeNull();
+  } finally {
+    view.unmount();
+    getIssueEvents.mockRestore();
+    listAgents.mockRestore();
   }
 });

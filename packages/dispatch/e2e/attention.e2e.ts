@@ -143,7 +143,15 @@ test("loading older Activity rows keeps the reader anchor", async ({ browser }) 
     const before = (await anchor.boundingBox())?.y;
     await loadOlder.click();
 
-    await expect(page.getByText("Older message 0", { exact: true })).toBeVisible();
+    // An Activity row reads the event's description, not a message's body, so the proof the
+    // older page landed is the oldest row of all: the issue's own creation, which only the
+    // page beneath the first 200 holds.
+    await expect(
+      page
+        .getByRole("list", { name: "Issue activity" })
+        .getByRole("listitem")
+        .filter({ hasText: "created the issue" })
+    ).toHaveCount(1);
     await expect.poll(async () => (await anchor.boundingBox())?.y).toBe(before);
   } finally {
     await context.close();

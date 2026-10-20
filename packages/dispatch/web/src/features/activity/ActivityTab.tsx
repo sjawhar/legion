@@ -63,11 +63,18 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
   });
   const issueState = stateForIssue(state, issueKey);
   const events = useMemo(() => log.data?.pages.flat() ?? [], [log.data]);
-  // A claim line names a session, so it reads the registry like every other author line; nothing
-  // is fetched for a history with no claim in it.
+  // Every row names its author, and a session's name is its live registry title, so the registry
+  // is read whenever a row this tab is showing was written by one. A claim line names a second
+  // session inside its own description, so it reads the registry too, whoever authored it.
+  // Nothing is fetched for a history no session touched.
   const { titles } = useAgents(
     visible &&
-      events.some((event) => event.type === "issue.claimed" || event.type === "issue.released")
+      events.some(
+        (event) =>
+          event.actor.kind === "session" ||
+          event.type === "issue.claimed" ||
+          event.type === "issue.released"
+      )
   );
   // The day the reader is in, recomputed every render so a midnight rollover moves the `Today`
   // label; the model itself is rebuilt only when one of its inputs changes, since building it

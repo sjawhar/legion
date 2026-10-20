@@ -95,8 +95,11 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
   const second = events.find(
     (event) => event.type === "message.created" && event.payload.body === "Second yesterday"
   );
+  const third = events.find(
+    (event) => event.type === "message.created" && event.payload.body === "Third today"
+  );
   const created = events.find((event) => event.type === "issue.created");
-  if (first === undefined || second === undefined || created === undefined) {
+  if (first === undefined || second === undefined || third === undefined || created === undefined) {
     throw new Error("seeded divider events were not recorded");
   }
   const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString();
@@ -128,10 +131,21 @@ test("Activity breaks its rows by day and marks where the reader stopped", async
       await dividers.evaluateAll((items) => items.map((item) => item.getAttribute("aria-label")))
     ).toEqual(["Today", "Yesterday", "New since you last read"]);
 
-    const texts = await list.locator("li").allTextContents();
-    const unreadIndex = texts.indexOf("New since you last read");
-    const secondIndex = texts.findIndex((text) => text.includes("Second yesterday"));
-    const thirdIndex = texts.findIndex((text) => text.includes("Third today"));
+    // A row is an event line: it reads the event's description ("sent a message"), never the
+    // message's own body, so the rows the dividers fall between are found by the
+    // `data-event-seq` each row carries.
+    const rows = await list
+      .locator("li")
+      .evaluateAll((items) =>
+        items.map((item) => item.getAttribute("data-event-seq") ?? item.getAttribute("aria-label"))
+      );
+    const unreadIndex = rows.indexOf("New since you last read");
+    const secondIndex = rows.indexOf(String(second.seq));
+    const thirdIndex = rows.indexOf(String(third.seq));
+    expect(secondIndex).toBeGreaterThanOrEqual(0);
+    expect(thirdIndex).toBeGreaterThanOrEqual(0);
+    // Newest first: the divider sits below the oldest unread row and above the newest row the
+    // reader had already seen.
     expect(unreadIndex).toBeGreaterThan(thirdIndex);
     expect(unreadIndex).toBeLessThan(secondIndex);
 

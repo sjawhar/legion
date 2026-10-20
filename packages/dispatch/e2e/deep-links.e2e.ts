@@ -58,6 +58,18 @@ async function seedIssue() {
   return { issue, secondary };
 }
 
+/** Below the phone breakpoint a link to a comment opens its thread full-screen over the
+ *  Conversation (`features/conversation/usePhoneThread.ts`), and the turns list behind it is
+ *  inert while it shows. Back closes it and leaves the reader on the card the landing marked. */
+async function leaveThreadOverlay(page: Page, project: string): Promise<void> {
+  if (project !== "iphone") {
+    return;
+  }
+  const thread = page.getByRole("dialog", { name: "Thread" });
+  await thread.getByRole("button", { name: "Back" }).click();
+  await expect(thread).toHaveCount(0);
+}
+
 /** The long-document fixture every landing test shares: the quotation is thousands of pixels
  *  below the fold, and the comment anchored to it is what the link names. */
 async function seedLongDocument(quote = "Unique faraway quotation.") {
@@ -1006,7 +1018,8 @@ test("an item link the SPA cannot resolve names what is missing, inside the shel
 // where the link names a reply rather than the root it marks that reply's own row inside it.
 test("every item link lands on exactly one marked card, and a reply link marks its row too", async ({
   browser,
-}) => {
+}, testInfo) => {
+  const isPhone = testInfo.project.name === "iphone";
   const { issue } = await seedIssue();
   const otherIssue = await createIssue({ project: "CORE", title: "Another issue" });
 
@@ -1052,17 +1065,31 @@ test("every item link lands on exactly one marked card, and a reply link marks i
     await expect(marked(page)).toHaveCount(1);
     await expect(marked(page)).toHaveAttribute("data-turn", `ask:${retracted.id}`);
 
-    // A reply in a resolved comment thread marks the thread's card and that reply's row.
+    // A reply in a resolved comment thread marks the thread's card and that reply's row. Below
+    // the phone breakpoint the link opens that thread full-screen over the Conversation
+    // (`features/conversation/usePhoneThread.ts`), which inerts the turns list behind it: the
+    // reply's row is marked in the thread the reader lands on, and the card behind it once
+    // Back closes the thread.
     await page.goto(`/issues/${issue.key}/comments/${resolvedReply.id}`);
+    const resolvedThread = page.getByRole("dialog", { name: "Thread" });
+    await expect(
+      (isPhone ? resolvedThread : marked(page)).locator('[data-reply][aria-current="true"]')
+    ).toHaveCount(1);
+    await leaveThreadOverlay(page, testInfo.project.name);
     await expect(marked(page)).toHaveCount(1);
     await expect(marked(page)).toHaveAttribute("data-turn", `comment:${resolvedRoot.id}`);
-    await expect(marked(page).locator('[data-reply][aria-current="true"]')).toHaveCount(1);
 
     // A search hit opens the very path the palette's row carries.
     const hits = await search("quadrant");
     const hit = hits.results.find((result) => result.id === found.id);
     expect(hit?.href).toBe(`/issues/${issue.key}/comments/${found.id}`);
     await page.goto(hit?.href ?? "");
+    if (isPhone) {
+      await expect(page.getByRole("dialog", { name: "Thread" })).toContainText(
+        "Search me: quadrant note."
+      );
+    }
+    await leaveThreadOverlay(page, testInfo.project.name);
     await expect(marked(page)).toHaveCount(1);
     await expect(marked(page)).toHaveAttribute("data-turn", `comment:${found.id}`);
 
