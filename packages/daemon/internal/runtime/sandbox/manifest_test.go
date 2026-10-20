@@ -597,24 +597,26 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 	return testSpec(t, token, role, testTree)
 }
 
-// Every directory a role's tools write to without being told where is under that role's own
-// scratch on the issue's volume. The rule this replaces was the opposite one: bun's install cache
-// sat on the container's own filesystem, private to the pod, because bun hardlinks that cache's
-// files into every worktree's node_modules and one shared cache corrupted every checkout on a box
-// at once (LEGION-198). The cache is 1.4 GB for this repository, more than the gigabyte of
-// ephemeral storage a role container is admitted with, so keeping it there is the eviction this
-// change exists to stop — and with the workspace on the volume and the cache off it, the hardlink
-// crossed devices anyway. What bounds the sharing now is a cache per role, no two roles holding
-// one directory, plus the one install Legion renders itself copying rather than linking
-// (plugins.go). Each directory is held by the issue volume's own mount, exactly as uv's are
-// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
-// directories.
+// The five directories a role's tools write to without being told where and which no other role
+// may reach are under that role's own scratch on the issue's volume: its temporary directory, its
+// cache, data and state homes, and bun's install cache. The rule this replaces was the opposite
+// one: bun's install cache sat on the container's own filesystem, private to the pod, because bun
+// hardlinks that cache's files into every worktree's node_modules and one shared cache corrupted
+// every checkout on a box at once (LEGION-198). The cache is 1.4 GB for this repository, more than
+// the gigabyte of ephemeral storage a role container is admitted with, so keeping it there is the
+// eviction this change exists to stop — and with the workspace on the volume and the cache off it,
+// the hardlink crossed devices anyway. What bounds the sharing now is a cache per role, no two
+// roles holding one directory, plus the one install Legion renders itself copying rather than
+// linking (plugins.go). Each directory is held by the issue volume's own mount, exactly as uv's
+// are (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
+// directories. The two Go caches are not on this list: they are the issue's, shared by its roles
+// (TestTheIssuesRolesAreToldOneGoBuildAndModuleCache).
 func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	scratched := append(slices.Clone(podsafety.ScratchVariables), "XDG_STATE_HOME")
+	scratched := []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "BUN_INSTALL_CACHE_DIR"}
 	told := map[string]claim.Role{}
 	for _, role := range launcherRoles {
 		main := workerOf(t, r, roleSpec(t, role))
@@ -642,31 +644,82 @@ func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 	}
 }
 
-// Every scratch directory the runtime names is one the shim makes. The shim reads its list from
-// podsafety.ScratchVariables and the runtime renders roleEnvironment, so without this the two
-// could drift silently: a role would be told a temporary directory nothing ever created, and
-// mktemp and every library equivalent would fail in its first turn, which is the failure
-// EnsureScratch exists to prevent. XDG_STATE_HOME is the one scratch value the shim makes
-// elsewhere (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), so it
-// is the only name the two lists are allowed to differ by.
+// Go's build cache and module cache are one pair for the whole issue — the same two directories in
+// every role container of a workflow pod and in the controller's — where the five directories
+// above are the role's own. Both hold content addressed by its hash and the roles of one issue may
+// fill them at once: of the build cache `go help cache` says "The cache is safe for concurrent
+// invocations of the go command", and what reaches the module cache is a module zip or go.mod the
+// go command has verified against a known hash (`go help module-auth`) in a directory it then
+// makes read-only, which only `go build -modcacherw` leaves writable. Six roles with a pair each
+// would be six copies of identical content, about 5.5 GB of a 20 GiB volume. Bun's install cache
+// does not join them, because bun hardlinks out of that cache into whatever it installs for, so
+// one cache shared between two roles' checkouts is the corruption the per-role split bounds
+// (LEGION-198); the state home does not, because Oh My Pi's browser broker takes its lock as an
+// abstract unix socket named from a path under it, one name across every container of the pod
+// (roleStateHome). The pair is on the issue volume's own mount, outside every role's scratch and
+// outside the workspace and uv's directories, exactly as uv's cache is
+// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume).
+func TestTheIssuesRolesAreToldOneGoBuildAndModuleCache(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := map[string]string{}
+	for _, role := range launcherRoles {
+		main := workerOf(t, r, roleSpec(t, role))
+		env := envOf(main)
+		for _, name := range []string{"GOCACHE", "GOMODCACHE"} {
+			dir := env[name]
+			if mount := mountHolding(main, dir); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
+				t.Errorf("%s: %s %q is on mount %+v, want the issue volume's own mount at %s", role, name, dir, mount, TreeRoot)
+			}
+			if dir == scratchRoot || strings.HasPrefix(dir, scratchRoot+"/") {
+				t.Errorf("%s is told %s=%q, under the per-role scratch %s; the issue's roles are told one Go cache", role, name, dir, scratchRoot)
+			}
+			for _, theirs := range []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
+				if path := env[theirs]; path != "" && overlaps(dir, path) {
+					t.Errorf("%s: %s %q overlaps %s %q", role, name, dir, theirs, path)
+				}
+			}
+			if first, seen := shared[name]; seen && first != dir {
+				t.Errorf("the roles are told %s=%q and %q; want the one cache of the issue", name, first, dir)
+			}
+			shared[name] = dir
+		}
+	}
+	if shared["GOCACHE"] == shared["GOMODCACHE"] {
+		t.Errorf("GOCACHE and GOMODCACHE are both %q; the go command keeps the two caches apart", shared["GOCACHE"])
+	}
+}
+
+// Every directory the runtime tells a role to write in is one the shim makes, and every directory
+// the shim makes is one the runtime names. The shim reads its list from podsafety.ScratchVariables
+// and the runtime renders roleEnvironment, so without this the two could drift silently: a role
+// would be told a temporary directory nothing ever created, and mktemp and every library
+// equivalent would fail in its first turn, which is the failure EnsureScratch exists to prevent.
+// So each name on the shim's list, plus XDG_STATE_HOME, which the shim makes elsewhere
+// (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), is set to an
+// absolute path on the issue's volume — the role's own scratch for five of them, the issue's Go
+// caches for the other two — and, the other way, no variable the runtime sets to a path under the
+// per-role scratch is missing from that list, so a new per-role directory cannot appear that
+// nothing makes.
 func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := envOf(workerOf(t, r, workerSpec(t)))
-	var named []string
-	for name, value := range env {
-		if strings.HasPrefix(value, scratchRoot+"/") {
-			named = append(named, name)
+	made := append(slices.Clone(podsafety.ScratchVariables), "XDG_STATE_HOME")
+	for _, name := range made {
+		if dir := env[name]; !strings.HasPrefix(dir, TreeRoot+"/") {
+			t.Errorf("the shim makes %s, which the runtime sets to %q; want an absolute path under %s", name, dir, TreeRoot)
 		}
 	}
-	want := append(slices.Clone(podsafety.ScratchVariables), "XDG_STATE_HOME")
-	slices.Sort(named)
-	slices.Sort(want)
-	if !slices.Equal(named, want) {
-		t.Errorf("the runtime names %v under the scratch; the shim makes %v and EnsureStateHome the state home",
-			named, podsafety.ScratchVariables)
+	for name, value := range env {
+		if strings.HasPrefix(value, scratchRoot+"/") && !slices.Contains(made, name) {
+			t.Errorf("the runtime tells the role %s=%q on its scratch; the shim makes %v and EnsureStateHome the state home, so nothing would make it",
+				name, value, podsafety.ScratchVariables)
+		}
 	}
 }
 

@@ -249,12 +249,16 @@ package api
 // controller's, is told a scratch directory of its own on the issue's volume,
 // `/legion/scratch/<role>`, and the values `mainEnvironment` sets name its directories: the three
 // XDG homes it moves off the image's home directory (`XDG_CACHE_HOME`, `XDG_DATA_HOME` and
-// `XDG_STATE_HOME`, whose `/home/legion/.local/state/<role>` entry 18 declared), and the four new
-// names `TMPDIR`, `GOCACHE`, `GOMODCACHE` and `BUN_INSTALL_CACHE_DIR`. `XDG_CONFIG_HOME` is
+// `XDG_STATE_HOME`, whose `/home/legion/.local/state/<role>` entry 18 declared), plus the two new
+// names `TMPDIR` and `BUN_INSTALL_CACHE_DIR`. The two other new names, `GOCACHE` and
+// `GOMODCACHE`, are on the issue's volume too, but shared by the issue's roles rather than one
+// pair per role — `/legion/go/build` and `/legion/go/mod`, as `UV_CACHE_DIR` already was — since
+// both hold content addressed by its hash and the roles of one issue may fill them at once, and
+// six copies of identical content would be about 5.5 GB of a 20 GiB volume. `XDG_CONFIG_HOME` is
 // unchanged, the pod's shared in-memory volume the setup container writes the agents' jj
-// configuration in, and the `workspace-init` containers keep every value they had. A role's
-// scratch is on the volume rather than the gigabyte of ephemeral storage its container is admitted
-// with, which the tools' caches overran: GKE Autopilot evicted the pod. The pane and pod
+// configuration in, and the `workspace-init` containers keep every value they had. These
+// directories are on the volume rather than the gigabyte of ephemeral storage the container is
+// admitted with, which the tools' caches overran: GKE Autopilot evicted the pod. The pane and pod
 // environment is the surface this contract names, and four of these names are the runtime's alone
 // (`runtimeOwned`), which a spec or an operator's pod env is now refused for setting, so the boot
 // gate and `legion probe-image` hold the daemon and the plugin to the same list.

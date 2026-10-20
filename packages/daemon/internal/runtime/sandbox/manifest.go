@@ -702,13 +702,16 @@ func roleScratch(role claim.Role) string {
 // roleEnvironment is where a role container's agent puts what it writes without being told where:
 // its temporary directory, the three XDG homes a tool caches under, and the three tool caches that
 // resolve to a path of their own (Go's build and module caches, bun's install cache). Every one of
-// them is under the role's own scratch (roleScratch) on the issue's volume, where neither the
-// gigabyte of ephemeral storage the container is admitted with nor the pod's memory bounds it: a
-// bun install cache alone is 1.4 GB for this repository, and charging it to the container's
-// filesystem is what GKE Autopilot evicted issue pods for. Only the config home stays the pod's
-// shared in-memory volume (xdgConfigHome): workspace-init writes the jj configuration the agents'
-// jj reads there. The scratch outlives the pod, so a later pod of the issue reuses what an earlier
-// one downloaded and built, and no two roles are handed one directory.
+// them is on the issue's volume, where neither the gigabyte of ephemeral storage the container is
+// admitted with nor the pod's memory bounds it: a bun install cache alone is 1.4 GB for this
+// repository, and charging it to the container's filesystem is what GKE Autopilot evicted issue
+// pods for. Five of them are under the role's own scratch (roleScratch), which no other role of
+// the pod is told: the temporary directory, the cache, data and state homes and bun's install
+// cache. The two Go caches are the issue's, one pair shared by its roles (goBuildCache,
+// goModCache), as uv's cache is (uvCacheDir). Only the config home stays the pod's shared
+// in-memory volume (xdgConfigHome): workspace-init writes the jj configuration the agents' jj
+// reads there. Every directory here outlives the pod, so a later pod of the issue reuses what an
+// earlier one downloaded and built.
 func roleEnvironment(role claim.Role) []corev1.EnvVar {
 	scratch := roleScratch(role)
 	return []corev1.EnvVar{
@@ -717,8 +720,8 @@ func roleEnvironment(role claim.Role) []corev1.EnvVar {
 		{Name: "XDG_DATA_HOME", Value: scratch + "/data"},
 		{Name: "XDG_STATE_HOME", Value: roleStateHome(role)},
 		{Name: "TMPDIR", Value: scratch + "/tmp"},
-		{Name: "GOCACHE", Value: scratch + "/go/build"},
-		{Name: "GOMODCACHE", Value: scratch + "/go/mod"},
+		{Name: "GOCACHE", Value: goBuildCache},
+		{Name: "GOMODCACHE", Value: goModCache},
 		{Name: "BUN_INSTALL_CACHE_DIR", Value: scratch + "/bun/install/cache"},
 	}
 }
@@ -764,6 +767,29 @@ const (
 func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
+
+// The go command's two caches in the role containers, which roleEnvironment hands every role of
+// the issue the same pair of.
+const (
+	// goBuildCache is the GOCACHE every role container of an issue is told and goModCache its
+	// GOMODCACHE, both on the issue's volume beside the workspaces and uv's cache, and both shared
+	// by the issue's roles rather than split per role. Each holds content addressed by its hash,
+	// and the roles of one issue may fill them at once: of the build cache `go help cache` says
+	// "The cache is safe for concurrent invocations of the go command", and what reaches the
+	// module cache is a module zip or go.mod the go command has verified against a known hash
+	// (`go help module-auth`) in a directory it then makes read-only, which only `go build
+	// -modcacherw` leaves writable. They are the issue's rather than the tree's because each issue
+	// has a volume of its own; the six roles of an issue pod with a pair each would be six copies
+	// of identical content, about 5.5 GB of a 20 GiB volume spent on nothing. Neither bun's install
+	// cache nor the state home joins them: bun hardlinks out of its install cache into whatever it
+	// installs for, so one cache shared between two roles' checkouts is the cross-checkout
+	// corruption `--backend=copyfile` and the cache per role exist to bound (LEGION-198), and Oh
+	// My Pi's browser broker takes its lock as an abstract unix socket named from a path under the
+	// state home, one name across every container of the pod, so one state home would block every
+	// role's broker but the first (roleStateHome).
+	goBuildCache = TreeRoot + "/go/build"
+	goModCache   = TreeRoot + "/go/mod"
+)
 
 // fetchEnvironment is `workspace-init fetch`'s: the image's PATH alone, its own TMPDIR, the mounted
 // provisioning token, and, for an issue pod, its repository's cache — its address, which resolves
@@ -843,8 +869,9 @@ func (r *Runtime) LaunchBound() time.Duration {
 // does not mount: Oh My Pi refuses to start on an unreadable URL file, so that generation fails
 // rather than keeping files. None of them repeats another: the runtime refuses a spec naming one
 // of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
-// a spec's. The temporary directory, XDG homes and tool caches are the role's own scratch
-// directory's (roleEnvironment), carried to the role's shim by the start command
+// a spec's. The temporary directory, XDG homes and tool caches are the issue volume's
+// (roleEnvironment) — the role's own scratch directory's but the two Go caches, which the issue's
+// roles share — carried to the role's shim by the start command
 // (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the

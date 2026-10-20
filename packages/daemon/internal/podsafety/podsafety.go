@@ -16,16 +16,17 @@
 // (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where
 // that directory exists. And the scratch directories: each directory the runtime tells a role to
 // write what it writes without being told where — its temporary directory, its cache and data
-// homes, its Go build and module caches and bun's install cache (EnsureScratch) — made before Oh
-// My Pi starts, since a role told a temporary directory nothing created cannot run. Apply, the
+// homes, bun's install cache and the two Go caches (EnsureScratch) — made before Oh My Pi
+// starts, since a role told a temporary directory nothing created cannot run. Apply, the
 // overlay and the baseline together, runs only in a pod, for a worker's shim (`legion worker-shim
 // --pod-safety`) and for the image probe (`legion probe-image --pod-safety`), which certifies the
 // baseline a worker's Oh My Pi starts on. The directories are the shim's alone: every role the
 // shim starts is told a state home of its own (sandbox.roleStateHome), which in an issue pod keeps
 // a role's browser broker lock apart from its siblings', and a scratch directory of its own
-// (sandbox.roleScratch) on the issue's volume, while the probe pod runs one container, on the
-// image's own directories, and is told neither. A pane gets the overlay alone, which runtime/tmux
-// writes and names itself (writeTurnScopeOverlay, panePairs).
+// (sandbox.roleScratch) on the issue's volume, which holds all of those but the two Go caches the
+// issue's roles share, while the probe pod runs one container, on the image's own directories,
+// and is told neither. A pane gets the overlay alone, which runtime/tmux writes and names itself
+// (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -175,24 +176,26 @@ func EnsureStateHome(environ []string) error {
 }
 
 // ScratchVariables are the variables EnsureScratch makes the directory of, in the order it makes
-// them: what sandbox.roleEnvironment tells a role container to write under its own scratch, less
-// XDG_STATE_HOME, which is EnsureStateHome's. The runtime is held to this list rather than to a
-// copy of it (sandbox.TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes), so a directory the
-// runtime starts naming that the shim would never make is a test failure, not a role whose
-// temporary directory does not exist.
+// them: what sandbox.roleEnvironment tells a role container to write in without being told where,
+// wherever on the issue's volume the runtime puts them — the role's own scratch for the temporary
+// directory, the cache and data homes and bun's install cache, the pair the issue's roles share
+// for the two Go caches — less XDG_STATE_HOME, which is EnsureStateHome's. The runtime is held to
+// this list rather than to a copy of it
+// (sandbox.TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes), so a directory the runtime
+// starts naming that the shim would never make is a test failure, not a role whose temporary
+// directory does not exist.
 var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR"}
 
 // EnsureScratch makes every directory environ names in ScratchVariables — TMPDIR, XDG_CACHE_HOME,
 // XDG_DATA_HOME, GOCACHE, GOMODCACHE and BUN_INSTALL_CACHE_DIR — with every parent, before Oh My
 // Pi starts. A name environ leaves unset or empty, or sets to a relative path, makes nothing: the
-// runtime always sets absolute ones (sandbox.roleEnvironment, under the role's own scratch on the
-// issue's volume), a relative one is not the shim's to resolve, and making it under whatever
-// working directory the pod happens to have would be worse than leaving the tool its own default.
-// A directory that cannot be made is a refusal naming the variable and the path, so a role whose
-// volume cannot be written never starts half-configured rather than part way through its first
-// turn. XDG_STATE_HOME is not here: EnsureStateHome keeps that one, since it makes Oh My Pi's
-// profile directory under the state home rather than the state home itself, and its refusal
-// carries its own reason.
+// runtime always sets absolute ones (sandbox.roleEnvironment, on the issue's volume), a relative
+// one is not the shim's to resolve, and making it under whatever working directory the pod
+// happens to have would be worse than leaving the tool its own default. A directory that cannot
+// be made is a refusal naming the variable and the path, so a role whose volume cannot be written
+// never starts half-configured rather than part way through its first turn. XDG_STATE_HOME is not
+// here: EnsureStateHome keeps that one, since it makes Oh My Pi's profile directory under the
+// state home rather than the state home itself, and its refusal carries its own reason.
 //
 // `go` and `bun` make their own cache directories, so GOCACHE, GOMODCACHE and BUN_INSTALL_CACHE_DIR
 // would come up by themselves; TMPDIR has no creator at all — mktemp and every library equivalent
