@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-62",
+  "completed": "2026-10-20T23:30:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2089",
+  "head": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+  "base": "envoy-infra-integration at ba3f6b7e2bbf0a8119bd8b597980904f3b4ab6e2",
+  "proof": [
+    {
+      "criterion": "Acceptance 1, first half: a replica count above one produces a rolling update, and the component's behaviour at one replica is unchanged.",
+      "surface": "The pulumi-resource-envoy-infra plugin built from this commit, driven through its own Construct RPC server — the entry point the Pulumi CLI's engine calls — with a throwaway driver over provider.New() and integration.NewServer(...).Construct(...), the same server pulumitest.Construct uses.",
+      "command": "cd packages/envoy/infra && go build -p 1 -ldflags \"-X main.version=1.2.3\" -o /legion/scratch/pulumi-resource-envoy-infra ./cmd/pulumi-resource-envoy-infra && go run -p 1 ./dispatchproof  (the driver, removed again after the run; its output is quoted below)",
+      "observed": "With replicas: 3 the plugin registered 35 resources, among them kubernetes:apps/v1:Deployment example-dispatch replicas=3 strategy={\"rollingUpdate\":{\"maxSurge\":1,\"maxUnavailable\":0},\"type\":\"RollingUpdate\"}, example-dispatch-tailnet replicas=1 strategy={\"type\":\"Recreate\"} and example-dispatch-listener replicas=1 strategy={\"type\":\"Recreate\"}. With replicas unset the app Deployment is replicas=1 strategy={\"type\":\"Recreate\"} with no rollingUpdate key (gcp/testdata/dispatch-pod.golden and TestDispatchDeploymentRecreatesOneReplicaByDefault at the same head).",
+      "headSha": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+      "negativeControl": "The same Construct call with replicas: 0 answered `rpc error: code = Unknown desc = envoy-infra:gcp:Dispatch example-dispatch: replicas 0 must be at least 1` and registered 0 resources — the refusal names the input and nothing is registered before it."
+    },
+    {
+      "criterion": "Acceptance 1, second half: the front-door arrangement is asserted rather than described — one tailnet node, one listener, the proxy and listener reachable only from the workloads that may dial them, and the app ordered behind the front door.",
+      "surface": "The same plugin Construct server at replicas: 3, reading the registered Services, NetworkPolicies and each Deployment's dependency list.",
+      "command": "cd packages/envoy/infra && go run -p 1 ./dispatchproof  (output saved at /legion/scratch/construct-proof-2.txt)",
+      "observed": "Services example-dispatch (8766, selector app=example-dispatch), example-dispatch-tailnet (1055, selector app=example-dispatch-tailnet) and example-dispatch-listener (9020, selector app=example-dispatch-listener). Policies: example-dispatch admits podSelector app=example-dispatch-tailnet on 8766; example-dispatch-tailnet admits 1055 from app=example-dispatch and app=example-dispatch-listener alone; example-dispatch-listener admits 9020 from app=example-dispatch alone. Both the app and the listener Deployments carry the front door's Deployment and Service URNs in their dependency lists (`waits-for=[… $kubernetes:apps/v1:Deployment::example-dispatch-tailnet … $kubernetes:core/v1:Service::example-dispatch-tailnet]`), and the front door's own list holds only the cluster.",
+      "headSha": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+      "negativeControl": "Each of the six arrangement assertions in gcp/dispatch_test.go was run against a one-line inversion of the production code before being accepted (for example TS_SOCKS5_SERVER back to 127.0.0.1:1055, the front door's replicas set to the app's count, the DependsOn removed) and each failed with the property it names; the production files were restored byte-identically afterwards (sha256 of dispatch_kube.go equal before and after)."
+    },
+    {
+      "criterion": "Deliverable 3: whatever a consumer needs for this is an input of the component, with the same refusals its other inputs have, and the generated SDK carries it.",
+      "surface": "The pinned Pulumi CLI v3.268.0 (the version .github/actions/install-pulumi installs, checked against its SHA-256) reading the plugin binary built from this commit, and the Go SDK that CLI generates from it, compiled by a throwaway consumer program.",
+      "command": "pulumi package get-schema ./pulumi-resource-envoy-infra | jq '.resources[\"envoy-infra:gcp:Dispatch\"].inputProperties.replicas, .resources[\"envoy-infra:gcp:Dispatch\"].requiredInputs' ; pulumi package gen-sdk ./pulumi-resource-envoy-infra --language go --out sdk ; go build ./... in a program that sets Replicas",
+      "observed": "The schema answers {\"type\":\"integer\",\"plain\":true} for replicas and lists it in no requiredInputs (the 13 required inputs are region, hostname, tailnetDnsName, tags, tailnetAuthKey, envoyImage, tailscaleImage, cloudSqlProxyImage, natsUrl, natsSeedSecret, signInClientId, signInClientSecret, signInDomain). gen-sdk generated `Replicas *int` on DispatchArgs, and a program setting `Replicas: &three` built against it.",
+      "headSha": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+      "negativeControl": "The same program with `Replicas: pulumi.String(\"3\")` failed to compile: `cannot use pulumi.String(\"3\") (constant \"3\" of string type pulumi.String) as *int value in struct literal` — the input is the plain int the schema declares, not an untyped passthrough."
+    },
+    {
+      "criterion": "Acceptance 3: the migration rule exists in the repository's own guidance, not only in this issue.",
+      "surface": "The tree at this head, the file a Dispatch contributor reads before writing a migration.",
+      "command": "grep -n \"A migration runs while the build before it is still serving\" packages/envoy/cmd/dispatch/README.md ; grep -n \"Database migrations\" packages/envoy/infra/README.md packages/envoy/AGENTS.md",
+      "observed": "The rule stands at the end of \"## Database migrations\" in packages/envoy/cmd/dispatch/README.md, immediately before \"### Pre-deploy census\": what a migration may add, what it must split across two releases, what the census does not cover, and why the five-second pgmigrate.LockTimeout bites harder while a deployment rolls. It is pointed at from the gcp:Dispatch section of packages/envoy/infra/README.md and from packages/envoy/AGENTS.md's internal/pgmigrate row. The census section's opening sentence, which claimed a deployment runs the census, now says no deployment of this component does and names the by-hand recipe.",
+      "headSha": "0ae5a902d601f6184b20aa8d02d5283ccc7cc938",
+      "negativeControl": "bash .github/scripts/check-private-names.sh over the whole tree passed (4361 files), so the new prose names no private host, company or repository; the same grep against the base commit ba3f6b7e finds the rule in no file."
+    }
+  ],
+  "objectInventory": [
+    "UNCHANGED, name for name: Deployment <h> (its metadata.name, namespace and spec.selector.matchLabels {app: <h>} — the only in-place-immutable fields here, pinned by TestDispatchAppDeploymentKeepsItsNameAndSelector), Service <h> (8766, selector app=<h>), ServiceAccount <h>, Role and RoleBinding <h>-tailscale-state, Secret <h>-tailnet-auth-key, Secret <h>-dispatch, SecretProviderClass <h>-nats-seed, Namespace <namespace> (absent with existingNamespace), and every Google Cloud child: Network <h>-network, Subnetwork <h>, Router <h>, RouterNat <h>, GlobalAddress <h>-services, servicenetworking Connection <h>-services, Cluster <h>, DatabaseInstance <h>, Database <h>, User <h>, SecretIamMember <h>-nats-seed-accessor, RandomPasswords <h>-password, <h>-signing-key and <h>-agent-token.",
+    "MUTATED: Deployment <h> (pod template — the tailscale container and the serve volume leave it, ENVOY_NATS_SOCKS5_PROXY and ENVOY_URL become Service addresses and ENVOY_TOKEN is added; replicas; strategy; and it now depends on the front door's Deployment and Service). ConfigMap <h>-serve (the Serve proxy target becomes http://<h>.<namespace>.svc.cluster.local:8766). NetworkPolicy <h> (one further ingress rule admitting app=<h>-tailnet on 8766).",
+    "CREATED: Deployment <h>-tailnet, Deployment <h>-listener, Service <h>-tailnet (1055), Service <h>-listener (9020), NetworkPolicy <h>-tailnet, NetworkPolicy <h>-listener, Secret <h>-listener (one key ENVOY_API_TOKEN), RandomPassword <h>-listener-token.",
+    "FORBIDDEN RESOURCES: the change touches no Role, no RoleBinding, no private services connection and no broker secret IAM policy — the deploying CI account's untouchable set. The front door keeps ServiceAccount <h> and TS_KUBE_SECRET=<h>-tailscale-state, so the Role that names that Secret and its binding are registered with the same inputs as before. The eight created objects are kinds the deploy account already applies in this namespace; only a name-scoped RBAC rule would refuse them, which the consuming stack's preview settles.",
+    "DELETED: nothing. No resource of the component is removed by this change.",
+    "APPLY NOTE for the consuming stack: the cutover apply briefly runs two tailscaled processes against <h>-tailscale-state (the old all-in-one pod and the new front door). Both load valid state under TS_AUTH_ONCE, so it is a node-session flap rather than key loss, but the single-use auth key is already spent: back that Secret up before the apply (kubectl -n <ns> get secret <h>-tailscale-state -o yaml), and mint the key Reusable (still non-ephemeral) going forward so a cleared state Secret is not a human recovery."
+  ],
+  "filesChanged": [
+    "packages/envoy/infra/gcp/dispatch.go — the replicas input, its default, its floor and refusal, the pure strategy resolver, the cluster-local Serve proxy target.",
+    "packages/envoy/infra/gcp/dispatch_kube.go — three Deployments, two new Services, three NetworkPolicies, the listener's bearer in the app's and the listener's environment, the front-door ordering, and the deployment/service/policy/strategy helpers the three workloads share.",
+    "packages/envoy/infra/gcp/dispatch_cloud.go — the fourth RandomPassword, <h>-listener-token.",
+    "packages/envoy/infra/gcp/export_test.go — the resolved replicas and strategy, for the external resolver tests.",
+    "packages/envoy/infra/gcp/dispatch_test.go — the replica and strategy tests, the six arrangement assertions, the listener Secret test, and the two new pod goldens' tests.",
+    "packages/envoy/infra/gcp/dispatch_construct_test.go — replicas sent as another resource's output is refused with nothing registered.",
+    "packages/envoy/infra/gcp/testdata/dispatch-pod.golden — now the app pod.",
+    "packages/envoy/infra/gcp/testdata/dispatch-tailnet-pod.golden, dispatch-listener-pod.golden — new.",
+    "packages/envoy/infra/gcp/testdata/dispatch-serve.golden — the cluster-DNS proxy target.",
+    "packages/envoy/infra/internal/pulumitest/mocks.go — Mocks.Named, a lookup by type and name, since three Deployments, Services and policies now register.",
+    "packages/envoy/infra/README.md — the three workloads, the replicas input, the rollout behaviour, the single-process caveat, and the pointer to the migration rule.",
+    "packages/envoy/cmd/dispatch/README.md — the rolling-update migration rule, and the corrected census sentence.",
+    "packages/envoy/AGENTS.md — the pointer to that rule from the internal/pgmigrate row."
+  ],
+  "trickyParts": [
+    "The app Deployment's name, namespace and selector are the only fields whose change would make the consuming stack's preview a replacement rather than an update. They are unchanged and pinned by a test; the reviewer should treat any future edit to them as a breaking change to the consumer.",
+    "Recreate at one replica is not a conservative default, it is the only safe strategy there: a surged second envoy-dispatch cannot bind the exclusive delivery push durable while the old pod holds it, and a terminating pod stops being counted by the ReplicaSet controller, so maxUnavailable:1/maxSurge:0 does not avoid the overlap either.",
+    "The front door and the listener are recreated at every update whatever the app's replica count, so Serve is briefly down when the tailnet pod is replaced even at replicas: 3. A rolling update of the app alone is what this issue makes gapless; a front-door image change is still a short outage, and the README says so.",
+    "The Serve configuration now names the app's Service, which is the one claim in the design with no in-repo proof: TS_USERSPACE=true leaves the pod's cluster DNS alone, so tailscaled should dial <h>.<ns>.svc.cluster.local as an ordinary outbound connection. The first curl through the tailnet after the consuming stack applies is what confirms it.",
+    "The listener moved out of the app pod, so it binds 0.0.0.0 and cmd/listener/apiauth.go then refuses to start without a bearer. That is why this change generates a token and gives the same value to envoy-dispatch as ENVOY_TOKEN; a reviewer removing the Secret would make the listener refuse to boot, not merely lose authentication."
+  ],
+  "deviations": [
+    "The plan named DependsOn for the app Deployment alone. The simplify pass's efficiency reviewer found that the listener dials the same SOCKS5 proxy and that envoy-listener exits on a failed initial NATS connect (cmd/listener/main.go), so on a fresh create it would crash-loop into Kubernetes' backoff while the update waits out its rollout. The listener now takes the same dependency, with its own assertion.",
+    "The plan's task 12 included a dispatch ask to the project owner to run the consuming stack's pulumi preview. The architect ruled at 21:05Z that this preview is INFRA-63's, which runs it in the repository where the stack lives immediately before its apply, and told this implementer not to open the ask; what INFRA-62 owes instead is the object inventory above, which is this handoff's objectInventory."
+  ],
+  "openQuestions": [
+    "The front door's tailscale container keeps the sidecar's 100m CPU / 128Mi, with requests equal to limits. It is now a single-replica Deployment whose userspace SOCKS5 proxy carries every app replica's NATS traffic as well as all tailnet HTTPS, SSE and websocket traffic, and it cannot scale out by design. Nothing measured says 100m is too little, and raising it would change the pod golden, so this change leaves it as it was; INFRA-63's apply is the first run that can measure it, and the number may need raising with the replica count.",
+    "The envoy-dispatch server is still not safe at two concurrent processes (exclusive delivery durables, a per-process SSE broker and document rooms, an outbox publisher that claims no row, and loops written for one process). The component ships the capability with the default at 1 and the README says so; a sibling issue must land before INFRA-63 sets more than one replica in production."
+  ],
+  "discoveredComplexity": [
+    "No surface in a Legion pod reaches a live cluster or the consuming stack: there is no pulumi state access (HTTP 403 on the state bucket), no gcloud, no Docker and no cluster credential. The production-like surface available for a Pulumi component is its own plugin binary driven through the Construct RPC server and read by the real Pulumi CLI, which is what the proof above uses; the deployed rendering is proved by INFRA-63.",
+    "The module's test suite has two environment-dependent failures in any pod without e2fsprogs (TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd and TestARefusedDataDiskIsNeverFormattedOnALaterBoot, both `these tests need mkfs.ext4 on this machine`). They fail on the base commit too and are green in CI's envoy-infra-go job."
+  ]
+}
