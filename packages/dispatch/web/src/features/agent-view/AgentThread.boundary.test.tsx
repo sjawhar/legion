@@ -54,9 +54,13 @@ function Harness({ messages }: { messages: ThreadMessageLike[] }): ReactNode {
     <AssistantRuntimeProvider runtime={runtime}>
       <AgentThread
         commands={undefined}
+        contentIds={messages.map((message) => message.id ?? "")}
         empty="Nothing yet."
+        ownSendCount={0}
         placeholder="Message the session…"
+        replayCount={0}
         resetKey="session-1"
+        sessionId="session-1"
       />
     </AssistantRuntimeProvider>
   );

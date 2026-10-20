@@ -269,6 +269,25 @@ function mainCap(page: Page): Promise<{ capped: boolean; fitsOwnHeight: boolean 
   });
 }
 
+/** Which turn the reader is looking at, and where it sits on their screen: the topmost turn the
+ *  thread shows any part of, by the key it carries, with its top edge relative to the thread's.
+ *  This is what "the page left me where I was" means to a reader, and it survives the browser's
+ *  own scroll anchoring moving `scrollTop` when something above them grows. */
+function topmostTurn(page: Page): Promise<{ id: string; top: number }> {
+  return page.evaluate(() => {
+    const thread = document.querySelector<HTMLElement>('[data-testid="agent-thread"]');
+    if (thread === null) throw new Error("no agent-thread");
+    const edge = thread.getBoundingClientRect().top;
+    for (const turn of thread.querySelectorAll<HTMLElement>("[data-message-id]")) {
+      const box = turn.getBoundingClientRect();
+      if (box.bottom > edge && box.top < edge + thread.clientHeight) {
+        return { id: turn.getAttribute("data-message-id") ?? "", top: box.top - edge };
+      }
+    }
+    throw new Error("no turn in view");
+  });
+}
+
 /** The newest turn is in view: its bottom edge is inside the thread and above the composer. */
 async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
   await expect
@@ -888,14 +907,17 @@ test("a reader scrolled back into a live session's transcript keeps their place,
     await expect(page.getByText("Starting a turn that grows on.")).toBeVisible();
     expect((await liveViewLayout(page)).threadScrollTop).toBe(900);
 
-    // A fold the reader opens is something they asked for, not news: the turn grows and the line
-    // they are on stays where it is.
+    // A fold the reader opens is something they asked for, not news: it grows under the turn it
+    // belongs to, and that turn stays where it is on their screen. The reader is put at the top
+    // of it first, because a fold opened in the middle of the screen pushes what is above it out
+    // of view by its own height whoever scrolls - the browser's own anchoring - and that is the
+    // text shifting under a reader the spec leaves alone.
     const tool = page.getByTestId("agent-tool-call");
-    await tool.scrollIntoViewIfNeeded();
-    const atFold = (await liveViewLayout(page)).threadScrollTop;
+    await tool.evaluate((element) => element.scrollIntoView({ block: "start" }));
+    const before = await topmostTurn(page);
     await tool.getByRole("button").click();
     await expect(page.getByTestId("agent-tool-result")).toContainText("- the relay");
-    expect((await liveViewLayout(page)).threadScrollTop).toBe(atFold);
+    expect(await topmostTurn(page)).toEqual(before);
 
     // The way back: one press puts the newest turn in front of them, takes the count with it,
     // and leaves the view following the session again.

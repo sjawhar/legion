@@ -74,7 +74,7 @@ export function AgentConversationPage(): ReactNode {
   const label = sessionLabel(sessionId, agent?.title ?? "");
   useDocumentTitle(label);
 
-  const { conversation, responding, status } = useAgentStream(sessionId);
+  const { conversation, replays, responding, status } = useAgentStream(sessionId);
   // The model the session is currently running (LEGION-548), next to its title: the most recent
   // assistant turn's own report, nothing guessed for a client that never sends one.
   const model = currentModel(conversation);
@@ -104,6 +104,11 @@ export function AgentConversationPage(): ReactNode {
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
+  // One per message of this viewer's the session accepted, which takes the thread back to its
+  // live end (`use-live-follow.ts`). Bumped after the write lands and never on a refusal: the
+  // reason renders above the transcript, where a reader who has scrolled back can read it
+  // without being taken away from what they were reading.
+  const [ownSendCount, setOwnSendCount] = useState(0);
 
   // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
   // read-only and this adds no write path of its own. The session confirms a Send or Aside with
@@ -119,6 +124,7 @@ export function AgentConversationPage(): ReactNode {
       setSendError(null);
       try {
         await api.createAgentMessage(sessionId, { body, delivery: mode });
+        setOwnSendCount((previous) => previous + 1);
         await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
       } catch (error) {
         setSendError(error instanceof Error ? error.message : "could not reach the session");
@@ -209,7 +215,9 @@ export function AgentConversationPage(): ReactNode {
           conversation={conversation}
           empty={emptyText(responding)}
           onNew={onNew}
+          ownSendCount={ownSendCount}
           placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`}
+          replayCount={replays}
           resetKey={sessionId}
           sessionId={sessionId}
           stored={stored.data ?? []}
