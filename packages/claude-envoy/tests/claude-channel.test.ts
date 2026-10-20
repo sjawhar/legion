@@ -112,6 +112,24 @@ test.skipIf(node === null)(
   },
 )
 
+test("a command line whose last arguments are empty is still read, not taken for title padding", async () => {
+  const child = spawn("sh", ["-c", "sleep 5", "claude", "--name", "", ""], { stdio: "ignore" })
+  try {
+    await Bun.sleep(50)
+    expect(processCommandLine(child.pid ?? 0)?.argv).toEqual([
+      "sh",
+      "-c",
+      "sleep 5",
+      "claude",
+      "--name",
+      "",
+      "",
+    ])
+  } finally {
+    child.kill()
+  }
+})
+
 test("an empty argument on the real command line keeps its place", async () => {
   // `--append-system-prompt ""` takes the empty value; dropping it would read the channel flag as
   // that option's value.

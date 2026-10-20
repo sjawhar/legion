@@ -78,20 +78,22 @@ events and sends them to the current Claude Code session as supported
   instructions. `ENVOY_CHANNEL_LOADED=1` or `0` overrides the check, for an allowlist an MDM
   profile delivers. A command line it cannot read, or no `claude` among the server's ancestors,
   counts as loaded (a Claude Code run under another program name inside another `claude`
-  session's shell reads as the outer one), and so does a one-word command line from a Claude Code
-  that runs on Node, whose `process.title = "claude"` overwrites the arguments. A Legion pane whose
-  deliveries go to the bridge's inbox needs no channel, so the check does not apply there.
+  session's shell reads as the outer one), and so does the command line of a Claude Code that runs
+  on Node, whose `process.title = "claude"` overwrites the arguments (on Linux, the title and NUL
+  padding, whatever the executable's name; elsewhere, one word from a program named `node…`). A
+  Legion pane whose deliveries go to the bridge's inbox needs no channel, so the check does not
+  apply there.
 
   The check cannot see every reason Claude Code refuses a channel. Claude Code also turns channels
   off for the account (not signed in, or an account without the channels feature), for a
   third-party provider (Bedrock, Vertex or Foundry), and for an organization whose managed settings
   do not set `channelsEnabled: true`; outside Linux it cannot tell whether stdout is a terminal;
   Claude Code skips a channel on a connection that negotiated an MCP protocol revision with no
-  unsolicited notifications. Claude Code then shows `--dangerously-load-development-channels ignored` (or
-  `--channels ignored`) with the reason when the session starts, and drops every notification. The
-  server still advertises Aside, so Dispatch records a message to that session as sent while the
-  model never sees it. If the session shows that warning, start it with `ENVOY_CHANNEL_LOADED=0`
-  so it advertises no delivery mode.
+  unsolicited notifications. Claude Code then shows
+  `--dangerously-load-development-channels ignored` (or `--channels ignored`) with the reason when
+  the session starts, and drops every notification. The server still advertises Aside, so Dispatch
+  records a message to that session as sent while the model never sees it. If the session shows
+  that warning, start it with `ENVOY_CHANNEL_LOADED=0` so it advertises no delivery mode.
 
   The other way round, the check runs once at startup, so a channel an SDK host turns on later
   (`enableChannel`) is not seen: that session advertises no mode and Dispatch refuses messages

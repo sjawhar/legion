@@ -47192,8 +47192,10 @@ function processCommandLine(pid, executable = processExecutable) {
         pieces.pop();
         trailing++;
       }
-      if (trailing > 1)
+      if (trailing > 1 && pieces.length === 1)
         return;
+      for (let blank = 1;blank < trailing; blank++)
+        pieces.push("");
       const argv = pieces;
       const terminal = stdoutIsTerminal(pid);
       const cwd = workingDirectory(pid);

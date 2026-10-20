@@ -414,17 +414,19 @@ export function processCommandLine(
   let commandLine: CommandLine | undefined
   if (process.platform === "linux") {
     try {
-      // Each argument ends in one NUL. More than one empty piece at the end is the padding a
-      // process that set its title leaves over its old arguments, so its arguments are gone. An
-      // empty argument before the last one (a blank option value) stays, since dropping it would
-      // shift which word is a value.
+      // Each argument ends in one NUL. A process that set its title (Node, for `process.title`)
+      // leaves the title alone, which holds no NUL, then NUL padding over its old arguments, so
+      // one piece before several empty ones is a title and its arguments are gone. Otherwise the
+      // empty pieces past the final NUL are blank arguments (`--name ""`), which keep their place,
+      // since dropping one would shift which word is a value.
       const pieces = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")
       let trailing = 0
       while (pieces.length > 0 && pieces.at(-1) === "") {
         pieces.pop()
         trailing++
       }
-      if (trailing > 1) return undefined
+      if (trailing > 1 && pieces.length === 1) return undefined
+      for (let blank = 1; blank < trailing; blank++) pieces.push("")
       const argv = pieces
       const terminal = stdoutIsTerminal(pid)
       const cwd = workingDirectory(pid)
