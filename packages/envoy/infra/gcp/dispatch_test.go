@@ -75,7 +75,7 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	require.Equal(t, 1, settings.Replicas)
 	require.Equal(t, "Recreate", settings.StrategyType)
 	require.Nil(t, settings.RollingUpdate, "one replica is recreated, never rolled")
-	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`, settings.ServeConfig)
+	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://example-dispatch.dispatch.svc.cluster.local:8766"}}}}}`, settings.ServeConfig)
 }
 
 // Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
@@ -350,6 +350,9 @@ func TestDispatchServiceExposesPort8766(t *testing.T) {
 	require.EqualValues(t, 8766, port["targetPort"])
 }
 
+// With no namespace named, the app's policy carries exactly one rule: the front door's. Serve runs
+// in a pod of this namespace, which no namespace selector covers, so without that rule it reaches
+// the app at no port at all; a rule with an empty from would admit every pod in the cluster.
 func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -357,7 +360,17 @@ func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
 	policy := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", "example-dispatch")
 	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
 	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
-	require.Empty(t, spec["ingress"], "an ingress rule with no from would admit every pod in the cluster")
+	ingress := spec["ingress"].([]any)
+	require.Len(t, ingress, 1)
+	rule := ingress[0].(map[string]any)
+	from := rule["from"].([]any)
+	require.Len(t, from, 1)
+	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"},
+		from[0].(map[string]any)["podSelector"].(map[string]any)["matchLabels"])
+	require.NotContains(t, from[0], "namespaceSelector")
+	ports := rule["ports"].([]any)
+	require.Len(t, ports, 1)
+	require.EqualValues(t, 8766, ports[0].(map[string]any)["port"])
 }
 
 func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
@@ -429,12 +442,36 @@ func normalizedProperty(value resource.PropertyValue) any {
 	}
 }
 
+// requirePodGolden pins one workload's pod template: the design's record of what runs beside what,
+// and of the addresses each container is given.
+func requirePodGolden(t *testing.T, m *pulumitest.Mocks, deployment, golden string) {
+	t.Helper()
+	template := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).Inputs["spec"].ObjectValue()["template"]
+	got, err := json.MarshalIndent(normalizedProperty(template), "", "  ")
+	require.NoError(t, err)
+	require.Equal(t, readGolden(t, golden), string(got)+"\n")
+}
+
+// The app's pod holds envoy-dispatch and the cloud-sql-proxy native sidecar alone, and reaches the
+// front door's proxy and the listener at their Services.
 func TestDispatchPodMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
-	template := deployment.Inputs["spec"].ObjectValue()["template"]
-	got, err := json.MarshalIndent(normalizedProperty(template), "", "  ")
+	requirePodGolden(t, m, "example-dispatch", "dispatch-pod.golden")
+}
+
+// The front door is one tailnet node, in a pod labelled app=<hostname>-tailnet: Service <hostname>
+// selects app=<hostname> and would send user traffic to a pod wearing that label.
+func TestDispatchTailnetPodMatchesGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
-	require.Equal(t, readGolden(t, "dispatch-pod.golden"), string(got)+"\n")
+	requirePodGolden(t, m, "example-dispatch-tailnet", "dispatch-tailnet-pod.golden")
+}
+
+// The listener serves on every address of its own pod, so it carries the bearer its API demands
+// there.
+func TestDispatchListenerPodMatchesGolden(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	requirePodGolden(t, m, "example-dispatch-listener", "dispatch-listener-pod.golden")
 }

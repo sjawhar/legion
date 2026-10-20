@@ -274,8 +274,10 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
 		}
 	}
-	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`,
-		s.hostname, s.tailnetDNSName)
+	// The tailnet node runs in a pod of its own now, so Serve proxies to the app's Service rather
+	// than to a container beside it. The Web key keeps the node's name and certificate domain.
+	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://%s.%s.svc.cluster.local:8766"}}}}}`,
+		s.hostname, s.tailnetDNSName, s.hostname, s.namespace)
 	return s, nil
 }
 

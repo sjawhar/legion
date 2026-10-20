@@ -85,11 +85,20 @@
           },
           {
             "name": "ENVOY_NATS_SOCKS5_PROXY",
-            "value": "127.0.0.1:1055"
+            "value": "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
           },
           {
             "name": "ENVOY_URL",
-            "value": "http://127.0.0.1:9020"
+            "value": "http://example-dispatch-listener.dispatch.svc.cluster.local:9020"
+          },
+          {
+            "name": "ENVOY_TOKEN",
+            "valueFrom": {
+              "secretKeyRef": {
+                "key": "ENVOY_API_TOKEN",
+                "name": "example-dispatch-listener"
+              }
+            }
           }
         ],
         "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -124,155 +133,10 @@
             "readOnly": true
           }
         ]
-      },
-      {
-        "env": [
-          {
-            "name": "PORT",
-            "value": "9020"
-          },
-          {
-            "name": "ENVOY_MACHINE_ID",
-            "value": "example-dispatch"
-          },
-          {
-            "name": "NATS_URLS",
-            "value": "nats://example-hub.example-tailnet.ts.net:4222"
-          },
-          {
-            "name": "ENVOY_ALLOW_REMOTE_NATS",
-            "value": "1"
-          },
-          {
-            "name": "ENVOY_NATS_SOCKS5_PROXY",
-            "value": "127.0.0.1:1055"
-          },
-          {
-            "name": "NATS_NKEY_SEED_FILE",
-            "value": "/var/run/secrets/envoy/nats-seed"
-          }
-        ],
-        "image": "example.invalid/envoy@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        "name": "envoy-listener",
-        "readinessProbe": {
-          "exec": {
-            "command": [
-              "curl",
-              "-fsS",
-              "http://127.0.0.1:9020/healthz"
-            ]
-          }
-        },
-        "resources": {
-          "limits": {
-            "cpu": "200m",
-            "memory": "512Mi"
-          },
-          "requests": {
-            "cpu": "200m",
-            "memory": "512Mi"
-          }
-        },
-        "volumeMounts": [
-          {
-            "mountPath": "/var/run/secrets/envoy",
-            "name": "nats-seed",
-            "readOnly": true
-          }
-        ]
       }
     ],
     "enableServiceLinks": false,
     "initContainers": [
-      {
-        "env": [
-          {
-            "name": "TS_AUTHKEY",
-            "valueFrom": {
-              "secretKeyRef": {
-                "key": "TS_AUTHKEY",
-                "name": "example-dispatch-tailnet-auth-key"
-              }
-            }
-          },
-          {
-            "name": "TS_AUTH_ONCE",
-            "value": "true"
-          },
-          {
-            "name": "TS_KUBE_SECRET",
-            "value": "example-dispatch-tailscale-state"
-          },
-          {
-            "name": "TS_USERSPACE",
-            "value": "true"
-          },
-          {
-            "name": "TS_SOCKS5_SERVER",
-            "value": "127.0.0.1:1055"
-          },
-          {
-            "name": "TS_SERVE_CONFIG",
-            "value": "/etc/tailscale/serve.json"
-          },
-          {
-            "name": "TS_HOSTNAME",
-            "value": "example-dispatch"
-          },
-          {
-            "name": "TS_EXTRA_ARGS",
-            "value": "--advertise-tags=tag:example-dispatch"
-          },
-          {
-            "name": "TS_ENABLE_HEALTH_CHECK",
-            "value": "true"
-          },
-          {
-            "name": "TS_LOCAL_ADDR_PORT",
-            "value": "127.0.0.1:9002"
-          }
-        ],
-        "image": "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
-        "name": "tailscale",
-        "readinessProbe": {
-          "exec": {
-            "command": [
-              "wget",
-              "-qO-",
-              "http://127.0.0.1:9002/healthz"
-            ]
-          },
-          "periodSeconds": 10
-        },
-        "resources": {
-          "limits": {
-            "cpu": "100m",
-            "memory": "128Mi"
-          },
-          "requests": {
-            "cpu": "100m",
-            "memory": "128Mi"
-          }
-        },
-        "restartPolicy": "Always",
-        "startupProbe": {
-          "exec": {
-            "command": [
-              "wget",
-              "-qO-",
-              "http://127.0.0.1:9002/healthz"
-            ]
-          },
-          "failureThreshold": 36,
-          "periodSeconds": 5
-        },
-        "volumeMounts": [
-          {
-            "mountPath": "/etc/tailscale",
-            "name": "serve"
-          }
-        ]
-      },
       {
         "args": [
           "--private-ip",
@@ -311,12 +175,6 @@
           }
         },
         "name": "nats-seed"
-      },
-      {
-        "configMap": {
-          "name": "example-dispatch-serve"
-        },
-        "name": "serve"
       }
     ]
   }
