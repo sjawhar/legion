@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // fixedClaimStore answers every boot token hash with the one claim it is given, or as unknown
@@ -434,6 +436,7 @@ func TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunche
 		t.Run(string(state), func(t *testing.T) {
 			store := &outboxClaimStore{}
 			logs := &syncBuffer{}
+			enroller := &recordingEnroller{}
 			sup := newSupervisor(context.Background(), nil, "legion", t.TempDir(), slog.New(slog.NewTextHandler(logs, nil)))
 			rt := fake.NewRuntime()
 			sup.deps = supervise.Deps{
@@ -441,10 +444,13 @@ func TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunche
 				Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
 				Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second, LaunchBackoff: time.Millisecond},
 				PluginContract: api.DaemonAPIVersion,
+				Secrets:        enroller,
 			}
 			t.Cleanup(sup.stop)
+			enrollment := supervise.Enrollment{ID: "enr-" + string(state), Incarnation: "pod-" + string(state)}
 			stored := supervise.Claim{Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleImplementer,
-				Generation: 1, State: state, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl", PluginContract: api.DaemonAPIVersion}
+				Generation: 1, State: state, Session: "ses_impl", SessionFile: "/sessions/impl.jsonl", PluginContract: api.DaemonAPIVersion,
+				CapabilityHash: []byte("known-registration-secret"), Enrollment: &enrollment}
 			claims := []supervise.Claim{stored}
 
 			unfinished, err := sup.restore(context.Background(), claims)
@@ -456,18 +462,22 @@ func TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunche
 				t.Fatalf("the unfinished launches = %v, want %s", unfinished, token)
 			}
 			m, _ := sup.Machine(token)
-			if c := m.Claim(); c.State != supervise.StateLaunchUncertain || c.Locator != nil {
-				t.Fatalf("restored %s with locator %+v, want launch_uncertain with no process", c.State, c.Locator)
+			if c := m.Claim(); c.State != supervise.StateLaunchUncertain || c.Locator != nil || len(c.CapabilityHash) != 0 || c.Enrollment != nil {
+				t.Fatalf("restored %+v, want launch_uncertain with no process, capability or enrollment", c)
 			}
 			store.mu.Lock()
 			written := store.claims[token]
 			store.mu.Unlock()
-			if written.State != supervise.StateLaunchUncertain {
-				t.Fatalf("the store holds %s, want launch_uncertain", written.State)
+			if written.State != supervise.StateLaunchUncertain || len(written.CapabilityHash) != 0 || written.Enrollment != nil {
+				t.Fatalf("the store holds %+v, want launch_uncertain with no capability or enrollment", written)
 			}
-			if claims[0].State != supervise.StateLaunchUncertain {
-				t.Fatalf("the boot's claims hold %s, want launch_uncertain for its later passes", claims[0].State)
+			if claims[0].State != supervise.StateLaunchUncertain || len(claims[0].CapabilityHash) != 0 || claims[0].Enrollment != nil {
+				t.Fatalf("the boot's claims hold %+v, want launch_uncertain with no capability or enrollment for its later passes", claims[0])
 			}
+
+			testwait.Eventually(t, "the stale enrollment to be revoked", func() bool {
+				return slices.Equal(enroller.revocations(), []string{enrollment.ID})
+			})
 			if got := logs.String(); !strings.Contains(got, "restoring a launch the previous daemon did not finish as launch_uncertain") ||
 				!strings.Contains(got, "stored="+string(state)) {
 				t.Errorf("logged %q, want the repair named with the state it was stored in", got)
@@ -487,4 +497,28 @@ func TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunche
 			}
 		})
 	}
+}
+
+// recordingEnroller makes restore prove that it revokes an enrollment belonging to a process it
+// can no longer record before it makes that claim launch_uncertain.
+type recordingEnroller struct {
+	mu      sync.Mutex
+	revoked []string
+}
+
+func (*recordingEnroller) Enroll(context.Context, supervise.PodEnrollment) (string, error) {
+	return "", errors.New("unexpected enrollment")
+}
+
+func (e *recordingEnroller) Revoke(_ context.Context, enrollment string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.revoked = append(e.revoked, enrollment)
+	return nil
+}
+
+func (e *recordingEnroller) revocations() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.revoked)
 }
