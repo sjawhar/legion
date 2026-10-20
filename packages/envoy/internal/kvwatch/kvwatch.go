@@ -57,9 +57,13 @@ type Watcher struct {
 	watching int
 	idle     chan struct{}
 	// retired are the watchers Stop took out of service and those a watch armed after it, which
-	// End ends. ended is set once End has taken them.
-	retired []nats.KeyWatcher
-	ended   bool
+	// End ends. ended is set once End has taken them, and endCause, with it, to why End stopped
+	// waiting for a watch still starting, when it did.
+	retired  []nats.KeyWatcher
+	ended    bool
+	endCause error
+	// endOnce runs End's work once: a later End waits for it to finish.
+	endOnce sync.Once
 }
 
 // Option configures a Watcher.
@@ -242,8 +246,15 @@ func (w *Watcher) Stop() {
 // so it is logged at WARN, and so is a delete the connection was lost before (lostConnection):
 // the server deletes a consumer whose interest is gone on its own. Any other failure, and a
 // delete still unanswered when ctx's deadline passes, is an ERROR. A watch that arms its watcher
-// after End has taken them stops that watcher itself.
+// after End has taken them stops that watcher itself (watch). End does its work once: a later
+// End, or one beside it, waits for the first to finish, within the first's ctx, and ends nothing
+// more.
 func (w *Watcher) End(ctx context.Context) {
+	w.endOnce.Do(func() { w.end(ctx) })
+}
+
+// end is End's work, run once.
+func (w *Watcher) end(ctx context.Context) {
 	w.Stop()
 	w.mu.Lock()
 	var idle chan struct{}
@@ -252,6 +263,7 @@ func (w *Watcher) End(ctx context.Context) {
 		w.idle = idle
 	}
 	w.mu.Unlock()
+	var gaveUp error
 	if idle != nil {
 		// A watch that has finished is read before ctx, which can already be done: a hook's
 		// context ends the moment the connection is lost.
@@ -261,7 +273,8 @@ func (w *Watcher) End(ctx context.Context) {
 			select {
 			case <-idle:
 			case <-ctx.Done():
-				w.logUnfinished(w.name+" watcher end found a watch still starting", context.Cause(ctx))
+				gaveUp = context.Cause(ctx)
+				w.logUnfinished(w.name+" watcher end found a watch still starting", gaveUp)
 			}
 		}
 	}
@@ -269,6 +282,7 @@ func (w *Watcher) End(ctx context.Context) {
 	retired := w.retired
 	w.retired = nil
 	w.ended = true
+	w.endCause = gaveUp
 	w.mu.Unlock()
 	results := make(chan error, len(retired))
 	for _, watcher := range retired {
@@ -297,6 +311,18 @@ func (w *Watcher) End(ctx context.Context) {
 func lostConnection(err error) bool {
 	return errors.Is(err, bus.ErrConnectionLost) || errors.Is(err, nats.ErrConnectionClosed) ||
 		errors.Is(err, nats.ErrConnectionReconnecting) || errors.Is(err, nats.ErrReconnectBufExceeded)
+}
+
+// lateStop is how stopping a watcher that a watch armed after End had taken the retired ones
+// ended. When End stopped waiting for that watch because the connection was lost, the stop runs
+// on a connection the drain has gone on without (nats.go refuses it as "connection draining"
+// once the connection's drain begins, nats.go's Unsubscribe), so a failure other than the consumer
+// being gone is that loss, and the consumer is left to the server as End's own are.
+func lateStop(err, endCause error) error {
+	if err == nil || !lostConnection(endCause) || errors.Is(err, nats.ErrConsumerNotFound) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", endCause, err)
 }
 
 // logEnd logs how stopping one retired watcher ended (End).
@@ -381,7 +407,7 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 		// delivered. Once End has taken the retired watchers, which it does only after this watch
 		// returns or its deadline passes, nothing else would end this one, so the watch ends it.
 		w.kv = kv
-		ended := w.ended
+		ended, endCause := w.ended, w.endCause
 		if !ended {
 			w.retired = append(w.retired, watcher)
 		}
@@ -389,7 +415,7 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 		w.applyMu.Unlock()
 		discard(watcher)
 		if ended {
-			w.logEnd(watcher.Stop())
+			w.logEnd(lateStop(watcher.Stop(), endCause))
 		}
 		return nil
 	}

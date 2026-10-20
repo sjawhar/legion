@@ -9,6 +9,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -103,6 +104,111 @@ func TestAWatchStillStartingAtEndsDeadlineIsAnError(t *testing.T) {
 	eventually(t, "the late watch to delete its consumer", func() bool { return len(testConsumers(t, conn)) == 0 })
 	if got, want := strings.Join(warnings(records()), ", "), "ERROR test cache watcher end found a watch still starting: context deadline exceeded"; got != want {
 		t.Fatalf("End logged %q, want %q", got, want)
+	}
+}
+
+// drainingStopKV is heldWatchKV whose watcher's Stop answers as nats.go's Unsubscribe does once its
+// connection's drain has begun (nats.go v1.50.0, nats.go:5069-5070): "connection draining". It
+// stops the real watcher first, so the test leaves no consumer behind.
+type drainingStopKV struct{ heldWatchKV }
+
+func (k *drainingStopKV) WatchAll(opts ...natsgo.WatchOpt) (natsgo.KeyWatcher, error) {
+	watcher, err := k.heldWatchKV.WatchAll(opts...)
+	if err != nil {
+		return watcher, err
+	}
+	return drainingStop{watcher}, nil
+}
+
+type drainingStop struct{ natsgo.KeyWatcher }
+
+func (w drainingStop) Stop() error {
+	_ = w.KeyWatcher.Stop()
+	return natsgo.ErrConnectionDraining
+}
+
+// A watch still starting when End gives up on it because the connection was lost arms its watcher
+// after End and stops it itself. That stop runs on a connection the drain has gone on without,
+// which nats.go refuses as "connection draining" once the connection's drain begins: the consumer
+// is left to the server, as End's own are, so the stop is a warning, never an error.
+func TestALateWatchAfterALostConnectionIsAWarning(t *testing.T) {
+	uri := testnats.URL(t)
+	_, kv := bucket(t, uri)
+	held := &drainingStopKV{heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}}
+	logger, records := jsonLogger(t)
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w.Start()
+	select {
+	case <-held.watched:
+	case <-time.After(5 * time.Second):
+		close(held.release)
+		t.Fatal("the watch never armed its watcher")
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(bus.ErrConnectionLost)
+	w.End(ctx)
+	close(held.release)
+	eventually(t, "the late watch's stop to be logged", func() bool { return len(warnings(records())) == 2 })
+	lost := "WARN test cache watcher end found a watch still starting: " + bus.ErrConnectionLost.Error()
+	late := "WARN test cache watcher's consumer was left to the server: the connection was lost before its delete: " +
+		bus.ErrConnectionLost.Error() + ": " + natsgo.ErrConnectionDraining.Error()
+	if got, want := strings.Join(warnings(records()), ", "), lost+", "+late; got != want {
+		t.Fatalf("End and the late watch logged %q, want %q", got, want)
+	}
+}
+
+// endsWaiting counts the goroutines parked inside End: waiting for a watch, or for another End.
+func endsWaiting() int {
+	n := 0
+	for _, goroutine := range goroutinetest.Traces() {
+		header, _, _ := strings.Cut(goroutine, "\n")
+		parked := strings.Contains(header, "[select") || strings.Contains(header, "[sync.Mutex.Lock")
+		if parked && strings.Contains(goroutine, "kvwatch.(*Watcher).End(") {
+			n++
+		}
+	}
+	return n
+}
+
+// End may be called more than once, and by two callers at once: the first does the work and every
+// caller returns once it has, so a second End beside a first still waiting on a watch never takes
+// the first's wake-up.
+func TestEndCalledTwiceAtOnceReturnsForBoth(t *testing.T) {
+	uri := testnats.URL(t)
+	conn, kv := bucket(t, uri)
+	held := &heldWatchKV{KeyValue: kv, watched: make(chan struct{}), release: make(chan struct{})}
+	logger, records := jsonLogger(t)
+	w := kvwatch.New("test cache", bus.KeyValue{KeyValue: held}, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
+	w.Start()
+	select {
+	case <-held.watched:
+	case <-time.After(5 * time.Second):
+		close(held.release)
+		t.Fatal("the watch never armed its watcher")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ended := make(chan struct{}, 2)
+	for range 2 {
+		go func() {
+			w.End(ctx)
+			ended <- struct{}{}
+		}()
+	}
+	eventually(t, "both Ends to wait for the watch", func() bool { return endsWaiting() == 2 })
+	close(held.release)
+	for range 2 {
+		select {
+		case <-ended:
+		case <-time.After(5 * time.Second):
+			t.Fatal("an End did not return once the watch it waited for had finished")
+		}
+	}
+	if consumers := testConsumers(t, conn); len(consumers) != 0 {
+		t.Fatalf("consumers after both Ends = %v, want none", consumers)
+	}
+	if got := warnings(records()); len(got) != 0 {
+		t.Fatalf("End logged %q, want nothing", got)
 	}
 }
 
