@@ -3,6 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
+	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
@@ -40,14 +41,14 @@ func TestTheListenerShutdownEndsItsKVWatchersBeforeTheDrain(t *testing.T) {
 			}
 			buckets := []string{bus.InterestBucket, bus.SessionBucket}
 			for _, bucket := range buckets {
-				if consumers := streamConsumers(js, "KV_"+bucket); len(consumers) != 1 {
-					t.Fatalf("%s carries consumers %v before the shutdown, want its cache watcher's one", bucket, consumers)
-				}
+				// The listener turns healthy before the interest marker collector's first pass
+				// (main.go starts it after the bind), and that pass's scan holds a consumer of its
+				// own on the interest bucket until the scan ends, so the cache watcher's is the
+				// bucket's only one only once that scan has.
+				watcher := onlyConsumer(t, js, "KV_"+bucket)
 				if test.consumerGone {
-					for _, name := range streamConsumers(js, "KV_"+bucket) {
-						if err := js.DeleteConsumer("KV_"+bucket, name); err != nil {
-							t.Fatalf("delete %s's watcher consumer %s: %v", bucket, name, err)
-						}
+					if err := js.DeleteConsumer("KV_"+bucket, watcher); err != nil {
+						t.Fatalf("delete %s's watcher consumer %s: %v", bucket, watcher, err)
 					}
 				}
 			}
@@ -86,4 +87,18 @@ func streamConsumers(js natsgo.JetStreamContext, stream string) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// onlyConsumer waits, up to 30 s, until the stream carries exactly one consumer, its cache
+// watcher's, and returns its name; it fails naming the consumers it last saw.
+func onlyConsumer(t *testing.T, js natsgo.JetStreamContext, stream string) string {
+	t.Helper()
+	var consumers []string
+	for deadline := time.Now().Add(30 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if consumers = streamConsumers(js, stream); len(consumers) == 1 {
+			return consumers[0]
+		}
+	}
+	t.Fatalf("%s carried consumers %v for 30 s after the listener turned healthy, want its cache watcher's one", stream, consumers)
+	return ""
 }
