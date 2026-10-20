@@ -6081,33 +6081,82 @@ note "the bound woke look 2 of $tree1's production check (the state at the wake:
 pass
 
 begin node-release
-# Tree 1 lingers (linger_hours 0.5): the Sandboxes of its issues still alive stay Suspended, each
-# with its own PVC Bound, and no pod of the run is left on any node a pod of tree 1 ran on. No pod
-# asks for or keeps off a node (LEGION-632): a node empties when the pods on it stop, and the pool
-# consolidates an empty node after consolidateAfter. So each such node is gone, unless another
-# project's pod is now on it (a production daemon running beside the run places where the pool has
-# room, the node tree 1 emptied included); that pod keeps the node from the moment it is bound,
-# Pending through its init containers included. Either case passes for each node, and the note says
-# which it saw where. Every node any pod of tree 1 — the root's, its children's, the replacements the
-# fence and the stream move made — was on is read from the pod watch.
+# Tree 1 lingers (linger_hours 0.5, from the merge that closed it): the Sandboxes of its issues still
+# alive stay Suspended, each with its own PVC Bound, and no pod of tree 1 is left on any node a pod
+# of tree 1 ran on. No pod asks for or keeps off a node (LEGION-632): a node empties when the pods on
+# it stop, and the pool consolidates an empty node after consolidateAfter. So each such node is gone,
+# unless another pod keeps it, placed there because the pool had room: another project's (a
+# production daemon running beside the run), the run's repository cache (legion.dev/cache=true, one
+# per repository of the project, which lives as long as the daemon and is no tree's), or another
+# tree of the run's — a carried child's own tree launches at tree 1's linger expiry, which falls in
+# this wait when the production check ran long, and nothing says where it lands. Such a pod keeps
+# the node from the moment it is bound, Pending through its init containers included, and the node
+# then stays, carrying no pod of tree 1; either case passes for each node, and the note says which
+# it saw where. Every node any pod of tree 1 — the root's, its children's, the replacements the
+# fence and the stream move made, the pod the check's last look brought back — was on is read from
+# the pod watch.
+# The checkpoint's own reads of tree 1's Sandboxes and volumes come first, since the nodes take up
+# to consolidateAfter and their drain each, and tree 1's linger (read from the daemon's line, as
+# mid-turn-carry reads it) may expire while they wait: at the expiry the close deletes the root's
+# and child 2's Sandboxes with their volumes and hands child 3's to its own tree, so the reads are
+# made again after the waits only while the linger still runs, and otherwise left to close and
+# carried-child, which judge that state.
 tree1_nodes=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | sort -u | grep .) ||
   fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
+tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" '[.[] | select(.tree == $tree)] | last | .until // empty')
+[ -n "$tree1_until" ] || fail "the daemon logged no linger for $tree1"
+# tree1_lingers: at least a minute of the linger the daemon logged for tree 1 is left, by the
+# driver's clock, so the reads that follow it end before the close starts deleting.
+tree1_lingers() { [ "$(date -u +%s)" -lt "$(($(date -u -d "$tree1_until" +%s) - 60))" ]; }
+# tree1_parked WHEN: tree 1's root, child 2 (parked) and child 3 (mid-run) each have one Sandbox,
+# Suspended, and one PVC, Bound; WHEN says when the read was made, for a failure's message.
+tree1_parked() {
+  local issue
+  [ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' $1, want its one, Suspended"
+  for issue in "$child2" "$child3"; do
+    [ "$(issue_sandbox_modes "$issue")" = Suspended ] || fail "tree 1's child $issue's Sandboxes are '$(issue_sandbox_modes "$issue" | paste -sd ' ' -)' $1, want its one, Suspended"
+  done
+  for issue in "$tree1" "$child2" "$child3"; do
+    assert_one_bound_pvc "$issue" " $1"
+  done
+}
+tree1_parked "before tree 1's nodes were released"
+# node_pods_judged reads a node's pods (`kubectl get pods -o json`) and prints what holds the wait
+# and what keeps the node: `holding`, the names of the run's pods on it that are tree 1's (its tree
+# label) or carry no tree label and are not the repository cache, and `others`, each other Legion
+# pod as `<project label>/<name> <phase>`: another project's, the run's repository cache
+# (legion.dev/cache=true), or another tree of the run's. A pod that has Succeeded or Failed holds
+# nothing and keeps nothing, and a pod with no project label is no Legion pod and is not counted.
+node_pods_judged() {
+  jq -c --arg run "$run_label" --arg tree "$tree1" '
+    [.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed" and .metadata.labels["legion.dev/project"] != null)
+      | {name: .metadata.name, phase: .status.phase, project: .metadata.labels["legion.dev/project"],
+         tree: .metadata.labels["legion.dev/tree"], cache: (.metadata.labels["legion.dev/cache"] == "true")}]
+    | {holding: [.[] | select(.project == $run and (.cache | not) and (.tree == null or .tree == $tree)) | .name],
+       others: [.[] | select(.project != $run or .cache or (.tree != null and .tree != $tree)) | "\(.project)/\(.name) \(.phase)"]}'
+}
+# node_released NODE: the node is gone, or carries no pod of tree 1 while another pod keeps it; a
+# node with no pod at all is not released until the pool takes it. Each read is held to its exit
+# status (see child1_released). node_release says which.
 node_release=
 node_released() {
-  local out pods others
+  local out pods judged holding others
   out=$(timeout 120 kubectl --context "$operator" get node "$1" -o name --ignore-not-found) || return 1
   if [ -z "$out" ]; then
     node_release="node $1 is gone"
     return 0
   fi
   pods=$(timeout 120 kubectl --context "$operator" -n "$namespace" get pods --field-selector "spec.nodeName=$1" -o json) || return 1
-  jq -e --arg run "$run_label" '[.items[] | select(.metadata.labels["legion.dev/project"] == $run and .status.phase != "Succeeded" and .status.phase != "Failed")] | length == 0' <<<"$pods" >/dev/null || return 1
-  others=$(jq -r --arg run "$run_label" '[.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | (.metadata.labels["legion.dev/project"] // empty) as $p | select($p != $run) | "\($p)/\(.metadata.name) \(.status.phase)"] | join(", ")' <<<"$pods")
+  judged=$(node_pods_judged <<<"$pods") || return 1
+  holding=$(jq -r '.holding | join(", ")' <<<"$judged")
+  [ -z "$holding" ] || return 1
+  others=$(jq -r '.others | join(", ")' <<<"$judged")
   [ -n "$others" ] || return 1
-  node_release="node $1 stays, carrying no pod of the run while another project's pod is on it ($others)"
+  node_release="node $1 stays, carrying no pod of tree 1 while other pods keep it ($others)"
 }
-# A timed-out wait says what the node held: a pod of the run that never left, another project's pod,
-# or nothing the pool ever deleted.
+# A timed-out wait says what the node held: a pod of tree 1 that never left, a pod that keeps the
+# node, or nothing the pool ever deleted; each pod with its project and tree labels, or `cache` for
+# the repository cache.
 report_node_release() {
   local out
   if ! out=$(timeout 120 kubectl --context "$operator" get node "$node" -o name --ignore-not-found 2>&1); then
@@ -6118,31 +6167,32 @@ report_node_release() {
     note "node $node no longer exists"
     return
   fi
-  note "node $node still exists; its pods (namespace/name, project label, phase):"
+  note "node $node still exists; its pods (namespace/name, project label, tree label or cache, phase):"
   timeout 120 kubectl --context "$operator" get pods -A --field-selector "spec.nodeName=$node" -o json |
-    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(.status.phase)"'
+    jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(if .metadata.labels["legion.dev/cache"] == "true" then "cache" else .metadata.labels["legion.dev/tree"] // "-" end) \(.status.phase)"'
 }
 releases=
 for node in $tree1_nodes; do
   timeout_hook=report_node_release
-  until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
+  until_true 1500 "tree 1's node $node to be released, or to carry no pod of tree 1 while another pod keeps it" node_released "$node"
   timeout_hook=limit_pending_blocked
   releases+="${releases:+; }$node_release"
 done
 at=$(date -u +%FT%TZ)
-[ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' after its nodes were released ($releases), want its one, Suspended"
-for issue in "$child2" "$child3"; do
-  [ "$(issue_sandbox_modes "$issue")" = Suspended ] || fail "tree 1's child $issue's Sandboxes are '$(issue_sandbox_modes "$issue" | paste -sd ' ' -)' after tree 1's nodes were released, want its one, Suspended"
-done
-for issue in "$tree1" "$child2" "$child3"; do
-  assert_one_bound_pvc "$issue" " after tree 1's nodes were released ($releases)"
-done
-note "at $at: $releases; the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) are Suspended, each PVC Bound ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
+if tree1_lingers; then
+  tree1_parked "after tree 1's nodes were released ($releases)"
+  parked_note="the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) are Suspended, each PVC Bound, as before the waits"
+else
+  parked_note="tree 1's linger expired at $tree1_until while its nodes were waited for, so its Sandboxes and volumes are now the close's (close) and the hand-over's (carried-child) to judge; before the waits the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) were Suspended, each PVC Bound"
+fi
+note "at $at: $releases; $parked_note ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
 pass
 
 begin close
-# At linger expiry (30 minutes from the merge that closed tree 1; the close waits while a member's
-# production check is open, which production-check-bound saw closed) the tree's cleanup
+# At linger expiry (30 minutes from the merge that closed tree 1, the daemon's `until` for its
+# linger, which node-release read; the expiry may already have passed while node-release waited,
+# and the reads below hold either way; the close waits while a member's production check is open,
+# which production-check-bound saw closed) the tree's cleanup
 # foreground-deletes every Sandbox of tree 1, each with the volume it owns: the root's, kept through
 # its production check, and child 2's, kept from child-release (child 1's went with its done).
 # Child 3's, left mid-run, is handed over instead: its hand-over is pending at the cleanup (production
