@@ -2,67 +2,47 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T23:05:00Z",
+  "completed": "2026-10-20T23:40:00Z",
   "proof": [
     {
-      "criterion": "The install lock's wait holds its relation to the registration deadline at every configuration an operator can set, not only at the defaults.",
-      "surface": "TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline in packages/daemon/internal/runtime/sandbox: four configurations — the daemon's own defaults read through config.LoadForValidation, a halved boot timeout, fewer intervals, and a deadline small enough that the floor bites — each asserting the wait positive, never more than its third of that deadline, and (where the deadline leaves room) two waits plus a second of install still inside it.",
-      "command": "go test -count=1 -run TestTheInstallLockWaitIsABoundInProportion ./internal/runtime/sandbox/",
-      "observed": "Green as it stands. Mutated to the raw third with no floor: `the wait at boot 800ms x 3 intervals is 0s, want a positive bound: a non-positive wait renders -w 0, which is -n, and restores the cold-entry race`. Mutated to a half instead of a third: `the wait at boot 2m0s x 3 intervals is 180s, more than its third of the 6m0s deadline`, with the halved-timeout and fewer-intervals cases failing beside it. Both restored, `ok … 0.021s`, and the file's checksum back to f491869a34cf9b7e.",
-      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
-      "negativeControl": "The test this replaces is the control: it asserted one constant against one deadline read from the defaults, so it would have passed the divisor mutation outright and could never see an operator's setting at all."
+      "criterion": "The property that holds the install lock's wait can see the derivation get too small, which it could not before: a wait of one second at the defaults must be red.",
+      "surface": "TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline, each case now carrying the wait computed by hand with its arithmetic beside it, plus a clause anchored to the feature rather than the derivation (queuedInstalls = 5 at installBudget = 1s, neither computed anywhere in installLockWait).",
+      "command": "installLockWait's body replaced by `return 1`, then `go test -count=1 -run TestTheInstallLockWaitIsABound ./internal/runtime/sandbox/`",
+      "observed": "Three of four cases red, each for two independent reasons: `the wait at boot 2m0s x 3 intervals is 1s, want 120s: the 6m0s deadline's third, floored at a second` and `… 1s, less than the 5s the queue this lock creates needs: the last of a pod's six roles waits for the 5 installs before it, so a wait this short fails the launch the lock was added to save`. Before this round the same mutation left the whole sandbox suite green in 1.2 s.",
+      "headSha": "f52a00d3b7bac9b07831aa94110b0612e9a25272",
+      "negativeControl": "The reviewer's run of the same mutation against the previous head is the control: `ok … 1.201s`, green, which is what established that every clause derived both sides from installLockWait and so could not fail."
     },
     {
-      "criterion": "The derived wait renders the same bound at the defaults, so the change makes the value unconditional rather than different.",
-      "surface": "The rendered install script, printed by a throwaway test that calls installScript with the golden options' BootTimeout and RegistrationIntervals.",
-      "command": "a throwaway test in internal/runtime/sandbox printing the rendered flock line, deleted after the run",
-      "observed": "`boot 2m0s x 3 intervals ->    /usr/bin/flock -w 120 -- \"$cache\" /usr/local/bin/bun add --backend=copyfile --exact '@sjawhar/pi-legion@9.7.0' '@sjawhar/pi-envoy@9.6.1'` — the same -w 120 the constant held. The throwaway was removed.",
-      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
-      "negativeControl": "TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript builds its expected `-w <n>` from installLockWait over the options it configured, so a derivation that rendered anything else for those options fails it."
+      "criterion": "The table fails for a wrong derivation rather than only for a different one, and fails for the right reason in each case.",
+      "surface": "The same property under two further mutations of installLockWait's divisor.",
+      "command": "divisor 4, then divisor 2, each `go test -count=1 -run TestTheInstallLockWaitIsABound ./internal/runtime/sandbox/`, restored between",
+      "observed": "Divisor 4: three cases red on the hand arithmetic alone (90s want 120s, 45s want 60s, 60s want 80s) with the queue clause silent — correct, since a quarter still covers five serialised installs, so it is not the stated derivation rather than unsafe. Divisor 2: red on all three clauses (180s want 120s; `more than its third of the 6m0s deadline`; `two waits of 180s and a second of install take 6m1s, past the 6m0s registration deadline`). Restored: `ok … 0.022s`, plugins.go back to checksum a0fc3865faeff5f7.",
+      "headSha": "f52a00d3b7bac9b07831aa94110b0612e9a25272",
+      "negativeControl": "The divisor-4 run is the control for the queue clause: it shows that clause stays silent for a change that is merely different, so its firing under `return 1` is a statement about the feature and not an echo of the arithmetic mismatch beside it."
     },
     {
-      "criterion": "What a plugin install actually costs, so the next person sizing a timeout, a deadline or a retry budget against it reads a measurement instead of guessing.",
-      "surface": "`bun add --backend=copyfile --exact @sjawhar/pi-legion@10.14.0 @sjawhar/pi-envoy@10.12.0` in an issue pod of this cluster, into a fresh generation directory, with BUN_INSTALL_CACHE_DIR empty and then warm.",
-      "command": "BUN_INSTALL_CACHE_DIR=<empty dir> /usr/local/bin/bun add --backend=copyfile --exact @sjawhar/pi-legion@10.14.0 @sjawhar/pi-envoy@10.12.0, timed, then repeated in a second directory against the cache it filled",
-      "observed": "cold exit=0 in 505 ms, leaving 3.4 MiB of cache and 3.3 MiB installed; warm exit=0 in 32 ms. So the remaining third of the deadline at the defaults, 120 s, covers the install it must cover by two orders of magnitude: the install side does not constrain this bound, the deadline side does. The order of magnitude is the claim — a pod on a cold node pulling from npm is slower.",
-      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
-      "negativeControl": "The warm run is the control for the cold one — same command, same pod, same pair, the cache the only difference — which is also what shows the cold fill, not the install out of it, is both the cost and the race."
-    },
-    {
-      "criterion": "A derived wait that rounds down would restore the race silently, so the floor is a fence rather than tidiness.",
-      "surface": "/usr/bin/flock against a directory a holder process holds, in this pod.",
-      "command": "setsid flock -- cache sh -c 'sleep 10' & then flock -w 0 -- cache /bin/true ; flock -n -- cache /bin/true ; flock -w 1 -- cache /bin/true ; flock -w 3 -- cache /bin/true",
-      "observed": "-w 0: exit=1 after 0.00 s. -n: exit=1 after 0.00 s — byte for byte the same behaviour. -w 1: exit=1 after 1.00 s. -w 3: exit=1 after 3.00 s. So a wait that rounds to zero is no wait at all, and the floor is what stands between a small boot timeout and the unserialised cold fill arriving by arithmetic with every test still green.",
-      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
-      "negativeControl": "The bounded waits are the control for the zero ones: the same binary against the same held lock waits exactly as long as it is told, so the zero case is the flag's meaning rather than a broken rig."
-    },
-    {
-      "criterion": "The lock rather than the retry is what removes the cold-fill failures — the question this implementer's own before/after could not answer.",
-      "surface": "The tester's control, recorded in .legion/INFRA-31/test.json and cited by name rather than re-derived: the rendered script with flock removed and the retry kept, run six-way cold in the tester's container.",
-      "command": "the tester's six-way cold run with the flock prefix stripped and `legion_install || legion_install` left in place",
-      "observed": "2 of 6 failed both attempts on its first cold run, and its second passed only with `ENOENT: failed copying files from cache to destination` in two roles' logs, succeeding on the retry. With the lock in place the tester's post-fix cold runs were 6 of 6 exit 0 with ENOENT absent from every log.",
-      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
-      "negativeControl": "The tester's pre-fix cold runs (4 of 6 and 2 of 6 failing, no failing role reaching its exec) are the control for the post-fix runs; the flock-removed, retry-kept run is the control that separates the lock from the retry."
+      "criterion": "The three copies of the bound's argument agree, including on the floor's exception, which two of them denied.",
+      "surface": "installLockWait's comment, docs/kubernetes.md's Sharing BUN_INSTALL_CACHE_DIR paragraph, and the test's doc comment — the one that already had it right.",
+      "command": "read at the head: the three sentences compared",
+      "observed": "All three now say the remainder holds at every configuration but the smallest, where the floor takes over — under a three-second deadline two floored waits of a second consume it, deliberately, since being serialised and then retired is no worse than racing. The documentation's five-installs sentence is scoped with it (`Above that floor …`), which was the second half of the finding: `boot 1s x 1` loads, so the exception is reachable rather than hypothetical. The comment also now says why the grace term is zero rather than dropped — the supervisor's grace is ProvisionBound while the claim is launching, and this script rides in the argv sent after the hello.",
+      "headSha": "f52a00d3b7bac9b07831aa94110b0612e9a25272",
+      "negativeControl": "The test's doc comment is the control: it stated the exception and its justification before this round, which is how the disagreement between the three copies was visible at all."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/plugins.go — installLockWaitSeconds (a constant correct only at the defaults) replaced by installLockWait(boot, intervals): a third of runtime.RegistrationDeadline(boot, intervals, 0), taken through that function rather than by re-multiplying, floored at one second; installScript and installArgv take the wait.",
-    "packages/daemon/internal/runtime/sandbox/types.go, sandbox.go — Options.RegistrationIntervals beside BootTimeout, refused when not positive, carried onto the runtime.",
-    "packages/daemon/internal/daemon/kubernetes.go — the field set from cfg.WorkerBootRegistrationDeadlineIntervals, beside BootTimeout.",
-    "packages/daemon/internal/runtime/sandbox/launcher.go — the one call site passes installLockWait(r.bootTimeout, r.registrationIntervals).",
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — the single-constant assertion replaced by the property over four configurations; the rendered-text pin builds its `-w <n>` from the same derivation over the options the spec configured.",
-    "rig_test.go, live_test.go and four internal/daemon tests — the new Options field, since configure now refuses it unset.",
-    "docs/kubernetes.md — the bound's sentence finishes its conditional: a third of the two settings' product, why a proportion rather than a number, and the one-second floor with its reason."
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — each case of the property carries a hand-computed want with its arithmetic in the case's comment; queuedInstalls and installBudget name the lower bound the lock's own queue needs; the inherited and false 'a change to either default is what fails' is gone, and is now true of the table it describes.",
+    "packages/daemon/internal/runtime/sandbox/plugins.go — the comment regains the lower bound the deleted constant carried (the last of six roles behind five serialised installs, 24 seconds each at the defaults), states the floor's exception to the remainder claim, and explains the zero grace term.",
+    "docs/kubernetes.md — the same exception in the same words, with the five-installs sentence scoped above the floor."
   ],
   "trickyParts": [
-    "Reachability was one field short rather than zero: BootTimeout was already on sandbox.Options from cfg.WorkerBootTimeout, but the intervals reached only supervise.Timeouts, so the derivation needed RegistrationIntervals plumbed to the runtime that renders the script.",
-    "Deriving through runtime.RegistrationDeadline rather than re-multiplying means the wait follows the deadline if that ever stops being a plain product — the same discipline as naming a setting rather than a number, applied to a computation.",
-    "The floor dominates below a deadline of about three seconds, where two waits cannot fit. That is deliberate and stated in the test rather than excluded from it: being serialised and then retired by the deadline is no worse than racing, since an unserialised cold fill fails the launch anyway.",
-    "The wait is a parameter of the render because an operator's configuration determines it, which is what production shape is for — deliberately unlike a test's convenience, which this branch refused as a reason to widen a signature when the serialisation test instead substitutes its stub into the rendered text."
+    "A table of hand-computed literals has its own rot: the day the derivation legitimately changes, four literals go red together and the cheap move is to paste in what the code now returns. The arithmetic written beside each literal is what makes that paste visible, since a pasted number disagrees with its own stated sum.",
+    "The two kinds of clause fail for different reasons on purpose. The literals catch a derivation that is not the stated one; the queue clause catches a derivation that is unsafe. Divisor 4 fires only the first, `return 1` fires both, and that difference is the evidence the second clause is anchored outside the code under test."
   ],
-  "deviations": [],
+  "deviations": [
+    "f52a00d3b7ba replaces 31e2e73673ea, pushed a minute earlier in this same round: the second finding's documentation scoping went into that commit rather than beside it. Nothing was built on the first and no other role had fetched it; the push was a sideways move of my own commit alone, recorded here and on the thread rather than left to be noticed."
+  ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "A text assertion built from the value it pins cannot see that value change: the substring assertion over the rendered script constructed its expected `-w <n>` from the same constant it was pinning, so a mutation to zero left it green while the behavioural test and the bound's own test failed. Adding more such assertions would not have closed it."
+    "The defect fixed here is the second instance of one shape in two rounds: a substring assertion built with Sprintf from installLockWaitSeconds could not see that constant change, and a property built from installLockWait could not see that function change. Knowing the first did not prevent the second, because the second looked like a property over four configurations rather than like a pin. The discriminator is not how many cases a check ranges over but where its expectation comes from: an expectation computed from the subject is a restatement, not a check."
   ]
 }
