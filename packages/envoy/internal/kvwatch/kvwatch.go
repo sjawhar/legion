@@ -50,6 +50,20 @@ type Watcher struct {
 	// stream is when the bucket's stream the current watcher reads was created. A different time
 	// on the next watch means the bucket was deleted and created again.
 	stream time.Time
+
+	// watching counts the watches in flight, so End can wait for one that may still arm a watcher.
+	// A watch joins it under mu, and only while the watcher is not stopped, so once Stop has run it
+	// only falls. idle, set by End while it waits, is closed when it falls to 0.
+	watching int
+	idle     chan struct{}
+	// retired are the watchers Stop took out of service and those a watch armed after it, which
+	// End ends. ended is set once End has taken them, and endCause, with it, to why End stopped
+	// waiting for a watch still starting, when it did.
+	retired  []nats.KeyWatcher
+	ended    bool
+	endCause error
+	// endOnce runs End's work once: a later End waits for it to finish.
+	endOnce sync.Once
 }
 
 // Option configures a Watcher.
@@ -205,16 +219,148 @@ func (w *Watcher) WaitReady(ctx context.Context) error {
 	}
 }
 
-// Stop retires the watcher for a shutdown, before the NATS drain ends it. Its end then belongs to
-// no live generation, so it records nothing and logs nothing, and every later Rewatch is a no-op:
-// a reconnect hook or a self-health rebuild still running at shutdown arms no new watcher and
-// reports no error. It makes no request of the server; the drain ends the watcher's subscription.
+// Stop retires the watcher for a shutdown, before the NATS drain. Its end then belongs to no live
+// generation, so it records nothing and logs nothing, and every later Rewatch is a no-op: a
+// reconnect hook or a self-health rebuild still running at shutdown arms no new watcher and
+// reports no error. It makes no request of the server, so it returns at once against one that does
+// not answer: the watcher it retires, and any a watch in flight arms after it, are kept for End.
 func (w *Watcher) Stop() {
 	w.mu.Lock()
 	w.stopped = true
+	if w.watcher != nil {
+		w.retired = append(w.retired, w.watcher)
+	}
 	w.watcher = nil
 	w.generation++
 	w.mu.Unlock()
+}
+
+// End stops the watcher (Stop) and ends every watcher it retired, while the connection still
+// carries requests: the listener runs it from the bus's drain hook (bus.Client.AddDrainHook),
+// before the connection's own drain. It waits, within ctx, for a watch still in flight to arm its
+// watcher, then stops each one, which unsubscribes it and deletes the ordered consumer nats.go
+// created for it, and waits for those deletes within ctx. Left to the connection's drain, that
+// delete races the drain and is refused as "connection draining" (bus.Client.AddDrainHook says
+// how). A consumer already gone (a NATS restart loses an ordered consumer outright, and a
+// disconnect past its inactive threshold lets the server delete it) is what the delete was for,
+// so it is logged at WARN, and so is a delete the connection was lost before (lostConnection):
+// the server deletes a consumer whose interest is gone on its own. Any other failure, and a
+// delete still unanswered when ctx's deadline passes, is an ERROR. A watch that arms its watcher
+// after End has taken them stops that watcher itself (watch). End does its work once: a later
+// End, or one beside it, waits for the first to finish, within the first's ctx, and ends nothing
+// more.
+func (w *Watcher) End(ctx context.Context) {
+	w.endOnce.Do(func() { w.end(ctx) })
+}
+
+// end is End's work, run once.
+func (w *Watcher) end(ctx context.Context) {
+	w.Stop()
+	w.mu.Lock()
+	var idle chan struct{}
+	if w.watching > 0 {
+		idle = make(chan struct{})
+		w.idle = idle
+	}
+	w.mu.Unlock()
+	var gaveUp error
+	if idle != nil {
+		// A watch that has finished is read before ctx, which can already be done: a hook's
+		// context ends the moment the connection is lost.
+		select {
+		case <-idle:
+		default:
+			select {
+			case <-idle:
+			case <-ctx.Done():
+				gaveUp = context.Cause(ctx)
+				w.logUnfinished(w.name+" watcher end found a watch still starting", gaveUp)
+			}
+		}
+	}
+	w.mu.Lock()
+	retired := w.retired
+	w.retired = nil
+	w.ended = true
+	w.endCause = gaveUp
+	w.mu.Unlock()
+	results := make(chan error, len(retired))
+	for _, watcher := range retired {
+		go func() { results <- watcher.Stop() }()
+	}
+	for range retired {
+		select {
+		case err := <-results:
+			w.logEnd(err)
+			continue
+		default:
+		}
+		select {
+		case err := <-results:
+			w.logEnd(err)
+		case <-ctx.Done():
+			w.logEnd(fmt.Errorf("delete its consumer: %w", context.Cause(ctx)))
+		}
+	}
+}
+
+// lostConnection reports whether err says the connection was lost before a request reached the
+// server or its answer came back: the drain hook's own cause (bus.ErrConnectionLost), and what
+// nats.go answers a request with when its connection is closed, reconnecting, or, with the
+// reconnect buffer off, refusing a publish until it reconnects.
+func lostConnection(err error) bool {
+	return errors.Is(err, bus.ErrConnectionLost) || errors.Is(err, nats.ErrConnectionClosed) ||
+		errors.Is(err, nats.ErrConnectionReconnecting) || errors.Is(err, nats.ErrReconnectBufExceeded)
+}
+
+// lateStop is how stopping a watcher that a watch armed after End had taken the retired ones
+// ended. When End stopped waiting for that watch because the connection was lost, the stop runs
+// on a connection the drain has gone on without (nats.go refuses it as "connection draining"
+// once the connection's drain begins, nats.go's Unsubscribe), so a failure other than the consumer
+// being gone is that loss, and the consumer is left to the server as End's own are.
+func lateStop(err, endCause error) error {
+	if err == nil || !lostConnection(endCause) || errors.Is(err, nats.ErrConsumerNotFound) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", endCause, err)
+}
+
+// logEnd logs how stopping one retired watcher ended (End).
+func (w *Watcher) logEnd(err error) {
+	switch {
+	case err == nil, errors.Is(err, nats.ErrBadSubscription):
+		// Stopped, or its subscription had already ended.
+	case errors.Is(err, nats.ErrConsumerNotFound):
+		w.logger().Warn(w.name+" watcher's consumer was already gone at its end",
+			slog.String("bucket", w.bucket), slog.String("error", err.Error()))
+	case lostConnection(err):
+		w.logger().Warn(w.name+" watcher's consumer was left to the server: the connection was lost before its delete",
+			slog.String("bucket", w.bucket), slog.String("error", err.Error()))
+	default:
+		w.logger().Error(w.name+" watcher end failed",
+			slog.String("bucket", w.bucket), slog.String("error", err.Error()))
+	}
+}
+
+// logUnfinished logs what End could not wait for: at WARN when the connection was lost, since the
+// server then ends what it would have, and at ERROR when End's deadline passed.
+func (w *Watcher) logUnfinished(message string, cause error) {
+	level := slog.LevelError
+	if lostConnection(cause) {
+		level = slog.LevelWarn
+	}
+	w.logger().Log(context.Background(), level, message, slog.String("bucket", w.bucket), slog.String("error", cause.Error()))
+}
+
+// watchDone counts a watch out (watching), and wakes End once none is left.
+func (w *Watcher) watchDone() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.watching--
+	if w.watching == 0 && w.idle != nil {
+		close(w.idle)
+		w.idle = nil
+	}
 }
 
 // watch arms a watcher on kv and replaces the current one, moving the handle to kv. The replaced
@@ -226,17 +372,20 @@ func (w *Watcher) Stop() {
 // reads its stream before it arms its watcher and takes the locks, so it can arrive after a
 // newer watch has switched to a recreated bucket: a watch whose stream is older than a running,
 // healthy watcher's is discarded, and that watcher stays. After Stop it arms nothing and only
-// moves the handle.
+// moves the handle; a watcher it armed while Stop ran is kept for End.
 func (w *Watcher) watch(kv bus.KeyValue) error {
 	w.mu.Lock()
 	stopped := w.stopped
 	if stopped {
 		w.kv = kv
+	} else {
+		w.watching++
 	}
 	w.mu.Unlock()
 	if stopped {
 		return nil
 	}
+	defer w.watchDone()
 	// The warm-up's cost as the caller waiting on readiness sees it: the stream read and the
 	// watcher's create request are part of it, not just the entries that follow.
 	started := time.Now()
@@ -252,13 +401,22 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 	w.applyMu.Lock()
 	w.mu.Lock()
 	if w.stopped {
-		// Stop ran while WatchAll was starting. Stopping this watcher would be a server request
-		// outside the drain's deadline, so the drain ends its subscription; until then it is read
-		// and dropped, since a drain waits for every pending message to be delivered.
+		// Stop ran while WatchAll was starting. Stopping this watcher here would be a server
+		// request outside the drain's deadline, so it is kept for End, which runs within it; until
+		// then it is read and dropped, since a drain waits for every pending message to be
+		// delivered. Once End has taken the retired watchers, which it does only after this watch
+		// returns or its deadline passes, nothing else would end this one, so the watch ends it.
 		w.kv = kv
+		ended, endCause := w.ended, w.endCause
+		if !ended {
+			w.retired = append(w.retired, watcher)
+		}
 		w.mu.Unlock()
 		w.applyMu.Unlock()
 		discard(watcher)
+		if ended {
+			w.logEnd(lateStop(watcher.Stop(), endCause))
+		}
 		return nil
 	}
 	if w.err == nil && stream.Before(w.stream) {
