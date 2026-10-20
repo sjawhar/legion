@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-44",
+  "completed": "2026-10-20T12:35:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 5,
+  "minor": 8,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/activity/ActivityTab.tsx:122",
+      "description": "Event pinning moved to the new Activity tab and lost its failure feedback: a refused state write answers with a bare invalidateQueries([\"user-state\"]), so the optimistic pin silently reverts and the reader is told nothing. The same failure in the Conversation raises the `Couldn't save pin - retry` banner with Retry and Close (ConversationTab.tsx:1051-1066, 1145-1164), and these rows carried that behaviour before this change. Criterion 4 keeps pinning a turn working; a silently swallowed error is not it."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/activity/ActivityTab.tsx:137",
+      "description": "The Activity list is a plain <section> with no ViewportAnchor, while the same event rows sat inside the Conversation's ViewportAnchor before this change (pre-change ConversationTab at 0cee06ca: rows carried data-turn at :1477 inside the wrapper at :1239-1607). prependEventToLog writes each live event to the front of page 0 of [\"events\", issueKey] (api/sse.ts:366-383), the list this tab renders newest-first, so every arriving event pushes a reader scrolled down the page by one row. Each row already carries data-event-seq, so the anchor is one wrapper away."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:860",
+      "description": "`Jump to latest · N new` counts the unfiltered list (`conversations.filter(c => c.unread).length`) while the pill is gated on and acts over `shown` (:1219, :1227; useFollowLatest's jumpToLatest scrolls to the first [data-turn] in the document). Under Open or Closed the pill names unread conversations the active bucket hides and then jumps to a card carrying no `New` mark. Criterion 4 makes this pill the per-conversation unread mechanism, so the count must be the one it acts on."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/inbox_queries.go:111",
+      "description": "The shared loadInboxAskThreads now runs loadAskAnswersByAsk for the Inbox too, whose own query is `where a.state = 'open'` (inbox.go:90) - an ask.answered row cannot exist for any of those ids, and the contract says so (packages/contracts/src/dispatch-api.ts:768, \"empty on an Inbox row, which is an open ask\"). Every Inbox load - the shared [\"inbox\"] read behind the sidebar, the needs-you count, AgentsPage, useMarginItems and useAskAnswerForm - now pays an extra events scan with a provably empty result."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/asks.go:683",
+      "description": "listIssueAsks loads every ask's whole thread unconditionally (replies, edits, answers, followers), and three surfaces share that response under [\"asks\", key]: the Conversation (ConversationTab.tsx:823), the review margin on every issue and document page (features/margin/useAnsweredAsks.ts:25) and the Spec tab's decision blocks (features/doc/ProofDocument.tsx). Only the Conversation renders a thread, so opening a Spec tab or any page that mounts the margin now downloads every ask's reply bodies and follower list it will not draw, on an unpaged list."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:968",
+      "description": "The focus-scroll effect latches scrolledToFocus on whichever anchor it finds first, and the effect that opens the named comment's thread is declared after it (:982-992), so on the commit where focus first becomes defined the reply row is not mounted and the card anchor wins. A /issues/<KEY>/comments/<replyId> link into a comment thread therefore marks the reply but centres the card; ask links are unaffected, since AskThreadDisclosure renders replies without the fold."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/delivery.ts:101",
+      "description": "receiptAnsweredWithError and features/refs/markdown-fragment.ts's replyPreviewMarkdown lost their last production caller in this diff and survive with only their tests; packages/dispatch/AGENTS.md:247 still describes replyPreviewMarkdown as a live surface."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/issue/IssuePage.tsx:120",
+      "description": "The keyboard doc comment still explains its rule with `Show activity`, a control this diff deletes."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/site/src/content/docs/dispatch/issues-and-projects.md:164",
+      "description": "The published docs call Activity \"everything else that happened to the issue\", while buildActivityItems filters nothing (features/activity/activity-model.ts:199-221) and criterion 1 asks for the whole event history, comment and ask events included."
+    },
+    {
+      "severity": "minor",
+      "file": "pull request body, `E2E (implementer)` and the `Change` bullet on the margin",
+      "description": "Two claims in the body are not accurate at this head: `The review margin is unchanged` (PinnedTab.tsx:32-49, useMarginItems.ts:306-345 and ThreadCard.tsx:431-433 all change), and the E2E line's assertion that the Playwright and Go suites cannot run in a Legion worker pod, which the tester disproved by running them there (.legion/INFRA-44/test.json notes)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:885-903",
+      "description": "`shown` concatenates the conversations held in hand after the filtered list, so one kept visible under Open or Closed loses its newest-reply-first position; under `all` the array is copied twice."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/dispatch-api.ts:2172",
+      "description": "AskRead restates AskThread's four fields and their doc comments instead of extending it, and IssueAskRow carries the newest reply twice (last_reply and thread.replies' last element), which conversation-model.ts:104-107 folds over twice."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/margin/useMarginItems.ts:337",
+      "description": "The conversation pin id is spelled inline as `${kind}:${id}` rather than through conversationItemId (features/issue/pins.ts:40), the helper whose doc comment claims to be its one spelling; the file already imports from ../issue/pins."
+    }
+  ]
+}
