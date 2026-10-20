@@ -1117,9 +1117,8 @@ func (m *Machine) letGo() {
 	m.forgetSend()
 	m.held = nil
 	m.interruptOver()
-	if e := m.claim.Enrollment; e != nil {
-		m.revoke(*e)
-		m.claim.Enrollment = nil
+	if enrollment := ClearEnrollment(&m.claim); enrollment != nil {
+		m.revoke(*enrollment)
 	}
 	m.identity, m.enrollmentSent = nil, false
 	if m.claim.Locator != nil {
@@ -1231,41 +1230,56 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
-// persist writes the claim alone. A capability belongs to a registered agent whose process runs,
-// so a claim in any other state — relaunching after a death, suspended, failed, or retired — gives
-// its capability up here, on the machine's own claim, which is what the capability check reads
-// (api/claims.go): the old secret authenticates nothing and every grant it minted fails its fence,
-// as the shipped daemon revokes a session's capability and its grants on death, retirement, and
-// teardown. Who suspended the claim is kept only while it is suspended: a claim that runs again, or
-// ends, was suspended by nobody. A confirmation and a retire write the claim together with the
-// delivery they change, each in one transaction, and every write hands the store the same shape
-// (stored).
+// persist writes the claim alone. Every write first normalizes state that is valid only while the
+// claim records a running process: a capability belongs to a registered agent, a suspension source
+// belongs to a suspended claim, and an enrollment belongs to the process it names. A confirmation
+// and a retire write the claim together with the delivery they change, each in one transaction.
 func (m *Machine) persist(ctx context.Context) error {
-	if !HoldsCapability(m.claim.State) {
-		m.claim.CapabilityHash = nil
-	}
-	if m.claim.State != StateSuspended {
-		m.claim.SuspendedBy = ""
-	}
+	c := m.stored()
 	// Published here as well as when the decision ends: a launch writes the claim before it waits
 	// in the runtime, and View then shows the launch rather than what it replaced.
 	m.publish()
-	return m.deps.Store.PutClaim(ctx, m.stored())
+	return m.deps.Store.PutClaim(ctx, c)
 }
 
-// stored is the claim as a write hands it to the store: without its pending delivery, which has a
-// table of its own, without a capability once the claim no longer holds one, and without a
-// suspend's source once it is not suspended. It is a copy and changes nothing; revoking the live
-// capability is persist's.
-func (m *Machine) stored() Claim {
-	c := m.claim
-	c.Pending = nil
+// NormalizeClaim clears state a claim can hold only while it records a compatible running process.
+// It returns an enrollment that lost that process so callers can revoke it at the broker.
+func NormalizeClaim(c *Claim) *Enrollment {
 	if !HoldsCapability(c.State) {
 		c.CapabilityHash = nil
 	}
 	if c.State != StateSuspended {
 		c.SuspendedBy = ""
 	}
+	if c.Locator == nil {
+		return ClearEnrollment(c)
+	}
+	return nil
+}
+
+// ClearEnrollment removes c's enrollment and returns the broker record that must be revoked.
+func ClearEnrollment(c *Claim) *Enrollment {
+	if c.Enrollment == nil {
+		return nil
+	}
+	enrollment := *c.Enrollment
+	c.Enrollment = nil
+	return &enrollment
+}
+
+// stored normalizes the machine's live claim, revoking any enrollment it detached, then returns the
+// form a claim write hands the store. A pending delivery has a table of its own.
+func (m *Machine) stored() Claim {
+	if enrollment := NormalizeClaim(&m.claim); enrollment != nil {
+		m.revoke(*enrollment)
+	}
+	return StoredClaim(m.claim)
+}
+
+// StoredClaim is c in the form a claim write hands the store: a pending delivery has a table of
+// its own. Call NormalizeClaim before this when c will also construct a machine.
+func StoredClaim(c Claim) Claim {
+	c.Pending = nil
 	return c
 }
 

@@ -135,22 +135,33 @@ func (s *supervisor) Claims(ctx context.Context) ([]supervise.Claim, error) {
 // if one opened at all, never recorded, or in any later live state a daemon wrote with no process
 // recorded — or a launch it released at boot and stopped before the relaunch wrote its next
 // generation (supervise.Claim.ReleasedLaunch). Each is put back to launch_uncertain, which is what
-// it is: the daemon cannot yet say whether a process runs for it. Every claim it puts back is
-// logged with the state it was stored in, and written back into claims, so the boot's later passes
-// over them (refreshStalePlugins, replayTerminal) read it as restored rather than as a live claim
-// with no process.
+// it is: the daemon cannot yet say whether a process runs for it. Every boot claim is normalized
+// before the store and NewMachine see it, so state a claim holds only with a recorded process
+// cannot survive a repair. Each repair is logged with the state it was stored in, and written back
+// into claims, so the boot's later passes over them (refreshStalePlugins, replayTerminal) read it
+// as restored rather than as a live claim with no process.
 func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]claim.Token, error) {
 	var unfinished []claim.Token
 	live := supervise.LiveStates()
 	for i, c := range claims {
-		if (c.Locator == nil && slices.Contains(live, c.State)) || c.ReleasedLaunch() {
+		repaired := (c.Locator == nil && slices.Contains(live, c.State)) || c.ReleasedLaunch()
+		if repaired {
 			s.log.Warn("supervise: restoring a launch the previous daemon did not finish as launch_uncertain; no process is recorded for it",
 				"claim", c.Token, "stored", c.State, "generation", c.Generation)
 			c.State = supervise.StateLaunchUncertain
-			if err := s.deps.Store.PutClaim(ctx, c); err != nil {
+		}
+		before := c
+		enrollment := supervise.NormalizeClaim(&c)
+		normalized := repaired || len(c.CapabilityHash) != len(before.CapabilityHash) ||
+			c.SuspendedBy != before.SuspendedBy || c.Enrollment != before.Enrollment
+		if normalized {
+			if err := s.deps.Store.PutClaim(ctx, supervise.StoredClaim(c)); err != nil {
 				return nil, err
 			}
 			claims[i] = c
+		}
+		if enrollment != nil {
+			go supervise.RevokeEnrollment(s.ctx, s.deps, s.log.With("claim", string(c.Token)), *enrollment)
 		}
 		if c.State == supervise.StateLaunchUncertain {
 			unfinished = append(unfinished, c.Token)
