@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import type { LegionRole } from "@legion/contracts";
 import type { LegionPhase } from "@legion/contracts/legion-api";
+import { findHandoffCommit, type JjRunner } from "@legion/pi-shared/handoff-commit";
 import type { PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { z } from "zod";
-import { findHandoffCommit, type JjRunner } from "./handoff-commit";
 import { createLegionTool, type LegionToolSession } from "./tools";
 
 function context(sessionId = "ses_208"): SessionContext {
@@ -55,7 +55,7 @@ function claimSession(role: LegionRole, issue = "LEGION-208"): LegionToolSession
   return {
     kind: role === "architect" ? "architect" : "phase-worker",
     role,
-    sessionId: "ses_208",
+    sessionID: "ses_208",
     tree: "LEGION-208",
     issue,
     secret: "claim-secret",
@@ -104,6 +104,148 @@ function recordingDaemon(options: {
   };
   return { calls, daemon: () => daemon as never };
 }
+
+/** The `legion` tool description Oh My Pi agents read, written out whole: the shared template
+ * (`legionToolDescription` in `@legion/pi-shared/legion-phase-ops`) must reproduce it exactly. */
+const OMP_LEGION_TOOL_DESCRIPTION =
+  "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
+  "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " +
+  "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail from the tester alone " +
+  "(the daemon refuses a verdict from any other role), `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " +
+  "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " +
+  "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " +
+  "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
+  "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " +
+  "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
+  "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
+  "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.";
+
+/** Every session kind the tool answers for: a root architect, a sub-architect, each phase worker,
+ * and the controller. */
+const EVERY_SESSION: readonly LegionToolSession[] = [
+  claimSession("architect"),
+  claimSession("architect", "LEGION-209"),
+  ...(["planner", "implementer", "tester", "reviewer", "merger"] as const).map((role) =>
+    claimSession(role)
+  ),
+  { kind: "controller", sessionID: "ses_controller" },
+];
+
+const toolFor = (active: LegionToolSession) =>
+  createLegionTool({
+    pi,
+    daemon: recordingDaemon({}).daemon,
+    controllerGrant: noControllerGrant,
+    onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
+    resolveDocument: noDocumentLookup,
+    session: () => active,
+  });
+
+test("the legion tool's description is the exact text Oh My Pi agents read, for every session", () => {
+  for (const active of EVERY_SESSION) {
+    expect(toolFor(active).description).toBe(OMP_LEGION_TOOL_DESCRIPTION);
+  }
+});
+
+/** The `legion` tool's parameter schema as Oh My Pi agents are given it, serialized whole: every
+ * property and every `op` value in the order the tool declares them. */
+const OMP_LEGION_TOOL_SCHEMA = JSON.stringify({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  properties: {
+    op: {
+      type: "string",
+      enum: [
+        "register_gate",
+        "release_children",
+        "request_backward_move",
+        "retry_or_escalate",
+        "sign_off",
+        "close_root",
+        "park_child",
+        "rerun_child",
+        "read_record",
+        "handoff_complete",
+        "read_state",
+        "set_status",
+      ],
+    },
+    issue: { type: "string" },
+    artifactId: {
+      type: "string",
+      description:
+        "register_gate's root spec document: its artifact id, slug, or filename, as a dispatch command's --artifact takes it",
+    },
+    version: { type: "number" },
+    issues: { type: "array", items: { type: "string" } },
+    to: {
+      type: "string",
+      enum: [
+        "admitted",
+        "planning",
+        "implementing",
+        "testing",
+        "reviewing",
+        "retro",
+        "merging",
+        "awaiting_merge",
+        "production_check",
+        "done",
+        "held",
+      ],
+    },
+    reason: { type: "string" },
+    decision: { type: "string", enum: ["retry", "escalate"] },
+    summary: { type: "string" },
+    verdict: { type: "string", enum: ["pass", "fail"] },
+    ready: { type: "boolean" },
+    status: { type: "string", enum: ["todo", "backlog", "icebox"] },
+  },
+  required: ["op"],
+  additionalProperties: false,
+});
+
+test("the legion tool's parameter schema serializes to the exact schema Oh My Pi agents are given, for every session", () => {
+  for (const active of EVERY_SESSION) {
+    expect(JSON.stringify(z.toJSONSchema(toolFor(active).parameters as z.ZodType))).toBe(
+      OMP_LEGION_TOOL_SCHEMA
+    );
+  }
+});
+
+test("a root architect's handoff_complete is refused as unavailable before its arguments are read", async () => {
+  const root = toolFor(claimSession("architect"));
+  for (const parameters of [
+    {},
+    { summary: "" },
+    { summary: "x", verdict: "maybe", ready: "yes" },
+  ]) {
+    await expect(
+      root.execute("", { op: "handoff_complete", ...parameters }, undefined, undefined, context())
+    ).resolves.toEqual({
+      content: [
+        {
+          type: "text",
+          text: "handoff_complete is not available to a root architect session, which runs no phase",
+        },
+      ],
+      details: {},
+      isError: true,
+    });
+  }
+  // A field handoff_complete never takes is named first, as the operation's field check names it.
+  await expect(
+    root.execute("", { op: "handoff_complete", phase: "plan" }, undefined, undefined, context())
+  ).resolves.toMatchObject({
+    content: [
+      {
+        type: "text",
+        text: 'handoff_complete does not accept field "phase"; handoff_complete is not available to a root architect session, which runs no phase',
+      },
+    ],
+  });
+});
 
 test("the legion tool exposes only the workflow operations each role owns", async () => {
   const state = {
@@ -564,7 +706,7 @@ test("the controller reads the whole state without a grant and sets an issue's s
     },
     handoffCommit: noHandoffCommit,
     resolveDocument: noDocumentLookup,
-    session: () => ({ kind: "controller", sessionId: "ses_controller" }),
+    session: () => ({ kind: "controller", sessionID: "ses_controller" }),
   });
   const run = (parameters: Record<string, unknown>) =>
     tool.execute("", parameters, undefined, undefined, context("ses_controller"));

@@ -16,10 +16,11 @@ import type {
   ChannelForwarderConnection,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
-import type {
-  ChannelNotification,
-  ChannelNotifier,
-  ChannelSessionOptions,
+import {
+  CHANNEL_CAPABILITIES,
+  type ChannelNotification,
+  type ChannelNotifier,
+  type ChannelSessionOptions,
 } from "../src/envoy-channel-server"
 import type { SessionIdentity } from "../src/session-identity"
 
@@ -207,6 +208,7 @@ export function sessionOptions(
     identity,
     connection: new FakeNats(),
     notifier: new FakeNotifier(),
+    capabilities: CHANNEL_CAPABILITIES,
     client: recordingClient([]),
     heartbeatMs: 60_000,
     configFile: sessionConfigFile("claude", process.env),

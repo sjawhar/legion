@@ -13,11 +13,16 @@ There is no Monitor and no native Claude messaging socket path. The server's too
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
 
-The session advertises only the `aside` capability - never `btw`, never `steer`. `btw` remains
-intentionally unsupported until there is a server-owned pending-delivery/reply-ack design; `steer`
-cannot be honoured because Claude Code queues channel notifications for the model's next turn. Permission relay is also intentionally
-absent: without a sender-authenticated reply path and reply-ack design, declaring it would allow
-an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch.
+A session advertises the delivery modes its deliveries' path can honour, never `btw`. One whose
+deliveries are channel notifications advertises `aside` alone (`CHANNEL_CAPABILITIES`): Claude Code
+queues a notification for the model's next turn, so a `steer` cannot be honoured. A Legion pane
+whose deliveries go to `legion claude-bridge`'s inbox advertises `aside` and `steer`
+(`INBOX_CAPABILITIES` in `src/legion-inbox.ts`): the bridge starts a turn with a delivery when
+Claude Code is idle and sends it as the next user message of the running turn otherwise. `btw`
+remains intentionally unsupported until there is a server-owned pending-delivery/reply-ack design.
+Permission relay is also intentionally absent: without a sender-authenticated reply path and
+reply-ack design, declaring it would allow an Envoy input to decide Claude Code permissions.
+Dispatch asks stay on Dispatch.
 
 ## Where to look
 
@@ -37,6 +42,8 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
 | Manual channel smoke | `scripts/smoke-channel.sh` | Real smoke, unattended (answers every startup dialog, captures the pane); documented and deliberately excluded from CI. |
 | Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: this package); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
+| Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
+| Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand: `scripts/build.ts` stages pi-legion's skills and converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped). `scripts/build.ts --check` and `tests/legion-plugin-fresh.test.ts` fail on drift. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
 
 ## Critical conventions
 
@@ -73,8 +80,11 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 - Pass a `ChannelInboundMessage` built field by field; a nats.js `Msg` exposes `subject`, `data`, and
   `reply` through prototype getters that an object spread silently drops. The forwarder decodes
   `data` once into `raw`; downstream code reads `raw`, never re-decodes.
-- Register `capabilities: ["aside"]`, never `btw` and never `steer`: Claude Code channel
-  notifications queue for the next turn, so a steer at the next tool boundary cannot be honoured.
+- Register the capabilities the delivery path honours, never `btw`: `CHANNEL_CAPABILITIES`
+  (`["aside"]`) for channel notifications, which queue for the next turn, so a steer at the next
+  tool boundary cannot be honoured; `INBOX_CAPABILITIES` (`["aside", "steer"]`) when
+  `LEGION_CLAUDE_INBOX` routes deliveries to the bridge. Dispatch refuses a targeted delivery in a
+  mode the session does not advertise, and defaults to `steer`.
   The direct NATS receipt occurs immediately after notification enqueue; it cannot imply model
   processing because Claude Code does not acknowledge channel notifications.
 - Preserve the held role at `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json` (keyed by session id so

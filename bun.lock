@@ -41,6 +41,7 @@
       "dependencies": {
         "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
+        "@legion/pi-shared": "workspace:*",
         "@modelcontextprotocol/sdk": "^1.30.0",
         "ky": "^2.0.2",
         "nats": "^2.29.2",
@@ -200,11 +201,13 @@
       "version": "0.1.0",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
+        "@legion/contracts": "workspace:*",
         "@legion/envoy-client": "workspace:*",
         "@oh-my-pi/pi-tui": "^18.1.15",
         "@oh-my-pi/pi-utils": "^18.1.15",
         "@types/bun": "latest",
         "typescript": "^5.3.0",
+        "zod": "4.3.6",
       },
     },
     "packages/proof-editor": {

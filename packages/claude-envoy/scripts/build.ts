@@ -6,7 +6,11 @@
 // scratch directory and fails when the result differs from the committed
 // files; CI runs it on the Bun version pinned in the repo-root `.bun-version`,
 // because bundler output depends on the exact Bun build (LEGION-568).
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+//
+// The same run generates `legion/`, the Legion plugin a Claude Code pane loads
+// beside this one (`buildLegionPlugin`), and `--check` holds it to a fresh
+// generation too.
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { thirdPartyNotices } from "../../../scripts/third-party-notices"
@@ -25,6 +29,140 @@ export const BUNDLE_ENTRYPOINTS = {
   "session-hook": "hooks/session-hook.ts",
   dispatch: "../envoy-client/bin/dispatch.ts",
 } as const
+
+/** Oh My Pi's tool names, as pi-legion's agents list them, to Claude Code's. A tool this Claude
+ *  Code build lacks maps to nothing: it has no Glob or Grep tool (an agent searches with `rg` or
+ *  `fd` through Bash where it has Bash), and its own task list stands in for `todo`. A name in
+ *  neither list is refused, so a new tool is mapped on purpose. */
+export const CLAUDE_TOOL_NAMES: Readonly<Record<string, string | null>> = {
+  read: "Read",
+  bash: "Bash",
+  edit: "Edit",
+  write: "Write",
+  glob: null,
+  grep: null,
+  todo: null,
+}
+
+/** One pi-legion agent file in Claude Code's agent format. The frontmatter keeps `name`,
+ *  `description` and `color`; `tools` is mapped through `CLAUDE_TOOL_NAMES`; `autoloadSkills`
+ *  becomes `skills`, each the plugin's namespaced `legion:<skill>`; `model` (an Oh My Pi model
+ *  role, which Claude Code does not read, so the agent runs on the pane's model), `blocking` (Claude
+ *  Code waits on an agent unless told otherwise) and every comment are dropped. The body is kept
+ *  as it is. */
+export function claudeAgent(file: string, source: string): string {
+  const match = /^---\n([\s\S]*?)\n---\n/.exec(source)
+  if (match === null) throw new Error(`${file} has no frontmatter`)
+  const lines: string[] = []
+  let dropping = false
+  for (const line of (match[1] as string).split("\n")) {
+    if (line.startsWith("#")) continue
+    const key = /^([A-Za-z]+):/.exec(line)?.[1]
+    if (key === undefined) {
+      if (!dropping) lines.push(line)
+      continue
+    }
+    const value = line.slice(key.length + 1).trim()
+    dropping = key === "model" || key === "blocking"
+    if (dropping) continue
+    if (key === "tools") {
+      const tools = value.split(",").map((name) => {
+        const tool = name.trim()
+        const mapped = CLAUDE_TOOL_NAMES[tool]
+        if (mapped === undefined) {
+          throw new Error(`${file} lists the tool ${tool}, which CLAUDE_TOOL_NAMES does not map`)
+        }
+        return mapped
+      })
+      const claude = tools.filter((tool): tool is string => tool !== null)
+      if (claude.length === 0) throw new Error(`${file} keeps no tool Claude Code has`)
+      lines.push(`tools: ${claude.join(", ")}`)
+    } else if (key === "autoloadSkills") {
+      const skills = /^\[(.*)\]$/.exec(value)?.[1]
+      if (skills === undefined) throw new Error(`${file}'s autoloadSkills is not a flow list`)
+      const names = skills.split(",").map((skill) => `legion:${skill.trim()}`)
+      lines.push(`skills: [${names.join(", ")}]`)
+    } else {
+      lines.push(line)
+    }
+  }
+  return `---\n${lines.join("\n")}\n---\n${source.slice(match[0].length)}`
+}
+
+/** `legion/`, the Legion plugin a Claude Code pane loads with `--plugin-dir` beside this one
+ *  (packages/daemon/internal/runtime/tmux/claude.go): its manifest, named `legion`, so Claude Code
+ *  names its skills and agents `legion:<name>`; the skills pi-legion ships, staged by the one script
+ *  that partitions them (scripts/pi-plugin-prepack.sh --stage-skills); and pi-legion's task agents
+ *  in Claude Code's format (`claudeAgent`). Generated, never edited by hand. */
+export async function buildLegionPlugin(outdir: string): Promise<void> {
+  await mkdir(join(outdir, ".claude-plugin"), { recursive: true })
+  await writeFile(
+    join(outdir, ".claude-plugin", "plugin.json"),
+    `${JSON.stringify(
+      {
+        name: "legion",
+        description:
+          "Legion's skills and task agents for a phase worker running on Claude Code, generated from the repository's skills/ and packages/pi-legion/agents by packages/claude-envoy/scripts/build.ts.",
+      },
+      null,
+      2,
+    )}\n`,
+  )
+  const staged = Bun.spawnSync([
+    "bash",
+    join(repoRoot, "scripts", "pi-plugin-prepack.sh"),
+    "--stage-skills",
+    "@sjawhar/pi-legion",
+    join(outdir, "skills"),
+  ])
+  if (staged.exitCode !== 0) {
+    throw new Error(`staging pi-legion's skills failed: ${staged.stderr.toString().trim()}`)
+  }
+  const agents = join(repoRoot, "packages", "pi-legion", "agents")
+  await mkdir(join(outdir, "agents"))
+  for (const name of (await readdir(agents)).filter((file) => file.endsWith(".md")).sort()) {
+    const source = await readFile(join(agents, name), "utf8")
+    await writeFile(join(outdir, "agents", name), claudeAgent(name, source))
+  }
+}
+
+/** Each file under `fresh` or `committed` that is missing from the other or differs in bytes,
+ *  relative to its root. */
+async function treeDifferences(fresh: string, committed: string): Promise<string[]> {
+  const files = async (root: string): Promise<Set<string>> => {
+    const entries = await readdir(root, { recursive: true, withFileTypes: true }).catch(() => [])
+    return new Set(
+      entries
+        .filter((entry) => entry.isFile())
+        .map((entry) => join(entry.parentPath, entry.name).slice(root.length + 1)),
+    )
+  }
+  const [freshFiles, committedFiles] = await Promise.all([files(fresh), files(committed)])
+  const differences: string[] = []
+  for (const file of [...freshFiles.union(committedFiles)].sort()) {
+    if (!freshFiles.has(file) || !committedFiles.has(file)) {
+      differences.push(file)
+      continue
+    }
+    const [freshBytes, committedBytes] = await Promise.all([
+      readFile(join(fresh, file)),
+      readFile(join(committed, file)),
+    ])
+    if (!freshBytes.equals(committedBytes)) differences.push(file)
+  }
+  return differences
+}
+
+/** The files of the committed `legion/` a fresh generation would change. */
+export async function legionPluginDifferences(committed: string): Promise<string[]> {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-check-legion-"))
+  try {
+    await buildLegionPlugin(scratch)
+    return await treeDifferences(scratch, committed)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
 
 /**
  * `bun run build` and `bun run check-dist` spawn a new "bun" process to run this file:
@@ -87,21 +225,7 @@ async function checkBundles(distDirectory: string): Promise<string[]> {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-check-dist-"))
   try {
     await buildBundles(scratch)
-    const fresh = (await readdir(scratch)).sort()
-    const committed = (await readdir(distDirectory).catch(() => [])).sort()
-    const differences: string[] = []
-    for (const file of new Set([...fresh, ...committed])) {
-      if (!fresh.includes(file) || !committed.includes(file)) {
-        differences.push(file)
-        continue
-      }
-      const [freshBytes, committedBytes] = await Promise.all([
-        readFile(join(scratch, file)),
-        readFile(join(distDirectory, file)),
-      ])
-      if (!freshBytes.equals(committedBytes)) differences.push(file)
-    }
-    return differences
+    return await treeDifferences(scratch, distDirectory)
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -113,18 +237,26 @@ if (import.meta.main) {
   // process was always going to refuse.
   assertPinnedBun(Bun.version, pinnedBunVersion)
   const distDirectory = join(packageRoot, "dist")
+  const legionDirectory = join(packageRoot, "legion")
   if (process.argv.includes("--check")) {
-    const differences = await checkBundles(distDirectory)
-    if (differences.length > 0) {
+    const stale = [
+      ...(await checkBundles(distDirectory)).map((file) => `dist/${file}`),
+      ...(await legionPluginDifferences(legionDirectory)).map((file) => `legion/${file}`),
+    ]
+    if (stale.length > 0) {
       process.stderr.write(
-        `dist/ is stale (${differences.join(", ")}); run \`bun run build\` on Bun ${pinnedBunVersion} and commit the result\n`,
+        `generated files are stale (${stale.join(", ")}); run \`bun run build\` on Bun ${pinnedBunVersion} and commit the result\n`,
       )
       process.exit(1)
     }
-    process.stdout.write("dist/ matches a fresh build\n")
+    process.stdout.write("dist/ and legion/ match a fresh build\n")
   } else {
     await rm(distDirectory, { recursive: true, force: true })
     await buildBundles(distDirectory)
-    process.stdout.write(`built ${Object.keys(BUNDLE_ENTRYPOINTS).join(", ")} into dist/\n`)
+    await rm(legionDirectory, { recursive: true, force: true })
+    await buildLegionPlugin(legionDirectory)
+    process.stdout.write(
+      `built ${Object.keys(BUNDLE_ENTRYPOINTS).join(", ")} into dist/ and the Legion plugin into legion/\n`,
+    )
   }
 }

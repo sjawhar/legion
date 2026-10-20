@@ -33,6 +33,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
@@ -155,6 +156,9 @@ type Config struct {
 	ControllerLaunch ControllerLaunch
 	// Capabilities is the `capabilities` block; the zero value with none.
 	Capabilities Capabilities
+	// WorkerBackends is `worker_backends`: the phase-worker roles that run on a backend other than
+	// Oh My Pi, by role; a role it leaves out runs on Oh My Pi (BackendFor).
+	WorkerBackends map[claim.Role]runtime.Backend
 }
 
 const (
@@ -263,6 +267,7 @@ type fileConfig struct {
 	Capabilities           *Capabilities
 	Durations              map[string]int
 	Counts                 map[string]int
+	WorkerBackends         map[claim.Role]runtime.Backend
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -394,6 +399,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Controller, err = readString(value, key)
 		case "capabilities":
 			file.Capabilities, err = readCapabilities(value, key)
+		case "worker_backends":
+			file.WorkerBackends, err = readWorkerBackends(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -895,6 +902,10 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 	if file.Capabilities != nil {
 		cfg.Capabilities = *file.Capabilities
+	}
+	cfg.WorkerBackends = file.WorkerBackends
+	if err := checkWorkerBackends(cfg); err != nil {
+		return Config{}, err
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {

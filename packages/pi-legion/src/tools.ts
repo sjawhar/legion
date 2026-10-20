@@ -1,39 +1,41 @@
 import type { LegionRole } from "@legion/contracts";
 import {
-  LEGION_PHASE_BACKWARD_TARGETS,
   LegionGateRegisterRequest,
   type LegionGrant,
-  type LegionIssue,
   type LegionPhase,
-  type LegionState,
 } from "@legion/contracts/legion-api";
+import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import {
+  type ClaimCapability,
+  executePhaseOp,
+  isPhaseOp,
+  legionToolDescription,
+  mintClaimGrant,
+  phaseOpParameters,
+} from "@legion/pi-shared/legion-phase-ops";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "@legion/pi-shared/pi-types";
 import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
-import type { LegionDaemonClient } from "./daemon-client";
 
 export type LegionToolRole = "architect" | "phase-worker" | "controller";
 
 /** A root architect's, a sub-architect's or a phase worker's session: its claim, which mints its
  * grants on `/grants`' session form. `role` is the claim's Legion role (a sub-architect's is
  * `architect`); `kind` is what the tool's operation sets are keyed by. */
-export interface LegionClaimToolSession {
+export interface LegionClaimToolSession extends ClaimCapability {
   readonly kind: "architect" | "phase-worker";
-  readonly role: LegionRole;
-  readonly sessionId: string;
-  readonly tree: string;
-  readonly issue: string;
-  readonly secret: string;
 }
 
 /** The controller's session: no tree, no issue; its grants are minted with its registration's
  * secret (`controllerGrant`, the `/grants` controller-session form). */
 export interface LegionControllerToolSession {
   readonly kind: "controller";
-  readonly sessionId: string;
+  readonly sessionID: string;
 }
 
 export type LegionToolSession = LegionClaimToolSession | LegionControllerToolSession;
 
+/** Each session kind's operations, in the order the tool's `op` enum lists them. The phase ops
+ * (`@legion/pi-shared/legion-phase-ops`) are an architect's too. */
 const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
   architect: [
     "register_gate",
@@ -51,17 +53,15 @@ const OPERATIONS: Readonly<Record<LegionToolRole, readonly string[]>> = {
   controller: ["read_state", "set_status"],
 };
 
+/** The fields each operation beyond the phase ops takes; a phase op's are `PhaseOpArguments`'. */
 const OPERATION_FIELDS: Readonly<Record<string, readonly string[]>> = {
   register_gate: ["issue", "artifactId", "version"],
   release_children: ["issues"],
-  request_backward_move: ["to", "reason"],
   retry_or_escalate: ["issue", "decision"],
   sign_off: ["issue"],
   close_root: ["issue", "reason"],
   park_child: ["issue"],
   rerun_child: ["issue"],
-  read_record: ["issue"],
-  handoff_complete: ["summary", "verdict", "ready"],
   read_state: [],
   set_status: ["issue", "status"],
 };
@@ -71,24 +71,14 @@ const ISSUE_STATUSES = ["todo", "backlog", "icebox"] as const;
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
+/** The tool's one object schema, `op` choosing the operation; its fields and the `op` values are
+ * in the order `tools.test.ts` pins. */
 function toolSchema(pi: PiApi): unknown {
   const z = pi.zod;
+  const phase = phaseOpParameters(z);
   return z.object({
-    op: z.enum([
-      "register_gate",
-      "release_children",
-      "request_backward_move",
-      "retry_or_escalate",
-      "sign_off",
-      "close_root",
-      "park_child",
-      "rerun_child",
-      "read_record",
-      "handoff_complete",
-      "read_state",
-      "set_status",
-    ]),
-    issue: z.string().optional(),
+    op: z.enum([...OPERATIONS.architect, ...OPERATIONS.controller]),
+    issue: phase.issue,
     artifactId: z
       .string()
       .describe(
@@ -97,12 +87,12 @@ function toolSchema(pi: PiApi): unknown {
       .optional(),
     version: z.number().optional(),
     issues: z.array(z.string()).optional(),
-    to: z.enum(LEGION_PHASE_BACKWARD_TARGETS).optional(),
-    reason: z.string().optional(),
+    to: phase.to,
+    reason: phase.reason,
     decision: z.enum(["retry", "escalate"]).optional(),
-    summary: z.string().optional(),
-    verdict: z.enum(["pass", "fail"]).optional(),
-    ready: z.boolean().optional(),
+    summary: phase.summary,
+    verdict: phase.verdict,
+    ready: phase.ready,
     status: z.enum(ISSUE_STATUSES).optional(),
   });
 }
@@ -128,18 +118,12 @@ function assertOperationInput(parameters: Record<string, unknown>, operation: st
   }
 }
 
-function recordFrom(state: LegionState, issue: string): LegionIssue {
-  const record = state.issues[issue];
-  if (record === undefined) throw new Error(`The daemon has no record for ${issue}`);
-  return record;
-}
-
 /** The daemon's role-local workflow surface: no operation can schedule a worker. Every operation
  * that writes mints its own grant in-process and posts it with the request; nothing is written
- * to the pane. `handoff_complete` belongs to every session but the root architect's (a phase
- * worker, and a sub-architect: an architect whose issue is not its tree), and finds the commit it
- * reports in the pane first (`handoffCommit`, src/handoff-commit.ts); `read_state` and
- * `set_status` to the controller. */
+ * to the pane. The phase ops run on the executor every harness shares (`executePhaseOp`):
+ * `handoff_complete` belongs to every session but the root architect's (a phase worker, and a
+ * sub-architect: an architect whose issue is not its tree), and finds the commit it reports in the
+ * pane first (`handoffCommit`); `read_state` and `set_status` belong to the controller. */
 export function createLegionTool(deps: {
   readonly pi: PiApi;
   readonly daemon: () => LegionDaemonClient;
@@ -160,33 +144,17 @@ export function createLegionTool(deps: {
 }): RegisteredTool {
   const { pi, daemon, session, controllerGrant, onPhaseCompleted, handoffCommit, resolveDocument } =
     deps;
-  const grantFor = async (
-    client: LegionDaemonClient,
-    active: LegionClaimToolSession
-  ): Promise<string> =>
-    (
-      await client.grant({
-        sessionId: active.sessionId,
-        secret: active.secret,
-        tree: active.tree,
-        issue: active.issue,
-      })
-    ).grantId;
   return {
     name: "legion",
     label: "legion",
-    description:
-      "Perform the workflow operation the Legion daemon assigned this role. The daemon advances phases; this tool cannot spawn workers. " +
-      "handoff_complete (phase workers and sub-architects; the daemon accepts a completion only from the role working the issue's current phase) " +
-      "reports this phase complete: `summary` (two sentences for the architect, or the merger's READY packet), `verdict` pass|fail from the tester alone " +
-      "(the daemon refuses a verdict from any other role), `ready: true` for the merger's READY. A handoff is a committed file, `.legion/<issue>/<phase>.json`: the pushed commit " +
-      "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " +
-      "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " +
-      "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
-      "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " +
-      "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
-      "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
-      "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.",
+    // No sentence on read_record or request_backward_move, and the controller's operations after
+    // handoff_complete: the exact text tools.test.ts pins, so a change to the shared template
+    // cannot reach an Oh My Pi agent unnoticed.
+    description: legionToolDescription({
+      envoyPublish: "envoy_publish",
+      after:
+        "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. ",
+    }),
     defaultInactive: true,
     parameters: toolSchema(pi),
     execute: async (_id, parameters, _signal, _onUpdate, context) => {
@@ -195,6 +163,14 @@ export function createLegionTool(deps: {
         const operation = requiredString(parameters, "legion", "op");
         if (!OPERATIONS[active.kind].includes(operation)) {
           throw new Error(`${operation} is not available to a ${active.kind} session`);
+        }
+        if (active.kind !== "controller" && isPhaseOp(operation)) {
+          const answer = await executePhaseOp(
+            { daemon: daemon(), claim: active, handoffCommit },
+            parameters
+          );
+          if (operation === "handoff_complete") onPhaseCompleted(context);
+          return jsonSuccess(answer);
         }
         assertOperationInput(parameters, operation);
         const client = daemon();
@@ -206,44 +182,11 @@ export function createLegionTool(deps: {
           if (status === undefined) {
             throw new Error(`set_status requires status ${ISSUE_STATUSES.join(", ")}`);
           }
-          const { grantId } = await controllerGrant(active.sessionId);
+          const { grantId } = await controllerGrant(active.sessionID);
           await client.issueStatus({ grantId, issue, status });
           return jsonSuccess({});
         }
         switch (operation) {
-          case "read_record": {
-            const issue = requiredString(parameters, operation, "issue");
-            return jsonSuccess({ record: recordFrom(await client.state(), issue) });
-          }
-          case "handoff_complete": {
-            if (active.kind === "architect" && active.issue === active.tree) {
-              throw new Error(
-                "handoff_complete is not available to a root architect session, which runs no phase"
-              );
-            }
-            const summary = requiredString(parameters, operation, "summary");
-            const { verdict, ready } = parameters;
-            if (verdict !== undefined && verdict !== "pass" && verdict !== "fail") {
-              throw new Error("handoff_complete's verdict is pass or fail");
-            }
-            if (ready !== undefined && typeof ready !== "boolean") {
-              throw new Error("handoff_complete's ready is true or false");
-            }
-            // The commit is found before the grant is minted: a refusal here posts nothing and
-            // mints nothing. The phase is the issue record's, the role the session's.
-            const { phase } = recordFrom(await client.state(), active.issue);
-            const commit = await handoffCommit(phase, active.role);
-            const grantId = await grantFor(client, active);
-            const answer = await client.handoffComplete({
-              grantId,
-              summary,
-              verdict: verdict ?? "",
-              ready: ready ?? false,
-              commit,
-            });
-            onPhaseCompleted(context);
-            return jsonSuccess(answer);
-          }
           case "register_gate": {
             const version = parameters.version;
             if (typeof version !== "number" || !Number.isSafeInteger(version) || version < 1) {
@@ -268,7 +211,7 @@ export function createLegionTool(deps: {
             const reference = requiredString(parameters, operation, "artifactId");
             const isId = LegionGateRegisterRequest.shape.artifactId.safeParse(reference).success;
             const artifactId = isId ? reference : await resolveDocument(issue, reference);
-            const grantId = await grantFor(client, active);
+            const grantId = await mintClaimGrant(client, active);
             await client.gateRegister({ grantId, issue, artifactId, version });
             return jsonSuccess({});
           }
@@ -277,28 +220,15 @@ export function createLegionTool(deps: {
             if (!Array.isArray(issues) || !issues.every((issue) => typeof issue === "string")) {
               throw new Error("release_children requires issues");
             }
-            const grantId = await grantFor(client, active);
+            const grantId = await mintClaimGrant(client, active);
             return jsonSuccess(await client.waveRelease({ grantId, issues }));
-          }
-          case "request_backward_move": {
-            const grantId = await grantFor(client, active);
-            await client.phaseBackward({
-              grantId,
-              to: requiredString(
-                parameters,
-                operation,
-                "to"
-              ) as (typeof LEGION_PHASE_BACKWARD_TARGETS)[number],
-              reason: requiredString(parameters, operation, "reason"),
-            });
-            return jsonSuccess({});
           }
           case "retry_or_escalate": {
             const decision = parameters.decision;
             if (decision !== "retry" && decision !== "escalate") {
               throw new Error("retry_or_escalate requires decision retry or escalate");
             }
-            const grantId = await grantFor(client, active);
+            const grantId = await mintClaimGrant(client, active);
             await client.phaseRetry({
               grantId,
               issue: requiredString(parameters, operation, "issue"),
@@ -307,7 +237,7 @@ export function createLegionTool(deps: {
             return jsonSuccess({});
           }
           case "sign_off": {
-            const grantId = await grantFor(client, active);
+            const grantId = await mintClaimGrant(client, active);
             await client.signOff({
               grantId,
               issue: requiredString(parameters, operation, "issue"),
@@ -315,7 +245,7 @@ export function createLegionTool(deps: {
             return jsonSuccess({});
           }
           case "close_root": {
-            const grantId = await grantFor(client, active);
+            const grantId = await mintClaimGrant(client, active);
             await client.rootClose({
               grantId,
               issue: requiredString(parameters, operation, "issue"),
@@ -325,7 +255,7 @@ export function createLegionTool(deps: {
           }
           case "park_child":
           case "rerun_child": {
-            const grantId = await grantFor(client, active);
+            const grantId = await mintClaimGrant(client, active);
             const request = { grantId, issue: requiredString(parameters, operation, "issue") };
             await (operation === "park_child"
               ? client.childPark(request)

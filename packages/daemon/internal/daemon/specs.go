@@ -62,6 +62,9 @@ type specs struct {
 	// Contract already set to api.DaemonAPIVersion; nil when the daemon knows none
 	// (LEGION-164's degraded mode). Never read under any other runtime.
 	plugins *runtime.PluginInstall
+	// backend is the backend a role runs on (config.Config.BackendFor); nil runs every role on Oh
+	// My Pi.
+	backend func(claim.Role) runtime.Backend
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -73,9 +76,10 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository with that repository's default branch; for a claim
 // whose workspace was lost with its session, the issue's branch the recreated workspace is
-// recovered from. The controller's launch (controllerSpawnSpec) is its own. Plugins carries the
-// plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the same way for both —
-// the controller the daemon launches (`controller: daemon`) is covered like any claim.
+// recovered from. The controller's launch (controllerSpawnSpec) is its own. Both name the backend
+// the role runs on and are told its prompt part after the role's parts (launchBackend). Plugins
+// carries the plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the same way
+// for both — the controller the daemon launches (`controller: daemon`) is covered like any claim.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	var spec runtime.SpawnSpec
 	var err error
@@ -87,8 +91,35 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
+	var part string
+	if spec.Backend, part, err = s.launchBackend(c.Role); err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	if part != "" {
+		spec.Prompt.RolePromptPaths = append(spec.Prompt.RolePromptPaths, part)
+	}
 	spec.Plugins = s.stalePluginInstall(c)
 	return spec, nil
+}
+
+// launchBackend is the backend role runs on (backend; Oh My Pi when nil) and the path of the
+// daemon prompt part its entry names (runtime.Backends), "" when it names none.
+func (s specs) launchBackend(role claim.Role) (runtime.Backend, string, error) {
+	backend := runtime.BackendOmp
+	if s.backend != nil {
+		backend = s.backend(role)
+	}
+	info, err := runtime.LookupBackend(backend)
+	if err != nil {
+		return "", "", fmt.Errorf("the %s's backend: %w", role, err)
+	}
+	if info.PromptPart == "" {
+		return backend, "", nil
+	}
+	if s.prompts == nil {
+		return "", "", errors.New("the daemon prompt bundle was not constructed at boot")
+	}
+	return backend, s.prompts.Part(info.PromptPart), nil
 }
 
 // workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.

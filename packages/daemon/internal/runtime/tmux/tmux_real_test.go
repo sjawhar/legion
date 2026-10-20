@@ -505,7 +505,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		DaemonURL:        r.daemon.server.URL,
 		EnvoyURL:         "http://127.0.0.1:9020",
 		NatsURLs:         []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:    shellprefix.Word(r.omp),
+		Launchers:        ompOnly(shellprefix.Word(r.omp)),
 		StopGrace:        5 * time.Second,
 		ProbeInterval:    100 * time.Millisecond,
 		AdoptTimeout:     5 * time.Second,
@@ -1532,6 +1532,86 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 		t.Errorf("the bystander's pane %s was killed:\n%s", bystander[1], panes)
 	}
 }
+
+// A pane verifies as its recorded process only while its command line holds the marker of a
+// harness the daemon launches (Launcher.Marker): the pane's own root process is `sh -c` on the
+// whole pane command, which names the harness the shim runs. A Claude Code pane verifies under a
+// daemon with both launchers; the same live pane, read by a runtime whose one launcher's marker it
+// does not hold, is not its recorded process, and is said not to run that launcher's harness.
+func TestRealTmuxVerifiesAPaneByItsConfiguredHarnessesMarkers(t *testing.T) {
+	fakeClaude := filepath.Join(t.TempDir(), "claude")
+	if err := os.WriteFile(fakeClaude, []byte("#!/bin/sh\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	claude := NewClaudeLauncher(ClaudeLaunch{Binary: fakeClaude, PluginDir: t.TempDir(), Bun: "/bin/true"})
+	r := newRig(t, func(o *Options) { o.Launchers[runtime.BackendClaude] = claude })
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	spec := r.spec("LEGION-2", "LEGION-2", claim.RoleImplementer)
+	spec.Backend = runtime.BackendClaude
+	loc, err := r.rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	pid := panePid(t, loc)
+	if argv := procCmdline(pid); len(argv) != 3 || argv[0] != shell || argv[1] != "-c" ||
+		!strings.Contains(argv[2], " worker-shim ") || !strings.Contains(argv[2], " claude-bridge -- ") {
+		t.Fatalf("the pane's root process is %q, want sh -c on the pane command running the bridge", argv)
+	}
+	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
+		t.Fatalf("Probe with both launchers = %+v, want alive", obs)
+	}
+	// Claude Code, under the bridge under the shim, runs with the role's gh bundle exactly as a pane's
+	// Oh My Pi does (TestRealTmuxLifecycle): the same gh variables, and the default owner's directory
+	// holding the role App's token. The stand-in execs sleep, so the process named sleep is it.
+	env := procEnviron(t, descendant(t, pid, "sleep"))
+	secrets := filepath.Join(r.stateDir, "secrets")
+	for name, want := range map[string]string{
+		"PATH":                 filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
+		"GH_CONFIG_DIR":        filepath.Join(secrets, string(spec.Claim)+"-gh", "acme"),
+		"LEGION_GH_OWNERS_DIR": filepath.Join(secrets, string(spec.Claim)+"-gh"),
+		"LEGION_GH_PATH":       fakeGH,
+		"GH_TOKEN":             "",
+		"GITHUB_TOKEN":         "",
+		"GH_HOST":              "",
+		"CLAUDE_CONFIG_DIR":    ClaudeConfigDir(r.stateDir, spec.Claim),
+	} {
+		if got, ok := env[name]; !ok || got != want {
+			t.Errorf("Claude Code's %s = %q (set %v), want %q", name, got, ok, want)
+		}
+	}
+	if hosts, err := os.ReadFile(filepath.Join(env["GH_CONFIG_DIR"], ghconfig.HostsFile)); err != nil {
+		t.Errorf("the Claude Code pane's hosts.yml: %v", err)
+	} else if token, err := ghconfig.TokenFromHosts(hosts); err != nil || token != staticCredentialToken(spec.Role) {
+		t.Errorf("the Claude Code pane's hosts.yml holds %q (%v), want %q", token, err, staticCredentialToken(spec.Role))
+	}
+	// Every pane's command holds "omp" (in `--append-system-prompt`), so Claude Code's own marker is
+	// proven by a runtime with its launcher alone.
+	claudeOnly := r.newRuntime(func(o *Options) { o.Launchers = map[runtime.Backend]Launcher{runtime.BackendClaude: claude} })
+	if obs := probe(t, claudeOnly, loc); obs.Kind != runtime.Alive {
+		t.Fatalf("Probe with Claude Code's launcher alone = %+v, want alive", obs)
+	}
+	unmarked := r.newRuntime(func(o *Options) {
+		o.Launchers = map[runtime.Backend]Launcher{runtime.BackendOmp: markedLauncher("no-such-harness")}
+	})
+	inc, err := parseIncarnation(loc.Incarnation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf("pane %s pid %d is not running OMP (recorded pid %d start %d)", loc.Tmux.Pane, pid, pid, inc.ticks)
+	if obs := probe(t, unmarked, loc); obs.Kind != runtime.NotRecordedProcess || obs.Detail != want {
+		t.Errorf("Probe by a runtime whose launcher's marker the pane does not hold = %+v, want not_recorded_process: %s", obs, want)
+	}
+}
+
+// markedLauncher launches nothing; its marker is the string itself.
+type markedLauncher string
+
+func (m markedLauncher) Launch(runtime.SpawnSpec, Host) (string, []string, error) {
+	return "", nil, errors.New("markedLauncher launches nothing")
+}
+
+func (m markedLauncher) Marker() string { return string(m) }
 
 // A provider key reaches a pane's OMP as the daemon resolved it at boot — the secretsd key's value
 // under the variable OMP reads, through the daemon-held file the real shim is pointed at — and

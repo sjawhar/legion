@@ -33,6 +33,26 @@
       "types": "./src/shell-command.ts",
       "bun": "./src/shell-command.ts"
     },
+    "./daemon-client": {
+      "types": "./src/daemon-client.ts",
+      "bun": "./src/daemon-client.ts"
+    },
+    "./handoff-commit": {
+      "types": "./src/handoff-commit.ts",
+      "bun": "./src/handoff-commit.ts"
+    },
+    "./git-lock": {
+      "types": "./src/git-lock.ts",
+      "bun": "./src/git-lock.ts"
+    },
+    "./legion-phase-ops": {
+      "types": "./src/legion-phase-ops.ts",
+      "bun": "./src/legion-phase-ops.ts"
+    },
+    "./legion-claim-core": {
+      "types": "./src/legion-claim-core.ts",
+      "bun": "./src/legion-claim-core.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"
@@ -61,10 +81,12 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
+    "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
     "@oh-my-pi/pi-tui": "^18.1.15",
     "@oh-my-pi/pi-utils": "^18.1.15",
     "@types/bun": "latest",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "zod": "4.3.6"
   }
 }

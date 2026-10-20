@@ -23,6 +23,8 @@ export function inboundOffChannelSession(options: {
       throw new Error(`inbound messages are off for this session: ${why}`)
     },
     unfollow: async () => [],
+    // No heartbeat runs, so no role is ever regained.
+    onRoleRegained: () => undefined,
     async rememberRole(role) {
       await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
         session_id: identity.id,

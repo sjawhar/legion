@@ -255,6 +255,16 @@ What each part is for:
 - Workflow limits, all optional: `linger_hours` (72), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+- **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
+  `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
+  default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
+  `reviewer`, `merger`) and only under `runtime: tmux`, since the worker image carries no Claude
+  Code; the loader refuses `claude` for the architect and under Kubernetes, naming why, and refuses
+  any other value. The controller always runs on Oh My Pi. A tmux daemon running a Claude Code role
+  resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP server runs on from
+  `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
+  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
+  `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.
