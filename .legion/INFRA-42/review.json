@@ -2,59 +2,45 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-42",
-  "completed": "2026-10-20T16:30:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-20T20:40:00Z",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 1,
-  "reviewedHead": "a052eee083c7f03c6e7aa00230d8afcdf181f9c4",
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx:519",
-      "description": "Three comments in runtime files still navigate by the Mine view this change deletes: Inbox.tsx:519 (\"the row moving into Mine at once is the feedback for that click\" - its twin sentence in packages/dispatch/AGENTS.md was rewritten by this same diff, so code and contract disagreed), SnoozeControl.tsx:20 (\"the optimistic move into Mine\") and useIssueAssignee.ts:23 (\"the inbox's Mine and Unassigned partitions\"). There is no Mine view and no Unassigned partition at this head (sections.ts:13 INBOX_SECTIONS = [\"human\",\"agent\",\"later\"]). I judged these one Fast-follow, as wording cleanup; the architect ruled them a defect of this change, the same class as the packages/envoy/AGENTS.md and documentation findings of round 1, and had the implementer push them as a fix round rather than carry them. This review executes that ruling: REQUEST_CHANGES naming exactly those three comments and nothing else, so the fix reaches the tester before any approval. The implementer pushed it as 9449cff1c3f639a818be29c90d9fa2bb7ce8c706 (three files, +7/-6, comment lines only) while this round was being written; the next round approves that head once the tester's bare gates are in and CI is green on it."
-    }
-  ],
-  "round1FindingsVerifiedFixed": [
-    {
-      "file": "packages/envoy/AGENTS.md:1811",
-      "evidence": "Rewritten in ec5de805: the line now says the SPA asks for no assignee at all, splits the one inbox response client-side by the reader's own ?assignee= filter whose values are a lowercase login or the literal unassigned, that no assignee at all is the reader's own work with nothing remembered, and that the single value everyone is the cleared filter. No Mine, no Everyone, no Unassigned band, no inbox.view, no ?view=."
+  "minor": 0,
+  "approvedCodeHead": "92490e944053dbb43d4e8fa32670af0bb40e203f",
+  "keyFindings": [],
+  "round3": {
+    "findingRaisedAndFixed": {
+      "file": "packages/dispatch/web/src/features/inbox/Inbox.tsx:518-519",
+      "description": "The sentence round 2 rewrote read \"Assign to me is likewise not a hold: the row becoming the reader's at once is the feedback for that click\", which is false in the one case where Assign to me is reachable. Under ?assignee=unassigned the settled assignment drops the row out of `shown` (Inbox.tsx:460-461; `assigning` clears when the write settles), so `listed` is undefined at :693 and `heldRow` returns `seen` (:288-289) - the hold. The answer case the sentence drew its parallel from is genuinely excluded (`anchor.id === answered.current`, :689-691); the assign case has no exclusion. The branch's own e2e comment (e2e/inbox.e2e.ts:1387-1390, with the page.reload() that exists for exactly that reason) and implement.json trickyParts both state the hold. Cutover residue of this change: the old sentence was true while the Unassigned band kept the row listed.",
+      "fix": "92490e944053dbb43d4e8fa32670af0bb40e203f, one comment block (+4/-2, no runtime line), pushed inside this round on the architect's decision rather than as a fourth round. The comment now says Assign to me has no such exclusion, names `Unassigned` as the one filter that offers it, and says the row is held until focus or pointer leaves it."
     },
-    {
-      "file": "docs/site/src/content/docs/dispatch/inbox-and-asks.md:85-87",
-      "evidence": "Now reads \"Needs you and the banner add the credential requests waiting on you; a project's pill counts no credential request, because a request belongs to no project\", matching issues-and-projects.md:27-29 and the code (ProjectPage.tsx:186-191 passes no credentialRequests; BlockedOnYou.tsx defaults it to []). The PR body's third Change bullet carries the same correction."
-    },
-    {
-      "file": "packages/dispatch/web/src/features/agents/AgentsPage.tsx:1167-1174",
-      "evidence": "The claim now follows the predicate: the comment says snoozes are ignored and that a snoozed agent-turn question is counted here and sits folded under Later, the PR body bullet says the same, and AgentsPage.test.tsx seeds a snoozed agent-turn ask pinning `Waiting on agent 2`. The tester drove it at 6d282e0b: pill 2, list 4 human + 1 agent + a Later (1) fold holding that row."
-    },
-    {
-      "file": "packages/dispatch/web/src/features/inbox/BlockedOnYou.tsx:62",
-      "evidence": "The `viewer === undefined` early return is gone from needsYou; waitingOnYou keeps the one guard that belongs to the asks, and BlockedOnYou.test.tsx:86-90 pins the credential request counting with viewer={undefined} instead of asserting no link. Driven at 6d282e0b with /auth/whoami held 12 s and a request seeded: the shell renders neither rail nor banner during the hold, so the removal has no user-visible effect."
-    },
-    {
-      "file": "packages/dispatch/web/src/features/inbox/BulkSnoozeBar.tsx:50",
-      "evidence": "Both comments I named are reworded (BulkSnoozeBar.tsx:48-49, keyboard-inbox.e2e.ts:622-624). The sweep stopped at the two I named, which is the finding this round carries."
-    }
-  ],
+    "fenceChecked": "This branch's own work over a052eee083c7 is five comment-only commits and one documentation line: 9449cff1c3f6 (Inbox.tsx, SnoozeControl.tsx, useIssueAssignee.ts), a7578f08acd0 (BlockedOnYou.tsx), b87105c7246a (packages/dispatch/AGENTS.md sentence order the conflict merge disturbed, +1/-1), 92490e944053 (Inbox.tsx), plus the forward merge e270a523ecaa of main@origin. No runtime statement, no test and no export changed in any of them.",
+    "mergeAudited": "main@origin (39999a606a5d) is the fork point of this branch, so `jj diff --from main@origin --to <head>` is the branch delta exactly and would show any of main's content the merge dropped as a removal; it shows none. packages/dispatch/AGENTS.md differs from main by this branch's three Inbox hunks alone, with main's Activity-tab bullet and its `t v` chord byte-identical on both sides, and main's `AskRead` import and [\"ask-thread\", row.id] assertion in Inbox.test.tsx - the commit that caused the first conflict - are intact at the head."
+  },
   "ci": {
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "6d282e0b92b930a036648697b2c6673cb7194f34",
-    "observed": "all four required checks completed/success at the CI head; compare 6d282e0b...a052eee0 listed only .legion/INFRA-42/test.json, so the code reviewed this round was the CI head's. CI for 9449cff1 was starting as this round closed and is the next round's read.",
-    "readAt": "2026-10-20T16:05:00Z"
+    "ciHead": "92490e944053dbb43d4e8fa32670af0bb40e203f",
+    "observed": "Read fresh at this round's code head after the correction push: lint, typecheck, test and pr-title all completed/success. The base's required set was re-read from the rulesets at this round rather than carried (branch protection declares none). The non-required Playwright `dispatch` lane was still in_progress at approval; its last completed run covering this code is 39473673072 at e270a523, above which only comment and documentation lines have been pushed.",
+    "readAt": "2026-10-20T20:37:00Z"
   },
   "thermonuclear": {
-    "head": "a052eee083c7f03c6e7aa00230d8afcdf181f9c4",
-    "deepReview": "0 critical, 0 important, 4 minor; all five round-1 findings verified fixed, and the corrective commit's \"none of them behaviour\" claim verified against the running app (AuthGate never renders a surface with an unresolved viewer, so the guard removal is unreachable in production); its stale-comment sweep finding is the one this round carries",
-    "codeQuality": "0 critical, 1 important, 6 minor; the important is the direction of the new EVERYONE_FILTER_VALUE import (routes.ts importing from features/inbox/sections), which is my own round-1 fast-follow carried out as I worded it, creates no cycle today, and is not held against this change"
+    "head": "6a7b13cedd0a87e00e62cf23cb6dd993896eef3a",
+    "deepReview": "0 critical, 0 important, 2 minor - the Inbox.tsx:518-519 comment (fixed at 92490e94) and the PR body's stale risk and size lines; merge audited clean in both directions, no semantic conflict between main's Activity/agent-view/pins work and this branch's renamed Inbox API, no security finding with an exploit path, no devex regression, no feature-gate leak",
+    "codeQuality": "0 critical, 0 important, 4 minor - leftovers rather than design problems (the now-pointless `place` optionality at Inbox.tsx:469, the EVERYONE_FILTER_VALUE import direction, and two test-shape notes); no file crosses 1000 lines and the change deletes more concepts than it adds"
   },
   "threads": {
     "opened": 3,
-    "answeredThisRound": 3,
+    "answeredByReviewer": 3,
     "botThreadsAdjudicated": 0,
-    "note": "All three threads I opened in round 1 were answered by the implementer, resolved by it as the pull request's author, and carry my own accepting reply at this round (PRRC_kwDORFy7ds8AAAABAe7INA, PRRC_kwDORFy7ds8AAAABAe7IRg, PRRC_kwDORFy7ds8AAAABAe7QPA). No bot thread exists on this pull request, so I named none to the implementer."
+    "note": "All three threads the reviewer opened in round 1 were answered by the implementer, carry the reviewer's own accepting replies from round 2 (PRRC_kwDORFy7ds8AAAABAe7INA, PRRC_kwDORFy7ds8AAAABAe7IRg, PRRC_kwDORFy7ds8AAAABAe7QPA), and are resolved by the implementer as the pull request's author. No bot thread exists on this pull request, so none was adjudicated or named. Verified in gh api graphql, not from the PR body's Threads section."
   },
-  "proofRecord": {
-    "note": "The E2E (implementer) line named 475972ee while the merging head was 6d282e0b, whose diff carried two runtime lines that proof never ran. I asked the implementer for the re-citation before approving; it re-cited the line at 6d282e0b naming run 39444342719's dispatch job (1423 passed, 0 failed) with the two runtime lines attributed to the in-pod rig. The gap is closed in the body, not deferred to retro; the next round checks that the line names the head that would then merge."
-  }
+  "beforeReady": {
+    "note": "Four implementer-owned body lines name heads below the merging head and must be refreshed before READY: `CI:` and `E2E (implementer):` name e270a523, `Proven by:` says 1412 passed, and `Size:` names 6d282e0b (54 files, +2138/-566 at this head). The delta above e270a523 is comment and documentation lines only, so the re-citation needs no new run - it is a body edit, as the round-2 re-citation was. The merger reports a stale body rather than rewriting it, which is why this is recorded here."
+  },
+  "roundHistory": [
+    "Round 1 at f9f80bc619e2: changes requested - 2 important (the stale packages/envoy/AGENTS.md SPA contract, and the user documentation contradicting itself and the code on the project pill's credential requests), 3 minor.",
+    "Round 2 at a052eee083c7: changes requested - all five round-1 findings verified fixed; the one finding was the three runtime comments still navigating by the deleted Mine view, which the reviewer judged a fast-follow and the architect ruled a defect of this change.",
+    "Round 3 at 6a7b13cedd0a, approved at 92490e944053: one finding, the Inbox.tsx hold sentence, fixed inside the round."
+  ]
 }
