@@ -48,6 +48,7 @@ import {
   INBOX_SECTIONS,
   type InboxSection,
   inAssigneeFilter,
+  isOwnList,
   isTurnSection,
   isUnassigned,
   sectionOf,
@@ -329,7 +330,7 @@ function emptyStateMessage({
 }): string | undefined {
   if (agent !== undefined) return `No open asks from ${agentTitle}`;
   if (credentials.status !== "listed" || credentials.requests.length > 0) return undefined;
-  if (selection.length === 1 && selection[0] === viewer) return "Nothing needs you";
+  if (isOwnList(selection, viewer)) return "Nothing needs you";
   return selection.length === 0 ? "Nothing needs anyone" : "Nothing matches this filter";
 }
 
@@ -363,7 +364,6 @@ export function Inbox({
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
   // state all read this one answer.
   const credentials = useCredentialRequests();
-  // `/auth/whoami` names the person by lowercase email, the form issue assignees carry.
   const viewer = whoAmI.data?.login;
   // Who the list is for: what `?assignee=` carries, and the reader alone when it carries
   // nothing. The address is the whole memory - a filter the reader can link, and nothing kept
@@ -466,7 +466,7 @@ export function Inbox({
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn band
   // on the first render after its moment passes. Computed here, with the selection, rather than
   // after the early returns, because the bar's count and the bindings both read it.
-  const place = viewer === undefined ? undefined : { now: Date.now() };
+  const place = viewer === undefined ? undefined : Date.now();
   // A row in a band the reader has not opened is not on the page: the band renders its heading
   // and count and none of its rows, so there is no checkbox to untick, and the reader may well
   // have set that row's own moment since marking it - a pick that wrote it would overwrite what

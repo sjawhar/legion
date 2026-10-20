@@ -1,10 +1,10 @@
 import { expect, type Locator, type Page } from "@playwright/test";
 
 /**
- * The Inbox's `?assignee=` control (`features/inbox/AssigneeFilter.tsx`), in the Mine/Everyone
- * switch's place. Driving it, rather than opening a filtered address, is what a test needs when
- * the Inbox must stay mounted across the change: a pick is a client-side `replace`, so the marks,
- * drafts and held responses the page is carrying survive it, where `page.goto` would lose them.
+ * The Inbox's `?assignee=` control (`features/inbox/AssigneeFilter.tsx`), above the list.
+ * Driving it, rather than opening a filtered address, is what a test needs when the Inbox must
+ * stay mounted across the change: a pick is a client-side `replace`, so the marks, drafts and
+ * held responses the page is carrying survive it, where `page.goto` would lose them.
  */
 
 /** The filter's trigger, whatever its selection reads (`Assignee · you`, `· everyone`, `· 2`). */

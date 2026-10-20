@@ -14,7 +14,7 @@ export const INBOX_SECTIONS = ["human", "agent", "later"] as const;
 
 /** The bands as the reader's own list names them; `sectionTitles` below picks the record a
  *  filtered list needs. */
-export const SECTION_TITLES: Record<InboxSection, string> = {
+const SECTION_TITLES: Record<InboxSection, string> = {
   agent: "Waiting on agents",
   human: "Waiting on you",
   later: "Later",
@@ -35,8 +35,9 @@ export function isUnassigned(row: InboxRow): boolean {
   return (row.issue?.assignee ?? null) === null;
 }
 
-/** The `?assignee=` value standing for rows nobody holds, shared by the filter control, the
- *  route and `inAssigneeFilter` so the three cannot drift. */
+/** The `?assignee=` value standing for rows nobody holds, shared by the filter control and
+ *  `inAssigneeFilter` so the two cannot drift. The route carries it as a plain value:
+ *  `features/refs/routes.ts` neither imports this constant nor special-cases the word. */
 export const UNASSIGNED_FILTER_VALUE = "unassigned";
 
 /**
@@ -52,6 +53,13 @@ export function inAssigneeFilter(row: InboxRow, selection: readonly string[]): b
   return selection.includes(assignee);
 }
 
+/** Whether the list is the reader's own: the one selection whose bands, empty state and
+ *  trigger speak in the second person. Every other selection - cleared, anybody else,
+ *  `unassigned` included - is about somebody, so it is spoken of in the third. */
+export function isOwnList(selection: readonly string[], viewer: string): boolean {
+  return selection.length === 1 && selection[0] === viewer;
+}
+
 /**
  * The band titles for a selection. With the Unassigned band gone, another person's question now
  * lands in a turn band for the first time, and "Waiting on you" would be false there: so only
@@ -62,7 +70,7 @@ export function sectionTitles(
   selection: readonly string[],
   viewer: string
 ): Record<InboxSection, string> {
-  if (selection.length === 1 && selection[0] === viewer) return SECTION_TITLES;
+  if (isOwnList(selection, viewer)) return SECTION_TITLES;
   return { ...SECTION_TITLES, human: "Waiting on a person" };
 }
 
@@ -78,7 +86,7 @@ export function isTurnSection(section: InboxSection): section is AskTurn {
  * replied. Everything else sits under whose turn it is, whoever the filter listed it for; a row
  * the inbox lists without a turn belongs to no section.
  */
-export function sectionOf(row: InboxRow, { now }: { now: number }): InboxSection | undefined {
+export function sectionOf(row: InboxRow, now: number): InboxSection | undefined {
   if (isSnoozed(row, now)) return "later";
   return row.waiting_on;
 }

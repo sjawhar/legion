@@ -1,21 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useState } from "react";
 
 import { usersQuery } from "../../api/queries";
 import { MultiSelect } from "../../components/MultiSelect";
-import { UNASSIGNED_FILTER_VALUE } from "./sections";
+import { isOwnList, UNASSIGNED_FILTER_VALUE } from "./sections";
 
 function triggerText(selected: readonly string[], viewer: string): string {
   if (selected.length === 0) return "Assignee · everyone";
+  if (isOwnList(selected, viewer)) return "Assignee · you";
   if (selected.length > 1) return `Assignee · ${selected.length}`;
   const only = selected[0];
-  if (only === viewer) return "Assignee · you";
   return `Assignee · ${only === UNASSIGNED_FILTER_VALUE ? "Unassigned" : only}`;
 }
 
 /**
- * Who the Inbox is listed for: the `?assignee=` filter, in the view switch's place. The trigger
- * says the selection in the reader's own words (`Assignee · you`, `· everyone`, `· Unassigned`,
+ * Who the Inbox is listed for: the `?assignee=` filter, above the list. The trigger says the
+ * selection in the reader's own words (`Assignee · you`, `· everyone`, `· Unassigned`,
  * one other person's email, or how many), and the popover picks any number of people, with
  * Unassigned - every document ask and every issue nobody holds - first.
  */
@@ -37,9 +37,6 @@ export function AssigneeFilter({
   // Every Inbox reader renders this control and few open it, so the people are fetched on the
   // first open and kept from then on: a reader who never filters costs no `/api/v1/users`.
   const [wanted, setWanted] = useState(false);
-  useEffect(() => {
-    if (open) setWanted(true);
-  }, [open]);
   const people = useQuery({ ...usersQuery(), enabled: wanted });
 
   const listed = [
@@ -55,19 +52,16 @@ export function AssigneeFilter({
 
   return (
     <MultiSelect
-      emptyMessage="No matching person."
-      error={
-        people.isError
-          ? "Could not load the people list."
-          : people.isPending
-            ? "Loading people…"
-            : null
-      }
+      emptyMessage={people.isPending ? "Loading people…" : "No matching person."}
+      error={people.isError ? "Could not load the people list." : null}
       label="Assignee"
       onChange={onChange}
-      onOpenChange={onOpenChange}
+      onOpenChange={(next) => {
+        if (next) setWanted(true);
+        onOpenChange(next);
+      }}
       open={open}
-      optionDetail={(value) => (value === viewer ? "you" : "")}
+      optionDetail={(value) => (value === viewer ? "you" : undefined)}
       optionLabel={(value) => (value === UNASSIGNED_FILTER_VALUE ? "Unassigned" : value)}
       options={options}
       searchLabel="Search people"

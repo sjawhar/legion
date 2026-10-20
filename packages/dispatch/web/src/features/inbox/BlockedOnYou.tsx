@@ -31,18 +31,29 @@ export function waitingOnHuman<
   return asks.filter((ask) => ask.waiting_on === "human" && !isSnoozed(ask));
 }
 
-/** Everything that waits for the viewer themselves - every open ask whose turn is a person's, on
- *  an issue assigned to them (`isMine`, the same rule the list's own filter reads), that they
- *  have not deferred, and every pending credential request they may decide, as its approver or
- *  as anyone signed in - counted, with when the oldest of them began waiting (undefined when
- *  nothing does). The badges and the banner read this one rule, so every count of work waiting
- *  on the reader means the same thing whatever the list on screen is filtered to, and another
- *  kind of waiting item is added here once. A question on nobody's issue, and every document
- *  question (a document has no assignee), is nobody's, so it waits on nobody here. Nothing is
- *  counted until the login resolves: a number taken over the whole inbox while the shell loads
- *  would not be the reader's. A time `compareTimestamps` refuses still counts but is never the
- *  oldest: the broker's `requested_at` reaches here verbatim, and the badges render in the app
- *  shell, outside every page's error boundary, so a throw here would take down every page. */
+/** The one rule for work waiting on the reader themselves: an open ask whose turn is a
+ *  person's and that they have not deferred (`waitingOnHuman`), on an issue assigned to them
+ *  (`isMine`, the same rule the list's own filter reads). A question on nobody's issue, and
+ *  every document question (a document has no assignee), is nobody's, so it waits on nobody
+ *  here. Nobody is the reader until the login resolves, so an unknown viewer is waited on by
+ *  nothing: a list taken over the whole inbox while the shell loads would not be theirs.
+ *  Every count of such work - the badges, the banner, the Agents page's first card number -
+ *  reads this, so they all mean the same thing. */
+export function waitingOnYou(asks: readonly InboxRow[], viewer: string | undefined): InboxRow[] {
+  if (viewer === undefined) return [];
+  return waitingOnHuman(asks).filter((ask) => isMine(ask, viewer));
+}
+
+/** Everything that waits for the viewer themselves - every ask `waitingOnYou` keeps, and every
+ *  pending credential request they may decide, as its approver or as anyone signed in -
+ *  counted, with when the oldest of them began waiting (undefined when nothing does). The
+ *  badges and the banner read this one rule, so every count of work waiting on the reader means
+ *  the same thing whatever the list on screen is filtered to, and another kind of waiting item
+ *  is added here once. Nothing is counted until the login resolves: a number taken over the
+ *  whole inbox while the shell loads would not be the reader's. A time `compareTimestamps`
+ *  refuses still counts but is never the oldest: the broker's `requested_at` reaches here
+ *  verbatim, and the badges render in the app shell, outside every page's error boundary, so a
+ *  throw here would take down every page. */
 function needsYou(
   asks: readonly InboxRow[],
   credentialRequests: readonly CredentialPendingRow[],
@@ -50,9 +61,7 @@ function needsYou(
 ): { count: number; oldest: string | undefined } {
   if (viewer === undefined) return { count: 0, oldest: undefined };
   const since = [
-    ...waitingOnHuman(asks)
-      .filter((ask) => isMine(ask, viewer))
-      .map((ask) => ask.created_at),
+    ...waitingOnYou(asks, viewer).map((ask) => ask.created_at),
     ...credentialRequests.map((request) => request.requested_at),
   ];
   const oldest = since
@@ -67,8 +76,7 @@ function needsYou(
 /** The rail's and the compact top bar's `Needs you N`: the reader's own, over the whole inbox. */
 export function useNeedsYouCount(): number {
   const inbox = useQuery(inboxQuery());
-  // `/auth/whoami` names the person by lowercase email, the form issue assignees carry; until it
-  // answers the rail shows no number rather than one that is not theirs.
+  // Until `/auth/whoami` answers, the rail shows no number rather than one that is not theirs.
   const viewer = useQuery(whoAmIQuery()).data?.login;
   const { requests } = useCredentialRequests();
   return needsYou(inbox.data ?? [], requests, viewer).count;
@@ -107,7 +115,7 @@ export function BlockedOnYou({
   // A count of every waiting ask, not one urgency, so the strip stays structural: the spec
   // reserves the urgency hues for urgency and priority. `w-full` is load-bearing - below
   // 1280 px an unlayered `a:not(.prose a) { display: inline-flex }` in styles.css beats
-  // Tailwind's `block`, and without it the strip sits beside the Mine/Everyone switch.
+  // Tailwind's `block`, and without it the strip sits beside the controls above the list.
   return (
     <Link
       className={`block w-full rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnSurfaceMuted}`}

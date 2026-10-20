@@ -13,7 +13,8 @@ import type {
   InboxRow,
 } from "./types";
 
-/** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it. */
+/** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it; it
+ *  names the person by lowercase email, the form issue assignees carry. */
 export const whoAmIQuery = () =>
   queryOptions({
     queryKey: ["whoami"],

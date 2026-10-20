@@ -65,8 +65,8 @@ export function ProjectPage(): ReactNode {
     queryFn: () => api.getInbox(projectKey),
     enabled: projectKey !== undefined,
   });
-  // Whose questions the pill counts: `/auth/whoami`'s lowercase email, the form issue
-  // assignees carry, as every other surface that counts work waiting on the reader reads it.
+  // Whose questions the pill counts, read as every other surface that counts work waiting on
+  // the reader reads it.
   const viewer = useQuery(whoAmIQuery()).data?.login;
   const projects = useQuery(projectsQuery());
   const project = projects.data?.find((candidate) => candidate.key === route?.project);

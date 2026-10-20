@@ -22,6 +22,7 @@ import {
 } from "../../api/queries";
 import type {
   Agent,
+  InboxRow,
   Message,
   MessageDelivery,
   MessageDeliveryMode,
@@ -65,8 +66,7 @@ import { useHeldSends } from "../conversation/held-sends";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
-import { waitingOnHuman } from "../inbox/BlockedOnYou";
-import { isMine } from "../inbox/sections";
+import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
@@ -106,6 +106,20 @@ function isInactive(agent: Agent, now: number): boolean {
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
 export type NeedsYouBySession = ReadonlyMap<string, number>;
+
+/** Open asks a session authored, tallied by that session's id: the walk both card numbers make
+ *  over the one inbox query, each over the rows it counts (`keep`, every row by default). */
+function tallyBySession(
+  asks: readonly InboxRow[],
+  keep: (ask: InboxRow) => boolean = () => true
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const ask of asks) {
+    if (ask.author.kind !== "session" || !keep(ask)) continue;
+    counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
+  }
+  return counts;
+}
 
 /** Whether Dispatch has heard from the session at all: an event, or an open ask. */
 function hasDispatchSignal(agent: Agent, needsYou: NeedsYouBySession): boolean {
@@ -1078,8 +1092,7 @@ export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
   const inbox = useQuery(inboxQuery());
-  // `/auth/whoami` names the person by lowercase email, the form issue assignees carry; until it
-  // answers no question is counted as the reader's.
+  // Until `/auth/whoami` answers, no question is counted as the reader's.
   const viewer = useQuery(whoAmIQuery()).data?.login;
   const readPinned = useCallback((stored: string | null): readonly string[] => {
     try {
@@ -1097,27 +1110,18 @@ export function AgentsPage(): ReactNode {
   // The first card number: the reader's own work with this session - a question whose next move
   // is a person's, on an issue assigned to them. One meaning for every count of what waits on
   // the reader, wherever it is shown.
-  const needsYouBySession = useMemo(() => {
-    const counts = new Map<string, number>();
-    if (viewer === undefined) return counts;
-    for (const ask of waitingOnHuman(inbox.data ?? [])) {
-      if (ask.author.kind !== "session" || !isMine(ask, viewer)) continue;
-      counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
-    }
-    return counts;
-  }, [inbox.data, viewer]);
+  const needsYouBySession = useMemo(
+    () => tallyBySession(waitingOnYou(inbox.data ?? [], viewer)),
+    [inbox.data, viewer]
+  );
   // The second card number, counted in its own right rather than as what is left of `open_asks`:
   // questions whose next move is the session's, on anybody's issue. A snooze is the reader
   // deferring a question that waits on a person, so it never makes one the agent's move - and
   // the subtraction this replaces counted every snoozed and every other person's question here.
-  const waitingOnAgentBySession = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const ask of inbox.data ?? []) {
-      if (ask.author.kind !== "session" || ask.waiting_on !== "agent") continue;
-      counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
-    }
-    return counts;
-  }, [inbox.data]);
+  const waitingOnAgentBySession = useMemo(
+    () => tallyBySession(inbox.data ?? [], (ask) => ask.waiting_on === "agent"),
+    [inbox.data]
+  );
   // Every issue key an OPEN ask by each session names (`sessionIssueKeys`), for the search box's
   // "issue key" field.
   const issueKeysBySession = useMemo(() => sessionIssueKeys(inbox.data ?? []), [inbox.data]);
