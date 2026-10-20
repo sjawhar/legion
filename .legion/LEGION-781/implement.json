@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-19T23:41:32Z",
+  "completed": "2026-10-20T00:13:59Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "eda1220c12400d1fb297b21efde1150ba031f6fa",
+  "head": "22817ba1d2a3791a0bb228552dd8317403561436",
   "proof": [
+    {
+      "criterion": "The forward merge of main (3442ab02; #2042 phase workers on Claude Code behind a harness abstraction, #2018 the issue's repository in every role's prompt) keeps the spec's design on the merged head: accepting replaces production_check, the legion tool carries the production-check report (pass|pending|fail, no commit), the pending refusal on a phase completion and the architect's issue on request_backward_move - now in the shared executor @legion/pi-shared/legion-phase-ops both hosts (pi-legion, claude-envoy) serve - and every suite the pod can run is green",
+      "surface": "the merged working copy: Go build/vet/test on the pod's Postgres, the four TypeScript packages' bun suites with their pinned description and schema text, claude-envoy's committed bundle check, biome, tsc, the e2e lib suite, and GitHub's mergeability and workflow starts at the pushed head",
+      "command": "jj new legion/LEGION-781 main@origin; jj resolve --list (6 files + 2 moved); go build ./... && go vet -tags e2e ./... && gofmt -l; LEGION_TEST_PG_DSN=... go test -count=1 ./...; bun test (packages/contracts, pi-shared, pi-legion, claude-envoy, scripts/e2e/lib); (cd packages/claude-envoy && bun run build && bun run check-dist); bunx tsc --noEmit -p <each>; bunx biome check .; .github/scripts/check-private-names.sh; gh api repos/sjawhar/legion/pulls/2059 (mergeable); gh api actions/runs?head_sha=22817ba1",
+      "observed": "Conflicts: AGENTS.md, phase.go, effects.go, pi-legion/AGENTS.md, pi-legion/src/tools.ts, skills/legion-architect/SKILL.md (2-sided) and pi-legion/src/handoff-commit{,.test}.ts (deleted on main, moved to pi-shared) - all resolved keeping both sides, tools.ts taken as main's and the branch's behaviors carried into pi-shared/src/legion-phase-ops.ts (+ 3 behaviour tests there: check report with each verdict and its two refusals, pending refused on a phase completion, architect/phase-worker issue rule). go build, go vet -tags e2e, gofmt clean; go test: every package ok except Docker/NATS tests (rootless Docker not found), supervise's two source-reading tests (cgo), runtime/tmux PATH test (no tmux), and launcher's TestAResumeIsToldWhetherItsWorkspaceWasRecreated... which passes under env -u LEGION_WORKSPACE (nil env inherits this pod's workspace variable; file identical to main and branch). bun test: contracts 207, pi-shared 70, pi-legion 491 (skills guard: legion-controller/SKILL.md re-wrapped from the merge's 500th line back to 498), claude-envoy 123 (manifest daemonApiVersion 32 -> 33, schema pin pass|pending|fail, description pin the shared request_backward_move sentence; check-dist clean after build), scripts/e2e/lib 494 pass with only nats-stream's 2 Docker cases failing. tsc per package clean. biome: only main's own 1 warning + 2 infos. GitHub at 22817ba1: mergeable true, Tests 39346167688 / Worker Image 39346167870 / Legion Envoy and Contracts 39346167859 / Docs 39346167840 started, PR Title 39346167906 success. Fingerprint 1322f073... -> faf23906... (changed: the phase ops moved into the shared module), posted at #2059 issuecomment-6280199384",
+      "headSha": "22817ba1d2a3791a0bb228552dd8317403561436",
+      "negativeControl": "Before the merge: git merge-tree of 0ec47d56 with main conflicted in six files and GitHub reported mergeable false/dirty with no workflow run started for eda1220c in 20 minutes; the pre-fix shared-module test run showed exactly the three pins the carry changes (verdict enum, request_backward_move sentence, the pass-or-fail refusal), and claude-envoy's two pins (schema enum, contract 32) failed until the carry and the manifest bump"
+    },
     {
       "criterion": "Done-when 5 (the rig's predicate): claim_states_are holds on the listing a close leaves - the implementer live at its look in ready/working/idle, the five other claims suspended - and refuses one that differs; the tester's red test scripts/e2e/lib/claim-states.test.ts passes unmodified",
       "surface": "the script function itself, extracted by name from scripts/e2e/lib/workflow.sh and run under bash over a claims_list stub answering `legion claims list --json`'s shape (the tester's test), plus jq on a two-claim stub",
@@ -62,12 +70,18 @@
     "packages/daemon/internal/workflow/check.go (new), linger.go, pullrequest.go, resume.go, engine.go; internal/intake/facts.go: the close, looks, reports, wakes, bounds, the linger wait, the boot sweep and compares",
     "packages/daemon/internal/daemon/outbox.go, daemon.go, workflow.go; internal/dispatch/client.go, types.go; cmd/legion/main.go: the check rows' executors, wait.Until in settle, daemon.Build, Dispatch's /healthz build, builtFromRepository, legion state's line",
     "packages/daemon/internal/intake/consume.go, decode.go; internal/api/handoff.go, state.go, version.go (31); internal/projection/project.go; packages/contracts/fixtures/daemon-api/state.json, version.json",
-    "packages/contracts/src/legion-api.ts, dispatch-api.ts; packages/pi-legion/package.json, src/tools.ts, src/handoff-commit.ts",
     "packages/envoy/internal/dispatch/store/migrations/0114_delivery_deployed_event.{up,census}.sql; internal/dispatch/delivery/deployed.go (new), store.go, intake.go, intakes.go, reconcile.go; internal/dispatch/startup/started.go (new); cmd/dispatch/main.go; packages/dispatch/web (event-type enumerations)",
     "skills/legion-worker (SKILL.md, references/merge-gate.md, references/pr-body.md), skills/legion-architect, skills/legion-retro, skills/legion-controller, skills/AGENTS.md; packages/daemon/internal/prompts/{go,roles}; AGENTS.md, README.md; docs/site content and media; packages/{envoy,contracts,pi-legion}/AGENTS.md",
     "packages/envoy/internal/dispatch/store/migrations/0114 (the stamp) + migrate_delivery_deployed_event_test.go; packages/claude-envoy/dist (rebuilt bundle)",
     "round 2: packages/daemon/internal/{record/record.go (ProductionCheck.ID, NamedBy), record/outbox.go (CheckOpenedAt, OpenedAt), intake/facts.go, workflow/check.go, api/handoff.go, daemon/outbox.go} + tests; packages/envoy/internal/dispatch/store/migrate_delivery_deployed_event_test.go; packages/contracts/src/legion-api.ts (comment)",
-    "scripts/e2e/lib/workflow.sh: claim_states_are binds the allowed states before reading the claim's state (round 7)"
+    "scripts/e2e/lib/workflow.sh: claim_states_are binds the allowed states before reading the claim's state (round 7)",
+    "packages/pi-shared/src/legion-phase-ops.ts: the shared executor carries the production-check report (implementer, done, check open: verdict pass|pending|fail required, no READY, no commit), refuses pending on a phase completion, and holds request_backward_move's issue by role (architect requires it; a phase worker leaves it out or names its own) (round 8)",
+    "packages/pi-shared/src/legion-phase-ops.test.ts: three behaviour tests for the carry, pins updated (round 8)",
+    "packages/pi-legion/src/tools.ts: main's shape (the shared executor) with the branch's description text (the shared request_backward_move sentence, sign_off) (round 8)",
+    "packages/pi-legion/src/tools.test.ts: description and schema pins (accepting, pass|pending|fail) (round 8)",
+    "packages/claude-envoy/{package.json,tests/legion-tool.test.ts,CHANGELOG.md,dist/envoy-channel.js,legion/skills/**}: contract 33, pins, rebuilt bundle and skills snapshot (round 8)",
+    "packages/pi-shared/src/handoff-commit{,.test}.ts: the branch's production_check removal carried to the moved module (round 8)",
+    "skills/legion-controller/SKILL.md: the merged bullet re-wrapped under the 500-line guard (round 8)"
   ],
   "trickyParts": [
     "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
@@ -94,16 +108,17 @@
     "round 4: scripts/e2e/stage4b-sandbox-tree.sh's delete_consumers and its comment, plus the handoff, nothing else (no forward merge, no runtime code), so the 2dce61d9 worker image stands for the stage run at this head; scripts/e2e/README.md:1059's 'two durable consumers' wording is the PR body's Fast-follow",
     "round 5: the forward merge of main at a5b302e4 (#2063, e2e scripts only) and the handoff, nothing else; fingerprint db81dd90 \u2192 d21fbe60 (changed by #2063's lines alone), the comment on #2059",
     "round 6: the race fix's shape differs from the one the architect first named (a started channel Run closes and DispatchPosition waits on) because the boot's admission probe reads the position before Run starts (daemon.go:364 vs :1442) and pollHoldRelease runs beside Run; DispatchPosition reads through a fresh stream.Consumer handle instead, which the architect accepted; a change under packages/daemon, so the Worker Image run builds this head's image and Stage 4b runs at this head with it",
-    "Round 7 carries the tester's suggestion no further: naming the claim states in the done checkpoint's failure message (first_look_claims is read only after success) is left out on the architect's ruling that this round is the jq fix, the red test, bash -n and the handoff alone, so the 4ab26ee5 image stands for the stage rerun"
+    "Round 7 carries the tester's suggestion no further: naming the claim states in the done checkpoint's failure message (first_look_claims is read only after success) is left out on the architect's ruling that this round is the jq fix, the red test, bash -n and the handoff alone, so the 4ab26ee5 image stands for the stage rerun",
+    "Round 8 touched one line outside the merge's mechanics: packages/claude-envoy/CHANGELOG.md's unreleased entry said the manifest pins contract 32, which the merge moved to 33 (a sentence about the pin, kept true)"
   ],
   "openQuestions": [
     "Stage 4b's run at 4ab26ee5 by the devbox holder (this head's own worker image): its log tarball on LEGION-781 and its comment on #2059 are what the tester and reviewer wait for",
-    "No pull_request CI run started for eda1220c: GitHub reports mergeable unknown and a local git merge-tree of the head with main (3442ab02) conflicts in AGENTS.md, packages/daemon/internal/phase/phase.go, packages/daemon/internal/workflow/effects.go, packages/pi-legion/AGENTS.md, packages/pi-legion/src/tools.ts and skills/legion-architect/SKILL.md (main took #2042 and #2018 since a5b302e4); the forward merge is the architect's to schedule - after the stage rerun, so the rerun is not interrupted, or before it, which rebuilds the image"
+    "The Go race lane (go test -race ./internal/daemon/ ./internal/record/) cannot run in the pod (no gcc for cgo); Tests run 39346167688's race step is its proof at 22817ba1"
   ],
   "discoveredComplexity": [
     "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 7
+  "round": 8
 }
