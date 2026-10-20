@@ -2,8 +2,11 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,32 +21,50 @@ import (
 )
 
 func TestParseSetupMarker(t *testing.T) {
-	line := "setup:architect:pod-1/3 cwd=/legion/workspaces/sjawhar/legion-smoke/s4a-1 uid=1000 ppid=41 git_from=/tmp helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=failed"
-	got, err := parseSetupMarker(line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := (setupMarker{
+	const head = "setup:architect:pod-1/3 cwd=/legion/workspaces/sjawhar/legion-smoke/s4a-1 uid=1000 ppid=41 git_from=/tmp helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok"
+	want := setupMarker{
 		role: "architect", incarnation: "pod-1/3", cwd: "/legion/workspaces/sjawhar/legion-smoke/s4a-1",
 		uid: "1000", ppid: "41", gitFrom: "/tmp", helper: "expected", helperCount: "1", helperEffective: "1", helperLines: "2",
-		git: "ok", gitWithoutHelper: "failed",
-	}); got != want {
-		t.Errorf("parseSetupMarker(%q) = %#v, want %#v", line, got, want)
+		git: "ok",
+	}
+	for control, detail := range map[string]string{
+		"refused": "",
+		"ok":      "",
+		// A failed control's error runs to the end of the line, spaces and `=` included.
+		"failed": "exit 128: fatal: unable to access 'https://github.com/x/' : Could not resolve host: github.com a=b",
+	} {
+		t.Run(control, func(t *testing.T) {
+			line := head + " git_without_helper=" + control + " git_without_helper_error=" + detail
+			got, err := parseSetupMarker(line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := want
+			want.gitWithoutHelper, want.gitWithoutHelperError = control, detail
+			if got != want {
+				t.Errorf("parseSetupMarker(%q) = %#v, want %#v", line, got, want)
+			}
+		})
 	}
 }
 
 func TestParseSetupMarkerRejectsMalformedRecords(t *testing.T) {
 	const fields = "cwd=/legion uid=1000 ppid=1 git_from=/tmp"
+	const control = " git_without_helper=refused git_without_helper_error="
 	for _, line := range []string{
-		"architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=failed",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 git=ok git_without_helper=failed",
-		"setup:architect:pod-1/3 " + fields + " helper=unknown helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=failed",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=one helper_effective=1 helper_lines=2 git=ok git_without_helper=failed",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=x helper_lines=2 git=ok git_without_helper=failed",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=maybe git_without_helper=failed",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=maybe",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok",
-		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 extra=2 git=ok git_without_helper=failed",
+		"architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok" + control,
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 git=ok" + control,
+		"setup:architect:pod-1/3 " + fields + " helper=unknown helper_count=1 helper_effective=1 helper_lines=2 git=ok" + control,
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=one helper_effective=1 helper_lines=2 git=ok" + control,
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=x helper_lines=2 git=ok" + control,
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=maybe" + control,
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=maybe git_without_helper_error=",
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=refused",
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper_error=",
+		// A failed control names its error, and only a failed one does.
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=failed git_without_helper_error=",
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 helper_lines=2 git=ok git_without_helper=refused git_without_helper_error=exit 128: x",
+		"setup:architect:pod-1/3 " + fields + " helper=expected helper_count=1 helper_effective=1 extra=2 git=ok" + control,
 	} {
 		t.Run(line, func(t *testing.T) {
 			if _, err := parseSetupMarker(line); err == nil {
@@ -65,10 +86,10 @@ func TestLiveSetupCarriesTheRepositoryAsAnArgument(t *testing.T) {
 
 // The setup runs before the agent, in its directory and as its uid, and every git it runs gets the
 // allowlist liveSetupScript names and nothing else: the role's GIT_CONFIG_* entries, its PATH and
-// LEGION_GH_OWNERS_DIR, an empty HOME and the three fixed git variables, whatever else the role's
+// LEGION_GH_OWNERS_DIR, an empty HOME and the four fixed variables, whatever else the role's
 // environment holds.
 func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
-	r := newSetupRig(t, false)
+	r := newSetupRig(t, private)
 	r.roleEnv()
 	global := filepath.Join(r.root, "gitconfig")
 	if err := os.WriteFile(global, []byte("[credential]\n\thelper = !poisoned-global-helper\n"), 0o600); err != nil {
@@ -78,7 +99,7 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 		"GIT_ASKPASS": "must-not-reach-git", "SSH_ASKPASS": "must-not-reach-git",
 		"GH_TOKEN": "must-not-reach-git", "GITHUB_TOKEN": "must-not-reach-git",
 		"GIT_CONFIG_GLOBAL": global, "GIT_CONFIG_PARAMETERS": "'http.extraheader'='Authorization: bearer fake-token'",
-		"HTTPS_PROXY": "http://127.0.0.1:9",
+		"HTTPS_PROXY": "http://127.0.0.1:9", "LC_ALL": "de_DE.UTF-8", "LANG": "de_DE.UTF-8",
 	} {
 		t.Setenv(name, value)
 	}
@@ -102,8 +123,8 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 	if setup.uid != strconv.Itoa(os.Getuid()) {
 		t.Errorf("setup uid %q, want %d", setup.uid, os.Getuid())
 	}
-	if setup.gitFrom != "/tmp" || setup.git != "ok" || setup.gitWithoutHelper != "failed" {
-		t.Errorf("setup git record = from %q, git %q, git_without_helper %q; want /tmp, ok and failed", setup.gitFrom, setup.git, setup.gitWithoutHelper)
+	if setup.gitFrom != "/tmp" || setup.git != "ok" || setup.gitWithoutHelper != "refused" || setup.gitWithoutHelperError != "" {
+		t.Errorf("setup git record = from %q, git %q, git_without_helper %q (%q); want /tmp, ok and refused", setup.gitFrom, setup.git, setup.gitWithoutHelper, setup.gitWithoutHelperError)
 	}
 	if err := setupGitProblem(setup); err != nil {
 		t.Errorf("setupGitProblem = %v, want nil", err)
@@ -135,31 +156,181 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 	}
 }
 
-// The control ls-remote runs with every command-scope helper emptied, so it succeeds only when
-// something other than the role's helper authenticates git. setup-ran requires git=ok and
-// git_without_helper=failed: with no helper both fail, and against a repository that needs no
-// credential both succeed, and each is refused.
+// The control ls-remote runs with every command-scope helper emptied, so on a private repository
+// git must stop for want of a credential. setup-ran requires git=ok and git_without_helper=refused,
+// and names why it refuses anything else: a control that succeeded proves the repository needs no
+// helper, and one that failed for another reason (no DNS, a GitHub 503, its timeout) proves nothing
+// about the helper, so that reason, redacted, is the checkpoint's message.
 func TestLiveSetupNegativeControl(t *testing.T) {
 	for name, tc := range map[string]struct {
-		public, helper        bool
+		network               setupNetwork
+		helper                bool
 		git, gitWithoutHelper string
-		accepted              bool
+		problem               string
 	}{
-		"the role's helper":   {helper: true, git: "ok", gitWithoutHelper: "failed", accepted: true},
-		"no helper":           {git: "failed", gitWithoutHelper: "failed"},
-		"a public repository": {public: true, helper: true, git: "ok", gitWithoutHelper: "ok"},
+		"the role's helper":   {network: private, helper: true, git: "ok", gitWithoutHelper: "refused"},
+		"no helper":           {network: private, git: "failed", gitWithoutHelper: "refused", problem: "with the role's helper: git=failed"},
+		"a public repository": {network: public, helper: true, git: "ok", gitWithoutHelper: "ok", problem: "the negative control succeeded without the role's helper"},
+		"no DNS for the control": {
+			network: unresolved, helper: true, git: "ok", gitWithoutHelper: "failed",
+			problem: "the negative control failed for another reason: exit 128: fatal: unable to access 'https://***@github.com/sjawhar/legion-smoke/': Could not resolve host: github.com",
+		},
+		"a GitHub 503 for the control": {
+			network: serverError, helper: true, git: "ok", gitWithoutHelper: "failed",
+			problem: "the negative control failed for another reason: exit 128: fatal: unable to access 'https://github.com/sjawhar/legion-smoke/': The requested URL returned error: 503",
+		},
+		"the control timed out": {
+			network: timedOut, helper: true, git: "ok", gitWithoutHelper: "failed",
+			problem: "the negative control failed for another reason: exit 124: no stderr",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := newSetupRig(t, tc.public)
+			r := newSetupRig(t, tc.network)
 			if tc.helper {
 				r.roleEnv()
 			}
-			setup := r.probe(r.start)
+			_, lines := r.run(r.start, []string{"/bin/true"})
+			if strings.Contains(strings.Join(lines, "\n"), setupRigOutageToken) || strings.Contains(strings.Join(lines, "\n"), "eyJ") {
+				t.Fatalf("the marker holds the token the control's error carried: %q", lines)
+			}
+			setup := parseSetupMarkerOrFail(t, lines[0])
 			if setup.git != tc.git || setup.gitWithoutHelper != tc.gitWithoutHelper {
 				t.Errorf("git = %q, git_without_helper = %q; want %q and %q", setup.git, setup.gitWithoutHelper, tc.git, tc.gitWithoutHelper)
 			}
-			if err := setupGitProblem(setup); (err == nil) != tc.accepted {
-				t.Errorf("setupGitProblem = %v, want accepted %t", err, tc.accepted)
+			err := setupGitProblem(setup)
+			switch {
+			case tc.problem == "" && err != nil:
+				t.Errorf("setupGitProblem = %v, want nil", err)
+			case tc.problem != "" && (err == nil || !strings.Contains(err.Error(), tc.problem)):
+				t.Errorf("setupGitProblem = %v, want an error containing %q", err, tc.problem)
+			}
+		})
+	}
+}
+
+// git's own refusal, when it stops for want of a credential, is the one text liveSetupControlClass
+// reads as `refused`. A local server answers every request 401 with a Basic challenge, as GitHub
+// answers a private repository with no credential, and the real git, under the control's own
+// variables (GIT_TERMINAL_PROMPT=0, LC_ALL=C, no helper), says:
+//
+//	fatal: could not read Username for 'http://127.0.0.1:<port>': terminal prompts disabled
+//
+// and, when the request already names a username (credential.username), `Password` for
+// 'http://<user>@127.0.0.1:<port>'. Both read as `refused`, and a closed port, git's failure to
+// connect, reads as `failed`.
+func TestGitRefusalReadsAsRefused(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Basic realm="GitHub"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closedURL := closed.URL
+	closed.Close()
+	home := t.TempDir()
+	for name, tc := range map[string]struct {
+		url    string
+		config []string
+		first  string
+		class  string
+	}{
+		"no username": {
+			url:   server.URL + "/sjawhar/legion-smoke",
+			first: "fatal: could not read Username for '" + server.URL + "': terminal prompts disabled",
+			class: "refused",
+		},
+		"a username and no password": {
+			url:    server.URL + "/sjawhar/legion-smoke",
+			config: commandConfig([2]string{"credential.username", "x-access-token"}),
+			first:  "fatal: could not read Password for '" + strings.Replace(server.URL, "://", "://x-access-token@", 1) + "': terminal prompts disabled",
+			class:  "refused",
+		},
+		"a closed port": {
+			url:   closedURL + "/sjawhar/legion-smoke",
+			class: "failed",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command(realGit, "ls-remote", tc.url, "HEAD")
+			cmd.Dir = t.TempDir()
+			cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"}, tc.config...)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			status := 0
+			if err := cmd.Run(); err != nil {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) {
+					t.Fatalf("run git: %v", err)
+				}
+				status = exit.ExitCode()
+			}
+			first, _, _ := strings.Cut(stderr.String(), "\n")
+			if tc.first != "" && first != tc.first {
+				t.Errorf("git's first stderr line = %q, want %q", first, tc.first)
+			}
+			class, detail := controlClass(t, status, stderr.String())
+			if class != tc.class {
+				t.Errorf("control class = %q (%q), want %q, for exit %d and stderr %q", class, detail, tc.class, status, stderr.String())
+			}
+		})
+	}
+}
+
+// controlClass runs liveSetupControlClass alone on a control's exit status and stderr, and returns
+// its git_without_helper and git_without_helper_error.
+func controlClass(t *testing.T, status int, stderr string) (string, string) {
+	t.Helper()
+	script := "status=$1\ncontrol=$2\n" + liveSetupControlClass + `printf '%s\n%s\n' "$git_without_helper" "$git_without_helper_error"`
+	out, err := exec.Command("/bin/sh", "-c", script, "control-class", strconv.Itoa(status), strings.TrimRight(stderr, "\n")).Output()
+	if err != nil {
+		t.Fatalf("run liveSetupControlClass: %v", err)
+	}
+	class, detail, _ := strings.Cut(strings.TrimSuffix(string(out), "\n"), "\n")
+	return class, detail
+}
+
+// A failed control's error is git's first stderr line with control characters removed, and a
+// GitHub token, a JWT and a URL's user info each replaced by `***`, since the marker is read with
+// kubectl exec and printed in the run's log.
+func TestLiveSetupControlErrorIsRedacted(t *testing.T) {
+	for name, tc := range map[string]struct{ stderr, want string }{
+		"a stateless installation token": {
+			stderr: "fatal: unable to access 'https://github.com/x/': token " + setupRigOutageToken + " expired",
+			want:   "exit 128: fatal: unable to access 'https://github.com/x/': token ghs_*** expired",
+		},
+		"a personal access token": {
+			stderr: "fatal: auth ghp_EXAMPLEtoken0123456789abcdefghijklmn rejected",
+			want:   "exit 128: fatal: auth ghp_*** rejected",
+		},
+		"a bare JWT": {
+			stderr: "fatal: bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln refused",
+			want:   "exit 128: fatal: bearer *** refused",
+		},
+		"user info in a URL": {
+			stderr: "fatal: unable to access 'https://x-access-token:s3cret@github.com/x/': Could not resolve host: github.com",
+			want:   "exit 128: fatal: unable to access 'https://***@github.com/x/': Could not resolve host: github.com",
+		},
+		"only the first line": {
+			stderr: "fatal: first\nfatal: second ghp_EXAMPLEtoken0123456789abcdefghijklmn",
+			want:   "exit 128: fatal: first",
+		},
+		"control characters": {
+			stderr: "fatal: \x1b[31mred\x1b[0m\tline",
+			want:   "exit 128: fatal: [31mred[0mline",
+		},
+		"nothing on stderr": {
+			stderr: "",
+			want:   "exit 128: no stderr",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			class, detail := controlClass(t, 128, tc.stderr)
+			if class != "failed" || detail != tc.want {
+				t.Errorf("control = %q, %q; want failed, %q", class, detail, tc.want)
 			}
 		})
 	}
@@ -177,13 +348,13 @@ func TestLiveSetupIgnoresTheRoleEnvironmentGitVariables(t *testing.T) {
 		"another helper":    {helper: "!different git-credential", class: "other", git: "failed"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := newSetupRig(t, false)
+			r := newSetupRig(t, private)
 			clone := r.configuredClone()
 			r.roleEnv()
 			t.Setenv("GIT_CONFIG_VALUE_1", tc.helper)
 			clean := r.probe(clone)
-			if clean.helper != tc.class || clean.git != tc.git || clean.gitWithoutHelper != "failed" {
-				t.Fatalf("clean record = helper %q, git %q, git_without_helper %q; want %q, %q and failed", clean.helper, clean.git, clean.gitWithoutHelper, tc.class, tc.git)
+			if clean.helper != tc.class || clean.git != tc.git || clean.gitWithoutHelper != "refused" {
+				t.Fatalf("clean record = helper %q, git %q, git_without_helper %q; want %q, %q and refused", clean.helper, clean.git, clean.gitWithoutHelper, tc.class, tc.git)
 			}
 			cleanEnv := r.environments()
 			for poison, variables := range r.poisons() {
@@ -208,7 +379,7 @@ func TestLiveSetupIgnoresTheRoleEnvironmentGitVariables(t *testing.T) {
 // whose value forges two command-scope records, an empty reset and Legion's helper, reads as the one
 // local record it is.
 func TestLiveSetupReadsEachConfigRecordWhole(t *testing.T) {
-	r := newSetupRig(t, false)
+	r := newSetupRig(t, private)
 	clone := r.plainClone()
 	forged := "x\ncommand\tcredential.https://github.com.helper \ncommand\tcredential.https://github.com.helper " + workspace.GitHubCredentialHelper
 	r.git("-C", clone, "config", "credential.helper", forged)
@@ -220,7 +391,7 @@ func TestLiveSetupReadsEachConfigRecordWhole(t *testing.T) {
 
 func TestLiveSetupNeverRecordsAHelperValue(t *testing.T) {
 	const poison = "not-a-real-token"
-	r := newSetupRig(t, false)
+	r := newSetupRig(t, private)
 	r.roleEnv()
 	t.Setenv("GIT_CONFIG_VALUE_1", workspace.GitHubCredentialHelper+"\tfuture="+poison)
 	stderr, lines := r.run(r.start, []string{"/bin/true"})
@@ -248,7 +419,7 @@ func TestLiveSetupNeverRecordsAHelperValue(t *testing.T) {
 // Every role container sets XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
 // global scope when GIT_CONFIG_GLOBAL is unset, so a helper written there must not count.
 func TestLiveSetupIgnoresTheXDGGlobalConfig(t *testing.T) {
-	r := newSetupRig(t, false)
+	r := newSetupRig(t, private)
 	xdg := filepath.Join(r.root, "xdg")
 	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o700); err != nil {
 		t.Fatal(err)
@@ -270,7 +441,7 @@ func TestLiveSetupClassifiesGitCredentialEnv(t *testing.T) {
 		"a changed helper":   true,
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := newSetupRig(t, false)
+			r := newSetupRig(t, private)
 			r.roleEnv()
 			if changed {
 				t.Setenv("GIT_CONFIG_VALUE_1", "!different git-credential")
@@ -333,7 +504,7 @@ func TestLiveSetupClassifiesEffectiveRepositoryHelpers(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			r := newSetupRig(t, false)
+			r := newSetupRig(t, private)
 			clone := r.configuredClone()
 			tc.configure(t, r, clone)
 			setup := r.probe(clone)
@@ -405,20 +576,44 @@ func TestGitCredentialHelperURLForms(t *testing.T) {
 // rig names. The fake ls-remote succeeds when the configuration it reads, as a real ls-remote does
 // (never through GIT_CONFIG), names an http.extraHeader for github.com, or when the real git's
 // `credential fill` for sjawhar/legion-smoke, run with the environment the probe gave it, returns
-// a password; otherwise it fails as git does against a private repository. Each fake call records
-// its environment, its HOME's emptiness and its directory under the rig's audit directory.
+// a password. Otherwise it ends as the rig's network says: as git refuses a private repository with
+// no credential (TestGitRefusalReadsAsRefused quotes that text from the real git), or as git fails
+// when the host does not resolve, or on a GitHub 5xx. Each fake call records its environment, its
+// HOME's emptiness and its directory under the rig's audit directory.
 type setupRig struct {
 	t                               *testing.T
 	root, start, bin, audit, owners string
 	marker, realGit                 string
 }
 
+// setupNetwork is how the rig's fake ls-remote ends when nothing authenticates it. The three
+// outages start after the helper's ls-remote has passed, so only the negative control meets them.
+type setupNetwork string
+
+const (
+	// private is GitHub answering a private repository 401: git stops for want of a credential.
+	private setupNetwork = "private"
+	// public is a repository anyone may read: every ls-remote succeeds.
+	public setupNetwork = "public"
+	// unresolved is a DNS outage: the control never reaches GitHub.
+	unresolved setupNetwork = "unresolved"
+	// serverError is GitHub answering the control 503.
+	serverError setupNetwork = "server-error"
+	// timedOut is the control outliving its `timeout 60`, which kills git and exits 124 with
+	// nothing on stderr.
+	timedOut setupNetwork = "timed-out"
+)
+
 const setupRigToken = "fake-installation-token"
+
+// setupRigOutageToken is a GitHub-token-shaped string the rig's outage errors carry, so a test
+// can see the control's recorded error never holds it.
+const setupRigOutageToken = "ghs_1234567_eyJhbGciOiJSUzI1NiJ9.eyJpbnN0YWxsYXRpb25faWQiOjF9.c2lnbmF0dXJl"
 
 const setupRigGit = `#!/bin/sh
 real=%s
 audit=%s
-public=%s
+network=%s
 environment() {
   env | grep -v -E '^(PWD|SHLVL|OLDPWD|_|HOME)=' | LC_ALL=C sort
 }
@@ -437,11 +632,32 @@ ls-remote)
   environment >"$audit/ls-remote-$n-env"
   home >"$audit/ls-remote-$n-home"
   pwd >"$audit/ls-remote-$n-cwd"
-  if [ -z "$public" ]; then
+  if [ "$n" -gt 1 ]; then
+    case $network in
+    unresolved)
+      echo "fatal: unable to access 'https://x-access-token:%s@github.com/sjawhar/legion-smoke/': Could not resolve host: github.com" >&2
+      exit 128
+      ;;
+    server-error)
+      echo "fatal: unable to access 'https://github.com/sjawhar/legion-smoke/': The requested URL returned error: 503" >&2
+      exit 128
+      ;;
+    timed-out)
+      exit 124
+      ;;
+    esac
+  fi
+  if [ "$network" != public ]; then
     header=$(env -u GIT_CONFIG "$real" config --get-urlmatch http.extraheader https://github.com/ 2>/dev/null) || header=
     if [ -z "$header" ]; then
-      answer=$(printf 'protocol=https\nhost=github.com\npath=sjawhar/legion-smoke.git\n\n' | "$real" credential fill 2>/dev/null) || exit 128
-      case $answer in *password=?*) ;; *) exit 128 ;; esac
+      answer=$(printf 'protocol=https\nhost=github.com\npath=sjawhar/legion-smoke.git\n\n' | "$real" credential fill 2>/dev/null) || answer=
+      case $answer in
+      *password=?*) ;;
+      *)
+        echo "fatal: could not read Username for 'https://github.com/sjawhar/legion-smoke': terminal prompts disabled" >&2
+        exit 128
+        ;;
+      esac
     fi
   fi
   printf '0123456789012345678901234567890123456789\tHEAD\n'
@@ -460,7 +676,7 @@ cat >/dev/null
 printf 'username=x-access-token\npassword=%s\n'
 `
 
-func newSetupRig(t *testing.T, public bool) *setupRig {
+func newSetupRig(t *testing.T, network setupNetwork) *setupRig {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -477,12 +693,8 @@ func newSetupRig(t *testing.T, public bool) *setupRig {
 			t.Fatal(err)
 		}
 	}
-	publicFlag := ""
-	if public {
-		publicFlag = "1"
-	}
 	scripts := map[string]string{
-		"git":    fmt.Sprintf(setupRigGit, shellQuote(realGit), shellQuote(r.audit), publicFlag),
+		"git":    fmt.Sprintf(setupRigGit, shellQuote(realGit), shellQuote(r.audit), network, setupRigOutageToken),
 		"legion": fmt.Sprintf(setupRigLegion, shellQuote(r.owners), setupRigToken),
 	}
 	for name, script := range scripts {
@@ -631,7 +843,7 @@ func (r *setupRig) wantEnvironment(withoutHelper bool) []string {
 	env := []string{
 		"PATH=" + r.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"LEGION_GH_OWNERS_DIR=" + r.owners,
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C",
 		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(gitCredentialPairs)),
 	}
 	for i, pair := range gitCredentialPairs {

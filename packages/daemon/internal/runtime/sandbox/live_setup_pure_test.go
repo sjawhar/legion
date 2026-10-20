@@ -5,6 +5,7 @@ package sandbox
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -26,7 +27,8 @@ import (
 //     command-scope entries (gitCredentialEnv);
 //   - HOME at an empty temporary directory, GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1,
 //     so git reads no global, XDG or system configuration;
-//   - GIT_TERMINAL_PROMPT=0, so a missing credential fails rather than prompts.
+//   - GIT_TERMINAL_PROMPT=0, so a missing credential fails rather than prompts;
+//   - LC_ALL=C, so git words that failure as liveSetupControlClass reads it.
 //
 // git builds one helper list for a request from credential.helper and every credential.<url>.helper
 // whose URL matches it, in its read order (system, global, local, worktree, command), and an empty
@@ -39,8 +41,10 @@ import (
 // of entries after the last reset, and the list is `expected` when it is exactly one entry,
 // `!legion git-credential` under one of those two keys at command scope, where gitCredentialEnv
 // puts it. The negative control runs the same ls-remote with every command-scope helper value
-// emptied, gitCredentialEnv's GIT_CONFIG_VALUE_1 among them: legion-smoke is private, so it must
-// fail, and git=ok is then the helper's doing.
+// emptied, gitCredentialEnv's GIT_CONFIG_VALUE_1 among them, and liveSetupControlClass reads how
+// it ended: legion-smoke is private, so it must be refused for want of a credential, and git=ok is
+// then the helper's doing. A control that failed for any other reason (no network, a GitHub
+// error, a timeout) proves nothing, and its record says so.
 const liveSetupScript = `set -eu
 cwd=$(pwd -P)
 uid=$(id -u)
@@ -62,7 +66,7 @@ probe_git() {
     set -- "GIT_CONFIG_KEY_$i=$key" "GIT_CONFIG_VALUE_$i=$value" "$@"
   done
   env -i PATH="$PATH" LEGION_GH_OWNERS_DIR="${LEGION_GH_OWNERS_DIR-}" HOME="$home" \
-    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 LC_ALL=C \
     GIT_CONFIG_COUNT="$count" "$@"
 }
 soh=$(printf '\001')
@@ -123,16 +127,37 @@ else
   git=failed
 fi
 without_helper=1
-if (cd /tmp && probe_git timeout 60 git ls-remote "$1" HEAD >/dev/null 2>&1); then
+status=0
+control=$(cd /tmp && probe_git timeout 60 git ls-remote "$1" HEAD 2>&1 >/dev/null) || status=$?
+` + liveSetupControlClass + `printf 'setup:%s:%s/%s cwd=%s uid=%s ppid=%s git_from=/tmp helper=%s helper_count=%s helper_effective=%s helper_lines=%s git=%s git_without_helper=%s git_without_helper_error=%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" "$cwd" "$uid" "$PPID" "$helper_class" "$helper_count" "$helper_effective" "$helper_lines" "$git" "$git_without_helper" "$git_without_helper_error" >>"$LEGION_E2E_MARKER"
+`
+
+// liveSetupControlClass reads how the negative control's ls-remote ended, from its exit status
+// ($status) and what it wrote to stderr ($control), into git_without_helper and
+// git_without_helper_error. `ok` is a success. `refused` is git stopping for want of a credential:
+// with no helper and GIT_TERMINAL_PROMPT=0, git 2.43 answers a 401 with `fatal: could not read
+// Username for '<url>': terminal prompts disabled`, or `Password` when it already has a username
+// (TestGitRefusalReadsAsRefused holds the local git to both). GitHub answers 401 for a repository
+// it hides as well as for a private one, but the ls-remote before the control read this one with
+// the role's helper. Anything else is `failed`: git_without_helper_error is then its exit status
+// and first stderr line, with control characters removed and a GitHub token, a JWT and a URL's
+// user info each replaced by `***`.
+const liveSetupControlClass = `git_without_helper_error=
+if [ "$status" -eq 0 ]; then
   git_without_helper=ok
+elif printf '%s\n' "$control" | grep -q -E '^fatal: could not read (Username|Password) for '"'"'[^'"'"']*'"'"': terminal prompts disabled$'; then
+  git_without_helper=refused
 else
   git_without_helper=failed
+  first=$(printf '%s\n' "$control" | sed -n 1p | tr -d '\000-\037\177' |
+    sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_.-]+/\1***/g; s/eyJ[A-Za-z0-9_.-]+/***/g; s#(://)[^/@[:space:]]+@#\1***@#g')
+  git_without_helper_error="exit $status: ${first:-no stderr}"
 fi
-printf 'setup:%s:%s/%s cwd=%s uid=%s ppid=%s git_from=/tmp helper=%s helper_count=%s helper_effective=%s helper_lines=%s git=%s git_without_helper=%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" "$cwd" "$uid" "$PPID" "$helper_class" "$helper_count" "$helper_effective" "$helper_lines" "$git" "$git_without_helper" >>"$LEGION_E2E_MARKER"
 `
 
 type setupMarker struct {
-	role, incarnation, cwd, uid, ppid, gitFrom, helper, helperCount, helperEffective, helperLines, git, gitWithoutHelper string
+	role, incarnation, cwd, uid, ppid, gitFrom, helper, helperCount, helperEffective, helperLines, git string
+	gitWithoutHelper, gitWithoutHelperError                                                            string
 }
 
 // liveSetup is the argv each Stage 4a role's start wrapper runs before its stub agent. The
@@ -142,9 +167,15 @@ func liveSetup(repo ghrepo.Repository) []string {
 }
 
 // parseSetupMarker parses the one setup line a role appends to the marker the stub agent later
-// appends its role:incarnation line to. It contains no credential or raw command output.
+// appends its role:incarnation line to. It holds no credential or helper text. Its one piece of
+// command output, a failed control's first stderr line, is redacted (liveSetupControlClass) and
+// is its last field, git_without_helper_error, which runs to the end of the line.
 func parseSetupMarker(line string) (setupMarker, error) {
-	fields := strings.Fields(line)
+	head, controlError, found := strings.Cut(line, " git_without_helper_error=")
+	if !found {
+		return setupMarker{}, fmt.Errorf("setup marker %q has no git_without_helper_error", line)
+	}
+	fields := strings.Fields(head)
 	if len(fields) != 11 || !strings.HasPrefix(fields[0], "setup:") {
 		return setupMarker{}, fmt.Errorf("setup marker %q is not one setup record", line)
 	}
@@ -152,7 +183,7 @@ func parseSetupMarker(line string) (setupMarker, error) {
 	if !found || role == "" || incarnation == "" {
 		return setupMarker{}, fmt.Errorf("setup marker %q has no role and incarnation", line)
 	}
-	marker := setupMarker{role: role, incarnation: incarnation}
+	marker := setupMarker{role: role, incarnation: incarnation, gitWithoutHelperError: controlError}
 	for _, field := range fields[1:] {
 		name, value, found := strings.Cut(field, "=")
 		if !found || value == "" {
@@ -216,10 +247,14 @@ func parseSetupMarker(line string) (setupMarker, error) {
 	if marker.cwd == "" || marker.uid == "" || marker.ppid == "" || marker.gitFrom == "" || marker.helper == "" || marker.helperCount == "" || marker.helperEffective == "" || marker.helperLines == "" {
 		return setupMarker{}, fmt.Errorf("setup marker %q is incomplete", line)
 	}
-	for _, outcome := range []string{marker.git, marker.gitWithoutHelper} {
-		if outcome != "ok" && outcome != "failed" {
-			return setupMarker{}, fmt.Errorf("setup marker %q has git outcome %q, want ok or failed", line, outcome)
-		}
+	if marker.git != "ok" && marker.git != "failed" {
+		return setupMarker{}, fmt.Errorf("setup marker %q has git outcome %q, want ok or failed", line, marker.git)
+	}
+	if !slices.Contains([]string{"ok", "refused", "failed"}, marker.gitWithoutHelper) {
+		return setupMarker{}, fmt.Errorf("setup marker %q has git_without_helper %q, want ok, refused or failed", line, marker.gitWithoutHelper)
+	}
+	if (marker.gitWithoutHelper == "failed") != (marker.gitWithoutHelperError != "") {
+		return setupMarker{}, fmt.Errorf("setup marker %q has git_without_helper %s with git_without_helper_error %q: a failed control names its error, and only it does", line, marker.gitWithoutHelper, marker.gitWithoutHelperError)
 	}
 	if marker.helper != "expected" && marker.helper != "other" {
 		return setupMarker{}, fmt.Errorf("setup marker %q has helper classification %q", line, marker.helper)
@@ -242,11 +277,18 @@ func setupHelperProblem(marker setupMarker) error {
 }
 
 // setupGitProblem is nil when the ls-remote from /tmp, outside any clone, succeeded with the role's
-// helper and the same ls-remote without it failed: then the private repository was read through
-// that helper.
+// helper and the same ls-remote without it was refused for want of a credential: then the private
+// repository was read through that helper. A control that failed for another reason names that
+// reason, so an outage reads as an outage.
 func setupGitProblem(marker setupMarker) error {
-	if marker.gitFrom == "/tmp" && marker.git == "ok" && marker.gitWithoutHelper == "failed" {
+	switch {
+	case marker.gitFrom != "/tmp" || marker.git != "ok":
+		return fmt.Errorf("setup ls-remote from %s with the role's helper: git=%s, want /tmp and ok", marker.gitFrom, marker.git)
+	case marker.gitWithoutHelper == "refused":
 		return nil
+	case marker.gitWithoutHelper == "failed":
+		return fmt.Errorf("the negative control failed for another reason: %s", marker.gitWithoutHelperError)
+	default:
+		return fmt.Errorf("the negative control succeeded without the role's helper (git_without_helper=%s), want refused: the repository does not need the helper's credential", marker.gitWithoutHelper)
 	}
-	return fmt.Errorf("setup ls-remote from %s: git=%s with the role's helper and git_without_helper=%s without it, want /tmp, ok and failed", marker.gitFrom, marker.git, marker.gitWithoutHelper)
 }
