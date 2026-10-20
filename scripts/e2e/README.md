@@ -1733,28 +1733,30 @@ LEGION_E2E_IMAGE=<worker image@sha256> bash scripts/e2e/burstable-kind.sh     # 
 Runs on an amd64 (x86_64) Linux host only: the gVisor release it installs and the static test binary
 it builds are amd64. Needs `docker`, `go`, `kubectl`, `curl`, `zstd`, a `tar` that supports `--zstd`
 (GNU tar 1.31 or later) and `kind` (`LEGION_E2E_KIND` names the binary when it is not on `PATH`).
-It creates a kind cluster of its own, `legion-burstable-<pid>`, whose kubeconfig
-is a file in the run's work directory: every `kubectl` call names that file and the cluster's
-`kind-…` context, and the Go driver refuses any other context, so the caller's kubeconfig and its
-current context are never read. The cluster is deleted on any exit.
+Its cluster is [`lib/kind-sandbox.sh`](#libkind-sandboxsh)'s, `legion-burstable-<pid>`, whose
+kubeconfig is a file in the run's work directory: every `kubectl` call names that file and the
+cluster's `kind-…` context, and the Go driver refuses any other context, so the caller's kubeconfig
+and its current context are never read. The cluster is deleted on any exit.
 
 | check | what it holds |
 | :--- | :--- |
-| `cluster` | the kind cluster, its one node labelled `legion.dev/pool=legion`, the `legion` namespace and the `standard` storage class |
-| `agent-sandbox` | Agent Sandbox v1.0.3's release manifest, pinned by sha256, applied and its controller rolled out |
-| `gvisor` | gVisor's dated release, pinned by sha512, installed into the node's containerd as the `runsc` handler with a `gvisor` RuntimeClass; a `runtimeClassName: gvisor` pod's `dmesg` says `Starting gVisor` |
-| `launch` | `TestBurstableRoleRendersABurstablePodLive` (`internal/daemon/burstable_live_test.go`, `-tags e2e`), built as a static test binary and run in a container on the kind network, writes two `legion.yaml` files, reads each with the daemon's loader, translates it with `sandboxOptions`, runs the cluster check, and launches one issue's root through the Sandbox runtime's `Spawn` on a worker stream bound to that container's address (pods reach the kind network's containers, while a host firewall can keep them from the host itself); it holds the implementer container to the file's request and limit and the pod to its QoS class |
+| `cluster`, `agent-sandbox`, `gvisor` | the lib's: the kind cluster, its one node labelled `legion.dev/pool=legion`, the `legion` namespace and the `standard` storage class; Agent Sandbox v1.0.3's release manifest, pinned by sha256, applied and its controller rolled out; gVisor's dated release, pinned by sha512, installed into the node's containerd as the `runsc` handler with a `gvisor` RuntimeClass, and a `runtimeClassName: gvisor` pod's `dmesg` says `Starting gVisor` |
+| `image` | the worker image, pulled into the node's containerd by digest |
+| `launch` | `TestBurstableRoleRendersABurstablePodLive` (`internal/daemon/burstable_live_test.go`, `-tags e2e`), built as a static test binary and run in a container on the kind network, writes two `legion.yaml` files, reads each with the daemon's loader, translates it with `sandboxOptions`, runs the cluster check, and launches one issue's root through the Sandbox runtime's `Spawn` on a worker stream bound to that container's address (pods reach the kind network's containers, while a host firewall can keep them from the host itself); the launch makes the repository's cache first, as every issue pod's does; it holds the implementer container to the file's request and limit and the pod to its QoS class |
 | `qos-class` | `kubectl get pod <pod> -o jsonpath='{.status.qosClass}'` reads `Burstable` for the file with `implementer: {memory: 32Gi, memory_request: 8Gi}` and `Guaranteed` for the file with no `resources` block; each pod is `PodScheduled=True` under `runtimeClassName: gvisor`, and its manifest is kept as evidence |
 | `check-config` | `legion start --check-config` passes both files, printing the `resources: Burstable roles …` line for the first and none for the second, and refuses `memory_request: 40Gi` (`… exceeds memory 32Gi`) and `memory_request: lots` (`… must be a positive Kubernetes quantity …`) with exit 1 |
 
 What the proof stands in for lies outside the reservation path: each role's agent is a sleep stub,
 so nothing dials a model, Dispatch or NATS (their addresses in the files are documentation
-placeholders); the store answers as the daemon's does for an issue's first launch; the repository
-is a public one GitHub clones without asking for the placeholder provisioning token; and the
-roles' gh files hold a placeholder token. The pod's reservation, its admission, scheduling and QoS
-class, Agent Sandbox's pod and gVisor are the real ones. `BURSTABLE_EVIDENCE_DIR` (default a fresh
-`/tmp` directory, kept and printed) keeps the transcript, both `legion.yaml` files and each pod's
-manifest as the API server holds it.
+placeholders); the store answers as the daemon's does for an issue's first launch; the mapping
+names one public repository, which GitHub clones for its cache without asking for the placeholder
+provisioning token; and the roles' gh files hold a placeholder token. The pod's reservation, its
+admission, scheduling and QoS class, Agent Sandbox's pod and gVisor are the real ones.
+`burstable_kind_test.go`, untagged, builds both files through the loader and each runtime through
+`sandboxOptions` and `sandbox.New` on every `go test`, so a contract change that refuses either
+fails CI, not the next live run. `BURSTABLE_EVIDENCE_DIR` (default a fresh `/tmp` directory, kept
+and printed) keeps the transcript, both `legion.yaml` files and each pod's manifest as the API
+server holds it.
 
 ## controller-sweep-kind.sh
 
@@ -2605,7 +2607,7 @@ The caller sets `op`, `note`, `fail` (from `lib/namespace-rig.sh`, sourced first
 ## lib/kind-sandbox.sh
 
 A throwaway kind cluster running Agent Sandbox's controller under gVisor, for a live proof of the
-Sandbox runtime on an amd64 Linux host. `controller-sweep-kind.sh` sources it.
+Sandbox runtime on an amd64 Linux host. `burstable-kind.sh` and `controller-sweep-kind.sh` source it.
 
 ```sh
 . "$root/scripts/e2e/lib/kind-sandbox.sh"     # sourced, never run
