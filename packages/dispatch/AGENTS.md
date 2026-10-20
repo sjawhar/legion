@@ -754,7 +754,7 @@ bun run build:web
 bun run check:classes
 bun run typecheck
 bun run lint
-bun test
+bun run test
 bun run dispatch:local
 ```
 
