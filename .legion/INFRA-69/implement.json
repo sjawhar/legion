@@ -2,52 +2,53 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-69",
-  "completed": "2026-10-20T23:40:00Z",
-  "round": 2,
+  "completed": "2026-10-21T00:05:00Z",
+  "round": 3,
   "answeredFailures": [
-    "Failure 1 (blocking): the note's Evidence said `du` reports 0 blocks for such a file on this gVisor overlay, so `df` is the instrument and `du` is not. Measured false. Fixed at 76e516e3e34bd0c584ac4bf719963d0203da116c: the note now says `du` pointed at a path reports the file normally, that the blind instrument is the one-filesystem walk `du -x` (a written file reports a different device from its parent on this overlay, so `du -x` skips it), and names what a reader should run — `du -sh ~/.cache` without `-x` for a directory, `df -k --output=used /` for the whole container filesystem — and what to avoid, `du -x` and `df -x`.",
-    "Failure 2: the not-charged list called all five of /home/legion/.config, /var/run/legion/private, /var/run/legion/state, /var/run/legion/launcher and /var/run/legion/gh 'in-memory directories'. Fixed: the three emptyDirs are named as in-memory emptyDirs mounting tmpfs rw, and /var/run/legion/launcher and /var/run/legion/gh as read-only credential mounts (Secret volumes, 9p ro) a reader cannot write to at all. Their not-charged verdict is unchanged, which is what the tester found too.",
-    "Failure 3: 'A habit of \"put the big download in /tmp\" is evicted for here' was ungrammatical. Fixed: 'gets the pod evicted here'; the rest of the sentence is byte-identical.",
-    "No permanent test was added, as the tester and the architect both judged: a grep over prose is a source-text test this repository's conventions forbid, the repository has no checker over docs/solutions/, and each finding's re-runnable command is the evidence."
+    "Failure 1: the corrected `du` bullet ended '`du -x` and `df -x` are the ones to avoid here', putting `df -x` beside `du -x` as a one-filesystem walk. GNU df has no such flag. Fixed at 04589b7aa2ec80e06846eeeac347476d6df3c44a: `du -x` stays named as the blind walk, which is measured, and the `df -x` half is replaced by the real caveat — df answers for the filesystem that holds the path it is given, so a path under a volume measures that volume and says nothing about the 1 GiB container-filesystem budget, while a path the container filesystem itself holds names `/`, the budgeted one.",
+    "Failure 2: the bullet closed 'Verified twice, in two different role containers of this pod, and it is how the 4.4 GiB of Go caches quoted above was found.' The attribution is not in the record. Fixed: the clause is deleted and nothing replaces it; 'Verified twice, in two different role containers of this pod.' stands, and the 4.4 GiB figure keeps its place in the Evidence paragraph above, which is what the record does support.",
+    "The same `df -x` clause was in the pull request body's `E2E (implementer)` line, which squashes into main's commit message, and is corrected there too.",
+    "No permanent test, for the reasons the tester, the architect and this role have already recorded: a grep over prose is a source-text test this repository's conventions forbid, and the repository has no checker over docs/solutions/."
   ],
   "proof": [
     {
-      "criterion": "Failure 1's correction is the measured one: `du` sees these files and `du -x` does not, so the note names the instrument a reader should actually use.",
-      "surface": "A live Legion role container — this issue's own implementer container in its Agent Sandbox pod — independently of the tester's container, which measured the same thing on its own overlay.",
-      "command": "dd if=/dev/zero of=/tmp/probe bs=1M count=200; stat -c 'blocks=%b dev=%d' /tmp/probe; stat -c 'dev=%d' /tmp; du -sk /tmp/probe; du -sk /tmp; du -sx -k /; du -x -a -d1 -k / | grep -w /tmp; mkdir -p /home/legion/.cache/probe && dd if=/dev/zero of=/home/legion/.cache/probe/f bs=1M count=200; stat -c 'dev=%d' /home/legion/.cache /home/legion/.cache/probe/f; du -sx -k /home; du -sh /home/legion/.cache",
-      "observed": "stat prints blocks=409600 dev=112 for the file against dev=114 for its parent /tmp; du -sk /tmp/probe prints 204800 and du -sk /tmp prints 217364, so du pointed at the path sees the whole file. du -sx -k / stays 42348 across the write and du -x -a -d1 -k / prints 0 for /tmp. The same holds from the home directory: the file written under /home/legion/.cache reports dev=112 against the directory's dev=114, du -sx -k /home stays 13516 with 200 MiB sitting there, while du -sh /home/legion/.cache reports 212M. These are the figures the note now carries, and they reproduce the tester's reading in a second container.",
-      "headSha": "76e516e3e34bd0c584ac4bf719963d0203da116c",
-      "negativeControl": "The old sentence's own prediction is the control: if `du` really reported 0 blocks for such a file, `du -sk /tmp/probe` would print 0 and `du -sh ~/.cache` would be useless — it prints 204800 and 212M instead. The instrument that does read 0 is `du -x` (`du -x -a -d1 -k /` prints 0 for /tmp), which is exactly the distinction the corrected text makes, so the measurement separates the two rather than confirming either by itself."
+      "criterion": "Failure 1: the note no longer names a df flag that does not exist, and the caveat that replaces it is the measured one.",
+      "surface": "A live Legion role container — this issue's own implementer container in its Agent Sandbox pod, the same surface the note is about.",
+      "command": "df -x; df -x / | wc -l; df -k --output=target,used /legion /home/legion/.cache /",
+      "observed": "`df -x` prints `df: option requires an argument -- 'x'` and `Try 'df --help' for more information.` — GNU df's -x is --exclude-type and takes an argument, so there is no one-filesystem df. `df -x /` is read as 'exclude filesystems of type /', excludes nothing and prints 21 lines, the header and every mount of the container. `df -k --output=target,used` names `/legion` for /legion (652476 KiB) and `/` for both /home/legion/.cache and / (38176 KiB each, the same figure), which is exactly the caveat the note now states: df answers for the filesystem holding the path, so a path under a volume measures that volume while a path the container filesystem holds measures the budget.",
+      "headSha": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
+      "negativeControl": "The architect's own example for this clause was that `df ~/.cache` says nothing about the budget. Measured, it does: /home/legion/.cache and / report the same mount point and the same used figure, because ~/.cache is on the container filesystem. The note therefore states the volume case (/legion) and not that example — the measurement refused half the instruction, which is the whole point of the clause it replaces, and the architect was told.",
+      "deviationFromInstruction": "The architect asked for 'df /legion or df ~/.cache says nothing about the 1 GiB budget'. Only the /legion half is true here, so the note carries that half alone."
     },
     {
-      "criterion": "Failure 2's correction is the measured one: /var/run/legion/launcher and /var/run/legion/gh are read-only Secret mounts, not in-memory directories, and remain uncharged.",
-      "surface": "The same live role container's /proc/mounts and the daemon's own recorded pod shape.",
-      "command": "grep -E ' /run/legion/(launcher|gh|private|state) ' /proc/mounts; python3 over packages/daemon/internal/runtime/sandbox/testdata/golden/root.json listing each volume's kind",
-      "observed": "/proc/mounts shows /run/legion/gh and /run/legion/launcher as `9p ro` against /run/legion/state and /run/legion/private as `tmpfs rw`. In the golden pod JSON every role's launcher-<role> and gh-<role> are Secret volumes (secretName legion-…-<role>-boot) while config, private-<role> and state-<role> are emptyDir medium Memory. The note now says exactly that, and keeps all five paths on the not-charged side.",
-      "headSha": "76e516e3e34bd0c584ac4bf719963d0203da116c",
-      "negativeControl": "The two tmpfs mounts are the control for the read-only claim: a write under /var/run/legion/private and /var/run/legion/state succeeds where one under launcher or gh fails read-only, so the refusal is the mount's kind and not a permission the container lacks everywhere."
+      "criterion": "Failure 2: the note attributes no method the record it cites does not record.",
+      "surface": "The cited record itself, read through the Dispatch CLI, and the note at the pushed head.",
+      "command": "dispatch read --ref dispatch://INFRA-51/comment/1a7ce2b2-076d-4609-8ea0-fcda1e35a5bf; grep -n -F 'was found' <note>; grep -c -F '4.4 GiB' <note>",
+      "observed": "The comment says 'Measured from inside a live implementer pod of dispatch://INFRA-57's tree, at 22:13Z, rather than inferred from eviction text', and gives about 1.5 GiB of Go module cache, about 2.9 GiB of Go build cache, roughly 4.4 GiB against the 1 GiB limit, and 368 MiB after relocation. It names no command anywhere in its body. The note's attribution clause is gone (`grep -F 'was found'` finds nothing) and the 4.4 GiB figure still appears once, in the Evidence paragraph that cites the record for the sizes alone.",
+      "headSha": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
+      "negativeControl": "The grep for the deleted clause over the previous head (`jj file show -r 925cac4e9994`) still finds it, so the check distinguishes this head from the one the tester failed rather than passing on any text; and `grep -c -F '4.4 GiB'` is still 1, so the fix removed the attribution without taking the figure with it."
     },
     {
-      "criterion": "The change is still documentation only, with no banned phrase left and every path a reader needs still present.",
+      "criterion": "The change is still documentation only and the repository's own checks pass at the head.",
       "surface": "The workspace at the pushed head and the pull request on GitHub.",
-      "command": "jj -R \"$LEGION_WORKSPACE\" diff --name-only (before the split); grep -n -F -e 'is evicted for' -e 'reports 0 blocks' <note>; grep -c -F over the twelve listed paths; grep -i -E 'ts\\.net|dispatch\\.tail|https?://dispatch' <note>; bash .github/scripts/check-private-names.sh",
-      "observed": "The round's diff touches only docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md, in three hunks. Neither banned phrase remains. All twelve paths are still present (/tmp 16, /home/legion 12, /home/legion/.cache 4, /home/legion/.local/state 2, /legion 19, /legion/feed 1, the sessions directory 1, /home/legion/.config 4, /var/run/legion/private 2, /var/run/legion/state 2, /var/run/legion/launcher 1, /var/run/legion/gh 2). No ts.net or Dispatch web address. check-private-names.sh exits 0 over 4688 files. CI at this head: Tests run 39514159713; PR Title run 39514160081 — see the pull request's CI line for the settled jobs.",
-      "headSha": "76e516e3e34bd0c584ac4bf719963d0203da116c",
-      "negativeControl": "The same two greps over the note as the previous head carried it (`jj file show -r 78f0acf162ab` ) do find 'is evicted for' and 'reports 0 blocks', so the check distinguishes this head from the one the tester failed rather than passing on any text."
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --name-only (before the split); jj -R \"$LEGION_WORKSPACE\" diff --git; grep -n -F 'df -x' <note>; grep -c -F 'du -x' <note>; bash .github/scripts/check-private-names.sh; gh run list --commit 04589b7aa2ec80e06846eeeac347476d6df3c44a",
+      "observed": "The round's diff is one file and one hunk, inside the `du` bullet; nothing else in the repository changed. `grep -F 'df -x'` finds nothing; `grep -c -F 'du -x'` is 5, so the blind-walk finding the tester verified is intact. check-private-names.sh exits 0 over 4688 files. CI at this head: Tests run 39517199481; PR Title run 39517199454 — the pull request's CI line carries their settled jobs.",
+      "headSha": "04589b7aa2ec80e06846eeeac347476d6df3c44a",
+      "negativeControl": "check-private-names.sh is the only required lint lane that can bite a markdown file, and it fails any text naming a *.ts.net host; the note cites dispatch:// references only, and a grep for ts.net or a Dispatch web address over it returns nothing."
     }
   ],
   "filesChanged": [
-    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — three hunks: the not-charged bullet split into in-memory emptyDirs and read-only Secret mounts; 'is evicted for here' corrected; the false `du` parenthetical replaced by a measured bullet that names `du -sh` on a directory and `df -k --output=used /` as the instruments and `du -x`/`df -x` as the ones to avoid."
+    "docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md — one hunk inside the `du` bullet: the `df -x` half of the closing advice replaced by the measured df caveat, and the clause attributing the 4.4 GiB discovery to `du` deleted."
   ],
   "trickyParts": [
-    "The false claim had a true-looking source: `du -sx /` really does report no change for a 200 MiB write, which is how it was written in round 1. The device mismatch between a written file (dev=112 here, 143 in the tester's container) and its parent directory (114 / 145) is the whole mechanism, and it is only visible if you stat both. Any later measurement of this filesystem should stat the file as well as the directory before concluding anything about an instrument.",
-    "The round-1 PR body carried the same false parenthetical in its `E2E (implementer)` line. Because this repository squashes, the body becomes main's commit message, so the wrong claim would have entered history even though the note was fixed; the body was corrected in the same round."
+    "Both of this round's defects entered the same way the note's original error did: a plausible sentence written beside a measured one. `df -x` was carried over from the instruction this role worked from, and the `du` attribution was an inference from a record that gives sizes and no command. The only thing that caught either was running the command and reading the record.",
+    "The replacement clause could not be written as instructed: `df ~/.cache` does report the budget here, because ~/.cache is on the container filesystem. The note states the /legion case alone."
   ],
   "deviations": [
-    "None. All three of the tester's failures are answered in the note itself; no permanent test was added, which the tester recommended and the architect confirmed."
+    "The architect's instruction named `df /legion or df ~/.cache` as the paths that say nothing about the budget. Measured in this container, /home/legion/.cache and / report the same mount point and the same used figure, so only the /legion half is true and the note carries that half alone. Reported to the architect with the measurement."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Two follow-ups are already filed and stay out of this diff: dispatch://INFRA-70 (the three out-of-scope carriers of the corrected claim — …LEGION-695.md:37, docs/kubernetes.md:1167-1184, and dispatch://INFRA-51) and dispatch://INFRA-71 (`bunx biome check .` resolving an unrelated registry package named biome and exiting 0 in a container with no node_modules, against the storage rule that makes `bun install` unwise there)."
+    "Two follow-ups stay filed and out of this diff: dispatch://INFRA-70 (the three out-of-scope carriers of the corrected claim) and dispatch://INFRA-71 (`bunx biome check .` resolving an unrelated registry package in a container with no node_modules)."
   ]
 }
