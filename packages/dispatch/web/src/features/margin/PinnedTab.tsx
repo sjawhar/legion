@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import type { Event } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { borderDefault, textMutedOnSurface } from "../../theme/classes";
-import { EventBody, isAskEvent } from "../issue/EventBody";
+import { EventBody, isAskEvent } from "../activity/EventBody";
 import { actorLabel } from "../refs/actor";
 
 interface PinnedTabProps {

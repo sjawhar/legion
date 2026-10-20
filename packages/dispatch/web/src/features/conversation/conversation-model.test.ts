@@ -1,11 +1,7 @@
 import { expect, test } from "bun:test";
 import type { Actor, Ask, Event } from "../../api/types";
-import {
-  activityDescription,
-  buildConversationItems,
-  dayLabel,
-  visibleConversationItems,
-} from "./conversation-model";
+import { activityDescription, dayLabel } from "../activity/activity-model";
+import { buildConversationItems, visibleConversationItems } from "./conversation-model";
 
 const session = { id: "session-1", kind: "session" as const };
 const bob = { id: "bob", kind: "user" as const };

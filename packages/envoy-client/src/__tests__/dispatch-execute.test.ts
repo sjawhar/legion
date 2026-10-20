@@ -7972,7 +7972,7 @@ describe("executeDispatchTool", () => {
     }
   });
 
-  test("maps the SPA's conversation, children, and message pages to their dispatch refs", async () => {
+  test("maps the SPA's conversation, activity, children, and message pages to their dispatch refs", async () => {
     const message = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
     const requested: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -8018,6 +8018,12 @@ describe("executeDispatchTool", () => {
     expect((await read("http://dispatch.test/issues/DSP-42/conversation")).text).toBe(
       "Key: DSP-42\nEvents:\n- none"
     );
+    // The Activity tab holds the issue's event list, so its page and its reference read it; the
+    // `activity` spelling is the same kind of read `dispatch://KEY/log` has always been.
+    expect((await read("http://dispatch.test/issues/DSP-42/activity")).text).toBe(
+      "Key: DSP-42\nEvents:\n- none"
+    );
+    expect((await read("dispatch://DSP-42/activity")).text).toBe("Key: DSP-42\nEvents:\n- none");
     expect((await read("http://dispatch.test/issues/DSP-42/children")).text).toContain(
       "- DSP-43: Child (todo)"
     );

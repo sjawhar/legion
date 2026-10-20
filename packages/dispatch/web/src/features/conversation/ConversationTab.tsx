@@ -42,9 +42,10 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ActivityLine } from "../activity/ActivityLine";
+import { dateKey } from "../activity/activity-model";
+import { EventBody } from "../activity/EventBody";
 import { AskCard } from "../inbox/AskCard";
-import { ActivityLine } from "../issue/ActivityLine";
-import { EventBody } from "../issue/EventBody";
 import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
 import {
   applyPinStateOperation,
@@ -73,7 +74,6 @@ import {
   type ConversationItem,
   commentMentions,
   countRetractedAsks,
-  dateKey,
   type MessageDeliveryEvent,
   type MessageEvent,
   type ThreadReply,
