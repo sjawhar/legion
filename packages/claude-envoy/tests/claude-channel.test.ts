@@ -82,6 +82,34 @@ test("a server: entry naming this plugin's server loads it, as Claude Code match
   ).toEqual({ loaded: true })
 })
 
+const node = Bun.which("node")
+
+test.skipIf(node === null)(
+  "a Node process that set its title reads as one word, which counts as unreadable",
+  async () => {
+    // Node writes process.title over its argument area and pads the rest with NULs.
+    const child = spawn(
+      node ?? "node",
+      [
+        "-e",
+        'process.title = "claude"; setTimeout(() => {}, 5000)',
+        "--",
+        "--dangerously-load-development-channels",
+        "x",
+      ],
+      { stdio: "ignore" },
+    )
+    try {
+      await Bun.sleep(300)
+      const pid = child.pid ?? 0
+      expect(processCommandLine(pid, () => "/bin/cat")?.argv).toEqual(["claude"])
+      expect(processCommandLine(pid)).toBe(undefined)
+    } finally {
+      child.kill()
+    }
+  },
+)
+
 test("an empty argument on the real command line keeps its place", async () => {
   // `--append-system-prompt ""` takes the empty value; dropping it would read the channel flag as
   // that option's value.

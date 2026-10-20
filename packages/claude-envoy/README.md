@@ -78,9 +78,9 @@ events and sends them to the current Claude Code session as supported
   instructions. `ENVOY_CHANNEL_LOADED=1` or `0` overrides the check, for an allowlist an MDM
   profile delivers. A command line it cannot read, or no `claude` among the server's ancestors,
   counts as loaded (a Claude Code run under another program name inside another `claude`
-  session's shell reads as the outer one), and so does a one-word command line from a Claude Code that runs on Node,
-  whose `process.title = "claude"` overwrites the arguments. A Legion pane whose deliveries go to
-  the bridge's inbox needs no channel, so the check does not apply there.
+  session's shell reads as the outer one), and so does a one-word command line from a Claude Code
+  that runs on Node, whose `process.title = "claude"` overwrites the arguments. A Legion pane whose
+  deliveries go to the bridge's inbox needs no channel, so the check does not apply there.
 
   The check cannot see every reason Claude Code refuses a channel. Claude Code also turns channels
   off for the account (not signed in, or an account without the channels feature), for a

@@ -47186,7 +47186,10 @@ function processCommandLine(pid, executable = processExecutable) {
   let commandLine2;
   if (process.platform === "linux") {
     try {
-      const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00").slice(0, -1);
+      const pieces = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00");
+      while (pieces.length > 0 && pieces.at(-1) === "")
+        pieces.pop();
+      const argv = pieces;
       const terminal = stdoutIsTerminal(pid);
       const cwd = workingDirectory(pid);
       commandLine2 = argv.length === 0 ? undefined : {

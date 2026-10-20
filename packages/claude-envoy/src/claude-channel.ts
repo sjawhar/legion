@@ -409,9 +409,13 @@ export function processCommandLine(
   let commandLine: CommandLine | undefined
   if (process.platform === "linux") {
     try {
-      // Each argument ends in NUL, so only the last piece is empty; an empty argument itself (a
-      // blank option value) stays, since dropping it would shift which word is a value.
-      const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").slice(0, -1)
+      // Each argument ends in NUL, and a process that set its title (Node, for `process.title`)
+      // pads the rest of its argument area with NULs, so the empty pieces at the end are dropped.
+      // An empty argument before the last one (a blank option value) stays, since dropping it
+      // would shift which word is a value.
+      const pieces = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")
+      while (pieces.length > 0 && pieces.at(-1) === "") pieces.pop()
+      const argv = pieces
       const terminal = stdoutIsTerminal(pid)
       const cwd = workingDirectory(pid)
       commandLine =
