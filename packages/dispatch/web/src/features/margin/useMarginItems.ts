@@ -4,11 +4,11 @@ import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { inboxQuery, userStateQuery } from "../../api/queries";
-import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
+import type { Actor, Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
-import { pinnedEventIds } from "../issue/pins";
+import { type ConversationPinKind, pinnedConversations, pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { useAnsweredAsks } from "./useAnsweredAsks";
 import { type CommentAction, useCommentActionQueue } from "./useCommentActionQueue";
@@ -74,6 +74,19 @@ export interface Thread {
   resolved: boolean;
   root: { comment: ThreadComment; kind: "comment" };
 }
+
+/** A Conversation card the reader pinned, as the Pinned tab shows it: who opened it, when, and
+ *  its text - an ask's question, a comment's or a message's body. */
+export interface PinnedConversationCard {
+  readonly at: string;
+  readonly author: Actor;
+  readonly body: string;
+  /** The `dismissed` id it is pinned under, which Unpin removes: `<kind>:<id>`. */
+  readonly id: string;
+  readonly kind: ConversationPinKind;
+}
+
+const NO_PINS: string[] = [];
 
 const pinnedEventBatchSize = 50;
 
@@ -288,8 +301,9 @@ export function useMarginItems(
     },
   });
   const userState = useQuery({ ...userStateQuery(), enabled: owner?.kind === "issue" });
-  const pinnedIds =
-    owner?.kind === "issue" ? pinnedEventIds(userState.data?.[owner.key]?.dismissed ?? []) : [];
+  const dismissed =
+    owner?.kind === "issue" ? (userState.data?.[owner.key]?.dismissed ?? NO_PINS) : NO_PINS;
+  const pinnedIds = pinnedEventIds(dismissed);
   const pinned = useQuery({
     enabled: owner?.kind === "issue" && tab === "pinned" && pinnedIds.length > 0,
     queryKey: ["events", issueKey, "margin-pinned", pinnedIds],
@@ -301,6 +315,46 @@ export function useMarginItems(
     },
   });
   const answeredAsks = useAnsweredAsks(owner, visibleArtifact?.id);
+  // A Conversation card is pinned under its own id (`features/issue/pins.ts`), so the Pinned tab
+  // resolves it from the lists this margin already reads: the issue's asks and its comments.
+  // Only a pinned message needs a read of its own, and only while the tab is open.
+  const pinnedMarkers = useMemo(() => pinnedConversations(dismissed), [dismissed]);
+  const pinnedMessageIds = useMemo(
+    () => pinnedMarkers.filter((marker) => marker.kind === "message").map((marker) => marker.id),
+    [pinnedMarkers]
+  );
+  const pinnedMessages = useQuery({
+    enabled: owner?.kind === "issue" && tab === "pinned" && pinnedMessageIds.length > 0,
+    queryKey: ["issue-messages", issueKey, "margin-pinned", pinnedMessageIds],
+    queryFn: () => {
+      if (owner?.kind !== "issue") {
+        throw new Error("Pinned margin messages require an issue owner.");
+      }
+      return Promise.all(pinnedMessageIds.map((id) => api.getMessage(owner.key, id)));
+    },
+  });
+  const pinnedCards = useMemo<PinnedConversationCard[]>(() => {
+    const asks = new Map(answeredAsks.all.map((ask) => [ask.id, ask]));
+    const roots = new Map((comments.data ?? []).map((comment) => [comment.id, comment]));
+    const messages = new Map((pinnedMessages.data ?? []).map((read) => [read.message.id, read]));
+    return pinnedMarkers.flatMap(({ id, kind }) => {
+      const record =
+        kind === "ask" ? asks.get(id) : kind === "comment" ? roots.get(id) : messages.get(id);
+      if (record === undefined) {
+        return [];
+      }
+      const row = "message" in record ? record.message : record;
+      return [
+        {
+          at: row.created_at,
+          author: row.author,
+          body: "question" in row ? row.question : row.body,
+          id: `${kind}:${id}`,
+          kind,
+        },
+      ];
+    });
+  }, [answeredAsks.all, comments.data, pinnedMarkers, pinnedMessages.data]);
   const needsYou = useMemo(() => {
     const openAsks = new Map<string, Ask>(inboxOpenAsks.map((ask) => [ask.id, ask]));
     for (const ask of answeredAsks.asks) {
@@ -455,6 +509,7 @@ export function useMarginItems(
     openAskCount,
     pendingActionIds,
     pinned: pinnedIds.length === 0 ? [] : (pinned.data ?? []),
+    pinnedConversations: pinnedCards,
     pinnedIds,
     resolvedThreads,
     isClosed: owner?.kind === "document" ? false : undefined,

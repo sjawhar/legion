@@ -1,21 +1,15 @@
-import {
-  type MutationKey,
-  replaceEqualDeep,
-  useInfiniteQuery,
-  useMutation,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { type MutationKey, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { userStateQuery, whoAmIQuery } from "../../api/queries";
-import { type EventPages, mergeEventPages } from "../../api/sse";
 import type {
   Agent,
   Artifact,
-  Event,
+  Comment,
+  Message,
+  MessageDelivery,
   MessageDeliveryMode,
   UserIssueState,
   UserState,
@@ -23,30 +17,27 @@ import type {
 import { PinButton } from "../../components/PinButton";
 import { useSending } from "../../hooks/useSending";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
   card,
-  checkboxAccent,
   dangerText,
   linkText,
-  newDividerLine,
   primaryButtonBg,
   primaryButtonHoverBg,
   secondaryButtonBorder,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
+  surfaceMutedBg,
   surfaceMutedHoverBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnSurface,
+  textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { ActivityLine } from "../activity/ActivityLine";
-import { dateKey } from "../activity/activity-model";
-import { EventBody } from "../activity/EventBody";
+import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
-import { eventItemId, isPinnedEvent, stateForIssue } from "../issue/pins";
+import { isPinnedConversation, stateForIssue } from "../issue/pins";
 import {
   applyPinStateOperation,
   issueStateTransport,
@@ -57,7 +48,7 @@ import { ThreadCard } from "../margin/ThreadCard";
 import { type CommentActionFailure, useCommentActionQueue } from "../margin/useCommentActionQueue";
 import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { replyPreviewMarkdown } from "../refs/markdown-fragment";
+import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useMarkThreadRead } from "../replies/useMarkThreadRead";
@@ -68,25 +59,16 @@ import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
 import type { ReplyTarget } from "./composer-model";
 import {
-  buildConversationItems,
+  buildConversations,
   type CommentDeliveryAttempt,
-  type CommentEvent,
-  type ConversationItem,
-  commentMentions,
-  countRetractedAsks,
-  type MessageDeliveryEvent,
-  type MessageEvent,
-  type ThreadReply,
-  visibleConversationItems,
+  type Conversation,
+  type ConversationFilter,
+  commentDeliveries,
+  filterConversations,
+  focusConversation,
+  type MessageConversation,
 } from "./conversation-model";
-import {
-  duplicateText,
-  failureGuidance,
-  isSafeRetry,
-  MODE_LABELS,
-  receiptAnsweredWithError,
-  withGuidance,
-} from "./delivery";
+import { duplicateText, failureGuidance, isSafeRetry, MODE_LABELS, withGuidance } from "./delivery";
 import {
   redirectedReplyTarget,
   useHeldReplyTo,
@@ -95,15 +77,9 @@ import {
 } from "./held-sends";
 import { MentionComposer } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
-import { ReplyQuote } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
-import {
-  capabilitiesForTarget,
-  type TargetedMessageAttempt,
-  TargetedMessageCard,
-} from "./TargetedMessageCard";
+import { capabilitiesForTarget, TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
-import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
 import { threadRepliesSendKey, threadReplySendKey, usePhoneThread } from "./usePhoneThread";
 
@@ -124,69 +100,83 @@ interface ConversationTabProps {
   visible: boolean;
 }
 
-function eventItems(data: { pages: Event[][] } | undefined): Event[] {
-  return data?.pages.flat() ?? [];
+const FILTERS: readonly { readonly label: string; readonly value: ConversationFilter }[] = [
+  { label: "All", value: "all" },
+  { label: "Open", value: "open" },
+  { label: "Closed", value: "closed" },
+];
+
+/** The live session behind a stored delivery, by the id the attempt recorded. */
+function sessionTitle(sessionId: string | null, agents: readonly Agent[]): string | undefined {
+  return agents.find((agent) => agent.session_id === sessionId)?.title;
 }
 
-/** A message's delivery attempts as `TargetedMessageCard` shows them, each named after the
- *  session it was aimed at. */
-function attemptsOf(deliveries: readonly MessageDeliveryEvent[]): TargetedMessageAttempt[] {
-  return deliveries.map((attempt) => ({
-    attempt: attempt.payload.attempt,
-    answeredWithError: receiptAnsweredWithError(attempt),
-    createdAt: attempt.created_at,
-    delivery: attempt.payload.delivery,
-    duplicate: attempt.payload.duplicate,
-    error: attempt.payload.error,
-    state: attempt.payload.state,
-    targetName: attempt.payload.title,
-  }));
+/** The session a thread's newest attempt reached, or the target it was aimed at: what the card
+ *  and its delivery lines call the recipient. */
+function targetNameOf(
+  deliveries: readonly MessageDelivery[],
+  target: string | null,
+  agents: readonly Agent[]
+): string {
+  const last = deliveries.at(-1);
+  return (
+    (last === undefined ? undefined : sessionTitle(last.session_id, agents)) ?? target ?? "agent"
+  );
 }
 
-const maxFocusPageLoads = 10;
-
-type ThreadRoot = Extract<ConversationItem, { kind: "message" | "targeted-message" }>;
+/** The mark an unread conversation carries: its newest activity is at or after the reader's
+ *  watermark (`user_issue_state.last_read_seq`). */
+function UnreadMark(): ReactNode {
+  return (
+    <span
+      className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold ${surfaceMutedBg} ${linkText}`}
+    >
+      New
+    </span>
+  );
+}
 
 /** The delivery a reply into this thread inherits: the root's target, in the mode of the
  *  thread's most recent attempt (root or any reply), named after the session that received it. */
 function threadDelivery(
-  root: ThreadRoot,
+  root: MessageConversation,
   agents: readonly Agent[]
 ): ReplyTarget["thread"] | undefined {
-  if (root.kind !== "targeted-message" || root.event.payload.target === null) {
+  if (root.kind !== "targeted-message" || root.root.target === null) {
     return undefined;
   }
-  let last: MessageDeliveryEvent | undefined;
+  let last: MessageDelivery | undefined;
   for (const attempt of [
-    ...root.deliveries,
+    ...root.root.deliveries,
     ...root.replies.flatMap((reply) => reply.deliveries),
   ]) {
-    if (last === undefined || attempt.seq > last.seq) last = attempt;
+    if (last === undefined || compareTimestamps(attempt.created_at, last.created_at) >= 0) {
+      last = attempt;
+    }
   }
-  const target = root.event.payload.target;
-  const session = agents.find((agent) => agent.session_id === last?.payload.session_id);
+  const target = root.root.target;
   return {
-    delivery: last?.payload.delivery ?? "steer",
+    delivery: last?.delivery ?? "steer",
     target,
-    title: last?.payload.title || session?.title || target,
+    title: sessionTitle(last?.session_id ?? null, agents) ?? target,
   };
 }
 
-/** What the composer quotes when the reader replies to `node`. */
+/** What the composer quotes when the reader replies to `message`. */
 function replyTargetFor(
-  node: { event: MessageEvent },
+  message: Message,
   author: Author,
-  root: ThreadRoot,
+  root: MessageConversation,
   issueKey: string,
   agents: readonly Agent[]
 ): ReplyTarget {
   const thread = threadDelivery(root, agents);
   return {
     author: author.label,
-    excerpt: node.event.payload.body,
-    id: node.event.payload.id,
+    excerpt: message.body,
+    id: message.id,
     parentKind: "message",
-    to: buildIssuePath({ id: node.event.payload.id, key: issueKey, kind: "message" }),
+    to: buildIssuePath({ id: message.id, key: issueKey, kind: "message" }),
     ...(thread === undefined ? {} : { thread }),
   };
 }
@@ -196,7 +186,7 @@ function replyTargetFor(
  *  retry row while unanswered, and every reply can be replied to while the issue is open. */
 function ConversationReply({
   agents,
-  currentTurnId,
+  currentReplyId,
   isClosed,
   issueKey,
   markRef,
@@ -207,43 +197,36 @@ function ConversationReply({
   titles,
 }: {
   agents: readonly Agent[];
-  currentTurnId: string | undefined;
+  currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
   /** The Replies page's read mark, on the thread's newest reply. */
   markRef?: DwellRef;
   onReply: (target: ReplyTarget) => void;
-  reply: ThreadReply;
+  reply: Message;
   replyDisabled: boolean;
-  root: ThreadRoot;
+  root: MessageConversation;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) =>
-      api.createMessageDelivery(reply.event.payload.id, delivery),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+    mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
   });
   const author = resolveAuthor(reply.author, titles);
-  const parentId = reply.event.payload.in_reply_to;
   const lastAttempt = reply.deliveries.at(-1);
-  const target = agents.find((agent) => agent.session_id === lastAttempt?.payload.session_id);
-  const targetName = lastAttempt?.payload.title || target?.title || "agent";
+  const targetName = targetNameOf(reply.deliveries, root.root.target, agents);
   const answer = root.replies.find(
-    (candidate) =>
-      candidate.event.payload.in_reply_to === reply.event.payload.id &&
-      candidate.author.kind === "session"
+    (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
-  const parent = [root, ...root.replies].find((node) => node.event.payload.id === parentId);
+  const parent = [root.root, ...root.replies].find((node) => node.id === reply.in_reply_to);
   return (
     <ReplyTurn
-      actions={
-        <CopyRefButton route={{ id: reply.event.payload.id, key: issueKey, kind: "message" }} />
-      }
-      at={reply.at}
+      actions={<CopyRefButton route={{ id: reply.id, key: issueKey, kind: "message" }} />}
+      at={reply.created_at}
       author={author}
-      body={<EventBody event={reply.event} />}
-      current={reply.id === currentTurnId}
+      body={<MarkdownBody markdown={reply.body} />}
+      current={reply.id === currentReplyId}
       markRef={markRef}
       delivery={
         lastAttempt === undefined
@@ -251,21 +234,16 @@ function ConversationReply({
           : {
               answeredBy:
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
-              attempts: attemptsOf(reply.deliveries),
+              attempts: deliveryAttempts(reply.deliveries, targetName),
               retry: isClosed
                 ? undefined
                 : {
                     canAside:
-                      capabilitiesForTarget(root.event.payload.target, agents)?.includes(
-                        "aside"
-                      ) !== false,
+                      capabilitiesForTarget(root.root.target, agents)?.includes("aside") !== false,
                     canBtw:
-                      capabilitiesForTarget(root.event.payload.target, agents)?.includes("btw") !==
-                      false,
+                      capabilitiesForTarget(root.root.target, agents)?.includes("btw") !== false,
                     canSteer:
-                      capabilitiesForTarget(root.event.payload.target, agents)?.includes(
-                        "steer"
-                      ) !== false,
+                      capabilitiesForTarget(root.root.target, agents)?.includes("steer") !== false,
                     onRetry: retry.mutate,
                     retrying: retry.isPending,
                   },
@@ -277,26 +255,21 @@ function ConversationReply({
       }
       quote={{
         author: parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
-        // Without the parent loaded, the server's 160-rune cut of it stands in; a mark the cut
-        // opened is dropped so it reads as words, not as its syntax.
-        excerpt:
-          parent === undefined
-            ? replyPreviewMarkdown(reply.event.payload.reply_body)
-            : parent.event.payload.body,
+        excerpt: parent?.body ?? "",
         to:
-          parentId === null || parentId === undefined
+          reply.in_reply_to === null
             ? undefined
-            : buildIssuePath({ id: parentId, key: issueKey, kind: "message" }),
+            : buildIssuePath({ id: reply.in_reply_to, key: issueKey, kind: "message" }),
       }}
       replyDisabled={replyDisabled}
-      turnID={reply.id}
+      turnID={`message:${reply.id}`}
     />
   );
 }
 
 function Thread({
   agents,
-  currentTurnId,
+  currentReplyId,
   isClosed,
   issueKey,
   onReply,
@@ -305,12 +278,12 @@ function Thread({
   titles,
 }: {
   agents: readonly Agent[];
-  currentTurnId: string | undefined;
+  currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
   onReply: (target: ReplyTarget) => void;
   replyDisabled: boolean;
-  root: ThreadRoot;
+  root: MessageConversation;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   // The Replies page's read mark: the thread is read once its newest reply has been on screen.
@@ -318,9 +291,9 @@ function Thread({
   const newest = root.replies.at(-1);
   const markRef = useMarkThreadRead({
     enabled: true,
-    newestShownAt: newest?.event.payload.created_at,
+    newestShownAt: newest?.created_at,
     owner: { issue: issueKey },
-    threadId: root.event.payload.id,
+    threadId: root.root.id,
   });
   if (root.replies.length === 0) return null;
   return (
@@ -328,7 +301,7 @@ function Thread({
       {root.replies.map((reply) => (
         <ConversationReply
           agents={agents}
-          currentTurnId={currentTurnId}
+          currentReplyId={currentReplyId}
           isClosed={isClosed}
           issueKey={issueKey}
           key={reply.id}
@@ -368,7 +341,7 @@ function MessageTurn({
   agents,
   author,
   current,
-  currentTurnId,
+  currentReplyId,
   disabled,
   isClosed,
   issueKey,
@@ -383,85 +356,70 @@ function MessageTurn({
   agents: readonly Agent[];
   author: Author;
   current: boolean;
-  currentTurnId: string | undefined;
+  currentReplyId: string | undefined;
   disabled: boolean;
   isClosed: boolean;
   issueKey: string;
-  item: Extract<ConversationItem, { kind: "message" }>;
+  item: Extract<Conversation, { kind: "message" }>;
   onPin: () => void;
   onReply: (target: ReplyTarget) => void;
   pinned: boolean;
-  register: DwellRef;
+  register?: DwellRef;
   replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
-  const replyTo = item.kind === "message" ? item.event.payload.in_reply_to : null;
   return (
     <li
       aria-current={current ? "true" : undefined}
-      className={`group rounded-lg px-2 ${item.continued ? "py-0.5" : "mt-2 py-1"} ${surfaceMutedHoverBg}`}
-      data-continued={String(item.continued)}
-      data-event-seq={item.lastSeq}
+      className={`group mt-2 rounded-lg px-2 py-1 ${surfaceMutedHoverBg}`}
       data-turn={item.id}
       ref={register}
     >
       <div className="flex gap-3">
-        {item.continued ? <span className="w-8 shrink-0" /> : <Avatar author={author} />}
+        <Avatar author={author} />
         <div className="min-w-0 flex-1">
-          {item.continued ? null : (
-            <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
-              <span className="font-semibold">{author.label}</span>
-              <Timestamp at={item.at} />
-            </p>
-          )}
-          {replyTo === null || replyTo === undefined ? null : (
-            <ReplyQuote
-              author={undefined}
-              className="mb-1"
-              excerpt={
-                item.kind === "message" ? replyPreviewMarkdown(item.event.payload.reply_body) : ""
-              }
-              to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
-            />
-          )}
-          <EventBody event={item.event} />
+          <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+            <span className="font-semibold">{author.label}</span>
+            <Timestamp at={item.root.created_at} />
+            {item.unread ? <UnreadMark /> : null}
+          </p>
+          <MarkdownBody markdown={item.root.body} />
         </div>
         <TurnActions>
-          <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: item.kind }} />
-          {item.kind === "message" && !isClosed ? (
+          <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
+          {isClosed ? null : (
             <ReplyButton
               disabled={replyDisabled}
-              onClick={() => onReply(replyTargetFor(item, author, item, issueKey, agents))}
+              onClick={() => onReply(replyTargetFor(item.root, author, item, issueKey, agents))}
             />
-          ) : null}
+          )}
           <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
         </TurnActions>
       </div>
-      {item.kind === "message" ? (
-        <Thread
-          agents={agents}
-          currentTurnId={currentTurnId}
-          isClosed={isClosed}
-          issueKey={issueKey}
-          onReply={onReply}
-          replyDisabled={replyDisabled}
-          root={item}
-          titles={titles}
-        />
-      ) : null}
+      <Thread
+        agents={agents}
+        currentReplyId={currentReplyId}
+        isClosed={isClosed}
+        issueKey={issueKey}
+        onReply={onReply}
+        replyDisabled={replyDisabled}
+        root={item}
+        titles={titles}
+      />
     </li>
   );
 }
+
 function commentReplyTarget(
-  event: CommentEvent,
+  comment: Comment,
   agents: readonly Agent[],
   issueKey: string
 ): ReplyTarget {
-  const author = event.payload.author;
+  const author = comment.author;
   const targets =
     author.kind === "session"
       ? [`session:${author.id}`]
-      : commentMentions(event.payload).map((mention) => mention.target);
+      : comment.mentions.map((mention) => mention.target);
   const mentions = [...new Set(targets)].map((target) => ({
     target,
     title: target.startsWith("session:")
@@ -472,11 +430,11 @@ function commentReplyTarget(
   return {
     author: resolveAuthor(author, new Map(agents.map((agent) => [agent.session_id, agent.title])))
       .label,
-    excerpt: event.payload.body,
-    id: event.payload.id,
+    excerpt: comment.body,
+    id: comment.id,
     mentions,
     parentKind: "comment",
-    to: buildIssuePath({ id: event.payload.id, key: issueKey, kind: "comment" }),
+    to: buildIssuePath({ id: comment.id, key: issueKey, kind: "comment" }),
   };
 }
 
@@ -555,6 +513,7 @@ function CommentTurn({
   issueArtifacts,
   composerClassName,
   current,
+  currentReplyId,
   disabled,
   expanded,
   forceExpanded = false,
@@ -581,6 +540,8 @@ function CommentTurn({
   issueArtifacts: ConversationTabProps["issueArtifacts"];
   composerClassName?: string;
   current: boolean;
+  /** The reply a deep link named, marked inside the thread. */
+  currentReplyId: string | undefined;
   disabled: boolean;
   /** Whether the reader has the thread open inline. The tab owns it, so a comment whose thread is
    *  open stays in the list whoever resolves it (`shown`), with its reply and the reply's send. */
@@ -590,7 +551,7 @@ function CommentTurn({
   isClosed: boolean;
   isPhone?: boolean;
   issueKey: string;
-  item: Extract<ConversationItem, { kind: "comment" }>;
+  item: Extract<Conversation, { kind: "comment" }>;
   onAction: (id: string, kind: "accept" | "reject" | "resolve" | "reopen") => void;
   onPhoneThreadToggle?: () => void;
   onPin: () => void;
@@ -616,7 +577,7 @@ function CommentTurn({
       setSavingCommentEditId(id);
       try {
         const comment = await api.editComment(id, { body });
-        await queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
+        await queryClient.invalidateQueries({ queryKey: ["issue-comments", issueKey] });
         return comment;
       } finally {
         setSavingCommentEditId(undefined);
@@ -625,8 +586,8 @@ function CommentTurn({
     [issueKey, queryClient]
   );
   const replySendKey = useMemo(
-    () => threadReplySendKey(sendKey, item.event.payload.id),
-    [item.event.payload.id, sendKey]
+    () => threadReplySendKey(sendKey, item.root.id),
+    [item.root.id, sendKey]
   );
   // Collapse thread waits for the reply until its deadline, so its answer lands where it was sent;
   // past it the reader may leave, and the held-send store keeps the reply for the thread's return.
@@ -638,26 +599,25 @@ function CommentTurn({
     mutationFn: (delivery: CommentDeliveryAttempt) =>
       api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery),
     onSettled: () => retryGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-comments", issueKey] }),
   });
   const thread: CommentThread = {
-    anchor: item.event.payload.anchor,
-    key: item.event.payload.id,
-    lastReplyAt: item.replies.at(-1)?.event.payload.created_at,
-    replies: item.replies.map((reply) => reply.event.payload),
-    resolved:
-      item.event.payload.resolved ||
-      (item.event.payload.suggestion !== null && item.event.payload.suggestion.accepted !== null),
-    root: { comment: item.event.payload, kind: "comment" },
+    anchor: item.root.anchor,
+    key: item.root.id,
+    lastReplyAt: item.replies.at(-1)?.created_at,
+    replies: [...item.replies],
+    resolved: item.closed,
+    root: { comment: item.root, kind: "comment" },
   };
   const deliveriesFor = (commentId: string): readonly CommentDeliveryAttempt[] =>
-    commentId === item.event.payload.id
-      ? item.deliveries
-      : (item.replies.find((reply) => reply.event.payload.id === commentId)?.deliveries ?? []);
+    commentDeliveries(
+      (commentId === item.root.id
+        ? item.root
+        : item.replies.find((reply) => reply.id === commentId)
+      )?.deliveries ?? []
+    );
   const anchorArtifact =
-    item.event.payload.anchor === null
-      ? undefined
-      : issueArtifacts.get(item.event.payload.anchor.artifact_id);
+    item.root.anchor === null ? undefined : issueArtifacts.get(item.root.anchor.artifact_id);
   const artifactSlug = anchorArtifact?.slug;
   const currentExpanded = forceExpanded || expanded;
   const toggleThread = () => {
@@ -674,14 +634,19 @@ function CommentTurn({
     <li
       aria-current={current ? "true" : undefined}
       className="my-2"
-      data-event-seq={item.lastSeq}
       data-turn={item.id}
       ref={register}
     >
+      {item.unread ? (
+        <div className="mb-1 flex justify-end">
+          <UnreadMark />
+        </div>
+      ) : null}
       <ThreadCard
         actionFailure={actionFailure}
         artifactSlug={artifactSlug}
         composerClassName={composerClassName}
+        currentReplyId={currentReplyId}
         expanded={currentExpanded}
         hovered={false}
         hideReplyComposer={hideReplyComposer}
@@ -710,13 +675,10 @@ function CommentTurn({
         thread={thread}
         viewerLogin={viewerLogin}
       />
-      {item.event.payload.anchor === null || anchorArtifact === undefined ? null : (
+      {item.root.anchor === null || anchorArtifact === undefined ? null : (
         <Link
           className={`ml-3 text-sm ${linkText}`}
-          to={documentItemPath(anchorArtifact, {
-            id: item.event.payload.id,
-            kind: "comment",
-          })}
+          to={documentItemPath(anchorArtifact, { id: item.root.id, kind: "comment" })}
         >
           View in document
         </Link>
@@ -733,12 +695,12 @@ function CommentTurn({
             {currentExpanded ? "Collapse thread" : "Expand thread"}
           </button>
         )}
-        <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "comment" }} />
+        <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "comment" }} />
         {isClosed ? null : (
           <ReplyButton
             disabled={replyDisabled}
             onClick={() => {
-              if (onReply(commentReplyTarget(item.event, agents, issueKey)) && !isPhone) {
+              if (onReply(commentReplyTarget(item.root, agents, issueKey)) && !isPhone) {
                 setExpanded(true);
               }
             }}
@@ -753,7 +715,7 @@ function CommentTurn({
 function TargetedMessageTurn({
   agents,
   current,
-  currentTurnId,
+  currentReplyId,
   isClosed,
   issueKey,
   item,
@@ -764,31 +726,24 @@ function TargetedMessageTurn({
 }: {
   agents: readonly Agent[];
   current: boolean;
-  currentTurnId: string | undefined;
+  currentReplyId: string | undefined;
   isClosed: boolean;
   issueKey: string;
-  item: Extract<ConversationItem, { kind: "targeted-message" }>;
+  item: Extract<Conversation, { kind: "targeted-message" }>;
   onReply: (target: ReplyTarget) => void;
-  register: DwellRef;
+  register?: DwellRef;
   replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
     mutationFn: (delivery: MessageDeliveryMode) =>
-      api.createMessageDelivery(item.event.payload.id, delivery),
-    onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: ["events", item.event.issue_key] }),
+      api.createMessageDelivery(item.root.id, delivery),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
   });
-  const delivery = item.deliveries.at(-1);
-  const target =
-    delivery === undefined
-      ? undefined
-      : agents.find((agent) => agent.session_id === delivery.payload.session_id);
-  const capabilities = capabilitiesForTarget(item.event.payload.target, agents);
-  const targetName =
-    delivery?.payload.title || target?.title || item.event.payload.target || "agent";
-  const asker = resolveAuthor(item.author, titles);
+  const capabilities = capabilitiesForTarget(item.root.target, agents);
+  const targetName = targetNameOf(item.root.deliveries, item.root.target, agents);
+  const asker = resolveAuthor(item.root.author, titles);
 
   return (
     <TargetedMessageCard
@@ -799,21 +754,21 @@ function TargetedMessageTurn({
         <>
           <p className={`flex flex-wrap items-center gap-x-2 text-sm ${textSecondaryOnSurface}`}>
             <span className="font-semibold">{asker.label}</span>
-            <Timestamp at={item.at} />
-            <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "message" }} />
+            <Timestamp at={item.root.created_at} />
+            <CopyRefButton route={{ id: item.root.id, key: issueKey, kind: "message" }} />
+            {item.unread ? <UnreadMark /> : null}
           </p>
-          <EventBody event={item.event} />
+          <MarkdownBody markdown={item.root.body} />
         </>
       }
       canAside={capabilities?.includes("aside") !== false}
       canBtw={capabilities?.includes("btw") !== false}
       canSteer={capabilities?.includes("steer") !== false}
       current={current}
-      deliveries={attemptsOf(item.deliveries)}
+      deliveries={deliveryAttempts(item.root.deliveries, targetName)}
       header={<Avatar author={asker} />}
       isClosed={isClosed}
-      lastSeq={item.lastSeq}
-      onReply={() => onReply(replyTargetFor(item, asker, item, issueKey, agents))}
+      onReply={() => onReply(replyTargetFor(item.root, asker, item, issueKey, agents))}
       onRetry={retry.mutate}
       register={register}
       replyDisabled={replyDisabled}
@@ -822,7 +777,7 @@ function TargetedMessageTurn({
       thread={
         <Thread
           agents={agents}
-          currentTurnId={currentTurnId}
+          currentReplyId={currentReplyId}
           isClosed={isClosed}
           issueKey={issueKey}
           onReply={onReply}
@@ -861,59 +816,48 @@ export function ConversationTab({
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
   const viewer = useQuery(whoAmIQuery());
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
-  const log = useInfiniteQuery({
-    initialPageParam: null as number | null,
-    queryKey: ["events", issueKey],
-    queryFn: ({ pageParam }) =>
-      api.getIssueEvents(
-        issueKey,
-        pageParam === null ? { limit: 200, order: "desc" } : { before: pageParam, limit: 200 }
-      ),
-    // A page can hold more than the server's 200 once streamed turns sit above a full response
-    // (mergeEventPages, prependEventToLog); it is still a full page with older turns beneath it.
-    getNextPageParam: (page) => (page.length >= 200 ? page.at(-1)?.seq : undefined),
-    // The stream (api/sse.ts) prepends turns as they are published; a refetch whose read predates
-    // one of them must not take it back.
-    structuralSharing: (current, incoming) =>
-      replaceEqualDeep(
-        current,
-        mergeEventPages(current as EventPages | undefined, incoming as EventPages)
-      ),
+  // The three reads the list is built from, each the issue's whole set: a conversation is listed
+  // however old it is, which no window of the event log could promise.
+  const asks = useQuery({
+    queryKey: ["issue-asks", issueKey],
+    queryFn: () => api.listIssueAsks(issueKey, "all"),
+  });
+  const comments = useQuery({
+    queryKey: ["issue-comments", issueKey],
+    queryFn: () => api.listComments(issueKey),
+  });
+  const messages = useQuery({
+    queryKey: ["issue-messages", issueKey],
+    queryFn: () => api.listIssueMessages(issueKey),
   });
   const issueState = stateForIssue(state, issueKey);
-  const lastRead = useRef(issueState.last_read_seq);
-  const events = useMemo(() => eventItems(log.data), [log.data]);
-  const today = dateKey(new Date().toISOString());
-  // A claim event's activity line names a session, so it reads the registry like every other
-  // author line; nothing is fetched for a log with no claim in it.
-  const { titles: activityTitles } = useAgents(
-    events.some((event) => event.type === "issue.claimed" || event.type === "issue.released")
-  );
-  const items = useMemo(
+  const lastReadSeq = issueState.last_read_seq;
+  // The watermark as a moment: the first event the reader has not read. One row - the list is
+  // ordered by activity, not by sequence, so the log is read for this and for the head alone.
+  const unreadBoundary = useQuery({
+    queryKey: ["events", issueKey, "unread-boundary", lastReadSeq],
+    queryFn: () => api.getIssueEvents(issueKey, { after: lastReadSeq, limit: 1 }),
+  });
+  // The issue's head: what a dwell on the newest conversation marks read.
+  const head = useQuery({
+    queryKey: ["events", issueKey, "head"],
+    queryFn: () => api.getIssueEvents(issueKey, { limit: 1, order: "desc" }),
+  });
+  const unreadFrom = unreadBoundary.data?.[0]?.created_at;
+  const headSeq = head.data?.[0]?.seq ?? 0;
+  const lastRead = useRef(lastReadSeq);
+  const conversations = useMemo(
     () =>
-      buildConversationItems({
-        events,
-        lastReadSeq: issueState.last_read_seq,
-        titles: activityTitles,
-        today,
+      buildConversations({
+        asks: asks.data ?? [],
+        comments: comments.data ?? [],
+        messages: messages.data ?? [],
+        unreadFrom,
       }),
-    [activityTitles, events, issueState.last_read_seq, today]
+    [asks.data, comments.data, messages.data, unreadFrom]
   );
-  const [showActivity, setShowActivity] = useShowActivity();
-  const [showRetracted, setShowRetracted] = useShowRetracted();
-  const [showResolvedComments, setShowResolvedComments] = useState(false);
-  const retractedCount = useMemo(() => countRetractedAsks(items), [items]);
-  const resolvedCommentCount = useMemo(
-    () =>
-      items.filter(
-        (item) =>
-          item.kind === "comment" &&
-          (item.event.payload.resolved ||
-            (item.event.payload.suggestion !== null &&
-              item.event.payload.suggestion.accepted !== null))
-      ).length,
-    [items]
-  );
+  const unreadCount = conversations.filter((conversation) => conversation.unread).length;
+  const [filter, setFilter] = useState<ConversationFilter>("all");
   const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
   const phone = usePhoneThread({ isPhoneViewport, sendKey, sendingNow });
   // The comments whose thread the reader has open inline.
@@ -927,48 +871,50 @@ export function ConversationTab({
       return next;
     });
   }, []);
+  // The conversation a deep link names, and the reply inside it when the link names one.
+  const focus = useMemo(
+    () =>
+      focusConversation(focusItemId, {
+        asks: asks.data ?? [],
+        comments: comments.data ?? [],
+        messages: messages.data ?? [],
+      }),
+    [asks.data, comments.data, focusItemId, messages.data]
+  );
   const shown = useMemo(
     () =>
-      visibleConversationItems(items, { showActivity, showRetracted }).filter((item) => {
-        if (item.kind !== "comment") {
-          return true;
-        }
-        const id = item.event.payload.id;
-        const focused =
-          id === focusItemId ||
-          item.replies.some((reply) => reply.event.payload.id === focusItemId);
-        const resolved =
-          item.event.payload.resolved ||
-          (item.event.payload.suggestion !== null &&
-            item.event.payload.suggestion.accepted !== null);
-        // A comment the reader has in hand stays whatever would drop it - resolved, by them or
-        // anyone, or the resolved filter turned off: its thread open inline or full-screen, the
-        // phone thread composer holding a reply to it, or its card's own reply held, out or
-        // refused, for its thread to show again.
-        const inHand =
-          openThreads.has(id) ||
-          phone.holds(id) ||
-          heldCardReplies.some((held) => held.request.replyTo?.id === id);
-        return showResolvedComments || !resolved || focused || inHand;
-      }),
-    [
-      focusItemId,
-      items,
-      openThreads,
-      heldCardReplies,
-      phone.holds,
-      showActivity,
-      showResolvedComments,
-      showRetracted,
-    ]
+      filterConversations(conversations, filter).concat(
+        // A conversation the reader has in hand stays listed whatever the filter would do with
+        // it - its thread open inline or full-screen, the phone thread composer holding a reply
+        // to it, or its card's own reply held, out or refused, for its thread to show again.
+        filter === "all"
+          ? []
+          : conversations.filter(
+              (conversation) =>
+                conversation.kind === "comment" &&
+                conversation.closed === (filter === "open") &&
+                (openThreads.has(conversation.root.id) ||
+                  phone.holds(conversation.root.id) ||
+                  heldCardReplies.some((held) => held.request.replyTo?.id === conversation.root.id))
+            )
+      ),
+    [conversations, filter, heldCardReplies, openThreads, phone.holds]
   );
+  // A landing overrides the filter: arriving at a conversation the current bucket hides resets
+  // it to All, so a link never fails to land.
+  useEffect(() => {
+    if (focus === undefined || filter === "all") return;
+    if (shown.some((conversation) => conversation.id === focus.id)) return;
+    if (!conversations.some((conversation) => conversation.id === focus.id)) return;
+    setFilter("all");
+  }, [conversations, filter, focus, shown]);
   const phoneThread = useMemo(
     () =>
       phone.id === undefined
         ? undefined
         : shown.find(
-            (item): item is Extract<ConversationItem, { kind: "comment" }> =>
-              item.kind === "comment" && item.event.payload.id === phone.id
+            (item): item is Extract<Conversation, { kind: "comment" }> =>
+              item.kind === "comment" && item.root.id === phone.id
           ),
     [phone.id, shown]
   );
@@ -978,13 +924,12 @@ export function ConversationTab({
   });
   const commentActions = useCommentActionQueue({
     // Resolving a comment, or accepting or rejecting its suggestion, is the reader done with its
-    // thread: once the server takes it, the thread closes, and the comment leaves the list as any
-    // resolved one does (`shown`). A refusal leaves the thread as it was, with the reply the reader
-    // was writing. It stays open while Resolved shows, where the comment stays listed anyway, and
-    // while the thread's own reply is out, which closing would unmount.
+    // thread: once the server takes it, the thread closes. A refusal leaves the thread and the
+    // reply the reader was writing as they were, and a thread whose own reply is out stays open,
+    // which closing would unmount.
     onSuccess: ({ id, kind }) => {
-      void queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
-      if (kind === "reopen" || showResolvedComments) return;
+      void queryClient.invalidateQueries({ queryKey: ["issue-comments", issueKey] });
+      if (kind === "reopen") return;
       if (queryClient.isMutating({ mutationKey: threadReplySendKey(sendKey, id) }) > 0) return;
       setThreadOpen(id, false);
       if (phone.id === id) phone.hide();
@@ -1003,83 +948,29 @@ export function ConversationTab({
     return reply.id === target.id;
   };
   const phoneReplyTargetsThread =
-    phoneThread !== undefined && phone.replyTo?.id === phoneThread.event.payload.id;
-  const itemSeqs = useMemo(
-    () => shown.flatMap((item) => ("lastSeq" in item ? [item.lastSeq] : [])),
-    [shown]
-  );
-  // The focused turn may be a reply nested in a thread; its own `data-turn` is the anchor.
-  const targetTurnId = useMemo(() => {
-    if (focusItemId === undefined) return undefined;
-    for (const item of shown) {
-      if (item.kind === "ask" && item.ask.id === focusItemId) return item.id;
-      if (item.kind === "comment") {
-        if (item.event.payload.id === focusItemId) return item.id;
-        const reply = item.replies.find((candidate) => candidate.event.payload.id === focusItemId);
-        if (reply !== undefined) return reply.id;
-      }
-      if (item.kind === "message" || item.kind === "targeted-message") {
-        if (item.event.payload.id === focusItemId) return item.id;
-        const reply = item.replies.find((candidate) => candidate.event.payload.id === focusItemId);
-        if (reply !== undefined) return reply.id;
-      }
-    }
-    return undefined;
-  }, [focusItemId, shown]);
-  const follow = useFollowLatest({
-    enabled: visible,
-    itemSeqs,
-    ownSendCount,
-  });
+    phoneThread !== undefined && phone.replyTo?.id === phoneThread.root.id;
+  // `useFollowLatest` counts arrivals by a number per row that rises with the row's recency; the
+  // list is ordered by activity, so that number is the activity's own millisecond.
+  const itemSeqs = useMemo(() => shown.map((conversation) => Date.parse(conversation.at)), [shown]);
+  const follow = useFollowLatest({ enabled: visible, itemSeqs, ownSendCount });
   const { agents, titles } = useAgents(visible);
-  const observedTurnKey = useMemo(
-    () =>
-      shown
-        .filter((item) => "lastSeq" in item)
-        .map((item) => `${item.id}:${item.lastSeq}`)
-        .join(","),
-    [shown]
-  );
   const hasFailedOps = failedOps?.issueKey === issueKey;
-  const lastFocusRequest = useRef<string | undefined>(undefined);
-  const focusPageLoads = useRef(0);
   const scrolledToFocus = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (lastFocusRequest.current !== focusItemId) {
-      lastFocusRequest.current = focusItemId;
-      focusPageLoads.current = 0;
-      scrolledToFocus.current = undefined;
-    }
-  }, [focusItemId]);
-
-  useEffect(() => {
-    if (!visible || focusItemId === undefined || scrolledToFocus.current === focusItemId) {
+    if (!visible || focus === undefined || scrolledToFocus.current === focus.id) {
       return;
     }
-    if (targetTurnId !== undefined) {
-      // The first `data-turn` in the document is the Conversation list's own turn. While the phone
-      // thread dialog is open it holds a second copy of the root, which this never scrolls to: the
-      // dialog shows its root at its top, and the list's collapsed copy renders no reply to match.
-      const target = document.querySelector<HTMLElement>(`[data-turn="${targetTurnId}"]`);
-      if (target !== null) {
-        target.scrollIntoView({ block: "center" });
-        scrolledToFocus.current = focusItemId;
-      }
-      return;
+    // The reply the link names is the anchor when it names one; a card with no reply named, or
+    // one whose reply is inside a collapsed thread, anchors on the card itself.
+    const anchor =
+      document.querySelector<HTMLElement>(`[data-reply][aria-current="true"]`) ??
+      document.querySelector<HTMLElement>(`[data-turn="${focus.id}"]`);
+    if (anchor !== null) {
+      anchor.scrollIntoView({ block: "center" });
+      scrolledToFocus.current = focus.id;
     }
-    if (log.hasNextPage && !log.isFetchingNextPage && focusPageLoads.current < maxFocusPageLoads) {
-      focusPageLoads.current += 1;
-      void log.fetchNextPage();
-    }
-  }, [
-    focusItemId,
-    log.fetchNextPage,
-    log.hasNextPage,
-    log.isFetchingNextPage,
-    targetTurnId,
-    visible,
-  ]);
+  }, [focus, visible]);
 
   // A link to a comment (`/issues/<key>/comments/<id>`, from a Replies row, the Inbox, search or
   // a copied reference) opens that comment's thread as it lands, so its replies are on screen:
@@ -1087,34 +978,34 @@ export function ConversationTab({
   // as any thread.
   const openedFocusThread = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!visible || focusItemId === undefined || openedFocusThread.current === focusItemId) return;
+    if (!visible || focus === undefined || openedFocusThread.current === focus.id) return;
     const root = shown.find(
-      (item): item is Extract<ConversationItem, { kind: "comment" }> =>
-        item.kind === "comment" &&
-        (item.event.payload.id === focusItemId ||
-          item.replies.some((reply) => reply.event.payload.id === focusItemId))
+      (item): item is Extract<Conversation, { kind: "comment" }> =>
+        item.kind === "comment" && item.id === focus.id
     );
     if (root === undefined) return;
-    openedFocusThread.current = focusItemId;
-    if (isPhoneViewport) phone.open(root.event.payload.id);
-    else setThreadOpen(root.event.payload.id, true);
-  }, [focusItemId, isPhoneViewport, phone.open, setThreadOpen, shown, visible]);
+    openedFocusThread.current = focus.id;
+    if (isPhoneViewport) phone.open(root.root.id);
+    else setThreadOpen(root.root.id, true);
+  }, [focus, isPhoneViewport, phone.open, setThreadOpen, shown, visible]);
 
   useEffect(() => {
-    lastRead.current = issueState.last_read_seq;
-  }, [issueState.last_read_seq]);
+    lastRead.current = lastReadSeq;
+  }, [lastReadSeq]);
 
-  // The issue's read mark: a turn three-quarters on screen for a second reads the issue through
-  // its sequence. A write the server refuses re-reads the stored mark and dwells again while the
-  // turn stays on screen (`useDwell` re-arms on the rejection this rethrows).
-  const registerObserved = useDwell({
-    enabled: visible && observedTurnKey !== "",
-    onDwell: async (target) => {
-      const sequence = Number(target.getAttribute("data-event-seq"));
-      if (sequence <= lastRead.current) return;
-      lastRead.current = sequence;
+  // The issue's read mark, and the only writer of it: the newest conversation three-quarters on
+  // screen for a second reads the issue through its head. A single watermark cannot say "I read
+  // the third conversation only", so a dwell lower down writes nothing, and under-marking never
+  // hides an unread conversation. A write the server refuses re-reads the stored mark and dwells
+  // again while the card stays on screen (`useDwell` re-arms on the rejection this rethrows).
+  const newestId = conversations[0]?.id;
+  const registerNewest = useDwell({
+    enabled: visible && newestId !== undefined && headSeq > 0,
+    onDwell: async () => {
+      if (headSeq <= lastRead.current) return;
+      lastRead.current = headSeq;
       try {
-        const next = await api.putIssueState(issueKey, { last_read_seq: sequence });
+        const next = await api.putIssueState(issueKey, { last_read_seq: headSeq });
         queryClient.setQueryData<UserState>(["user-state"], (current) => ({
           ...current,
           [issueKey]: next,
@@ -1125,8 +1016,8 @@ export function ConversationTab({
         throw error;
       }
     },
-    resetKey: `${issueKey} ${observedTurnKey}`,
-    shouldDwell: (target) => Number(target.getAttribute("data-event-seq")) > lastRead.current,
+    resetKey: `${issueKey} ${newestId ?? ""} ${headSeq}`,
+    shouldDwell: () => headSeq > lastRead.current,
   });
 
   const applyOptimisticOperations = (operations: PinStateOperation[]) => {
@@ -1200,6 +1091,12 @@ export function ConversationTab({
     }
   };
 
+  const pinConversation = (id: string) =>
+    updatePins((dismissed) => ({
+      id,
+      op: isPinnedConversation(dismissed, id) ? "unpin" : "pin",
+    }));
+
   const retryFailedOperations = () => {
     if (failedOps === undefined || failedOps.issueKey !== issueKey || retryingFailedOps) {
       return;
@@ -1225,22 +1122,22 @@ export function ConversationTab({
     setFailedOps(undefined);
   };
 
-  if (log.isPending) {
+  if (asks.isPending || comments.isPending || messages.isPending) {
     return <p className={textMutedOnCanvas}>Loading conversation…</p>;
   }
-  if (log.isError) {
+  if (asks.isError || comments.isError || messages.isError) {
     return <p className={dangerText}>Could not load the conversation.</p>;
   }
 
-  // The reader's turn keeps its viewport position across live updates - a turn arriving while
-  // they browse history, a pin reflow, the failed-operations banner, the unread divider moving -
-  // except while they follow the latest turn, where an arrival simply appears in place.
+  // The reader's card keeps its viewport position across live updates - a reply arriving while
+  // they browse, a pin reflow, the failed-operations banner, a card moving bucket - except while
+  // they follow the newest conversation, where an arrival simply appears in place.
   return (
     <ViewportAnchor
       as="section"
       className="flex min-h-[60dvh] flex-col gap-3 pb-56 sm:pb-16 xl:pb-0"
       enabled={() => !follow.pinnedToTop()}
-      item="data-event-seq"
+      item="data-turn"
       label="Conversation"
     >
       {hasFailedOps ? (
@@ -1284,45 +1181,35 @@ export function ConversationTab({
           replyTo={replyTo}
         />
       </div>
-      <div className="flex items-center justify-end gap-4">
-        {retractedCount === 0 ? null : (
-          <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
-            <input
-              checked={showRetracted}
-              className={`${checkboxAccent} min-h-11 min-w-11`}
-              onChange={(event) => setShowRetracted(event.target.checked)}
-              type="checkbox"
-            />
-            Show retracted ({retractedCount})
-          </label>
-        )}
-        {resolvedCommentCount === 0 ? null : (
-          <button
-            aria-expanded={showResolvedComments}
-            className={`min-h-11 text-sm font-medium ${textSecondaryOnCanvas}`}
-            onClick={() => setShowResolvedComments((current) => !current)}
-            type="button"
-          >
-            Resolved ({resolvedCommentCount})
-          </button>
-        )}
-        <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
-          {/* The 44px target is the label, which is already `min-h-11`; putting it on the box
-              itself drew a checkbox three times the size of every other control. */}
-          <input
-            checked={showActivity}
-            className={checkboxAccent}
-            onChange={(event) => setShowActivity(event.target.checked)}
-            type="checkbox"
-          />
-          Show activity
-        </label>
+      {/* All / Open / Closed, the one control over the list. It starts on All every visit: a
+          reader who filtered yesterday still meets the whole conversation today. */}
+      <div className="flex items-center justify-end">
+        <fieldset
+          aria-label="Conversations"
+          className={`flex rounded-md border ${secondaryButtonBorder}`}
+        >
+          {FILTERS.map(({ label, value }) => (
+            <button
+              aria-pressed={filter === value}
+              className={`min-h-11 px-3 text-sm font-medium first:rounded-l-md last:rounded-r-md ${
+                filter === value
+                  ? `${surfaceMutedBg} ${textPrimaryOnSurfaceMuted}`
+                  : textSecondaryOnCanvas
+              }`}
+              key={value}
+              onClick={() => setFilter(value)}
+              type="button"
+            >
+              {label}
+            </button>
+          ))}
+        </fieldset>
       </div>
       {/* The pill takes an edge the docked composer leaves free, so it never covers the
           composer's controls. Below `sm` the composer sits at the foot of the screen and grows
           upward (a refusal's Retry or Discard draft with it), so the pill takes the top: it sits
-          where the turns begin, and sticks at the top of the screen once they scroll under it, so
-          it never rises over what is above them - the issue's header, its tabs and the filters.
+          where the cards begin, and sticks at the top of the screen once they scroll under it, so
+          it never rises over what is above them - the issue's header, its tabs and the filter.
           Its box has no height, and `-mb-3` takes back the section's gap, so it moves nothing. From
           `sm` the composer sticks to the top and the pill floats at the foot. A thread opened
           full-screen covers the Conversation the pill acts on, and its own composer sits at the
@@ -1335,7 +1222,7 @@ export function ConversationTab({
             onClick={follow.jumpToLatest}
             type="button"
           >
-            Jump to latest{follow.newItemCount === 0 ? "" : ` · ${follow.newItemCount} new`}
+            Jump to latest{unreadCount === 0 ? "" : ` · ${unreadCount} new`}
           </button>
         </div>
       ) : null}
@@ -1346,46 +1233,23 @@ export function ConversationTab({
         inert={phoneThread === undefined ? undefined : true}
       >
         {shown.map((item) => {
-          if (item.kind === "day-divider" || item.kind === "unread-divider") {
-            const label = item.kind === "day-divider" ? item.label : "New since you last read";
-            return (
-              // biome-ignore lint/a11y/useSemanticElements: A labeled list item is required by the Conversation DOM contract.
-              // biome-ignore lint/a11y/useFocusableInteractive: A divider is descriptive, not an interactive control.
-              <li
-                aria-label={label}
-                className={`my-2 flex items-center gap-3 text-xs font-semibold tracking-wide uppercase ${
-                  item.kind === "unread-divider" ? linkText : textMutedOnCanvas
-                }`}
-                key={item.id}
-                // biome-ignore lint/a11y: The role is required by the Conversation DOM contract.
-                role="separator"
-              >
-                <span className={`h-px flex-1 ${newDividerLine}`} />
-                {label}
-                <span className={`h-px flex-1 ${newDividerLine}`} />
-              </li>
-            );
-          }
-
-          const pinned = isPinnedEvent(issueState.dismissed, item.pinEventId);
-          const onPin = () =>
-            updatePins((dismissed) => ({
-              id: eventItemId({ id: item.pinEventId }),
-              op: isPinnedEvent(dismissed, item.pinEventId) ? "unpin" : "pin",
-            }));
+          const current = item.id === focus?.id;
+          const currentReplyId = current ? focus?.replyId : undefined;
+          const pinned = isPinnedConversation(issueState.dismissed, item.id);
+          const register = item.id === newestId ? registerNewest : undefined;
 
           if (item.kind === "targeted-message") {
             return (
               <TargetedMessageTurn
                 agents={agents}
-                current={item.id === targetTurnId}
-                currentTurnId={targetTurnId}
+                current={current}
+                currentReplyId={currentReplyId}
                 isClosed={isClosed}
                 issueKey={issueKey}
                 item={item}
                 key={item.id}
                 onReply={beginReply}
-                register={registerObserved}
+                register={register}
                 replyDisabled={composerSending}
                 titles={titles}
               />
@@ -1395,18 +1259,18 @@ export function ConversationTab({
             return (
               <MessageTurn
                 agents={agents}
-                author={resolveAuthor(item.author, titles)}
+                author={resolveAuthor(item.root.author, titles)}
                 issueKey={issueKey}
-                current={item.id === targetTurnId}
-                currentTurnId={targetTurnId}
+                current={current}
+                currentReplyId={currentReplyId}
                 disabled={hasFailedOps}
                 isClosed={isClosed}
                 item={item}
                 key={item.id}
-                onPin={onPin}
+                onPin={() => pinConversation(item.id)}
                 onReply={beginReply}
                 pinned={pinned}
-                register={registerObserved}
+                register={register}
                 replyDisabled={composerSending}
                 titles={titles}
               />
@@ -1416,96 +1280,72 @@ export function ConversationTab({
             return (
               <CommentTurn
                 actionFailure={
-                  commentActions.actionFailure?.id === item.event.payload.id
+                  commentActions.actionFailure?.id === item.root.id
                     ? commentActions.actionFailure
                     : undefined
                 }
-                hideReplyComposer={
-                  replyTo?.parentKind === "comment" && replyTo.id === item.event.payload.id
-                }
+                hideReplyComposer={replyTo?.parentKind === "comment" && replyTo.id === item.root.id}
                 agents={agents}
                 issueArtifacts={issueArtifacts}
                 isPhone={isPhoneViewport}
-                onPhoneThreadToggle={() => phone.open(item.event.payload.id)}
+                onPhoneThreadToggle={() => phone.open(item.root.id)}
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
-                current={item.id === targetTurnId}
+                current={current}
+                currentReplyId={currentReplyId}
                 disabled={hasFailedOps}
-                expanded={openThreads.has(item.event.payload.id)}
+                expanded={openThreads.has(item.root.id)}
                 onRetryAction={commentActions.retryItem}
-                pendingAction={commentActions.pendingActionIds.has(item.event.payload.id)}
+                pendingAction={commentActions.pendingActionIds.has(item.root.id)}
                 isClosed={isClosed}
                 issueKey={issueKey}
                 item={item}
                 key={item.id}
-                onPin={onPin}
+                onPin={() => pinConversation(item.id)}
                 onReply={isPhoneViewport ? phone.beginReply : beginReply}
                 pinned={pinned}
-                register={registerObserved}
+                register={register}
                 replyDisabled={composerSending}
                 sendKey={sendKey}
-                setExpanded={(open) => setThreadOpen(item.event.payload.id, open)}
+                setExpanded={(open) => setThreadOpen(item.root.id, open)}
                 viewerLogin={viewer.data?.login ?? ""}
               />
             );
           }
-          if (item.kind === "ask") {
-            return (
-              <li
-                aria-current={item.id === targetTurnId ? "true" : undefined}
-                className="my-2 flex gap-3"
-                data-event-seq={item.lastSeq}
-                data-turn={item.id}
-                key={item.id}
-                ref={registerObserved}
-              >
-                <div className="min-w-0 flex-1">
-                  {/* The margin shows this same open ask beside the document, so a full
-                      two-row composer here is the question, its options and its answer
-                      controls twice on one screen. The timeline is the record: it carries the
-                      compact density, whose options answer in one click and whose note field
-                      stays behind its own disclosure. */}
-                  <AskCard ask={item.ask} markRead thread="collapsed" variant="compact" />
-                </div>
-                <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
-              </li>
-            );
-          }
           return (
             <li
-              className={`flex flex-wrap items-baseline gap-x-2 px-2 text-xs ${textMutedOnCanvas}`}
-              data-event-seq={item.lastSeq}
-              data-kind="activity"
+              aria-current={current ? "true" : undefined}
+              className="my-2 flex gap-3"
               data-turn={item.id}
               key={item.id}
-              ref={registerObserved}
+              ref={register}
             >
-              {/* The author keeps its whole width until the row runs out, then truncates with
-                  the full label on hover - a live session title can be a sentence, and left to
-                  set its own width it pushed the line, the turns list and the document past
-                  the viewport. The description keeps a floor so it wraps as prose rather than
-                  one word per line. */}
-              {/* Who and when are one group that never breaks, so the time never wraps alone to
-                  the start of the next row when the author takes most of the line. The author
-                  truncates inside it, with the full label on hover - a live session title can
-                  be a whole sentence - and only the description wraps, with a floor so it
-                  wraps as prose rather than one word per line. */}
-              <span className="flex max-w-full min-w-0 shrink-0 items-baseline gap-x-2 whitespace-nowrap">
-                <span
-                  className="min-w-0 truncate font-medium"
-                  title={resolveAuthor(item.author, titles).label}
-                >
-                  {resolveAuthor(item.author, titles).label}
-                </span>
-                <span aria-hidden="true">·</span>
-                <Timestamp at={item.at} />
-              </span>
-              <span className="min-w-48 flex-1 break-words">
-                <ActivityLine
-                  description={item.description}
-                  event={item.event}
-                  issueKey={issueKey}
+              <div className="min-w-0 flex-1">
+                {item.unread ? (
+                  <div className="mb-1 flex justify-end">
+                    <UnreadMark />
+                  </div>
+                ) : null}
+                {/* The margin shows this same open ask beside the document, so a full
+                    two-row composer here is the question, its options and its answer
+                    controls twice on one screen. The list is the record: it carries the
+                    compact density, whose options answer in one click and whose note field
+                    stays behind its own disclosure. The row's own thread seeds the card, so a
+                    page of asks makes no per-ask thread request. */}
+                <AskCard
+                  ask={item.ask}
+                  currentReplyId={currentReplyId}
+                  initialThread={{ ask: item.ask, ...item.ask.thread }}
+                  initialThreadUpdatedAt={asks.dataUpdatedAt}
+                  markRead
+                  thread="collapsed"
+                  variant="compact"
                 />
-              </span>
+              </div>
+              <TurnPin
+                disabled={hasFailedOps}
+                onPin={() => pinConversation(item.id)}
+                pinned={pinned}
+              />
             </li>
           );
         })}
@@ -1536,17 +1376,18 @@ export function ConversationTab({
             <ol className="min-h-0 flex-1 overflow-y-auto px-4 pb-32">
               <CommentTurn
                 actionFailure={
-                  commentActions.actionFailure?.id === phoneThread.event.payload.id
+                  commentActions.actionFailure?.id === phoneThread.root.id
                     ? commentActions.actionFailure
                     : undefined
                 }
                 agents={agents}
                 issueArtifacts={issueArtifacts}
                 composerClassName={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
-                current={phoneThread.id === targetTurnId}
+                current={phoneThread.id === focus?.id}
+                currentReplyId={phoneThread.id === focus?.id ? focus?.replyId : undefined}
                 viewerLogin={viewer.data?.login ?? ""}
                 disabled={hasFailedOps}
-                expanded={openThreads.has(phoneThread.event.payload.id)}
+                expanded={openThreads.has(phoneThread.root.id)}
                 forceExpanded
                 hideReplyComposer={phoneReplyTargetsThread}
                 isClosed={isClosed}
@@ -1557,18 +1398,13 @@ export function ConversationTab({
                 onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
                 onPhoneThreadToggle={phone.leave}
                 onRetryAction={commentActions.retryItem}
-                pendingAction={commentActions.pendingActionIds.has(phoneThread.event.payload.id)}
-                onPin={() =>
-                  updatePins((dismissed) => ({
-                    id: eventItemId({ id: phoneThread.pinEventId }),
-                    op: isPinnedEvent(dismissed, phoneThread.pinEventId) ? "unpin" : "pin",
-                  }))
-                }
+                pendingAction={commentActions.pendingActionIds.has(phoneThread.root.id)}
+                onPin={() => pinConversation(phoneThread.id)}
                 onReply={phone.beginReply}
-                pinned={isPinnedEvent(issueState.dismissed, phoneThread.pinEventId)}
+                pinned={isPinnedConversation(issueState.dismissed, phoneThread.id)}
                 replyDisabled={composerSending}
                 sendKey={sendKey}
-                setExpanded={(open) => setThreadOpen(phoneThread.event.payload.id, open)}
+                setExpanded={(open) => setThreadOpen(phoneThread.root.id, open)}
               />
             </ol>
           )}
@@ -1591,19 +1427,7 @@ export function ConversationTab({
           )}
         </section>
       )}
-      {shown.length === 0 ? <p className={textMutedOnCanvas}>No messages yet.</p> : null}
-      {log.hasNextPage ? (
-        <div className="flex items-center justify-center">
-          <button
-            className={`min-h-11 rounded-lg px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-            disabled={log.isFetchingNextPage}
-            onClick={() => void log.fetchNextPage()}
-            type="button"
-          >
-            {log.isFetchingNextPage ? "Loading…" : "Load older"}
-          </button>
-        </div>
-      ) : null}
+      {shown.length === 0 ? <p className={textMutedOnCanvas}>No conversations yet.</p> : null}
     </ViewportAnchor>
   );
 }

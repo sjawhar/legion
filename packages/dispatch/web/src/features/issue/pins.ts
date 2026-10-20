@@ -22,6 +22,38 @@ export function pinnedEventIds(dismissed: string[]): string[] {
     .map((item) => item.slice(prefix.length));
 }
 
+/** What a Conversation card pins: the conversation itself. Only an ask carries an event id of
+ *  its own (`opened_event_id`), and a card built from `/comments` or `/messages` has none at
+ *  all, so a card is pinned under its own `<kind>:<id>` - the id the list already gives it -
+ *  beside the `event:<id>` an Activity row still pins under. A pin made before the Conversation
+ *  became a list of conversations is that event's, and stays the margin's to show and unpin. */
+export const CONVERSATION_PIN_KINDS = ["ask", "comment", "message"] as const;
+export type ConversationPinKind = (typeof CONVERSATION_PIN_KINDS)[number];
+
+export interface PinnedConversation {
+  readonly kind: ConversationPinKind;
+  readonly id: string;
+}
+
+/** `conversationId` is a conversation's own id (`ask:<id>`, `comment:<id>`, `message:<id>`). */
+export function isPinnedConversation(dismissed: string[], conversationId: string): boolean {
+  return dismissed.includes(pinnedItemMarker(conversationId));
+}
+
+export function pinnedConversations(dismissed: string[]): PinnedConversation[] {
+  const pinned: PinnedConversation[] = [];
+  for (const item of dismissed) {
+    if (!item.startsWith(pinnedItemPrefix)) continue;
+    const marker = item.slice(pinnedItemPrefix.length);
+    const separator = marker.indexOf(":");
+    const kind = CONVERSATION_PIN_KINDS.find(
+      (candidate) => candidate === marker.slice(0, separator)
+    );
+    if (kind !== undefined) pinned.push({ id: marker.slice(separator + 1), kind });
+  }
+  return pinned;
+}
+
 /** The viewer's row for an issue, defaulted: absent state and an unvisited issue read alike. */
 export function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
   return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 };

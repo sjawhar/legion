@@ -4,8 +4,8 @@ import type { ReactNode } from "react";
 
 import { useFollowLatest } from "./use-follow-latest";
 
-// The composer sits at document top 0; the newest turn (topmost `[data-event-seq]`) sits below
-// it. `useFollowLatest` reads both elements' `getBoundingClientRect()`, so the harness renders
+// The composer sits at document top 0; the newest card (topmost `[data-turn]`) sits below it.
+// `useFollowLatest` reads both elements' `getBoundingClientRect()`, so the harness renders
 // stand-ins for them rather than a real layout engine.
 const COMPOSER_HEIGHT = 140;
 const NEWEST_TURN_DOC_TOP = 300;
@@ -16,7 +16,7 @@ function installScrollLayoutMocks(): { restore: () => void } {
     this: Element
   ) {
     const isComposer = this.getAttribute("aria-label") === "Comment composer";
-    const isTurn = this.hasAttribute("data-event-seq");
+    const isTurn = this.hasAttribute("data-turn");
     const docTop = isComposer ? 0 : isTurn ? NEWEST_TURN_DOC_TOP : 0;
     const height = isComposer ? COMPOSER_HEIGHT : isTurn ? 50 : 0;
     const top = docTop - window.scrollY;
@@ -59,7 +59,7 @@ function Harness({
     <div>
       <form aria-label="Comment composer" />
       {itemSeqs.map((seq) => (
-        <div data-event-seq={seq} key={seq} />
+        <div data-turn={`message:${seq}`} key={seq} />
       ))}
     </div>
   );

@@ -31,9 +31,22 @@ export type CreateReply = (issueKey: string, input: CreateCommentInput) => Promi
 
 const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
 
-function AskReply({ comment, markRef }: { comment: Comment; markRef?: DwellRef }): ReactNode {
+function AskReply({
+  comment,
+  current = false,
+  markRef,
+}: {
+  comment: Comment;
+  current?: boolean;
+  markRef?: DwellRef;
+}): ReactNode {
   return (
-    <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`} ref={markRef}>
+    <li
+      aria-current={current ? "true" : undefined}
+      className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`}
+      data-reply=""
+      ref={markRef}
+    >
       <div className={textPrimaryOnSurfaceMuted}>
         <MarkdownBody markdown={comment.body} />
       </div>
@@ -161,6 +174,9 @@ export interface AskThreadProps {
   /** The Replies page's mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the newest
    *  reply's own element when that reply is the newest write the card shows. */
   markNewest?: DwellRef;
+  /** The reply a deep link named, which only the Conversation passes: that reply carries
+   *  `aria-current`, and the fold over the older replies opens when it is one of them. */
+  currentReplyId?: string;
 }
 
 /**
@@ -178,6 +194,7 @@ export function AskThread({
   embedded = false,
   uploadOwner,
   markNewest,
+  currentReplyId,
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
@@ -185,7 +202,11 @@ export function AskThread({
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
   const recentReplies = replies.slice(-2).reverse();
   const newestReply = replies.at(-1);
-  const olderReplies = showAllReplies ? replies.slice(0, -2).reverse() : [];
+  const older = replies.slice(0, -2);
+  // A link to a reply older than the two the card keeps visible opens the fold over them, so
+  // the reply it names is on screen rather than behind a control the reader must find.
+  const showAll = showAllReplies || older.some((comment) => comment.id === currentReplyId);
+  const olderReplies = showAll ? [...older].reverse() : [];
 
   return (
     <section
@@ -198,6 +219,7 @@ export function AskThread({
           {recentReplies.map((comment) => (
             <AskReply
               comment={comment}
+              current={comment.id === currentReplyId}
               key={comment.id}
               markRef={comment === newestReply ? markNewest : undefined}
             />
@@ -207,12 +229,12 @@ export function AskThread({
       {hiddenReplyCount === 0 ? null : (
         <button
           aria-controls={olderRepliesId}
-          aria-expanded={showAllReplies}
+          aria-expanded={showAll}
           className={`min-h-11 text-sm font-medium ${linkText} ${linkHoverText}`}
-          onClick={() => setShowAllReplies((showing) => !showing)}
+          onClick={() => setShowAllReplies(!showAll)}
           type="button"
         >
-          {showAllReplies
+          {showAll
             ? "Show fewer replies"
             : `Show ${hiddenReplyCount} more ${hiddenReplyCount === 1 ? "reply" : "replies"}`}
         </button>
@@ -220,7 +242,7 @@ export function AskThread({
       {olderReplies.length === 0 ? null : (
         <ul className="space-y-2" id={olderRepliesId}>
           {olderReplies.map((comment) => (
-            <AskReply comment={comment} key={comment.id} />
+            <AskReply comment={comment} current={comment.id === currentReplyId} key={comment.id} />
           ))}
         </ul>
       )}

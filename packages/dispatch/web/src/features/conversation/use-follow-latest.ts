@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const FOLLOW_POSITION_TOLERANCE_PX = 1;
-const NEWEST_TURN_SELECTOR = "[data-event-seq]";
+/** Every card and reply carries `data-turn`; the first in the document is the newest card. */
+const NEWEST_TURN_SELECTOR = "[data-turn]";
 
 export function useFollowLatest({
   enabled,

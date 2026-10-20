@@ -707,6 +707,22 @@ function keySet(keys: readonly (readonly unknown[])[]): string[] {
   return [...new Set(keys.map((key) => JSON.stringify(key)))].sort();
 }
 
+/** The Conversation builds its list from the issue's own asks, comments and messages
+ *  (`features/conversation/ConversationTab.tsx`), under keys of its own, so each of those
+ *  lists refreshes exactly when the list it mirrors does - never on its own schedule. */
+const CONVERSATION_LISTS: Record<string, string> = {
+  asks: "issue-asks",
+  comments: "issue-comments",
+  messages: "issue-messages",
+};
+
+function conversationListAdditions(keys: readonly unknown[][]): unknown[][] {
+  return keys.flatMap((key) => {
+    const list = typeof key[0] === "string" ? CONVERSATION_LISTS[key[0]] : undefined;
+    return list === undefined ? [] : [[list, ...key.slice(1)]];
+  });
+}
+
 // One case per corpus entry, so a failure names the event and the rest still run.
 const corpus = representativeEvents.map(
   (incoming, index) => [`${incoming.type}#${index}`, incoming] as const
@@ -727,9 +743,12 @@ test.each(
   ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
+  const lists = conversationListAdditions([...base, ...counted]);
   // Which rows refresh is the contract; the order they are queued in and whether a key is
   // repeated are not, since the stream's pending map is keyed on the serialised key.
-  expect(keySet(invalidatedKeys(incoming))).toEqual(keySet([...base, ...counted, ...references]));
+  expect(keySet(invalidatedKeys(incoming))).toEqual(
+    keySet([...base, ...counted, ...references, ...lists])
+  );
 });
 
 test("the corpus contains events the subtraction applies to", () => {

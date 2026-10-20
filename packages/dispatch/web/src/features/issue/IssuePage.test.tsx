@@ -134,6 +134,9 @@ function stubIssuePage(
 ): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
+  const originalListIssueAsks = api.listIssueAsks;
+  const originalListComments = api.listComments;
+  const originalListIssueMessages = api.listIssueMessages;
   const originalGetInbox = api.getInbox;
   const originalGetMyState = api.getMyState;
   const originalListAgents = api.listAgents;
@@ -142,6 +145,10 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
+  // The Conversation builds its list from the issue's own asks, comments and messages.
+  api.listIssueAsks = async () => [];
+  api.listComments = async () => [];
+  api.listIssueMessages = async () => [];
   api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
@@ -149,6 +156,9 @@ function stubIssuePage(
     api.getInbox = originalGetInbox;
     api.getMyState = originalGetMyState;
     api.getIssueEvents = originalGetIssueEvents;
+    api.listIssueAsks = originalListIssueAsks;
+    api.listComments = originalListComments;
+    api.listIssueMessages = originalListIssueMessages;
     api.listAgents = originalListAgents;
     api.getIssueSubscribers = originalGetIssueSubscribers;
   };

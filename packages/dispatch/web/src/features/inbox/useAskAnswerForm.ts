@@ -234,6 +234,8 @@ export function useAskAnswerForm({
       return;
     }
     void queryClient.invalidateQueries({ queryKey: ["asks", ask.issue_key] });
+    // The Conversation lists the issue's asks itself, and an answer moves the card's bucket.
+    void queryClient.invalidateQueries({ queryKey: ["issue-asks", ask.issue_key] });
     void queryClient.invalidateQueries({ queryKey: ["issue", ask.issue_key] });
     void queryClient.invalidateQueries({ queryKey: ["issues"] });
   }
