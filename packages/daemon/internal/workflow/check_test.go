@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -262,10 +263,10 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	seedPR(t, rig.pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-300", Repo: "acme/widgets", Number: 7, Branch: "legion/LEGION-300", HeadSHA: "w", Failing: []string{}})
 	rig.apply("widgets-merged", intake.PullRequestMerged{Repo: "acme/widgets", Number: 7, MergeSHA: "merge-w"})
 
-	rig.apply("started", intake.ServerStarted{Commit: "b00f"})
+	rig.apply("started", intake.ServerStarted{Commit: "b00f0000"})
 	compares := checkCompares(t, rig.pool, "LEGION-209")
-	if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f", OpenedAt: checkOpened}) {
-		t.Fatalf("check_compare rows of the legion check = %+v, want one for look 1 of build b00f", compares)
+	if len(compares) != 1 || compares[0] != (record.CheckCompare{Look: 1, Cause: "dispatch start", Build: "b00f0000", OpenedAt: checkOpened}) {
+		t.Fatalf("check_compare rows of the legion check = %+v, want one for look 1 of build b00f0000", compares)
 	}
 	if got := checkCompares(t, rig.pool, "LEGION-300"); len(got) != 0 {
 		t.Fatalf("check_compare rows of the widgets check = %+v, want none", got)
@@ -274,8 +275,17 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
 		t.Fatalf("check_compare rows after a start with no commit = %+v, want the one", got)
 	}
+	// A commit that is not a git SHA is refused before any row: it would reach the implement App's
+	// compare URL and the implementer's task text, and the listener takes a `source: dispatch`
+	// publish from any client, so the shape is the gate.
+	for i, commit := range []string{"main#../../x", "b00f", "B00F0000", "0" + strings.Repeat("a", 40), "deadbeef?per_page=100", "deadbee\n"} {
+		rig.apply(fmt.Sprintf("started-unshaped-%d", i), intake.ServerStarted{Commit: commit})
+		if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
+			t.Fatalf("check_compare rows after a start on commit %q = %+v, want the one", commit, got)
+		}
+	}
 	unbuilt := New(record.NewStore(), Config{Project: "LEGION", Clock: rig.clock.Now}, nil)
-	if _, err := intake.ApplyFact(context.Background(), rig.pool, "dispatch", "started-unbuilt", intake.ServerStarted{Commit: "c0de"}, unbuilt, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(context.Background(), rig.pool, "dispatch", "started-unbuilt", intake.ServerStarted{Commit: "c0de0000"}, unbuilt, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact: %v", err)
 	}
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 1 {
@@ -287,17 +297,17 @@ func TestServerStartedComparesOnlyTheBuiltFromRepositorysChecks(t *testing.T) {
 // revision compares nothing, Dispatch's build included.
 func TestTheBootComparesItsRevisionAndDispatchsBuild(t *testing.T) {
 	rig := childCheckRig(t, "sjawhar/legion")
-	rig.apply("boot-1", intake.DaemonBooted{Boot: 1, Revision: "r1", DispatchBuild: "d1"})
-	want := []record.CheckCompare{{Look: 1, Cause: "daemon boot", Build: "r1", OpenedAt: checkOpened}, {Look: 1, Cause: "dispatch build", Build: "d1", OpenedAt: checkOpened}}
+	rig.apply("boot-1", intake.DaemonBooted{Boot: 1, Revision: "0000000a", DispatchBuild: "0000000d"})
+	want := []record.CheckCompare{{Look: 1, Cause: "daemon boot", Build: "0000000a", OpenedAt: checkOpened}, {Look: 1, Cause: "dispatch build", Build: "0000000d", OpenedAt: checkOpened}}
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("check_compare rows after a release boot = %+v, want %+v", got, want)
 	}
-	rig.apply("boot-2", intake.DaemonBooted{Boot: 2, DispatchBuild: "d2"})
+	rig.apply("boot-2", intake.DaemonBooted{Boot: 2, DispatchBuild: "0000000e"})
 	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 2 {
 		t.Fatalf("check_compare rows after a boot with no revision = %+v, want the two", got)
 	}
-	rig.apply("boot-3", intake.DaemonBooted{Boot: 3, Revision: "r3"})
-	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 3 || got[2] != (record.CheckCompare{Look: 1, Cause: "daemon boot", Build: "r3", OpenedAt: checkOpened}) {
+	rig.apply("boot-3", intake.DaemonBooted{Boot: 3, Revision: "0000000c"})
+	if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 3 || got[2] != (record.CheckCompare{Look: 1, Cause: "daemon boot", Build: "0000000c", OpenedAt: checkOpened}) {
 		t.Fatalf("check_compare rows after a boot with no Dispatch build = %+v, want the daemon's alone added", got)
 	}
 }
@@ -434,6 +444,94 @@ func TestTheImplementersFailedClaimEndsItsLook(t *testing.T) {
 	}
 }
 
+// A root reopened inside its linger runs again from the reopen: admit's readmit stands it in
+// `admitted` with the reopen's status, no role's phase, and its production check untouched. Nothing
+// of the check moves the tree while it runs again: the implementer's failed claim takes the live
+// phase's path rather than ending the look (the look's own bound ends it, and that end starts no
+// look and suspends nothing, since the implementer and pod are the run's), a wake is kept for a
+// look after the run, and the bound closes the check as not run without an issue_close of the
+// implementer the run reuses.
+func TestAReopenedRootsCheckStartsNoLookWhileItRunsAgain(t *testing.T) {
+	rig := rootCheckRig(t)
+	if _, err := rig.pool.Exec(context.Background(), "update issues set phase = 'admitted', status = 'todo', linger_until = null where key = 'LEGION-208'"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(superviseRowsOf(t, rig.pool, "LEGION-208", "suspend"))
+	suspensions := len(issueSuspensions(t, rig.pool, "LEGION-208"))
+
+	rig.apply("implementer-failed", intake.ClaimFailed{Issue: "LEGION-208", Role: claim.RoleImplementer})
+	if check := productionCheck(t, rig.pool, "LEGION-208"); !check.Open() || !check.LookOpen {
+		t.Fatalf("the check after the implementer's claim failed while the root runs again = %+v, want its look still open", check)
+	}
+	if !containsNotice(noticeKinds(t, rig.pool, "LEGION-208"), "worker-died") {
+		t.Fatalf("notices %v after the implementer's claim failed, want worker-died: the failure is the run's", noticeKinds(t, rig.pool, "LEGION-208"))
+	}
+
+	rig.apply("look-bound", intake.CheckLookEnded{Issue: "LEGION-208", Look: 1, Cause: "look bound", OpenedAt: checkOpened})
+	check := productionCheck(t, rig.pool, "LEGION-208")
+	if !check.Open() || check.Looks != 1 || check.LookOpen {
+		t.Fatalf("the check after its look's bound = %+v, want open at look 1 with the look ended", check)
+	}
+	if got := len(superviseRowsOf(t, rig.pool, "LEGION-208", "suspend")); got != before {
+		t.Fatalf("suspend rows = %d, want %d: the look's end suspends nothing of a run", got, before)
+	}
+	if got := len(issueSuspensions(t, rig.pool, "LEGION-208")); got != suspensions {
+		t.Fatalf("issue suspensions = %d, want %d: the pod is the run's", got, suspensions)
+	}
+
+	rig.apply("deployed", intake.IssueDeployed{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, RunID: 77, CompletedAt: rig.clock.now})
+	check = productionCheck(t, rig.pool, "LEGION-208")
+	if check.Looks != 1 || check.LookOpen || check.PendingCauseKind != "issue.deployed" {
+		t.Fatalf("the check after a wake while the root runs again = %+v, want the wake kept for a look after the run, none started", check)
+	}
+	if starts := superviseRowsOf(t, rig.pool, "LEGION-208", "start"); len(starts) != 1 || starts[0].CheckLook != 1 {
+		t.Fatalf("start rows = %+v, want look 1's alone", starts)
+	}
+
+	rig.clock.now = checkOpened.Add(checkBound)
+	rig.apply("bound", intake.CheckBound{Issue: "LEGION-208"})
+	check = productionCheck(t, rig.pool, "LEGION-208")
+	if check.Open() || check.Outcome != record.CheckNotRun {
+		t.Fatalf("the check at its bound while the root runs again = %+v, want closed as not run", check)
+	}
+	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-208/implementer"] != 0 {
+		t.Fatalf("issue_close rows = %v, want none for the implementer the run reuses", got)
+	}
+}
+
+// A done child a person parks and sets done again leaves twice more, each a close of the same
+// merge: the check it has stands, recorded or open, and no second check is opened over it, no
+// second bound row queued, no look started. A rerun's merge, of another pull request after a
+// re-entry closed the check, still replaces it (openCheck).
+func TestADoneChildSetDoneAgainKeepsItsChecks(t *testing.T) {
+	rig := childCheckRig(t, "")
+	rig.apply("report", intake.CheckReport{Issue: "LEGION-209", Look: 1, Verdict: "pass", Summary: "seen"})
+	recorded := productionCheck(t, rig.pool, "LEGION-209")
+	bounds := outboxKindCount(t, rig.pool, "LEGION-209", record.OutboxKindCheckBound)
+
+	rig.apply("parked", intake.DispatchIssue{Key: "LEGION-209", Seq: 3, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"})
+	// Admission, which runs after the engine on each event, records the observation the engine
+	// kept its hands off (the parked status, the sequence); the rig's admission stub records
+	// nothing, so the row is moved by hand to what the daemon would hold at the next event.
+	if _, err := rig.pool.Exec(context.Background(), "update issues set status = 'backlog', dispatch_status = 'backlog', last_dispatch_seq = 3 where key = 'LEGION-209'"); err != nil {
+		t.Fatal(err)
+	}
+	rig.apply("done-again", intake.DispatchIssue{Key: "LEGION-209", Seq: 4, Type: "issue.updated", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"})
+	if got := superviseRequests(t, rig.pool, "issue_close"); got["LEGION-209/planner"] != 2 {
+		t.Fatalf("issue_close rows = %v, want the second done to have left again (two of the planner's)", got)
+	}
+	check := productionCheck(t, rig.pool, "LEGION-209")
+	if check.Open() || check.Outcome != recorded.Outcome || !check.OpenedAt.Equal(recorded.OpenedAt) || check.Looks != recorded.Looks {
+		t.Fatalf("the check after the child was set done again = %+v, want the recorded one kept: %+v", check, recorded)
+	}
+	if got := outboxKindCount(t, rig.pool, "LEGION-209", record.OutboxKindCheckBound); got != bounds {
+		t.Fatalf("check_bound rows = %d, want %d: no second check was opened", got, bounds)
+	}
+	if starts := superviseRowsOf(t, rig.pool, "LEGION-209", "start"); len(starts) != 1 {
+		t.Fatalf("start rows = %+v, want look 1's alone", starts)
+	}
+}
+
 // The check's bound starts its last look, told that it is the last and that production did not
 // carry the merge within the bound; a pending report of the last look closes the check as not run,
 // and so does its silence. A look open at the bound defers the bound by the look bound, and a bound
@@ -474,7 +572,7 @@ func TestTheBoundStartsTheLastLookWhoseNothingClosesTheCheckAsNotRun(t *testing.
 				!strings.Contains(starts[1].Task, "woken by the bound: production did not carry the merge within 2 days.") || !strings.Contains(starts[1].Task, "did not run") {
 				t.Fatalf("start rows = %+v, want the last look's task saying so", starts)
 			}
-			rig.apply("boot", intake.DaemonBooted{Boot: 1, Revision: "r1"})
+			rig.apply("boot", intake.DaemonBooted{Boot: 1, Revision: "0000000a"})
 			if got := checkCompares(t, rig.pool, "LEGION-209"); len(got) != 0 {
 				t.Fatalf("check_compare rows for a check in its last look = %+v, want none", got)
 			}
@@ -660,4 +758,14 @@ func checkCompares(t *testing.T, pool *pgxpool.Pool, issue string) []record.Chec
 		compares = append(compares, compare)
 	}
 	return compares
+}
+
+// outboxKindCount is how many outbox rows of kind issue has, settled or not.
+func outboxKindCount(t *testing.T, pool *pgxpool.Pool, issue string, kind record.OutboxKind) int {
+	t.Helper()
+	var count int
+	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where issue = $1 and kind = $2", issue, string(kind)).Scan(&count); err != nil {
+		t.Fatalf("count outbox rows of kind %s for %s: %v", kind, issue, err)
+	}
+	return count
 }

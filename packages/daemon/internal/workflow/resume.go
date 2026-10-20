@@ -147,7 +147,7 @@ func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
 			if err != nil {
 				return err
 			}
-			if running := slices.IndexFunc(members, func(m record.Issue) bool { return m.Key != issue.Key && inWorkflow(m) }); running >= 0 {
+			if running := slices.IndexFunc(members, func(m record.Issue) bool { return m.Key != issue.Key && InWorkflow(m) }); running >= 0 {
 				e.logOnCommit(ctx, "workflow: the boot leaves a merged root awaiting its merge while a child runs", "issue", issue.Key,
 					"pullRequest", pr.Number, "child", members[running].Key)
 				continue

@@ -572,7 +572,12 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if fact.Role == claim.RoleArchitect {
 		return intake.Result{}, nil
 	}
-	if fact.Role == claim.RoleImplementer {
+	// The implementer's failure ends the look of its closed issue's production check, as its
+	// bound would: the look is the only work a done issue has for it. An issue in the workflow
+	// (one reopened inside its linger with a look still open at the reopen) takes the live-phase
+	// path below instead, where the failure holds the phase and is told; its stale look ends at
+	// the look's own bound (check_look), which endLookPending keeps for the run.
+	if fact.Role == claim.RoleImplementer && !InWorkflow(*issue) {
 		check, err := e.store.ProductionCheck(ctx, tx, issue.Key)
 		if err != nil {
 			return intake.Result{}, err

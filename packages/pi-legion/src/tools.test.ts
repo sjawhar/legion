@@ -830,35 +830,50 @@ test("the implementer's report on its closed issue's production check carries a 
 
   // Only the implementer reports on the check: any other role's completion on the closed issue is
   // a phase completion, which looks its commit up (and the daemon then refuses it naming whose
-  // phase it is), as is the implementer's once the check closed or when none opened.
-  const phasePaths = [
-    [claimSession("tester"), { check: openCheck }, "the tester at done"],
-    [claimSession("implementer"), {}, "the implementer at done"],
-  ] as const;
-  for (const [session, record, lookup] of phasePaths) {
-    const { daemon: closedDaemon } = recordingDaemon({
-      state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done", ...record } } },
-    });
-    const result = await createLegionTool({
-      pi,
-      daemon: closedDaemon,
-      controllerGrant: noControllerGrant,
-      onPhaseCompleted: () => undefined,
-      handoffCommit: noHandoffCommit,
-      resolveDocument: noDocumentLookup,
-      session: () => session,
-    }).execute(
-      "",
-      { op: "handoff_complete", summary: "Looked.", verdict: "pass" },
-      undefined,
-      undefined,
-      context()
-    );
-    expect(result.isError).toBe(true);
-    expect(result.content).toEqual([
-      { type: "text", text: `no handoff-commit lookup expected for ${lookup}` },
-    ]);
-  }
+  // phase it is).
+  const { daemon: testerDaemon } = recordingDaemon({
+    state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done", check: openCheck } } },
+  });
+  const testerAtDone = await createLegionTool({
+    pi,
+    daemon: testerDaemon,
+    controllerGrant: noControllerGrant,
+    onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
+    resolveDocument: noDocumentLookup,
+    session: () => claimSession("tester"),
+  }).execute(
+    "",
+    { op: "handoff_complete", summary: "Looked.", verdict: "pass" },
+    undefined,
+    undefined,
+    context()
+  );
+  expect(testerAtDone.isError).toBe(true);
+  expect(testerAtDone.content).toEqual([
+    { type: "text", text: "no handoff-commit lookup expected for the tester at done" },
+  ]);
+
+  // The implementer's completion on a done issue is a check report whatever the record shows, as
+  // the daemon reads it (api/handoff.go): once the check closed, or when none opened, no commit is
+  // looked up and the report is posted as given, for the daemon's one refusal, CHECK_NOT_OPEN.
+  const { calls: closedCalls, daemon: closedDaemon } = recordingDaemon({
+    state: { issues: { "LEGION-208": { key: "LEGION-208", phase: "done" } } },
+  });
+  const implementerAtDone = await createLegionTool({
+    pi,
+    daemon: closedDaemon,
+    controllerGrant: noControllerGrant,
+    onPhaseCompleted: () => undefined,
+    handoffCommit: noHandoffCommit,
+    resolveDocument: noDocumentLookup,
+    session: () => claimSession("implementer"),
+  }).execute("", { op: "handoff_complete", summary: "Looked." }, undefined, undefined, context());
+  expect(implementerAtDone.isError).toBeUndefined();
+  expect(closedCalls.at(-1)).toEqual([
+    "handoffComplete",
+    { grantId: "grant-208", summary: "Looked.", verdict: "", ready: false },
+  ]);
 });
 
 test("a refused completion surfaces the daemon's code and leaves the phase open", async () => {

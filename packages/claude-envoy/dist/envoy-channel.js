@@ -47840,17 +47840,19 @@ async function executePhaseOp(runtime, input) {
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete": {
       const record3 = recordFrom(await daemon.state(), claim.issue);
-      if (claim.role === "implementer" && record3.phase === "done" && record3.check !== undefined) {
-        if (args.verdict === undefined) {
-          throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
-        }
-        if (args.ready === true) {
-          throw new Error("handoff_complete on a production check is no READY: leave ready out");
+      if (claim.role === "implementer" && record3.phase === "done") {
+        if (record3.check !== undefined) {
+          if (args.verdict === undefined) {
+            throw new Error("handoff_complete on a production check names a verdict of pass, pending or fail");
+          }
+          if (args.ready === true) {
+            throw new Error("handoff_complete on a production check is no READY: leave ready out");
+          }
         }
         return daemon.handoffComplete({
           grantId: await mintClaimGrant(daemon, claim),
           summary: args.summary,
-          verdict: args.verdict,
+          verdict: args.verdict ?? "",
           ready: false
         });
       }

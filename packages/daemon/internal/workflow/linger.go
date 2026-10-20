@@ -139,7 +139,7 @@ func (e *Engine) closeAwaitingRoot(ctx context.Context, tx pgx.Tx, root record.I
 		return err
 	}
 	for _, member := range members {
-		if member.Key != root.Key && inWorkflow(member) {
+		if member.Key != root.Key && InWorkflow(member) {
 			return nil
 		}
 	}
@@ -153,9 +153,13 @@ func awaitsMerge(issue record.Issue) bool {
 	return issue.Phase == phase.AwaitingMerge || issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.AwaitingMerge
 }
 
-// inWorkflow says whether a tree member is still in the workflow: its status is one the workflow
-// runs in and its phase short of done. A child still admitted counts, since it will run.
-func inWorkflow(issue record.Issue) bool {
+// InWorkflow says whether an issue is in the workflow: its status is one the workflow runs in and
+// its phase short of done. One still admitted counts, since it will run — a root reopened inside
+// its linger (admit's readmit) stands in `admitted` with no role's phase until its architect
+// reaches planning, and is running again from the reopen. It is the production check's "runs
+// again" predicate (check.go) and the outbox's (checkLookHolds): a look of an issue that runs
+// again would resume the implementer and relaunch its Sandbox under the run, so none starts.
+func InWorkflow(issue record.Issue) bool {
 	return !record.OutOfWorkflow(issue.Status) && issue.Phase != phase.Done
 }
 

@@ -181,6 +181,32 @@ func TestACheckStartFinishesWithoutActingWhenItsLookIsNotOpen(t *testing.T) {
 	}
 }
 
+// A check start of an issue that runs again finishes without acting: a root reopened inside its
+// linger (admit's readmit) stands in `admitted` with the status of the reopen, and the look its
+// row would start would resume the implementer and relaunch the Sandbox under the run. The row's
+// check is still open at its look, so the check alone would let it start.
+func TestACheckStartOfAnIssueRunningAgainFinishesWithoutActing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	root := checkRoot()
+	root.Phase, root.Status, root.LingerUntil = phase.Admitted, "todo", nil
+	putOutboxIssue(t, pool, records, root)
+	putProductionCheck(t, pool, records, openCheck(root, "a1b2c3d4"))
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	machine, _ := suspendedImplementer(t, sup, root, supervise.SuspendedByDaemon)
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), log: quietLogger(), now: time.Now}
+
+	if err := runner.execute(context.Background(), checkStart(t, root, 1)); err != nil {
+		t.Fatalf("check start of an issue running again = %v, want finished without acting", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.LastStartRow != 0 || got.Pending != nil || len(rt.CallsOf("Resume")) != 0 {
+		t.Fatalf("implementer = %s with last start %d, pending %+v and %d resumes, want left suspended with nothing started", got.State, got.LastStartRow, got.Pending, len(rt.CallsOf("Resume")))
+	}
+	if check := readProductionCheck(t, pool, records, root.Key); !check.Open() || !check.LookOpen {
+		t.Fatalf("the check after the refused start = %+v, want untouched, its look ending at its own bound", check)
+	}
+}
+
 // An operator's suspension of the implementer holds a phase start on the row's backoff until the
 // operator resumes it; a look cannot wait that long, so the check start finishes without acting and
 // ends the look as one nobody reported, with the hold as its cause, of the check the row's issue

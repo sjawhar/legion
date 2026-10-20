@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -46,10 +47,25 @@ func buildWake(cause string) bool {
 // implementer's live session; the rows are the same, since the start resumes either. One check
 // per issue: a second merge of the same issue — a rerun's, after a re-entry closed the first —
 // replaces the earlier record, whose bound row the new check then defers to its own bound
-// (checkBound). The check's OpenedAt is its identity (record.ProductionCheck.ID), so it is the
-// clock truncated to the microsecond, Postgres's timestamptz precision: the value the rows and
-// facts of this transaction carry equals the one every later read of the record returns.
+// (checkBound); the same merge seen again — a done child a person parks and sets done again, each
+// move a leave — opens nothing, since the check it has, open or recorded, is that merge's. The
+// check's OpenedAt is its identity (record.ProductionCheck.ID), so it is the clock truncated to the
+// microsecond, Postgres's timestamptz precision: the value the rows and facts of this transaction
+// carry equals the one every later read of the record returns.
 func (e *Engine) openCheck(ctx context.Context, tx pgx.Tx, issue record.Issue, pr record.PullRequest, wake bool) error {
+	existing, err := e.store.ProductionCheck(ctx, tx, issue.Key)
+	if err != nil {
+		return err
+	}
+	if existing != nil && existing.Repo == pr.Repo && existing.Number == pr.Number && (existing.MergeSHA == "" || pr.MergeSHA == "" || existing.MergeSHA == pr.MergeSHA) {
+		state := "open"
+		if !existing.Open() {
+			state = "closed as " + string(existing.Outcome)
+		}
+		e.logOnCommit(ctx, "workflow: production check not opened again: the issue's check is this merge's", "issue", issue.Key,
+			"mergeCommit", pr.MergeSHA, "pullRequest", pr.Number, "check", existing.OpenedAt, "state", state)
+		return nil
+	}
 	now := e.now().Truncate(time.Microsecond)
 	check := record.ProductionCheck{
 		Issue: issue.Key, Project: issue.Project, Tree: issue.Tree, Repo: pr.Repo, Number: pr.Number, MergeSHA: pr.MergeSHA,
@@ -231,7 +247,7 @@ func (e *Engine) endLookPending(ctx context.Context, tx pgx.Tx, check *record.Pr
 	if err != nil {
 		return err
 	}
-	if RoleFor(issue.Phase) != "" {
+	if InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check waits while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA,
 			"look", check.Looks, "phase", issue.Phase)
 		return nil
@@ -267,7 +283,7 @@ func (e *Engine) closeCheck(ctx context.Context, tx pgx.Tx, check *record.Produc
 	if err != nil {
 		return err
 	}
-	if RoleFor(issue.Phase) != "" {
+	if InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check closed while its issue runs again; its implementer and pod are the run's", "issue", issue.Key,
 			"mergeCommit", check.MergeSHA, "phase", issue.Phase)
 		return nil
@@ -362,7 +378,7 @@ func (e *Engine) wake(ctx context.Context, tx pgx.Tx, check *record.ProductionCh
 	if issue == nil {
 		return fmt.Errorf("production check of %s: its issue is not recorded", check.Issue)
 	}
-	runsAgain := RoleFor(issue.Phase) != ""
+	runsAgain := InWorkflow(*issue)
 	if runsAgain || check.LookOpen {
 		why := "a look is open"
 		if runsAgain {
@@ -407,13 +423,27 @@ func (e *Engine) serverStarted(ctx context.Context, tx pgx.Tx, fact intake.Serve
 	return intake.Result{}, e.compareBuilds(ctx, tx, wakeDispatchStart, fact.Commit)
 }
 
+// buildShape is what a build's commit must look like to be compared: a git SHA, abbreviated or
+// whole. The daemon's own revision and Dispatch's /healthz commit are release stamps of that
+// shape; Dispatch's server.started is published on the bus by any client the listener takes a
+// `source: dispatch` publish from, so its commit is held to the shape here, where every build
+// meets the compare path (the implement App's GitHub compare URL) and the wake detail written
+// into the implementer's task text, and nothing else reaches either.
+var buildShape = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+
 // compareBuilds queues one check_compare row, carrying cause, the build's commit and the check
 // it is of, for every open check of this project in the repository the daemon is built from
 // (Config.BuiltFrom): the row's executor reads GitHub for whether the build carries the check's
 // merge and applies intake.CheckWake when it does. A check whose last look has started gets none,
-// since no look follows; no build, or no repository the daemon is built from, compares nothing.
+// since no look follows; no build, or no repository the daemon is built from, compares nothing,
+// and a build that is not a git SHA (buildShape) is refused, logged with its cause and length
+// and never its text.
 func (e *Engine) compareBuilds(ctx context.Context, tx pgx.Tx, cause, build string) error {
 	if build == "" || e.cfg.BuiltFrom == "" {
+		return nil
+	}
+	if !buildShape.MatchString(build) {
+		e.logOnCommit(ctx, "workflow: a build is not compared against the open production checks: its commit is not a git SHA", "cause", cause, "length", len(build), "repo", e.cfg.BuiltFrom)
 		return nil
 	}
 	open, err := e.store.OpenProductionChecks(ctx, tx)
@@ -481,7 +511,7 @@ func (e *Engine) checkBound(ctx context.Context, tx pgx.Tx, fact intake.CheckBou
 	if err != nil {
 		return intake.Result{}, err
 	}
-	if RoleFor(issue.Phase) != "" {
+	if InWorkflow(issue) {
 		e.logOnCommit(ctx, "workflow: production check bound came due while its issue runs again", "issue", issue.Key, "mergeCommit", check.MergeSHA, "phase", issue.Phase)
 		return intake.Result{}, e.closeCheck(ctx, tx, check, record.CheckNotRun)
 	}

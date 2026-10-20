@@ -240,17 +240,27 @@ test("the implementer's report on its closed issue's production check carries a 
 
   // Only the implementer reports on the check: any other role's completion on the closed issue is
   // a phase completion, which looks its commit up (and the daemon then refuses it naming whose
-  // phase it is), as is the implementer's once the check closed or when none opened.
-  for (const [claim, record, lookup] of [
-    [{ ...implementer, role: "tester" }, { check: openCheck }, "the tester at done"],
-    [implementer, {}, "the implementer at done"],
-  ] as const) {
-    const closed = closedRuntime(claim, record);
-    await expect(
-      executePhaseOp(closed.ops, { op: "handoff_complete", summary: "Looked.", verdict: "pass" })
-    ).rejects.toThrow(new Error(`no handoff-commit lookup expected for ${lookup}`));
-    expect(closed.posted).toEqual([]);
-  }
+  // phase it is).
+  const tester = closedRuntime({ ...implementer, role: "tester" }, { check: openCheck });
+  await expect(
+    executePhaseOp(tester.ops, { op: "handoff_complete", summary: "Looked.", verdict: "pass" })
+  ).rejects.toThrow(new Error("no handoff-commit lookup expected for the tester at done"));
+  expect(tester.posted).toEqual([]);
+
+  // The implementer's completion on a done issue is a check report whatever the record shows, as
+  // the daemon reads it (api/handoff.go): once the check closed, or when none opened, no commit is
+  // looked up (a done issue has no handoff for it) and the report is posted with the verdict as
+  // given, for the daemon's one refusal, CHECK_NOT_OPEN.
+  const closed = closedRuntime(implementer, {});
+  await expect(
+    executePhaseOp(closed.ops, { op: "handoff_complete", summary: "Looked." })
+  ).resolves.toEqual({});
+  expect(closed.posted.at(-1)).toEqual({
+    grantId: "grant-for-one-command",
+    summary: "Looked.",
+    verdict: "",
+    ready: false,
+  });
 });
 
 test("pending is a production check's verdict: a phase completion naming it is refused once the record says so, nothing minted or posted", async () => {

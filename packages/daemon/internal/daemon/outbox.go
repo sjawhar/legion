@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -738,7 +739,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	// the phase.
 	var check *record.ProductionCheck
 	if payload.CheckLook > 0 {
-		if check, err = r.checkLookHolds(ctx, row, payload); err != nil || check == nil {
+		if check, err = r.checkLookHolds(ctx, row, payload, issue); err != nil || check == nil {
 			return err
 		}
 	} else {
@@ -1203,10 +1204,12 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 
 // checkLookHolds is the production check a check start row still has a look to start in, nil for
 // none: its issue's production check is open, the one the row names (record.ProductionCheck.NamedBy),
-// at the look the row names, with that look open. A check closed since (a report, its last look),
-// a check a later merge replaced, a look its bound or a hold ended, or a later look's start leave
-// the row nothing to start, and it finishes without acting, logged with why.
-func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (*record.ProductionCheck, error) {
+// at the look the row names, with that look open, and the issue out of the workflow. A check closed
+// since (a report, its last look), a check a later merge replaced, a look its bound or a hold ended,
+// a later look's start, or an issue running again (reopened inside its linger since the row was
+// queued: a look would resume the implementer and relaunch the Sandbox under the run; the look ends
+// at its own bound) leave the row nothing to start, and it finishes without acting, logged with why.
+func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest, issue record.Issue) (*record.ProductionCheck, error) {
 	check, err := r.productionCheck(ctx, row.Issue)
 	if err != nil {
 		return nil, err
@@ -1215,6 +1218,8 @@ func (r *outbox) checkLookHolds(ctx context.Context, row record.OutboxRow, paylo
 	switch {
 	case check == nil:
 		why = "the issue has no production check"
+	case workflow.InWorkflow(issue):
+		why = fmt.Sprintf("the issue runs again (%s, %s)", issue.Phase, issue.Status)
 	case !check.Open():
 		why = fmt.Sprintf("the check closed as %s", check.Outcome)
 	case !check.NamedBy(payload.CheckOpenedAt):
@@ -1353,7 +1358,10 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	var compare struct {
 		Status string `json:"status"`
 	}
-	err = github.Get(ctx, "/compare/"+check.MergeSHA+"..."+payload.Build+"?per_page=1", &compare)
+	// Both commits are SHAs by the time they reach here (the merge from GitHub's own answer, the
+	// build held to workflow's buildShape before its row was queued); the escape is defence in depth,
+	// so a value that is not keeps to its path segment rather than ending the request at a `#` or `?`.
+	err = github.Get(ctx, "/compare/"+url.PathEscape(check.MergeSHA)+"..."+url.PathEscape(payload.Build)+"?per_page=1", &compare)
 	var answer *githubrest.Answer
 	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
 		r.log.Info("outbox check compare finished without acting: GitHub does not know the merge or the build", "row", row.ID,

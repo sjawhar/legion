@@ -240,21 +240,28 @@ export async function executePhaseOp(
       return { record: recordFrom(await daemon.state(), args.issue) };
     case "handoff_complete": {
       // The record is read before anything is minted: it says whether this is a phase
-      // completion or a check report. A refusal here posts nothing and mints nothing.
+      // completion or a check report, by the daemon's own rule (`api/handoff.go`): the
+      // implementer's call on an issue no role works (`done`) is a check report, whether or not
+      // the record shows a check — a done issue whose check closed, or opened none, has no
+      // handoff for the implementer to commit, so no commit is looked up, and the daemon answers
+      // the report `CHECK_NOT_OPEN`. The report's own refusals (a verdict, no READY) apply while
+      // the record shows the check it is of. A refusal here posts nothing and mints nothing.
       const record = recordFrom(await daemon.state(), claim.issue);
-      if (claim.role === "implementer" && record.phase === "done" && record.check !== undefined) {
-        if (args.verdict === undefined) {
-          throw new Error(
-            "handoff_complete on a production check names a verdict of pass, pending or fail"
-          );
-        }
-        if (args.ready === true) {
-          throw new Error("handoff_complete on a production check is no READY: leave ready out");
+      if (claim.role === "implementer" && record.phase === "done") {
+        if (record.check !== undefined) {
+          if (args.verdict === undefined) {
+            throw new Error(
+              "handoff_complete on a production check names a verdict of pass, pending or fail"
+            );
+          }
+          if (args.ready === true) {
+            throw new Error("handoff_complete on a production check is no READY: leave ready out");
+          }
         }
         return daemon.handoffComplete({
           grantId: await mintClaimGrant(daemon, claim),
           summary: args.summary,
-          verdict: args.verdict,
+          verdict: args.verdict ?? "",
           ready: false,
         });
       }
