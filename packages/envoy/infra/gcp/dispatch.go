@@ -99,6 +99,11 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
 	}
+	for i, namespace := range args.AllowedNamespaces {
+		if bus.HoldsSeed(namespace) {
+			return fmt.Sprintf("allowedNamespaces[%d]", i), true
+		}
+	}
 	return "", false
 }
 
@@ -213,6 +218,11 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 			return dispatchSettings{}, fmt.Errorf("namespace %q must be a DNS label", *args.Namespace)
 		}
 		s.namespace = *args.Namespace
+	}
+	for i, namespace := range args.AllowedNamespaces {
+		if !namespaceRule.MatchString(namespace) {
+			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
+		}
 	}
 	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`,
 		s.hostname, s.tailnetDNSName)

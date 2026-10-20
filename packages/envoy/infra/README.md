@@ -132,7 +132,7 @@ refuses every other namespace.
 | --- | --- |
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
-| Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (a new Secret Manager version reaches its synced Kubernetes Secret without an apply), and Workload Identity. |
+| Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
 | Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
 | ClusterIP Service and NetworkPolicy | Dispatch's API on port 8766, to the `allowedNamespaces` alone. |

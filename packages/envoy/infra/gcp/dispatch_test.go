@@ -94,6 +94,7 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an empty database version", edit: func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef("") }, err: []string{"databaseVersion", "empty"}},
 		{name: "an empty database tier", edit: func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("") }, err: []string{"databaseTier", "empty"}},
 		{name: "an invalid namespace", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("Dispatch") }, err: []string{"namespace", "DNS label"}},
+		{name: "an invalid allowed namespace", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", "Legion"} }, err: []string{"allowedNamespaces[1]", "DNS label"}},
 		{name: "no tailnet auth key", edit: func(a *gcp.DispatchArgs) { a.TailnetAuthKey = nil }, err: []string{"tailnetAuthKey", "required"}},
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
@@ -144,6 +145,20 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 	args.Region = string(seed)
 	_, err = gcp.ResolveDispatch(args)
 	require.ErrorContains(t, err, "region")
+	require.ErrorContains(t, err, "nkey seed")
+	require.NotContains(t, err.Error(), string(seed))
+}
+
+func TestDispatchRefusesAnNKeySeedInAnAllowedNamespace(t *testing.T) {
+	key, err := nkeys.CreateUser()
+	require.NoError(t, err)
+	seed, err := key.Seed()
+	require.NoError(t, err)
+
+	args := dispatchArgs()
+	args.AllowedNamespaces = []string{"envoy", string(seed)}
+	_, err = gcp.ResolveDispatch(args)
+	require.ErrorContains(t, err, "allowedNamespaces[1]")
 	require.ErrorContains(t, err, "nkey seed")
 	require.NotContains(t, err.Error(), string(seed))
 }
@@ -201,9 +216,12 @@ func TestDispatchClusterEnablesSecretSync(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	sync := m.One(t, "gcp:container/cluster:Cluster").Inputs.Mappable()["secretSyncConfig"].(map[string]any)
+	sync, ok := m.One(t, "gcp:container/cluster:Cluster").Inputs.Mappable()["secretSyncConfig"].(map[string]any)
+	require.True(t, ok, "the cluster registers secretSyncConfig")
 	require.Equal(t, true, sync["enabled"])
-	require.Equal(t, true, sync["rotationConfig"].(map[string]any)["enabled"])
+	rotation, ok := sync["rotationConfig"].(map[string]any)
+	require.True(t, ok, "secretSyncConfig registers rotationConfig")
+	require.Equal(t, true, rotation["enabled"])
 }
 
 func countRegistrations(m *pulumitest.Mocks, typ string) int {
@@ -280,11 +298,7 @@ func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
 	policy := m.One(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy")
 	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
 	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
-	ingress := spec["ingress"].([]any)[0].(map[string]any)
-	require.Empty(t, ingress["from"])
-	ports := ingress["ports"].([]any)
-	require.Len(t, ports, 1)
-	require.EqualValues(t, 8766, ports[0].(map[string]any)["port"])
+	require.Empty(t, spec["ingress"], "an ingress rule with no from would admit every pod in the cluster")
 }
 
 func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
