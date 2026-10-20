@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-42",
+  "completed": "2026-10-20T13:05:00Z",
+  "proof": [
+    {
+      "criterion": "Opening the Inbox lists only questions on issues assigned to the reader, every visit, with no switch and no Unassigned band on the page.",
+      "surface": "The Dispatch dashboard itself - the real Go server on a pgvector Postgres, the built SPA, and real browsers (chromium, webkit, firefox, iphone) - driven by packages/dispatch/e2e under Playwright in CI's `dispatch` job.",
+      "command": "GitHub Actions run 39414768631, job `dispatch` (118601054213), `bunx playwright test --config e2e/playwright.config.ts`; the case is `e2e/inbox.e2e.ts:1174` \"the Inbox opens on the reader's own questions, every visit, and ?assignee= names whose it lists\".",
+      "observed": "Alice, who holds nothing, opens `/` to no rows and `Nothing needs you`, with the trigger reading `Assignee · you` and no Mine/Everyone control on the page; Bob, who holds one issue, sees that one row and neither the unassigned issue's question nor the document's; a reload opens the same way, and after visiting a filtered address the bare `/` is his own work again. The whole suite: `1412 passed (41.1m)`, 0 failed.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "Same test, `/?assignee=bob` from Alice's browser: Bob's question is listed and the row count is 1, so her empty list is who she is rather than a page that lists nothing. Independently, the `dispatch` job at the earlier head 6af018be9bded4d4d175c99d2e219ce39b90c065 (run 39407230285) failed `a document ask links its project and document page`, which renders the Inbox at `/` with a document question - the default list really does exclude what nobody holds."
+    },
+    {
+      "criterion": "The filter takes several people at once and an Unassigned choice, and a text box narrows the options to every person who has signed in.",
+      "surface": "The Dispatch dashboard, same Playwright harness and browsers.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/inbox.e2e.ts:1245` \"the assignee filter takes several people and Unassigned, narrows its rows, and lives in the address\".",
+      "observed": "Opening `Filter by assignee` focuses `Search people`; typing `bo` leaves one option, `bob`; picking `bob` and then `Unassigned` leaves the trigger reading `Assignee · 3` and lists all four seeded questions (Alice's, Bob's, the unassigned issue's and the project document's).",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "In the same test, a search for `zzz` lists no option, shows the control's own `No matching person.` line, and leaves the list exactly as it was (one row, Alice's question)."
+    },
+    {
+      "criterion": "Clearing the filter leaves every question in the list, and the default list re-opened holds only the reader's.",
+      "surface": "The Dispatch dashboard, same Playwright harness and browsers.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/inbox.e2e.ts:1327` \"clearing the filter lists every question, and Assign to me takes one under the Unassigned filter\".",
+      "observed": "The popover's `Clear assignee` navigates to `/?assignee=everyone`, the trigger reads `Assignee · everyone`, and all three open questions are listed, the project document's included.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "The same test re-opens `/` straight after: one row, Alice's own, so `everyone` is doing the widening rather than the list having grown."
+    },
+    {
+      "criterion": "The filter is in the address and a link carries it; an address naming somebody unknown lists nothing and refuses nothing.",
+      "surface": "The Dispatch dashboard, same Playwright harness and browsers, with a second browser context opening the address the first produced.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/inbox.e2e.ts:1245`.",
+      "observed": "Each pick appends one value: `/?assignee=alice&assignee=bob`, then `…&assignee=unassigned`. A second signed-in browser opening that address sees the same four rows, the document's question among them.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "`/?assignee=nobody@example.invalid` in the same test: no rows, `Nothing matches this filter`, the trigger still naming the value (`Assignee · nobody@example.invalid`), and no request refused - the split is client-side."
+    },
+    {
+      "criterion": "Every count of work waiting on the reader means the same thing and does not move with the filter; assigning one more issue to the reader moves them together.",
+      "surface": "The Dispatch dashboard, same Playwright harness and browsers: the rail/compact badge, the Inbox banner and the Agents card read in one run.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/inbox.e2e.ts:1406` \"the rail, the banner and an Agents card count the reader's own work, whatever the filter lists\".",
+      "observed": "With two of four open questions on Alice's issues: the default list shows 2 rows, `Needs you 2` and `Blocked on you: 2 items`; clearing the filter lists 4 rows and both numbers stay 2; the Agents card for the same session also reads `Needs you 2`.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "The same test then assigns Bob's issue to Alice: the Agents card, the badge and the banner all move to 3 together, so the numbers are not simply pinned."
+    },
+    {
+      "criterion": "A project page's pill counts that project's questions assigned to the reader.",
+      "surface": "The Dispatch dashboard's project page, same Playwright harness and browsers.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/project.e2e.ts:30` \"project page groups issues by status in board order; filters narrow issues; documents stay scoped to the project\".",
+      "observed": "CORE's header shows `Blocked on you · 1` - Alice's one question in that project - linking to `/`.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "The seed for that test now also opens a question on Bob's issue in the same project (and its status band count moved from `In progress (1)` to `In progress (2)`, asserted in the same test); the pill stayed at 1, so another person's question in the project does not reach it."
+    },
+    {
+      "criterion": "An Agents card's second number counts what waits on that session in its own right, and each pill's number equals the number of rows its link opens.",
+      "surface": "The Dispatch dashboard's Agents page and the Inbox the pills link to, same Playwright harness and browsers.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/agents.e2e.ts:72` \"Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, …\".",
+      "observed": "The Planner's card reads `Needs you 1` (Alice's own question waiting on a person) and `Waiting on agent 2` (its own-turn questions on Alice's and Bob's issues); `Needs you` opens `/?agent=planner-session&section=needs-you` with exactly one row, and `Waiting on agent` opens `/?agent=planner-session&assignee=everyone` with exactly the two rows it counted, under the agent chip.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "Bob's question waiting on a person is in neither number, and the unit suite's `AgentsPage.test.tsx` case \"Agents counts a card's two numbers in their own right\" pins a snoozed human-turn question in neither - both of which the replaced `open_asks - needsYou` subtraction counted as the agent's."
+    },
+    {
+      "criterion": "\"Assign to me\" takes a question wherever the list shows it, and a question on a document never offers it.",
+      "surface": "The Dispatch dashboard, same Playwright harness and browsers, with the PATCH observed on the wire and the issue re-read from the API.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/inbox.e2e.ts:1327`.",
+      "observed": "Under `/?assignee=unassigned` both unheld questions are listed in the turn band `human` (no band of their own); pressing `Assign <KEY> to me` sends `PATCH /api/v1/issues/<KEY>` with `{\"assignee\":\"alice\"}`, the API then reports the issue as Alice's, the row leaves the unassigned list, and `/` shows it under `Waiting on you`.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "In the same test the project document's row carries no `Assign …` button at all (count 0), since it has no issue to take; and the unit case \"a refused Assign to me keeps its row under the Unassigned filter, with the reason and a working Retry\" drives the refusal path the filter would otherwise unmount."
+    },
+    {
+      "criterion": "Escape inside the filter's popover closes the popover and nothing else (the page's \"clear the selection\" is withheld while it is open).",
+      "surface": "The Dispatch dashboard's keyboard, same Playwright harness and browsers.",
+      "command": "Run 39414768631, job `dispatch`; case `e2e/keyboard-inbox.e2e.ts:491` \"Escape inside the assignee popover closes it and clears nothing\".",
+      "observed": "With one row marked and no row focused, Escape closes the popover, returns focus to the trigger and leaves the selection standing.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "A second Escape, with the popover shut, clears the selection - so the first press was withheld rather than simply ineffective."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/web/src/features/refs/routes.ts and routes.test.ts - the Inbox's address carries repeated `?assignee=` values; `InboxView`/`view` deleted.",
+    "packages/dispatch/web/src/features/inbox/sections.ts - the Unassigned band is gone; `inAssigneeFilter`, `sectionTitles`, `isOwnList`, `UNASSIGNED_FILTER_VALUE`; `sectionOf(row, now)`.",
+    "packages/dispatch/web/src/features/inbox/AssigneeFilter.tsx and AssigneeFilter.test.tsx - the new control over `MultiSelect`, people read on its first open alone.",
+    "packages/dispatch/web/src/features/inbox/Inbox.tsx and Inbox.test.tsx - the filter in the switch's place, the list rule, the three empty states, Assign to me on any unheld row, Escape withheld while the popover is open.",
+    "packages/dispatch/web/src/features/inbox/InboxDrawer.tsx and InboxDrawer.test.tsx - the drawer's own selection, starting on the reader.",
+    "packages/dispatch/web/src/features/inbox/InboxGroups.tsx - the band titles arrive as a prop.",
+    "packages/dispatch/web/src/features/inbox/BlockedOnYou.tsx and BlockedOnYou.test.tsx - `waitingOnHuman` (the rename) and `waitingOnYou(asks, viewer)`, the one rule every count reads.",
+    "packages/dispatch/web/src/features/agents/AgentsPage.tsx and AgentsPage.test.tsx - both card numbers counted in their own right through one `tallyBySession`.",
+    "packages/dispatch/web/src/features/project/ProjectPage.tsx and ProjectPage.test.tsx - the pill takes the reader.",
+    "packages/dispatch/web/src/features/issue/IssueHeader.tsx, AssigneeControl.tsx, api/queries.ts (`usersQuery`), components/MultiSelect.tsx (`optionDetail` may be undefined), features/shell/userPreference.ts (`inbox.view` dropped) and its test, web/src/__tests__/{sidebar,responsive-shell,ask-card}.test.*",
+    "packages/dispatch/e2e: new inbox-filter.ts helper; inbox, inbox-grouping, keyboard-inbox, approval, issue, phone, workspace, agents, project and document specs, and the seed's comments.",
+    "Documentation: packages/dispatch/AGENTS.md, docs/site/src/content/docs/dispatch/{inbox-and-asks,agents,issues-and-projects,index}.md, docs/site/src/content/docs/legion/using-legion.md, skills/dispatch/references/asks.md, skills/legion-controller/SKILL.md (and claude-envoy's generated copy)."
+  ],
+  "trickyParts": [
+    "GitHub runs no `on: pull_request` workflow at all while a pull request is CONFLICTING, so the first head got no checks; the base was merged forward (the one conflict was `Inbox.test.tsx`'s type import, where main added `AskRead` and this branch removed `InboxView`) and the unchanged-diff fingerprint is identical on both sides: fafe6276b8c40bd7a1e401302456c9e054cc0b84cc8187f16fd7686032e97d49.",
+    "A row whose `Assign to me` write is live is kept in the list even once the filter would drop it - taking a question under the Unassigned filter is exactly that case, and unmounting the control would take `Assigning…`, the refusal and its Retry with it.",
+    "The banner now reads the whole inbox and is scoped by the count rather than by the list, so it agrees with the rail whatever the filter shows.",
+    "On the iphone project a tap leaves the reader's hand on the row, which `heldRow` keeps where they last saw it; the Assign-to-me assertion reads the list again rather than waiting for a release it is not about.",
+    "This pod has no Postgres, docker or root (`command -v psql`/`docker` answer nothing), so the Playwright suite cannot run here; the recorded proof is CI's `dispatch` job, which runs that same suite against the real server. The local unit suite also cannot resolve the `proof-sdk-upstream` git dependency, so its Markdown-rendering tests fail here and pass in CI."
+  ],
+  "deviations": [
+    "The project page's `Blocked on you` pill carries no credential request, departing from the spec's sentence that lists it among the counts that do. A credential request belongs to no project (the pending list is global), so counting one there would make a project's number partly about another page. The architect settled this on 2026-10-20 ('the pill follows the settled rule alone') and the plan records it as a departure.",
+    "The first band's heading reads `Waiting on a person` while the filter names anybody but the reader alone, where the spec says the bands stay as they are. With the Unassigned band gone another person's question lands in a turn band for the first time, and the second person would be false there. The architect settled this the same day."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "`skills/legion-controller/SKILL.md` was one line under the 500-line limit the pi-legion skills guard enforces, so the reworded sentence had to stay on one line; and `packages/claude-envoy` carries a generated copy of that skill, which `bun run build` regenerates and `check-dist` verifies.",
+    "`docs/site/src/content/docs/legion/using-legion.md` and `skills/legion-controller/SKILL.md` both told readers an unassigned issue's questions wait in every Inbox's Unassigned band; both now say they reach no default list and name the Unassigned filter and the issue page instead."
+  ]
+}
