@@ -440,6 +440,17 @@ func TestDispatchFrontDoorDoesNotRollOnTheAppsImage(t *testing.T) {
 		"the app's own pods carry the new image")
 }
 
+// requireWaitsForTheFrontDoor fails unless deployment is created after the front door's pod and
+// its Service, the two a caller of the SOCKS5 proxy needs.
+func requireWaitsForTheFrontDoor(t *testing.T, m *pulumitest.Mocks, deployment, dials string) {
+	t.Helper()
+	deps := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).RPC.GetDependencies()
+	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
+		dials+" is created after the pod running the SOCKS5 proxy")
+	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
+		dials+" dials the proxy at its Service, not at the pod")
+}
+
 // envoy-dispatch exits 1 when it cannot reach NATS through the proxy, and its /healthz answers 503
 // until it connects, so an app pod started before the front door and its Service exist never goes
 // ready and the rollout waits it out.
@@ -447,11 +458,18 @@ func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
-		"the app is created after the pod running the SOCKS5 proxy")
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
-		"the app dials the proxy at its Service, not at the pod")
+	requireWaitsForTheFrontDoor(t, m, "example-dispatch", "the app")
+}
+
+// envoy-listener dials the hub through the same proxy and exits on a failed initial connect
+// (packages/envoy/cmd/listener/main.go), with no retry on that first attempt, so a listener pod
+// started before the front door crash-loops into Kubernetes' backoff while the update waits out
+// its rollout. It waits for the front door too, on a fresh create and on every replacement.
+func TestDispatchListenerWaitsForTheFrontDoor(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	requireWaitsForTheFrontDoor(t, m, "example-dispatch-listener", "the listener")
 }
 
 // Two listeners with one machine id never both bind that id's exclusive durable, and a listener
@@ -621,8 +639,7 @@ func normalizedProperty(value resource.PropertyValue) any {
 // and of the addresses each container is given.
 func requirePodGolden(t *testing.T, m *pulumitest.Mocks, deployment, golden string) {
 	t.Helper()
-	template := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).Inputs["spec"].ObjectValue()["template"]
-	got, err := json.MarshalIndent(normalizedProperty(template), "", "  ")
+	got, err := json.MarshalIndent(deploymentPodTemplate(t, m, deployment), "", "  ")
 	require.NoError(t, err)
 	require.Equal(t, readGolden(t, golden), string(got)+"\n")
 }

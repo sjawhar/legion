@@ -2,6 +2,7 @@ package gcp
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	kubernetes "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes"
@@ -18,6 +19,30 @@ import (
 
 type dispatchKubernetes struct {
 	kubeconfig pulumi.StringOutput
+}
+
+// dispatchSOCKS5Port is the port the front door's tailscaled binds its userspace SOCKS5 proxy on,
+// which its Service publishes, its NetworkPolicy admits, and the two workloads that dial the NATS
+// hub through it name.
+const dispatchSOCKS5Port = 1055
+
+// clusterLocal is the in-cluster DNS name of Service name in namespace: what one pod calls
+// another workload's Service at.
+func clusterLocal(name, namespace string) string {
+	return name + "." + namespace + ".svc.cluster.local"
+}
+
+// deploymentStrategy maps a resolved strategy onto a Deployment's. A Recreate strategy carries no
+// rolling bounds, and so registers no rollingUpdate key at all.
+func deploymentStrategy(strategy dispatchStrategy) *appsv1.DeploymentStrategyArgs {
+	args := &appsv1.DeploymentStrategyArgs{Type: pulumi.String(strategy.strategyType)}
+	if rolling := strategy.rollingUpdate; rolling != nil {
+		args.RollingUpdate = &appsv1.RollingUpdateDeploymentArgs{
+			MaxUnavailable: pulumi.Int(rolling.maxUnavailable),
+			MaxSurge:       pulumi.Int(rolling.maxSurge),
+		}
+	}
+	return args
 }
 
 func renderKubeconfig(endpoint, ca, name string) string {
@@ -150,8 +175,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	// each runs in a pod of its own: one tailnet node holds the hostname and the single-use auth
 	// key's state, and one listener binds the machine id's exclusive durable, while the app scales.
 	tailnetName := s.hostname + "-tailnet"
-	socks5Proxy := tailnetName + "." + s.namespace + ".svc.cluster.local:1055"
-	listenerURL := "http://" + listenerName + "." + s.namespace + ".svc.cluster.local:9020"
+	socks5Port := strconv.Itoa(dispatchSOCKS5Port)
+	listenerPort := strconv.Itoa(core.DefaultListenerPort)
+	socks5Proxy := clusterLocal(tailnetName, s.namespace) + ":" + socks5Port
+	listenerURL := "http://" + clusterLocal(listenerName, s.namespace) + ":" + listenerPort
 
 	listenerEnv := args.NatsUrl.ToStringOutput().ApplyT(func(url string) corev1.EnvVarArray {
 		env, err := (core.ListenerConfig{
@@ -204,9 +231,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	// Both single-replica workloads are recreated, never rolled, whatever the app's replica count:
 	// a second tailnet node would contend for the one state Secret the Role names, and a second
 	// listener with the same machine id never binds its exclusive durable.
-	recreate := func() *appsv1.DeploymentStrategyArgs {
-		return &appsv1.DeploymentStrategyArgs{Type: pulumi.String(dispatchStrategyRecreate)}
-	}
+	recreate := dispatchStrategyFor(minDispatchReplicas)
 
 	seedMount := corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}
 	seedVolume := corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("nats-seed"), Csi: &corev1.CSIVolumeSourceArgs{Driver: pulumi.String("secrets-store-gke.csi.k8s.io"), ReadOnly: pulumi.Bool(true), VolumeAttributes: pulumi.StringMap{"secretProviderClass": pulumi.String(seedName)}}}}
@@ -222,12 +247,12 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	tailnetStartup.PeriodSeconds, tailnetStartup.FailureThreshold = pulumi.Int(5), pulumi.Int(36)
 	tailnetReady := tailnetHealth()
 	tailnetReady.PeriodSeconds = pulumi.Int(10)
-	tailnet, err := deployment(tailnetName, 1, recreate(), corev1.PodSpecArgs{
+	tailnet, err := deployment(tailnetName, 1, deploymentStrategy(recreate), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
 		Containers: corev1.ContainerArray{
 			corev1.ContainerArgs{Name: pulumi.String("tailscale"), Image: pulumi.String(s.images.tailscale), Resources: resources("100m", "128Mi"), Env: corev1.EnvVarArray{
 				secretEnv("TS_AUTHKEY", authKeyName, "TS_AUTHKEY"),
-				valueEnv("TS_AUTH_ONCE", "true"), valueEnv("TS_KUBE_SECRET", stateName), valueEnv("TS_USERSPACE", "true"), valueEnv("TS_SOCKS5_SERVER", "0.0.0.0:1055"), valueEnv("TS_SERVE_CONFIG", "/etc/tailscale/serve.json"), valueEnv("TS_HOSTNAME", s.hostname), valueEnv("TS_EXTRA_ARGS", "--advertise-tags="+strings.Join(s.tags, ",")), valueEnv("TS_ENABLE_HEALTH_CHECK", "true"), valueEnv("TS_LOCAL_ADDR_PORT", "127.0.0.1:9002"),
+				valueEnv("TS_AUTH_ONCE", "true"), valueEnv("TS_KUBE_SECRET", stateName), valueEnv("TS_USERSPACE", "true"), valueEnv("TS_SOCKS5_SERVER", "0.0.0.0:"+socks5Port), valueEnv("TS_SERVE_CONFIG", "/etc/tailscale/serve.json"), valueEnv("TS_HOSTNAME", s.hostname), valueEnv("TS_EXTRA_ARGS", "--advertise-tags="+strings.Join(s.tags, ",")), valueEnv("TS_ENABLE_HEALTH_CHECK", "true"), valueEnv("TS_LOCAL_ADDR_PORT", "127.0.0.1:9002"),
 			}, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("serve"), MountPath: pulumi.String("/etc/tailscale")}}, StartupProbe: tailnetStartup, ReadinessProbe: tailnetReady},
 		},
 		Volumes: corev1.VolumeArray{corev1.VolumeArgs{Name: pulumi.String("serve"), ConfigMap: &corev1.ConfigMapVolumeSourceArgs{Name: pulumi.String(serveName)}}},
@@ -235,37 +260,34 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	if err != nil {
 		return nil, err
 	}
-	tailnetService, err := service(tailnetName, 1055)
+	tailnetService, err := service(tailnetName, dispatchSOCKS5Port)
 	if err != nil {
 		return nil, err
 	}
 
+	// Both other workloads dial the NATS hub through the front door's proxy, so each waits for its
+	// pod and its Service: envoy-dispatch exits 1 when it cannot reach NATS and answers 503 on
+	// /healthz until it connects, and envoy-listener exits on a failed initial connect
+	// (packages/envoy/cmd/listener/main.go), so a pod started before the proxy exists never goes
+	// ready and the rollout waits it out.
+	frontDoor := pulumi.DependsOn([]pulumi.Resource{tailnet, tailnetService})
+
 	// The listener runs under the app's ServiceAccount, which is what mounts the NATS seed through
 	// Workload Identity.
-	if _, err := deployment(listenerName, 1, recreate(), corev1.PodSpecArgs{
+	if _, err := deployment(listenerName, 1, deploymentStrategy(recreate), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), EnableServiceLinks: pulumi.Bool(false),
 		Containers: corev1.ContainerArray{
-			corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("200m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:9020/healthz")}}}},
+			corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("200m", "512Mi"), Env: listenerEnv, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:" + listenerPort + "/healthz")}}}},
 		},
 		Volumes: seedVolume,
-	}); err != nil {
+	}, frontDoor); err != nil {
 		return nil, err
 	}
-	if _, err := service(listenerName, 9020); err != nil {
+	if _, err := service(listenerName, core.DefaultListenerPort); err != nil {
 		return nil, err
 	}
 
-	strategy := &appsv1.DeploymentStrategyArgs{Type: pulumi.String(s.strategy.strategyType)}
-	if rolling := s.strategy.rollingUpdate; rolling != nil {
-		strategy.RollingUpdate = &appsv1.RollingUpdateDeploymentArgs{
-			MaxUnavailable: pulumi.Int(rolling.maxUnavailable),
-			MaxSurge:       pulumi.Int(rolling.maxSurge),
-		}
-	}
-	// The app waits for the front door and its Service: envoy-dispatch exits 1 when it cannot
-	// reach NATS through the proxy, and its /healthz answers 503 until it connects, so a pod
-	// started before the proxy exists never goes ready and the rollout waits it out.
-	if _, err := deployment(s.hostname, s.replicas, strategy, corev1.PodSpecArgs{
+	if _, err := deployment(s.hostname, s.replicas, deploymentStrategy(s.strategy), corev1.PodSpecArgs{
 		ServiceAccountName: pulumi.String(s.hostname), TerminationGracePeriodSeconds: pulumi.Int(30), EnableServiceLinks: pulumi.Bool(false),
 		InitContainers: corev1.ContainerArray{
 			corev1.ContainerArgs{Name: pulumi.String("cloud-sql-proxy"), Image: pulumi.String(s.images.proxy), RestartPolicy: pulumi.String("Always"), Args: pulumi.StringArray{pulumi.String("--private-ip"), pulumi.String("--structured-logs"), pulumi.String("--address=127.0.0.1"), pulumi.String("--port=5432"), cloud.instance.ConnectionName}, Resources: resources("200m", "256Mi"), SecurityContext: &corev1.SecurityContextArgs{RunAsNonRoot: pulumi.Bool(true)}},
@@ -277,7 +299,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 			}, VolumeMounts: seedMount, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 		},
 		Volumes: seedVolume,
-	}, pulumi.DependsOn([]pulumi.Resource{tailnet, tailnetService})); err != nil {
+	}, frontDoor); err != nil {
 		return nil, err
 	}
 	if _, err := service(s.hostname, 8766); err != nil {
@@ -327,12 +349,12 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	// Whatever reaches the proxy gets tailnet egress as this node, so only the two workloads that
 	// dial the hub through it may.
 	if err := policy(tailnetName, networkingv1.NetworkPolicyIngressRuleArray{
-		ingressFrom(1055, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}),
+		ingressFrom(dispatchSOCKS5Port, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname), podPeer(listenerName)}),
 	}); err != nil {
 		return nil, err
 	}
 	if err := policy(listenerName, networkingv1.NetworkPolicyIngressRuleArray{
-		ingressFrom(9020, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname)}),
+		ingressFrom(core.DefaultListenerPort, networkingv1.NetworkPolicyPeerArray{podPeer(s.hostname)}),
 	}); err != nil {
 		return nil, err
 	}

@@ -23,6 +23,11 @@ const (
 	defaultDispatchNamespace       = "dispatch"
 	defaultDispatchReplicas        = 1
 
+	// minDispatchReplicas is the fewest pods a workload of this component may run, and the count
+	// at which a Deployment must be recreated rather than rolled: two processes of one pod's kind
+	// must not overlap. It is what an unset replicas happens to default to, not the same rule.
+	minDispatchReplicas = 1
+
 	// dispatchStrategyRecreate stops every running pod before starting the new one;
 	// dispatchStrategyRollingUpdate starts new pods beside the old ones. dispatchStrategyFor picks
 	// between them.
@@ -158,13 +163,14 @@ type dispatchStrategy struct {
 	rollingUpdate *dispatchRollingUpdate
 }
 
-// dispatchStrategyFor turns the replica count into the app Deployment's update strategy. At one
-// replica two envoy-dispatch processes must never overlap, since the second cannot bind the
-// exclusive NATS push durable, so Recreate, which stops the old pod before starting the new one,
-// is the only safe strategy. Above one replica the operator has accepted that overlap and wants no
-// gap in service, so the Deployment rolls: one new pod comes up before any old one goes down.
+// dispatchStrategyFor turns a workload's replica count into its Deployment's update strategy. At
+// minDispatchReplicas two processes of that workload must never overlap, since a second
+// envoy-dispatch cannot bind the exclusive NATS push durable, so Recreate, which stops the old pod
+// before starting the new one, is the only safe strategy. Above that count the operator has
+// accepted the overlap and wants no gap in service, so the Deployment rolls: one new pod comes up
+// before any old one goes down.
 func dispatchStrategyFor(replicas int) dispatchStrategy {
-	if replicas <= defaultDispatchReplicas {
+	if replicas <= minDispatchReplicas {
 		return dispatchStrategy{strategyType: dispatchStrategyRecreate}
 	}
 	return dispatchStrategy{
@@ -256,8 +262,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 		s.deletionProtection = *args.DeletionProtection
 	}
 	if args.Replicas != nil {
-		if *args.Replicas < 1 {
-			return dispatchSettings{}, fmt.Errorf("replicas %d must be at least 1", *args.Replicas)
+		if *args.Replicas < minDispatchReplicas {
+			return dispatchSettings{}, fmt.Errorf("replicas %d must be at least %d", *args.Replicas, minDispatchReplicas)
 		}
 		s.replicas = *args.Replicas
 	}
@@ -276,8 +282,8 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	}
 	// The tailnet node runs in a pod of its own now, so Serve proxies to the app's Service rather
 	// than to a container beside it. The Web key keeps the node's name and certificate domain.
-	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://%s.%s.svc.cluster.local:8766"}}}}}`,
-		s.hostname, s.tailnetDNSName, s.hostname, s.namespace)
+	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://%s:8766"}}}}}`,
+		s.hostname, s.tailnetDNSName, clusterLocal(s.hostname, s.namespace))
 	return s, nil
 }
 
