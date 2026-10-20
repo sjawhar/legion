@@ -9,10 +9,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// Every read behind an Inbox card's initial data: the orchestrator, its reply chain, and the
-// per-ask edits and followers. `inboxAskReplyChainsQuery` stays in comment_queries.go with
-// `replyChainQuery`, the other recursion over `comments`, so the two can be read against each
-// other; query_plan_test.go pins both from there.
+// Every read behind an ask card's initial data: the orchestrator, its reply chain, and the
+// per-ask edits and followers. An Inbox card and an issue's ask list render from the
+// same reads, each batched over every ask on the page. `inboxAskReplyChainsQuery` stays in
+// comment_queries.go with `replyChainQuery`, the other recursion over `comments`, so the two
+// can be read against each other; query_plan_test.go pins both from there.
 
 func (s *server) loadInboxAskEdits(ctx context.Context, q queryer, askIDs []string) (map[string][]model.AskEdit, error) {
 	edits := make(map[string][]model.AskEdit, len(askIDs))
@@ -81,14 +82,17 @@ func (s *server) loadInboxAskFollowers(ctx context.Context, q queryer, askIDs []
 	return followers, nil
 }
 
-// loadInboxAskThreads batches the initial data each Inbox card renders. Both write paths
-// normalise a reply under an ask to that ask's ask_id, so the recursive reply_to walk only
-// picks up rows a pre-0043 server wrote or is still draining; it matches loadReplyChain
-// exactly either way.
-func (s *server) loadInboxAskThreads(ctx context.Context, q queryer, askIDs []string) (map[string]inboxAskThread, error) {
-	threads := make(map[string]inboxAskThread, len(askIDs))
+// loadAskThreads batches the initial data each ask card renders, for the Inbox and for an
+// issue's ask list. Both write paths normalise a reply under an ask to that ask's ask_id, so the
+// recursive reply_to walk only picks up rows a pre-0043 server wrote or is still draining; it
+// matches loadReplyChain exactly either way. Answers are not among the reads: an Inbox row is an
+// open ask and can have none, so a caller that does want them (an issue's ask list asked for a
+// thread) merges loadAskAnswersByAsk over the same ask ids itself rather than making every
+// Inbox load scan `events` for answers that cannot exist.
+func (s *server) loadAskThreads(ctx context.Context, q queryer, askIDs []string) (map[string]askThread, error) {
+	threads := make(map[string]askThread, len(askIDs))
 	for _, askID := range askIDs {
-		threads[askID] = inboxAskThread{
+		threads[askID] = askThread{
 			Replies:   []model.Comment{},
 			Edits:     []model.AskEdit{},
 			Answers:   []model.AskAnswer{},

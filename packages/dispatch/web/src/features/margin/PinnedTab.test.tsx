@@ -31,7 +31,13 @@ test("PinnedTab renders pinned event bodies as Markdown", async () => {
   });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <PinnedTab events={[messageEvent]} onUnpin={() => {}} pinnedIds={["1"]} />
+      <PinnedTab
+        conversations={[]}
+        events={[messageEvent]}
+        onUnpin={() => {}}
+        onUnpinConversation={() => {}}
+        pinnedIds={["1"]}
+      />
     </QueryClientProvider>
   );
   try {
@@ -78,8 +84,10 @@ test("a pinned lifecycle event remains removable", async () => {
   const view = render(
     <QueryClientProvider client={queryClient}>
       <PinnedTab
+        conversations={[]}
         events={[lifecycleEvent]}
         onUnpin={(eventId) => removed.push(eventId)}
+        onUnpinConversation={() => {}}
         pinnedIds={["2"]}
       />
     </QueryClientProvider>

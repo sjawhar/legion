@@ -12,6 +12,7 @@ import {
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
   type AskRead,
+  type AskThread,
   type BlockTypeSchema,
   type Comment,
   CommentEventPayloadSchema,
@@ -24,7 +25,6 @@ import {
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
-  type InboxThread,
   IssueEventPayloadSchema,
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
@@ -183,7 +183,7 @@ test("models answer changes, ask answer history, and the answers page", () => {
     answers: [answer],
     followers: [],
   } satisfies AskRead;
-  const thread = { replies: [], edits: [], answers: [], followers: [] } satisfies InboxThread;
+  const thread = { replies: [], edits: [], answers: [], followers: [] } satisfies AskThread;
   const page = {
     rows: [
       {

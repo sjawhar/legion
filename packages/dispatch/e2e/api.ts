@@ -38,6 +38,7 @@ import type {
   MyRepliesResponse,
   Project,
   RepoProject,
+  SearchResponse,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -240,6 +241,17 @@ export function listIssues(project: string, options: ApiOptions = {}): Promise<I
 /** The viewer's Inbox rows, as the SPA's own `["inbox"]` query reads them. */
 export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
   return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
+}
+
+/** `GET /api/v1/search`: the palette's own read, so a row's `href` here is the path a reader
+ *  lands on by clicking that hit. */
+export function search(query: string, options: ApiOptions = {}): Promise<SearchResponse> {
+  return request<SearchResponse>(
+    `/api/v1/search?q=${encodeURIComponent(query)}`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 /** `GET /api/v1/me/answers`: the caller's own answers and ask replies, newest first, one page. */

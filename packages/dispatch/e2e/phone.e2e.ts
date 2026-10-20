@@ -439,19 +439,43 @@ test("an inline link keeps its line and grows its hit box without covering its n
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   try {
-    await page.goto(`/issues/${issue.key}/conversation`);
+    // The `view` link is an event line's - "<author> replied to … view" - and the event lines
+    // are the Activity tab's. The line it sits in is measured as a line box rather than as its
+    // paragraph's height: the row wraps the author, the description and the pin across flex
+    // lines, and a paragraph two lines tall says nothing about whether the link moved one.
+    await page.goto(`/issues/${issue.key}/activity`);
     await expect(page.getByRole("link", { name: "view" }).first()).toBeVisible();
+    const inline = await page.evaluate(() => {
+      const view = [...document.querySelectorAll("main a")].find(
+        (link) => (link.textContent ?? "") === "view"
+      );
+      if (view === undefined) {
+        throw new Error("the activity is missing its seeded view link");
+      }
+      const range = document.createRange();
+      range.selectNodeContents(view.parentElement ?? view);
+      // One rect per line box the description occupies: an inline-flex control box would be in
+      // the line box, a padded inline link is not.
+      const lines = [...range.getClientRects()].map((rect) => rect.height);
+      if (lines.length === 0) {
+        throw new Error("the activity line the view link sits in has no line box");
+      }
+      return {
+        lineHeight: Math.max(...lines),
+        viewHeight: view.getBoundingClientRect().height,
+      };
+    });
+
+    await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByRole("link", { name: "Lower line" }).first()).toBeVisible();
     const line = await page.evaluate(() => {
       // Outside the ask cards: a decision block renders the same body in its own card.
       const links = [...document.querySelectorAll("main a")].filter(
         (link) => link.closest('[data-testid^="ask-"]') === null
       );
-      const named = (text: string) => links.find((link) => (link.textContent ?? "") === text);
-      const view = named("view");
-      const upper = named("Upper line");
-      const lower = named("Lower line");
-      if (view === undefined || upper === undefined || lower === undefined) {
+      const upper = links.find((link) => (link.textContent ?? "") === "Upper line");
+      const lower = links.find((link) => (link.textContent ?? "") === "Lower line");
+      if (upper === undefined || lower === undefined) {
         throw new Error("the conversation is missing a seeded link");
       }
       const range = document.createRange();
@@ -462,13 +486,11 @@ test("an inline link keeps its line and grows its hit box without covering its n
         upperText.bottom - 1
       );
       return {
-        lineHeight: (view.parentElement ?? view).getBoundingClientRect().height,
         // How far the lower link's padding box starts below the upper link's own text.
         // Negative is padding sitting on letters a reader is trying to tap.
         lowerClearance: lower.getBoundingClientRect().y - upperText.bottom,
         onUpperTextBottom:
           node === null ? "null" : (node.closest("a")?.textContent ?? "not-a-link"),
-        viewHeight: view.getBoundingClientRect().height,
       };
     });
 
@@ -513,9 +535,9 @@ test("an inline link keeps its line and grows its hit box without covering its n
     });
 
     // 1. The line the inline link sits in is a line of text: it was 44px as a control box.
-    expect(line.lineHeight).toBeLessThanOrEqual(28);
+    expect(inline.lineHeight).toBeLessThanOrEqual(28);
     // 2. Its own hit box clears the 24px WCAG 2.5.8 target.
-    expect(line.viewHeight).toBeGreaterThanOrEqual(24);
+    expect(inline.viewHeight).toBeGreaterThanOrEqual(24);
     // 3. On consecutive lines of one message turn - 16px prose on 24px lines, the tightest
     //    pitch a body reaches - the lower link's padding starts below the upper link's own
     //    text, so a tap at the bottom of that text opens the upper link.

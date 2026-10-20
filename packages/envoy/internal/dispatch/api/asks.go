@@ -648,9 +648,22 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, response)
 }
 
+// issueAskRow is one row of an issue's ask list: the ask itself, plus the newest reply in its
+// thread and, when the caller asked for it, the thread a card renders. Embedding model.Ask keeps
+// every field a reader already has exactly where it was, so the row stays a superset of the ask.
+type issueAskRow struct {
+	model.Ask
+	LastReply *model.AskLastReply `json:"last_reply"`
+	Thread    *askThread          `json:"thread,omitempty"`
+}
+
 // listIssueAsks returns every ask on an issue, filtered by state: "open" or
 // "answered" match only that state; "all" (the default) returns every ask
-// regardless of state, including resolved ones.
+// regardless of state, including resolved ones. Each ask carries its newest reply, so a
+// client can order by it; `?thread=1` adds the thread a card renders, batched over the whole
+// page in one set of reads rather than a fetch per ask. The list is unpaged and three surfaces
+// read it, so the thread is what the one surface that draws it asks for, not what every reader
+// of the ask row pays for.
 func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -660,12 +673,54 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	asks, _, err := s.queryOwnerAsks(r.Context(), s.deps.Store.Pool, issueOwner(r.PathValue("key")), state)
+	withThread, err := parseAskListThread(r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, asks)
+	asks, lastReplies, err := s.queryOwnerAsks(r.Context(), s.deps.Store.Pool, issueOwner(r.PathValue("key")), state)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	rows := make([]issueAskRow, len(asks))
+	for index := range asks {
+		rows[index] = issueAskRow{Ask: asks[index]}
+		if reply, ok := lastReplies[asks[index].ID]; ok {
+			rows[index].LastReply = &reply
+		}
+	}
+	if withThread {
+		if err := s.attachIssueAskThreads(r.Context(), rows); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	WriteJSON(w, http.StatusOK, rows)
+}
+
+// attachIssueAskThreads hangs each row's thread off it. loadAskThreads leaves `answers` empty -
+// an Inbox row, its other caller, is an open ask and can have none - so this list, which does
+// carry answered asks, merges them over the same ask ids itself.
+func (s *server) attachIssueAskThreads(ctx context.Context, rows []issueAskRow) error {
+	askIDs := make([]string, len(rows))
+	for index := range rows {
+		askIDs[index] = rows[index].ID
+	}
+	threads, err := s.loadAskThreads(ctx, s.deps.Store.Pool, askIDs)
+	if err != nil {
+		return err
+	}
+	answers, err := s.loadAskAnswersByAsk(ctx, s.deps.Store.Pool, askIDs)
+	if err != nil {
+		return err
+	}
+	for index := range rows {
+		thread := threads[rows[index].ID]
+		thread.Answers = answers[rows[index].ID]
+		rows[index].Thread = &thread
+	}
+	return nil
 }
 
 func parseAskListState(r *http.Request) (string, error) {
@@ -677,6 +732,20 @@ func parseAskListState(r *http.Request) (string, error) {
 		return "", errorf(http.StatusBadRequest, "INVALID_ASK_STATE", "state must be all, open, or answered")
 	}
 	return state, nil
+}
+
+// parseAskListThread reads ?thread=, which asks an issue's ask list to carry each ask's thread:
+// absent is a row without one, `1` is a row with it. Any other value is a caller that meant
+// something this server does not read, refused rather than silently answered without the thread.
+func parseAskListThread(r *http.Request) (bool, error) {
+	thread := r.URL.Query().Get("thread")
+	if thread == "" {
+		return false, nil
+	}
+	if thread != "1" {
+		return false, errorf(http.StatusBadRequest, "INVALID_ASK_THREAD", "thread must be 1 or absent")
+	}
+	return true, nil
 }
 
 func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
@@ -777,10 +846,22 @@ func answerEventsQuery(columns, filter string) string {
 		order by e.payload->>'id', e.payload->'answer'->>'at', e.id asc`
 }
 
-// loadAskAnswers reads every real answer to one ask back from its ask.answered events
-// (answerEventsQuery), oldest first.
-func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([]model.AskAnswer, error) {
-	rows, err := q.Query(ctx, answerEventsQuery(`e.payload->'answer', e.id`, `e.payload->>'id' = $1`), askID)
+// loadAskAnswersByAsk reads every real answer to each listed ask back from its ask.answered
+// events (answerEventsQuery), oldest first, keyed by ask id; an ask nobody answered gets an
+// empty slice. One query for the whole list: the ask read batches one ask, an issue's ask list
+// asked for a thread a page of them.
+func (s *server) loadAskAnswersByAsk(ctx context.Context, q queryer, askIDs []string) (map[string][]model.AskAnswer, error) {
+	answers := make(map[string][]model.AskAnswer, len(askIDs))
+	for _, askID := range askIDs {
+		answers[askID] = []model.AskAnswer{}
+	}
+	if len(askIDs) == 0 {
+		return answers, nil
+	}
+	rows, err := q.Query(ctx, answerEventsQuery(
+		`e.payload->>'id', e.payload->'answer', e.id`,
+		`e.payload->>'id' = any($1::text[])`,
+	), askIDs)
 	if err != nil {
 		return nil, fmt.Errorf("load ask answers: %w", err)
 	}
@@ -789,27 +870,42 @@ func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([
 		answer model.AskAnswer
 		id     int64
 	}
-	events := []answerEvent{}
+	events := map[string][]answerEvent{}
 	for rows.Next() {
+		var askID string
 		var encoded []byte
 		var event answerEvent
-		if err := rows.Scan(&encoded, &event.id); err != nil {
+		if err := rows.Scan(&askID, &encoded, &event.id); err != nil {
 			return nil, fmt.Errorf("scan ask answer: %w", err)
 		}
 		if err := json.Unmarshal(encoded, &event.answer); err != nil {
 			return nil, fmt.Errorf("decode ask answer: %w", err)
 		}
-		events = append(events, event)
+		events[askID] = append(events[askID], event)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("load ask answers: %w", err)
 	}
-	sort.Slice(events, func(left, right int) bool { return events[left].id < events[right].id })
-	answers := make([]model.AskAnswer, len(events))
-	for index := range events {
-		answers[index] = events[index].answer
+	// The dedupe orders the kept events by each answer's own `at`; an ask's answers are handed
+	// back in the order they were written, so sort each ask's by event id.
+	for askID, askEvents := range events {
+		sort.Slice(askEvents, func(left, right int) bool { return askEvents[left].id < askEvents[right].id })
+		ordered := make([]model.AskAnswer, len(askEvents))
+		for index := range askEvents {
+			ordered[index] = askEvents[index].answer
+		}
+		answers[askID] = ordered
 	}
 	return answers, nil
+}
+
+// loadAskAnswers reads every real answer to one ask, oldest first.
+func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([]model.AskAnswer, error) {
+	answers, err := s.loadAskAnswersByAsk(ctx, q, []string{askID})
+	if err != nil {
+		return nil, err
+	}
+	return answers[askID], nil
 }
 
 // loadAsk reads one ask for a response: unlike lockAskForTransition, which feeds the

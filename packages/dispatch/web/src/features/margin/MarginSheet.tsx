@@ -30,6 +30,7 @@ import type {
   MarginOwner,
   MarginTab,
   MarkPlacement,
+  PinnedConversationCard,
   Thread,
 } from "./useMarginItems";
 
@@ -43,6 +44,7 @@ export interface MarginSheetModel {
     onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;
     onUnpin: (eventId: number) => void;
+    onUnpinConversation: (id: string) => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
     onRetryIssue: () => void;
@@ -69,6 +71,7 @@ export interface MarginSheetModel {
     openAskCount: number;
     pendingActionIds: ReadonlySet<string>;
     pinned: Event[];
+    pinnedConversations: PinnedConversationCard[];
     pinnedIds: string[];
     resolvedThreads: Thread[];
     /** Retracted asks hidden behind the same toggle as resolved threads. */
@@ -142,6 +145,7 @@ export function MarginSheet({
       openAskCount,
       pendingActionIds,
       pinned,
+      pinnedConversations,
       pinnedIds,
       needsYou,
       onSelectCard,
@@ -299,7 +303,13 @@ export function MarginSheet({
                 </div>
               ) : null}
               {tab.value === "pinned" && owner?.kind === "issue" ? (
-                <PinnedTab events={pinned} onUnpin={actions.onUnpin} pinnedIds={pinnedIds} />
+                <PinnedTab
+                  conversations={pinnedConversations}
+                  events={pinned}
+                  onUnpin={actions.onUnpin}
+                  onUnpinConversation={actions.onUnpinConversation}
+                  pinnedIds={pinnedIds}
+                />
               ) : null}
               {filter.blockId === undefined ? null : (
                 <div

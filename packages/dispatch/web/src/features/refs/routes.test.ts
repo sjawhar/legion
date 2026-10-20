@@ -123,6 +123,7 @@ test("issue routes select Spec and artifact routes select Artifacts unless prima
   expect(issueTabForRoute({ key: "CORE-1", kind: "conversation" }, undefined)).toBe("conversation");
   expect(issueTabForRoute({ key: "CORE-1", kind: "children" }, undefined)).toBe("children");
   expect(issueTabForRoute({ key: "CORE-1", kind: "artifacts" }, undefined)).toBe("artifacts");
+  expect(issueTabForRoute({ key: "CORE-1", kind: "activity" }, undefined)).toBe("activity");
   expect(
     issueTabForRoute(
       { key: "CORE-1", kind: "artifact", slug: "diagram", version: 2 },
@@ -218,6 +219,19 @@ test("agent references keep the dispatch://KEY/log grammar for the conversation"
   expect(buildDispatchReference({ key: "CORE-1", kind: "conversation" })).toBe(
     "dispatch://CORE-1/log"
   );
+});
+
+test("the activity tab owns its path, its reference and its short form", () => {
+  const route = { key: "CORE-1", kind: "activity" as const };
+
+  expect(parseDispatchReference("dispatch://CORE-1/activity")).toEqual(route);
+  expect(buildDispatchReference(route)).toBe("dispatch://CORE-1/activity");
+  expect(shortForm(route)).toBe("CORE-1 activity");
+  expect(parseIssuePath("/issues/CORE-1/activity")).toEqual(route);
+  expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/activity"));
+  expect(
+    referenceRouteFromHref("https://dispatch.test/issues/CORE-1/activity", "https://dispatch.test")
+  ).toEqual(route);
 });
 
 test("parses and builds project, documents, and document routes with version and item query", () => {

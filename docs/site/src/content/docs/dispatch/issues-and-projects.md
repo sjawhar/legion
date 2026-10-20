@@ -148,18 +148,26 @@ still clamps a title shows the whole of it on hover.
 ### The tabs
 
 - **Spec** is the issue's main document. [Documents](/legion/dispatch/documents/) covers it.
-- **Conversation** is the issue's history: comments, messages, asks and their answers, and
-  activity such as updates, uploads, and changes to child issues. The newest is at the top, with
-  **Load older** at the bottom. **Show activity** hides or shows the activity lines.
-  **Show retracted** shows asks the agent withdrew. **Resolved (N)** shows resolved comment
-  threads.
+- **Conversation** is the issue's conversations, one card each: every ask with its replies and
+  its answer, every comment thread with its replies, every message thread with its replies. The
+  conversation with the newest reply is at the top, so a thread rises when someone answers it,
+  and the whole list is there however old a conversation is. **All**, **Open** and **Closed**
+  filter it: an ask is Closed once it is answered, resolved or retracted, a comment thread once
+  it is resolved or its suggestion is accepted or rejected, and a message thread is never
+  closed. The filter opens on **All** every visit. A conversation holding something you have
+  not read is marked **New**, and **Jump to latest** counts those and takes you to the top.
 - **Children** lists the issue's child issues, each with its status, how much of its own tree is
   done, and its latest activity.
 - **Artifacts** lists the issue's documents and files, with a count. Pick a file, or drop one on the
   tab, add an optional summary, and choose **Upload**. Uploading a file with the same name adds a
   new version.
+- **Activity** is the issue's whole history, one line each, newest first: every comment, ask and
+  message as it was posted, and everything else that happened to the issue — status moves,
+  claims, document versions, uploads, subscriptions, changes to child issues. It has **Load
+  older** at the bottom, a divider for each day, and a mark where your last read ends.
 
-Press `t` and then `s`, `c`, `h`, or `a` to switch to Spec, Conversation, Children, or Artifacts.
+Press `t` and then `s`, `c`, `h`, `a`, or `v` to switch to Spec, Conversation, Children,
+Artifacts, or Activity.
 
 ### Writing in the Conversation
 
