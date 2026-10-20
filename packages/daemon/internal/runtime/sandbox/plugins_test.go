@@ -21,7 +21,11 @@ func testPlugins() *runtime.PluginInstall {
 // plugins <agent argv…>`: the agent argv rides after the script as legion-plugins's own positional
 // parameters, never quoted into the script, and the script names both sources, the generation
 // directory under the role's state home, and the contract, ends `exec "$@"`, and the agent argv it
-// wraps carries the two installed --extension roots rather than the image's.
+// wraps carries the two installed --extension roots rather than the image's. The install carries
+// `--backend=copyfile`, which keeps bun from hardlinking the installed plugin files out of the
+// role's bun install cache: the cache and the generation directory share the issue's volume, and a
+// hardlinked install is one inode with the cache's copy, so an in-place edit of either corrupts
+// the other for the life of that volume.
 func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -47,7 +51,7 @@ func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	genDir := pluginGenDir(stateHome, spec.Generation)
 	for _, want := range []string{
 		spec.Plugins.PiLegion, spec.Plugins.PiEnvoy, genDir, "/g*",
-		"exec \"$@\"", "} 1>&2", "set -eu",
+		"--backend=copyfile", "exec \"$@\"", "} 1>&2", "set -eu",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("install script does not name %q:\n%s", want, script)

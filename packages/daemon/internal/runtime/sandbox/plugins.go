@@ -89,9 +89,16 @@ if (got !== want) {
 // whose image lacks it fails the same way, with the shell's own "not found" on stderr. Each
 // source is handed to `bun add` as bunSpec renders it — a tarball path or URL verbatim, an exact
 // version as the scoped package at that version — so the install can never read a bare version as
-// a package name of its own. The directory, the two specs and the contract are each shell-quoted
-// into the script (shellprefix.Literal): they travel as literal text the daemon renders, never as
-// something the shell expands.
+// a package name of its own. The install is `--backend=copyfile` because the role's bun install
+// cache (BUN_INSTALL_CACHE_DIR) and this generation's directory now both sit on the issue's
+// volume: on one filesystem bun hardlinks the installed files out of that cache, so the installed
+// file and the cache file are one inode and an in-place edit of either corrupts the other for the
+// life of the volume. The flag on the command is the only way to say it — bun ignores the setting
+// in a bunfig.toml and has no environment variable for it (oven-sh/bun#25391, #32158) — and it is
+// the same copy-don't-link that uv is made to do for the same reason (uvLinkMode, manifest.go).
+// The directory, the two specs and the contract are each shell-quoted into the script
+// (shellprefix.Literal): they travel as literal text the daemon renders, never as something the
+// shell expands.
 func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
 	root, genDir := pluginsRoot(stateHome), pluginGenDir(stateHome, generation)
 	legionSpec := bunSpec("@sjawhar/pi-legion", plugins.PiLegion)
@@ -101,7 +108,7 @@ func installScript(stateHome string, generation uint64, plugins *runtime.PluginI
 {
   rm -rf -- %s/g*
   mkdir -p -- %s && cd -- %s
-  /usr/local/bin/bun add --exact %s %s \
+  /usr/local/bin/bun add --backend=copyfile --exact %s %s \
     || { echo %s; exit 1; }
   node -e %s %s/node_modules/@sjawhar/pi-legion/package.json %d
 } 1>&2
