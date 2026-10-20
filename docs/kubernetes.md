@@ -1194,10 +1194,10 @@ being told where to put it. Five of those directories are the role's own, under
 `/legion/scratch/<role>` — its temporary directory, its cache, data and state homes and bun's
 install cache, whose cold fill for this repository is 1.4 GB, with a Playwright Chromium under
 the state home about 400 MB — and one pair is shared by the issue's roles, the Go build and
-module caches at `/legion/go/build` and `/legion/go/mod`, 1.3 GB and 931 MB for this repository
+module caches at `/legion/go/build` and `/legion/go/mod`, 1.3 GiB and 931 MiB for this repository
 after `go test -count=1 ./...` over `packages/daemon` alone — the figure an operator sizes from,
 because roles run tests — where a cold `go build ./...` of that same module with nothing tested
-leaves 751 MB and 375 MB, the reproducible cold-build measurement that
+leaves 751 MiB and 375 MiB, the reproducible cold-build measurement that
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) records below beside it. An operator's
 arithmetic is therefore five directories per role the issue runs plus one Go pair for the issue,
 not seven directories per role. The controller's pod owns a volume of the same size, holding its
@@ -1800,18 +1800,18 @@ by its hash, and the roles of one issue may fill them at once: of the build cach
 says "The cache is safe for concurrent invocations of the go command", and what reaches the
 module cache is a module zip or `go.mod` the go command has verified against a known hash
 (`go help module-auth`) into a directory it then makes read-only, which only
-`go build -modcacherw` leaves writable. A pair is 751 MB of build cache and 375 MB of module
+`go build -modcacherw` leaves writable. A pair is 751 MiB of build cache and 375 MiB of module
 cache for this repository, so six roles with a pair each would hold five redundant copies, about
-5.6 GB of a 20 GiB volume spent on nothing. It was proven live in an issue pod: two
-`go build ./...` at once against one empty shared pair both exited 0 in 227 s, filling 751 MB of
-build cache and 375 MB of module cache — two concurrent builds of one module leave one build's
+5.5 GiB of a 20 GiB volume spent on nothing. It was proven live in an issue pod: two
+`go build ./...` at once against one empty shared pair both exited 0 in 227 s, filling 751 MiB of
+build cache and 375 MiB of module cache — two concurrent builds of one module leave one build's
 worth of content in the shared pair, which is why sharing is both safe and cheap — and the cache
 that race left rebuilt and tested clean. What those figures measure is one build: a cold
 `cd packages/daemon && go build ./...` into an empty pair — `packages/daemon` alone, one of the
 two modules `go.work` names, with nothing of `packages/envoy` built and no test run. A second,
-separate run of it measured 752 MB and 375 MB in 114 s, exit 0. A role that runs tests leaves
-more: after `go test -count=1 ./...` over that same one module the pair holds 1.3 GB of build
-cache and 931 MB of module cache, measured in this issue's own container, and that after-tests
+separate run of it measured 752 MiB and 375 MiB in 114 s, exit 0. A role that runs tests leaves
+more: after `go test -count=1 ./...` over that same one module the pair holds 1.3 GiB of build
+cache and 931 MiB of module cache, measured in this issue's own container, and that after-tests
 pair is the one the sizing above does its arithmetic with, because roles run tests. Neither bun's
 install cache nor the state home joins them: bun hardlinks out of its install cache into whatever
 it installs for, and the issue's roles share one checkout (`workspace.Location`,
@@ -1832,8 +1832,8 @@ What puts them off the container's own filesystem is the ephemeral-storage bound
 a role container is admitted with about a gigabyte (Warden refuses a pod whose containers' summed
 ephemeral-storage requests pass 10Gi and clamps each container's limit to its request, so the 1Gi
 default request is the whole bound; [Issue sizing](#issue-sizing-one-reservation-per-pod)), while
-ordinary work measurably needs more: this repository's Go build cache 751 MB and its Go module
-cache 375 MB (the measurement above), a Playwright Chromium about 400 MB, a Postgres with a data
+ordinary work measurably needs more: this repository's Go build cache 751 MiB and its Go module
+cache 375 MiB (the measurement above), a Playwright Chromium about 400 MB, a Postgres with a data
 directory about 300 MB, and a cold bun install cache 1.4 GB. A container past its
 ephemeral-storage limit has its whole pod evicted by the kubelet, and all six roles of an issue
 run in one pod, so one role's overrun takes every role of that issue down with it — which is

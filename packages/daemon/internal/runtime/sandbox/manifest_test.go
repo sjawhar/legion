@@ -655,9 +655,9 @@ func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 // fill them at once: of the build cache `go help cache` says "The cache is safe for concurrent
 // invocations of the go command", and what reaches the module cache is a module zip or go.mod the
 // go command has verified against a known hash (`go help module-auth`) in a directory it then
-// makes read-only, which only `go build -modcacherw` leaves writable. A pair is 751 MB of build
-// cache and 375 MB of module cache for this repository, so six roles with a pair each would hold
-// five redundant copies, about 5.6 GB of a 20 GiB volume spent on nothing. Bun's install cache
+// makes read-only, which only `go build -modcacherw` leaves writable. A pair is 751 MiB of build
+// cache and 375 MiB of module cache for this repository, so six roles with a pair each would hold
+// five redundant copies, about 5.5 GiB of a 20 GiB volume spent on nothing. Bun's install cache
 // does not join them, because bun hardlinks out of that cache into whatever it installs for and
 // the issue's roles share one checkout (workspace.Location names no role), so what a cache per
 // role bounds is which installs can put a hardlinked file back — that role's later ones alone,

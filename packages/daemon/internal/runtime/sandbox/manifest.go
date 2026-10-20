@@ -786,9 +786,9 @@ const (
 	// module cache is a module zip or go.mod the go command has verified against a known hash
 	// (`go help module-auth`) in a directory it then makes read-only, which only `go build
 	// -modcacherw` leaves writable. They are the issue's rather than the tree's because each issue
-	// has a volume of its own; a pair is 751 MB of build cache and 375 MB of module cache for this
+	// has a volume of its own; a pair is 751 MiB of build cache and 375 MiB of module cache for this
 	// repository, so the six roles of an issue pod with a pair each would hold five redundant
-	// copies, about 5.6 GB of a 20 GiB volume spent on nothing. Neither bun's install cache nor the
+	// copies, about 5.5 GiB of a 20 GiB volume spent on nothing. Neither bun's install cache nor the
 	// state home joins them. Bun hardlinks out of its install cache into whatever it installs for
 	// (LEGION-198, where that hardlinking was first met), and the issue's roles share
 	// one checkout — workspace.Location names the repository and the issue, never a role — so a
