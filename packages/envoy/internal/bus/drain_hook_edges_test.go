@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -113,9 +114,10 @@ func TestADrainHookLosingTheConnectionWarns(t *testing.T) {
 }
 
 // A delivery that finishes just before the drain's deadline leaves the hooks their share of it:
-// the delivery subscriptions drain within the drain's first 70%, so the hooks and the
-// connection's drain always keep the last 30%, however long a delivery takes. Of the 600 ms that
-// share is of a 2 s drain, the test asks for half, which leaves the scheduler the other half.
+// the delivery subscriptions drain within all but the drain's last 3 s, or its last 30% when that
+// is less, so the hooks and the connection's drain always keep it, however long a delivery takes.
+// Of the 600 ms that share is of a 2 s drain, the test asks for half, which leaves the scheduler
+// the other half.
 func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	_, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
@@ -148,6 +150,55 @@ func TestASlowDeliveryLeavesTheDrainHooksTheirShare(t *testing.T) {
 	case remaining := <-left:
 		if remaining < 300*time.Millisecond {
 			t.Fatalf("the drain hooks ran with %s of the drain's 2s left, want at least 300ms of the 600ms share they keep", remaining)
+		}
+	default:
+		t.Fatal("the drain never ran its hooks")
+	}
+}
+
+// The listener drains for 13 s, and its deliveries keep the 10 s they had before the drain hooks:
+// a delivery that takes 9.5 s finishes, the drain reports no error, and the hooks still have their
+// 3 s once it has (bus's drainHookReserve).
+func TestADeliveryKeepsTenSecondsOfTheListenersDrain(t *testing.T) {
+	_, uri := testnats.Start(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	started := make(chan struct{})
+	var delivered atomic.Bool
+	if _, err := client.SubscribeCore("notifications.role.drain-window", func(*natsgo.Msg) {
+		close(started)
+		time.Sleep(9500 * time.Millisecond)
+		delivered.Store(true)
+	}, "drain-window"); err != nil {
+		t.Fatalf("subscribe the role lane: %v", err)
+	}
+	if err := client.Conn.Publish("notifications.role.drain-window", nil); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delivery never reached its handler")
+	}
+	type observed struct {
+		delivered bool
+		left      time.Duration
+	}
+	ran := make(chan observed, 1)
+	client.AddDrainHook(func(ctx context.Context) {
+		deadline, _ := ctx.Deadline()
+		ran <- observed{delivered: delivered.Load(), left: time.Until(deadline)}
+	})
+	if err := client.Drain(13 * time.Second); err != nil {
+		t.Fatalf("a 13 s drain of a 9.5 s delivery returned %v, want none", err)
+	}
+	select {
+	case run := <-ran:
+		if !run.delivered || run.left < 2500*time.Millisecond {
+			t.Fatalf("the hooks ran with the delivery finished %v and %s of the drain left, want it finished and about 3.5s left", run.delivered, run.left)
 		}
 	default:
 		t.Fatal("the drain never ran its hooks")

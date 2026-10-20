@@ -930,7 +930,9 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	for _, c := range caches {
 		c.cache.StopWatch()
 	}
-	if err := client.Drain(10 * time.Second); err != nil {
+	// 10 s for the deliveries in their handlers, as before the drain hooks, and the hooks' 3 s on
+	// top (bus's drainHookReserve): with the HTTP stop's 10 s, 23 s, inside every runtime's 30 s.
+	if err := client.Drain(13 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}
 

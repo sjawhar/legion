@@ -460,7 +460,7 @@ func (c *Client) Close() {
 // still accepts new ones: a handler finishing its delivery may subscribe (RequestCoreTo's receipt
 // inbox), which a draining connection refuses. Next it runs the drain hooks (AddDrainHook), which
 // end the KV watchers with requests of their own while the connection still carries them, even
-// when the deliveries ran out their share of the timeout (drainHookShare) or failed to drain. Only
+// when the deliveries ran out their share of the timeout (drainHookReserve) or failed to drain. Only
 // then does it drain the connection, whose Drain only starts the drain, and wait for it to close
 // itself. A connection that is reconnecting is closed at once and runs no hook: nothing it sends
 // reaches the server, so no subscription would drain and a reconnect would re-send them.
@@ -471,7 +471,7 @@ func (c *Client) Close() {
 // after the stop (closeStopped).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	deliveriesDeadline := deadline.Add(-timeout * drainHookShare / 100)
+	deliveriesDeadline := deadline.Add(-min(drainHookReserve, timeout*3/10))
 	c.subscriptionsMu.Lock()
 	if c.stopMode == clientRunning {
 		c.stopMode = clientDraining
@@ -523,16 +523,16 @@ func (c *Client) Drain(timeout time.Duration) error {
 	}
 }
 
-// drainHookShare is the percentage of Drain's timeout kept from the delivery subscriptions for the
+// drainHookReserve is the part of Drain's timeout kept from the delivery subscriptions for the
 // drain hooks and the connection's own drain, so a delivery still in its handler near the deadline
 // cannot leave the hooks no time and make each KV watcher's consumer delete fail at ERROR. A
 // delivery's handler can take seconds (a role-lane forward waits up to 2 s for its receipt, a
 // session delivery up to its request limit), while a hook's delete is one round trip per watcher,
-// run for every watcher at once, and the connection's drain a flush and a close. At the listener's
-// 10 s timeout the split is 7 s for deliveries and 3 s for the rest, comfortably more than one
-// round trip even over a relay; a delivery that needs more than its 7 s is cut off, as one that
-// needed more than 10 s was before.
-const drainHookShare = 30
+// run for every watcher at once, and the connection's drain a flush and a close: 3 s is
+// comfortably more than one round trip even over a relay. The listener drains for 13 s, so its
+// deliveries keep the 10 s they had before the hooks and the hooks get their 3 s on top. A drain
+// shorter than 10 s keeps 30% of its timeout instead, so its deliveries still get most of it.
+const drainHookReserve = 3 * time.Second
 
 // drainDeliveries drains the delivery subscriptions, pass after pass while a bind in flight
 // installs one more, and waits until each is no longer valid, at the latest until deadline.
