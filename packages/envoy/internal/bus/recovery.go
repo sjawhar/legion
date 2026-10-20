@@ -107,9 +107,10 @@ func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 // AddDrainHook registers an end Drain gives to state attached to NATS that the client does not
 // subscribe for itself, such as KV watchers, while the connection still carries requests. Drain
 // runs each hook once, in the order they were added, after the delivery subscriptions have drained
-// and before the connection's own drain, with ctx ending at Drain's deadline. A drain of a
-// connection that is reconnecting closes it at once and runs no hook, since nothing it sent would
-// reach the server.
+// or run out their share of the timeout, and before the connection's own drain, with ctx ending at
+// Drain's deadline, or as soon as the connection is lost, with ErrConnectionLost as its cause. A
+// drain of a connection that is reconnecting closes it at once and runs no hook, since nothing it
+// sent would reach the server.
 //
 // The connection's own drain cannot end a KV watcher cleanly. nats.go deletes the ordered
 // consumer it created for the watcher once it has removed the watcher's subscription
@@ -125,16 +126,40 @@ func (c *Client) AddDrainHook(hook func(ctx context.Context)) {
 	c.reconnectHooksMu.Unlock()
 }
 
-// runDrainHooks runs the drain hooks one after another, each bounded by deadline.
-func (c *Client) runDrainHooks(deadline time.Time) {
+// ErrConnectionLost is the cause of a drain hook's context (context.Cause) when the connection
+// was lost while the hooks ran. nats.go then refuses a request with the reconnect buffer off
+// ("outbound buffer limit exceeded"), and a request already sent gets no answer, so what a hook
+// had still to ask the server is left to the server: an ordered consumer whose interest is gone is
+// deleted by its inactive threshold.
+var ErrConnectionLost = errors.New("bus: the connection was lost during the drain")
+
+// runDrainHooks runs the drain hooks one after another on conn, each bounded by deadline and by
+// conn staying connected.
+func (c *Client) runDrainHooks(conn *nats.Conn, deadline time.Time) {
 	c.reconnectHooksMu.Lock()
 	hooks := slices.Clone(c.drainHooks)
 	c.reconnectHooksMu.Unlock()
 	if len(hooks) == 0 {
 		return
 	}
-	ctx, cancel := context.WithDeadline(context.Background(), deadline)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	ctx, cancelDeadline := context.WithDeadline(ctx, deadline)
+	defer cancelDeadline()
+	lost := conn.StatusChanged(nats.DISCONNECTED, nats.RECONNECTING, nats.CLOSED)
+	defer conn.RemoveStatusListener(lost)
+	if !conn.IsConnected() {
+		cancel(ErrConnectionLost)
+	}
+	go func() {
+		select {
+		case _, ok := <-lost:
+			if ok {
+				cancel(ErrConnectionLost)
+			}
+		case <-ctx.Done():
+		}
+	}()
 	for _, hook := range hooks {
 		hook(ctx)
 	}

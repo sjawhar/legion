@@ -459,7 +459,8 @@ func (c *Client) Close() {
 // a process that is shutting down. It then drains the delivery subscriptions while the connection
 // still accepts new ones: a handler finishing its delivery may subscribe (RequestCoreTo's receipt
 // inbox), which a draining connection refuses. Next it runs the drain hooks (AddDrainHook), which
-// end the KV watchers with requests of their own while the connection still carries them. Only
+// end the KV watchers with requests of their own while the connection still carries them, even
+// when the deliveries ran out their share of the timeout (drainHookShare) or failed to drain. Only
 // then does it drain the connection, whose Drain only starts the drain, and wait for it to close
 // itself. A connection that is reconnecting is closed at once and runs no hook: nothing it sends
 // reaches the server, so no subscription would drain and a reconnect would re-send them.
@@ -470,6 +471,7 @@ func (c *Client) Close() {
 // after the stop (closeStopped).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	deliveriesDeadline := deadline.Add(-timeout * drainHookShare / 100)
 	c.subscriptionsMu.Lock()
 	if c.stopMode == clientRunning {
 		c.stopMode = clientDraining
@@ -486,35 +488,16 @@ func (c *Client) Drain(timeout time.Duration) error {
 	if conn.IsReconnecting() {
 		return fmt.Errorf("drain NATS: %w", nats.ErrConnectionReconnecting)
 	}
-	waitUntil := func(done func() bool) error {
-		for !done() {
-			if !time.Now().Before(deadline) {
-				return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		return nil
-	}
-	for {
-		delivering := c.deliveringSubscriptions()
-		if len(delivering) == 0 {
-			break
-		}
-		for _, subscription := range delivering {
-			if err := subscription.Drain(); err != nil {
-				return err
-			}
-		}
-		for _, subscription := range delivering {
-			if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
-				return err
-			}
-		}
+	if err := c.drainDeliveries(deliveriesDeadline); err != nil {
+		// The deliveries did not drain in their share. The hooks still end the KV watchers within
+		// what is left, so the close does not leave their consumers for the server to time out.
+		c.runDrainHooks(conn, deadline)
+		return err
 	}
 	// The drain hooks end what the connection's drain cannot end cleanly, such as the KV watchers'
 	// ordered consumers, whose delete would race the connection's drain (AddDrainHook), and they
 	// run while the connection still carries their requests.
-	c.runDrainHooks(deadline)
+	c.runDrainHooks(conn, deadline)
 	// nats.go's Drain only starts the drain, and the wait for it to close the connection takes the
 	// connection's CLOSED event rather than polling for the state. A close that lands while nats.go
 	// drains the connection (a lost server, a reconnect callback closing it) is undone at the
@@ -537,6 +520,47 @@ func (c *Client) Drain(timeout time.Duration) error {
 		return nil
 	case <-expired.C:
 		return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+	}
+}
+
+// drainHookShare is the percentage of Drain's timeout kept from the delivery subscriptions for the
+// drain hooks and the connection's own drain, so a delivery still in its handler near the deadline
+// cannot leave the hooks no time and make each KV watcher's consumer delete fail at ERROR. A
+// delivery's handler can take seconds (a role-lane forward waits up to 2 s for its receipt, a
+// session delivery up to its request limit), while a hook's delete is one round trip per watcher,
+// run for every watcher at once, and the connection's drain a flush and a close. At the listener's
+// 10 s timeout the split is 7 s for deliveries and 3 s for the rest, comfortably more than one
+// round trip even over a relay; a delivery that needs more than its 7 s is cut off, as one that
+// needed more than 10 s was before.
+const drainHookShare = 30
+
+// drainDeliveries drains the delivery subscriptions, pass after pass while a bind in flight
+// installs one more, and waits until each is no longer valid, at the latest until deadline.
+func (c *Client) drainDeliveries(deadline time.Time) error {
+	waitUntil := func(done func() bool) error {
+		for !done() {
+			if !time.Now().Before(deadline) {
+				return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	}
+	for {
+		delivering := c.deliveringSubscriptions()
+		if len(delivering) == 0 {
+			return nil
+		}
+		for _, subscription := range delivering {
+			if err := subscription.Drain(); err != nil {
+				return err
+			}
+		}
+		for _, subscription := range delivering {
+			if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
+				return err
+			}
+		}
 	}
 }
 
