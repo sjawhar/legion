@@ -36,7 +36,7 @@ import { InboxOwnerLink } from "./AskOwnerLink";
 import { AssigneeFilter } from "./AssigneeFilter";
 import { outsideAskCard } from "./ask-card";
 import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
-import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
+import { BlockedOnYou, waitingOnHuman } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
 import { crossBandCounts, groupRows } from "./grouping";
 import { bandGroupItems, useGroupJump } from "./InboxGroups";
@@ -457,7 +457,7 @@ export function Inbox({
   // live stays. Taking a question under the Unassigned filter is exactly that case - the row
   // stops matching the moment the optimistic assignment lands - and unmounting the control
   // would take `Assigning…`, a refusal and its Retry off the screen with it.
-  const shown = (filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent).filter(
+  const shown = (filter.section === "needs-you" ? waitingOnHuman(fromAgent) : fromAgent).filter(
     (row) => inAssigneeFilter(row, selection) || assigning.has(row.id)
   );
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
@@ -746,7 +746,11 @@ export function Inbox({
       {assigneeFilter}
       {chip}
       {agent === undefined ? (
-        <BlockedOnYou asks={adoptedInbox ?? []} credentialRequests={credentials.requests} />
+        <BlockedOnYou
+          asks={adoptedInbox ?? []}
+          credentialRequests={credentials.requests}
+          viewer={viewer}
+        />
       ) : null}
       {bulkBar}
     </>

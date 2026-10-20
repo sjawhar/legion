@@ -1813,7 +1813,7 @@ test("a sibling ask of the same issue leaving the list does not drop an in-fligh
   }
 });
 
-test("Blocked on you counts the whole inbox, whatever the list is filtered to", async () => {
+test("Blocked on you counts the reader's own questions, and does not move when the filter widens", async () => {
   const mine = issueAsk({ id: "ask-mine" });
   const bobs = issueAsk({
     id: "ask-bob",
@@ -1834,15 +1834,24 @@ test("Blocked on you counts the whole inbox, whatever the list is filtered to", 
   try {
     await screen.findByText("Which approach?");
     expect(rowIds()).toEqual(["ask-mine"]);
-    // The banner reads the inbox rather than the list, so it says what the rail's badge says.
-    expect(screen.getByText(/Blocked on you: 3 items/)).toBeTruthy();
+    // One question of the three is on the reader's own issue; the banner counts that one.
+    expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
   } finally {
     own.unmount();
+  }
+  const everyone = renderInbox("/?assignee=everyone");
+  try {
+    await screen.findByText("Bob's question?");
+    expect(rowIds()).toEqual(["ask-mine", "ask-bob", "ask-orphan"]);
+    // The list widened; what waits on the reader did not, so the banner says the same thing.
+    expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
+  } finally {
+    everyone.unmount();
   }
   const narrowed = renderInbox("/?assignee=unassigned");
   try {
     await screen.findByText("Orphan question?");
-    expect(screen.getByText(/Blocked on you: 3 items/)).toBeTruthy();
+    expect(screen.getByText(/Blocked on you: 1 item/)).toBeTruthy();
   } finally {
     narrowed.unmount();
     getAsk.mockRestore();

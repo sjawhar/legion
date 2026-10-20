@@ -14,7 +14,12 @@ import {
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { agentMessagesQuery, inboxQuery, userAgentStateQuery } from "../../api/queries";
+import {
+  agentMessagesQuery,
+  inboxQuery,
+  userAgentStateQuery,
+  whoAmIQuery,
+} from "../../api/queries";
 import type {
   Agent,
   Message,
@@ -60,7 +65,8 @@ import { useHeldSends } from "../conversation/held-sends";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { capabilitiesForTarget, TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
-import { waitingOnYou } from "../inbox/BlockedOnYou";
+import { waitingOnHuman } from "../inbox/BlockedOnYou";
+import { isMine } from "../inbox/sections";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
@@ -518,9 +524,12 @@ function AgentMessageList({
   );
 }
 
-/** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks. */
+/** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks.
+ *  `assignees` is the list's own filter, so each pill opens exactly the questions it counted:
+ *  absent leaves the Inbox's default, the reader's own; an empty array clears the filter. */
 function AskCountPill({
   agent,
+  assignees,
   count,
   section,
   selected = false,
@@ -528,6 +537,7 @@ function AskCountPill({
   wording,
 }: {
   agent: Agent;
+  assignees?: readonly string[];
   count: number;
   section?: "needs-you";
   selected?: boolean;
@@ -538,7 +548,7 @@ function AskCountPill({
     <Link
       className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
       title={title}
-      to={buildInboxPath({ agent: agent.session_id, section })}
+      to={buildInboxPath({ agent: agent.session_id, assignees, section })}
     >
       <LabelPill selected={selected}>
         {wording} {count}
@@ -560,24 +570,27 @@ function AgentRow({
   pinned,
   section,
   selected,
+  waitingOnAgent,
 }: {
   agent: Agent;
   /** A row in a closed fold, or one the filters exclude: still mounted, so a pin, a fold's toggle
    *  or a filter loses nothing it holds. */
   hidden: boolean;
   liveAgents: readonly Agent[];
+  /** This session's open questions that wait on the reader themselves: whose next move is a
+   *  person's, on an issue assigned to them, and not snoozed. */
   needsYou: number;
   onPin: () => void;
   onSelect: (selected: boolean) => void;
   pinned: boolean;
   section: AgentSection;
   selected: boolean;
+  /** This session's open questions whose next move is its own, counted in their own right
+   *  rather than as what is left of `open_asks`. */
+  waitingOnAgent: number;
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.host} · ${agent.dir}`;
-  // The inbox query and the agent list are polled separately, so the two counts can briefly
-  // disagree in either direction; a negative remainder renders nothing.
-  const waitingOnAgent = agent.open_asks - needsYou;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -694,9 +707,12 @@ function AgentRow({
               wording="Needs you"
             />
           )}
-          {waitingOnAgent <= 0 ? null : (
+          {waitingOnAgent === 0 ? null : (
             <AskCountPill
               agent={agent}
+              // The Inbox opens on the reader's own; these questions are on anybody's issue, so
+              // the link clears the filter and the list holds exactly what the pill counted.
+              assignees={[]}
               count={waitingOnAgent}
               title={`Open asks from ${label} whose next move is ${label}'s`}
               wording="Waiting on agent"
@@ -1062,6 +1078,9 @@ export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
   const inbox = useQuery(inboxQuery());
+  // `/auth/whoami` names the person by lowercase email, the form issue assignees carry; until it
+  // answers no question is counted as the reader's.
+  const viewer = useQuery(whoAmIQuery()).data?.login;
   const readPinned = useCallback((stored: string | null): readonly string[] => {
     try {
       const parsed: unknown = stored === null ? [] : JSON.parse(stored);
@@ -1075,10 +1094,26 @@ export function AgentsPage(): ReactNode {
   const [pinned, setPinned] = useUserPreference("agents.pinned", readPinned, (next) =>
     JSON.stringify(next)
   );
+  // The first card number: the reader's own work with this session - a question whose next move
+  // is a person's, on an issue assigned to them. One meaning for every count of what waits on
+  // the reader, wherever it is shown.
   const needsYouBySession = useMemo(() => {
     const counts = new Map<string, number>();
-    for (const ask of waitingOnYou(inbox.data ?? [])) {
-      if (ask.author.kind !== "session") continue;
+    if (viewer === undefined) return counts;
+    for (const ask of waitingOnHuman(inbox.data ?? [])) {
+      if (ask.author.kind !== "session" || !isMine(ask, viewer)) continue;
+      counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
+    }
+    return counts;
+  }, [inbox.data, viewer]);
+  // The second card number, counted in its own right rather than as what is left of `open_asks`:
+  // questions whose next move is the session's, on anybody's issue. A snooze is the reader
+  // deferring a question that waits on a person, so it never makes one the agent's move - and
+  // the subtraction this replaces counted every snoozed and every other person's question here.
+  const waitingOnAgentBySession = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const ask of inbox.data ?? []) {
+      if (ask.author.kind !== "session" || ask.waiting_on !== "agent") continue;
       counts.set(ask.author.id, (counts.get(ask.author.id) ?? 0) + 1);
     }
     return counts;
@@ -1214,6 +1249,7 @@ export function AgentsPage(): ReactNode {
       pinned={pinned.includes(agent.session_id)}
       section={section}
       selected={selected.has(agent.session_id)}
+      waitingOnAgent={waitingOnAgentBySession.get(agent.session_id) ?? 0}
     />
   );
   // One list, keyed by session, with each fold's toggle as an item between the rows - the Inbox's

@@ -54,6 +54,8 @@ const agents = [
   },
 ] satisfies Agent[];
 
+// The signed-in reader is `alice`, and a card's first number is their own work: these rows are
+// on an issue assigned to them.
 const inbox: InboxRow[] = [1, 2].map((number) => ({
   anchor: null,
   answer: null,
@@ -61,7 +63,7 @@ const inbox: InboxRow[] = [1, 2].map((number) => ({
   created_at: new Date(now - 60_000).toISOString(),
   edited_at: null,
   id: `ask-${number}`,
-  issue: { assignee: null, key: "CORE-1", title: "Core work" },
+  issue: { assignee: "alice", key: "CORE-1", title: "Core work" },
   issue_key: "CORE-1",
   kind: "question",
   multiple: false,
@@ -276,23 +278,36 @@ test("Agents collapses every card by default and expands each one independently"
   }
 });
 
-test("Agents shows one whose-turn pill per card: Needs you, plus Waiting on agent only for the asks you have answered, none at zero", async () => {
-  // Planner: both of its open asks wait on the viewer. Builder: three open asks, two waiting on
-  // the viewer, so the third is the agent's move. Reviewer: nothing open.
+test("Agents counts a card's two numbers in their own right: the reader's own, and the session's", async () => {
+  // Planner: both of its open asks wait on the reader, on their own issue. Builder: five open
+  // asks - two the reader's, one on Bob's issue, one the reader snoozed, and one whose next
+  // move is Builder's. Reviewer: nothing open.
   const builder: Agent = {
     ...agents[0],
-    open_asks: 3,
+    open_asks: 5,
     session_id: "builder-session",
     title: "Builder",
   };
+  const builderAsk = (overrides: Partial<InboxRow>): InboxRow => ({
+    ...inbox[0],
+    author: { id: "builder-session", kind: "session" },
+    ...overrides,
+  });
   const page = renderAgents({
     inboxRows: [
       ...inbox,
-      ...inbox.map((ask, index) => ({
-        ...ask,
-        author: { id: "builder-session", kind: "session" as const },
-        id: `builder-ask-${index}`,
-      })),
+      builderAsk({ id: "builder-mine-1" }),
+      builderAsk({ id: "builder-mine-2" }),
+      builderAsk({
+        id: "builder-bobs",
+        issue: { assignee: "bob", key: "CORE-2", title: "Bob's work" },
+        issue_key: "CORE-2",
+      }),
+      builderAsk({
+        id: "builder-snoozed",
+        snoozed_until: new Date(now + 3 * 60 * 60 * 1000).toISOString(),
+      }),
+      builderAsk({ id: "builder-agents", waiting_on: "agent" }),
     ],
     listedAgents: [...agents, builder],
   });
@@ -305,12 +320,16 @@ test("Agents shows one whose-turn pill per card: Needs you, plus Waiting on agen
     expect(within(planner).queryByText(/^Waiting on agent/)).toBeNull();
     expect(within(planner).queryByText(/^Open asks/)).toBeNull();
 
+    // Bob's question is in neither number, and so is the snoozed one - a snooze is the reader
+    // deferring a question that waits on a person, never a move handed back to the agent, which
+    // is what subtracting from `open_asks` used to make it.
     const builderCard = card(region, "Builder");
     expect(
       (await within(builderCard).findByRole("link", { name: "Needs you 2" })).getAttribute("href")
     ).toBe("/?agent=builder-session&section=needs-you");
     const waiting = within(builderCard).getByRole("link", { name: "Waiting on agent 1" });
-    expect(waiting.getAttribute("href")).toBe("/?agent=builder-session");
+    // The filter cleared, so the list it opens holds the question it counted whoever holds it.
+    expect(waiting.getAttribute("href")).toBe("/?agent=builder-session&assignee=everyone");
     expect(waiting.getAttribute("title")).toContain("Builder");
 
     const reviewer = card(region, "Reviewer");

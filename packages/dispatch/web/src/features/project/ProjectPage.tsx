@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { projectsQuery } from "../../api/queries";
+import { projectsQuery, whoAmIQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
@@ -65,6 +65,9 @@ export function ProjectPage(): ReactNode {
     queryFn: () => api.getInbox(projectKey),
     enabled: projectKey !== undefined,
   });
+  // Whose questions the pill counts: `/auth/whoami`'s lowercase email, the form issue
+  // assignees carry, as every other surface that counts work waiting on the reader reads it.
+  const viewer = useQuery(whoAmIQuery()).data?.login;
   const projects = useQuery(projectsQuery());
   const project = projects.data?.find((candidate) => candidate.key === route?.project);
   // Whether the project has an architecture source decides where the bare project path opens
@@ -177,10 +180,14 @@ export function ProjectPage(): ReactNode {
         >
           {route.project}
         </Link>
+        {/* The reader's own questions on this project, and no credential request: the pending
+            list is global (a request belongs to no project), so counting one here would make
+            this project's number partly about another page. */}
         <BlockedOnYou
           asks={inbox.data ?? []}
           className="order-3 shrink-0 md:order-5"
           variant="pill"
+          viewer={viewer}
         />
         <div aria-hidden className="order-4 basis-full md:hidden" />
         <div className="order-5 shrink-0 md:order-3">
