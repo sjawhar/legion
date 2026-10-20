@@ -704,9 +704,9 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	bootToken := "interrupted-" + randomSuffix(t)
 	oldSecret := "old-secret"
 	oldCapability := sha256.Sum256([]byte(oldSecret))
-	// A launching claim holds no capability in reality (supervise.HoldsCapability); the hash here stands in
-	// for a process at this daemon's own contract, so the register/ready exchange below exercises
-	// the "previous launch" refusal rather than the stale-plugin one.
+	// A launching claim holds no capability in reality (supervise.HoldsCapability). The hash here
+	// proves restore's normalization clears state left by a prior daemon before the old shim reaches
+	// the ready route.
 	putClaim(t, cfg, supervise.Claim{
 		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken(bootToken), CapabilityHash: oldCapability[:],
@@ -737,8 +737,8 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	status, body = d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
 		ClaimToken: token, SessionID: "old-session", Secret: oldSecret, Generation: 1,
 	}, false)
-	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
-		t.Fatalf("old shim ready while the pane is uncertain = %d %s, want a named 409", status, body)
+	if status != http.StatusForbidden || !strings.Contains(string(body), claim.InvalidSecret.Message) {
+		t.Fatalf("old shim ready while the pane is uncertain = %d %s, want %q", status, body, claim.InvalidSecret.Message)
 	}
 	if c := d.claim(token); c.State != "launch_uncertain" || c.Locator != nil {
 		t.Fatalf("old shim hello, register, and ready produced %+v, want no live state without a locator", c)
@@ -791,6 +791,38 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 	if c := final.claim(token); c.State != string(supervise.StateLaunching) || c.Locator == nil {
 		t.Fatalf("claim after successful reconciliation = %+v, want the one launching incarnation", c)
+	}
+}
+
+// A secret belongs to the registered process it was minted for. A boot repair that finds that the
+// process was never recorded must clear the secret before it makes the claim launch_uncertain: the
+// old process cannot authenticate or mint a grant while boot waits for orphan reconciliation.
+func TestRunBootRepairRevokesAStaleSecretBeforeItMintsAGrant(t *testing.T) {
+	cfg := testConfig(t)
+	project, _ := claim.ProjectToken(cfg.Project)
+	token, _ := claim.NewToken(project, "LEGION-4", claim.RoleReviewer)
+	secret := "registered-without-a-process"
+	capability := sha256.Sum256([]byte(secret))
+	putClaim(t, cfg, supervise.Claim{
+		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
+		Generation: 1, State: supervise.StateReady, Session: "ses_reviewer", SessionFile: "/sessions/reviewer.jsonl",
+		CapabilityHash: capability[:], Enrollment: &supervise.Enrollment{ID: "enr-reviewer", Incarnation: "pane-1"},
+		PluginContract: api.DaemonAPIVersion,
+	})
+	rt := fake.NewRuntime()
+	rt.FailReconcileOrphans(errors.New("tmux list-panes timed out"))
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 20 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+
+	testwait.Eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+	status, body := d.request(http.MethodPost, "/legion/v1/grants",
+		api.GrantRequest{SessionID: "ses_reviewer", Secret: secret, Tree: "LEGION-1", Issue: "LEGION-4"}, false)
+	if status != http.StatusForbidden || !strings.Contains(string(body), claim.InvalidSecret.Message) {
+		t.Fatalf("a stale registration secret minted a grant = %d %s, want %q", status, body, claim.InvalidSecret.Message)
+	}
+	if stored := storedClaim(t, cfg, token); stored.State != supervise.StateLaunchUncertain || len(stored.CapabilityHash) != 0 || stored.Enrollment != nil {
+		t.Fatalf("the repaired store claim is %+v, want launch_uncertain with no capability or enrollment", stored)
 	}
 }
 
