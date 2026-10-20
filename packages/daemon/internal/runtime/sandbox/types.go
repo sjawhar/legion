@@ -87,7 +87,7 @@ type Options struct {
 	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
 	// IssueVolume is each issue volume's size, positive; the daemon's configuration supplies its
-	// default (runtime.kubernetes.issue_volume, 20Gi).
+	// default (runtime.kubernetes.issue_volume, config.defaultIssueVolume when the file sets none).
 	IssueVolume resource.Quantity
 	Scheduling  Scheduling
 	// Resources are each role's container requirements, the controller's included: the daemon

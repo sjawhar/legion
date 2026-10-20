@@ -97,8 +97,9 @@ type RepositoryCacheConfig struct {
 	Resources      RoleResources
 }
 
-// defaultRepositoryCache is the cache when the file sets none of it: a 20Gi volume, as an issue's,
-// fetched every ten minutes, kept a week after its repository leaves the mapping; one CPU and 4Gi,
+// defaultRepositoryCache is the cache when the file sets none of it: a 20Gi volume, enough for one
+// repository's bare clone and sized on its own rather than against an issue's volume, fetched
+// every ten minutes, kept a week after its repository leaves the mapping; one CPU and 4Gi,
 // each requested in full, for a process whose daily `git repack -a -d` of a large repository wants
 // the memory, and the roles' 1Gi request over a 2Gi limit on the node's disk, since the clone lives
 // on the volume.
