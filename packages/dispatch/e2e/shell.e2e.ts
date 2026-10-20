@@ -175,7 +175,8 @@ test("a chunk that fails after a Download link was followed reloads the page", a
     });
     expect(events).toBeDefined();
     const downloadNavigation = events?.findIndex(
-      (event) => event.type === "navigate" && event.download !== null && event.download !== undefined
+      (event) =>
+        event.type === "navigate" && event.download !== null && event.download !== undefined
     );
     expect(downloadNavigation).toBeGreaterThanOrEqual(0);
     expect(events?.[downloadNavigation ?? -1]).toMatchObject({
