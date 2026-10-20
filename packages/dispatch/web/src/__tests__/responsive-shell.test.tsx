@@ -176,6 +176,8 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-waiting",
+      // The badge counts the reader's own: the shell signs in as `alice`.
+      issue: { assignee: "alice", key: "CORE-1", title: "Responsive shell" },
       issue_key: "CORE-1",
       kind: "question",
       multiple: false,

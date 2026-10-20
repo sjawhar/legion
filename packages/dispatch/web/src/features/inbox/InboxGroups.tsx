@@ -5,17 +5,20 @@ import { linkHoverText, linkText, textSecondaryOnCanvas } from "../../theme/clas
 import { InboxOwnerLink } from "./AskOwnerLink";
 import type { CrossBandCount, InboxGroup } from "./grouping";
 import { ROW_SELECTOR } from "./inbox-row";
-import { type InboxSection, SECTION_TITLES } from "./sections";
+import type { InboxSection } from "./sections";
 
 /** A visual grouping label only: rows stay the flat list's keyboard and viewport targets. */
 function InboxGroupHeader({
   group,
   notes,
   onJump,
+  titles,
 }: {
   group: InboxGroup;
   notes: readonly CrossBandCount[];
   onJump: (section: InboxSection, ownerKey: string) => void;
+  /** The bands as the reader sees them headed, so a jump button names the heading it leads to. */
+  titles: Record<InboxSection, string>;
 }): ReactNode {
   const first = group.rows[0];
   if (first === undefined) return null;
@@ -25,7 +28,7 @@ function InboxGroupHeader({
         <InboxOwnerLink ask={first} rowOwner={false} />
         <span className={textSecondaryOnCanvas}>· {group.rows.length} asks</span>
         {notes.map((note) => {
-          const title = SECTION_TITLES[note.section];
+          const title = titles[note.section];
           return (
             <button
               aria-label={`Jump to ${group.owner.label}'s asks ${title}`}
@@ -55,6 +58,7 @@ export function bandGroupItems({
   onJump,
   renderRow,
   section,
+  titles,
 }: {
   groups: readonly InboxGroup[];
   /** The cross-band counts of this band's owners, by owner key. */
@@ -62,6 +66,8 @@ export function bandGroupItems({
   onJump: (section: InboxSection, ownerKey: string) => void;
   renderRow: (ask: InboxRow, group: InboxGroup) => ReactNode;
   section: InboxSection;
+  /** The band headings this list is showing (`sectionTitles`), passed to each header's jumps. */
+  titles: Record<InboxSection, string>;
 }): ReactNode[] {
   return groups.flatMap((group) => [
     group.rows.length > 1 ? (
@@ -70,6 +76,7 @@ export function bandGroupItems({
         key={`group-${section}-${group.owner.key}`}
         notes={notes?.get(group.owner.key) ?? []}
         onJump={onJump}
+        titles={titles}
       />
     ) : null,
     ...group.rows.map((ask) => renderRow(ask, group)),

@@ -2,12 +2,11 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { InboxRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
-import { userPreferenceStorageKey } from "../shell/userPreference";
 import { InboxDrawer } from "./InboxDrawer";
 import { installInboxApiMocks, issueAsk, mockAskReads } from "./inbox-fixture";
 
@@ -27,6 +26,11 @@ function Harness() {
   );
 }
 
+/** What the drawer must never write to: the address of the page it is a peek over. */
+function LocationProbe() {
+  return <output data-testid="location">{useLocation().search}</output>;
+}
+
 function renderDrawer() {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
@@ -35,6 +39,7 @@ function renderDrawer() {
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
+          <LocationProbe />
           <Harness />
         </KeymapProvider>
       </QueryClientProvider>
@@ -65,7 +70,7 @@ test("opens over the triggering control, moves initial focus to Close, and retur
   }
 });
 
-test("toggling Mine/Everyone inside the drawer never writes the Inbox page's remembered view", async () => {
+test("picking an assignee inside the drawer lists that person there, writes nothing to the address, and leaves the drawer open", async () => {
   const mine = issueAsk();
   const bobs = issueAsk({
     id: "ask-bob",
@@ -76,6 +81,10 @@ test("toggling Mine/Everyone inside the drawer never writes the Inbox page's rem
   const rows = [mine, bobs];
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
   const getAsk = mockAskReads(rows);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "alice" },
+    { login: "bob" },
+  ]);
   const view = renderDrawer();
   try {
     fireEvent.click(screen.getByRole("button", { name: "Open inbox" }));
@@ -83,13 +92,18 @@ test("toggling Mine/Everyone inside the drawer never writes the Inbox page's rem
     await within(dialog).findByText("Which approach?");
     expect(within(dialog).queryByText("Bob's question?")).toBeNull();
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "Everyone" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Filter by assignee" }));
+    // The popover is portalled onto the body, so it is reached from the screen, not the drawer.
+    fireEvent.click(await screen.findByRole("option", { name: /bob/ }));
+
     await within(dialog).findByText("Bob's question?");
-    expect(window.localStorage.getItem(userPreferenceStorageKey("alice", "inbox.view"))).toBeNull();
+    expect(screen.getByTestId("location").textContent).toBe("");
+    expect(screen.getByRole("dialog", { name: "Inbox" })).toBe(dialog);
   } finally {
     view.unmount();
     getAsk.mockRestore();
     getInbox.mockRestore();
+    listUsers.mockRestore();
   }
 });
 

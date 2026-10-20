@@ -186,7 +186,9 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
       throw new Error("Document ask did not retain its anchor.");
     }
     await expect(markSpan(bobPage, ask.ask.anchor.mark_id)).toContainText(ask.ask.anchor.quote);
-    await bobPage.goto("/");
+    // A document has no assignee, so its question is in nobody's own list: the Inbox reaches it
+    // under the Unassigned filter.
+    await bobPage.goto("/?assignee=unassigned");
     const inboxDocument = bobPage.getByRole("link", { name: /CORE.*Design notes/ });
     await expect(inboxDocument).toBeVisible();
     const inboxAsk = bobPage.getByTestId(`ask-${askId}`);

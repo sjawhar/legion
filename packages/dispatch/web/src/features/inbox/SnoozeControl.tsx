@@ -17,8 +17,9 @@ import { useAskSnooze } from "./useAskSnooze";
  *
  * A snooze folds its row out of the list, which would unmount this control and take its
  * `Snoozing…` and its refusal with it - so, exactly as `AssignToMe` does for the optimistic
- * move into Mine, it tells the Inbox while its write is live and the Inbox keeps the row
- * rendered until it settles. The fold is the feedback for a snooze that lands; a snooze the
+ * assignment that can drop a row out of the assignee filter, it tells the Inbox while its write
+ * is live and the Inbox keeps the row rendered until it settles. The fold is the feedback for a
+ * snooze that lands; a snooze the
  * server refuses rolls the row back with the reason still attached to it.
  *
  * `label` names the row for assistive tech; the Inbox passes the issue key or the document.

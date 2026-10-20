@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../api/client";
+import { whoAmIQuery } from "../api/queries";
 import type { CredentialPendingRow, IssueSummary, Project } from "../api/types";
 import { Sidebar } from "../features/sidebar/Sidebar";
 
@@ -56,6 +57,8 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-1",
+      // Needs you counts the reader's own questions, so these sit on their issues.
+      issue: { assignee: "alice", key: "CORE-1", title: "Pinned work" },
       issue_key: "CORE-1",
       priority: null,
       snoozed_until: null,
@@ -97,6 +100,7 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
       created_at: "2026-09-10T00:00:00Z",
       edited_at: null,
       id: "ask-3",
+      issue: { assignee: "alice", key: "OPS-2", title: "Operations work" },
       issue_key: "OPS-2",
       priority: null,
       snoozed_until: null,
@@ -127,6 +131,9 @@ function renderSidebar(pathname = "/", pending?: CredentialPendingRow[]) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
+  // Needs you counts the reader's own questions, so the badge waits on `/auth/whoami`; the
+  // sidebar is handed the same person below.
+  queryClient.setQueryData(whoAmIQuery().queryKey, { kind: "user", login: "alice" });
   const view = render(
     createElement(
       MemoryRouter,

@@ -23,9 +23,9 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
     const inboxRow = (askID: string) =>
       page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${askID}`) });
 
-    // The Inbox opens on Mine: alice's issues' asks, the Unassigned band with the document ask,
-    // and the snoozed ask folded under Later. A session's ask names it by the title its write
-    // stamped, as a real agent's does, rather than by its raw id.
+    // The Inbox opens on the reader's own work: alice's issues' asks, with the snoozed one
+    // folded under Later. A session's ask names it by the title its write stamped, as a real
+    // agent's does, rather than by its raw id.
     await page.goto("/");
     await expect(page.getByRole("article", { name: "Urgency: Blocking" })).toBeVisible();
     await expect(page.getByRole("button", { name: /^Later \(1\)/ })).toBeVisible();
@@ -33,8 +33,12 @@ test("the seeded workspace fills every human-only surface", async ({ browser }, 
     await expect(
       inboxRow(seeded.asks.rotate).getByRole("button", { expanded: false, name: /Reviewer/ })
     ).toBeVisible();
-    await expect(inboxRow(seeded.asks.document)).toContainText("Runbook");
+    // The runbook's question is on a document, which nobody holds, so it is the one row of this
+    // seed her own list leaves out; the Unassigned filter is where it is listed.
+    await expect(inboxRow(seeded.asks.document)).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("workspace-inbox.png"), fullPage: true });
+    await page.goto("/?assignee=unassigned");
+    await expect(inboxRow(seeded.asks.document)).toContainText("Runbook");
 
     // Every session with Dispatch activity is an open row; the one Dispatch never heard from and
     // the one unseen for twenty minutes each sit under their own fold. A fold's rows follow the
