@@ -1,6 +1,6 @@
 // Package podsafety is what a Legion pod's Oh My Pi starts with beyond the operator's pod, and
 // nothing in it names a model, a provider, or a route, nor holds a repository's settings off. It is
-// three things. The turn-scoping overlay: the two keys supervise.Machine.Quiesce depends on
+// four things. The turn-scoping overlay: the two keys supervise.Machine.Quiesce depends on
 // (TurnScopeOverlay, turnscope.yml, which says why), written as the one settings overlay Legion
 // names first in PI_CONFIG_FILES, before the operator's own (runtime.kubernetes.pod): by Oh My Pi's
 // order the operator's overlay outranks it, and both outrank a repository's .omp/config.yml, so a
@@ -11,16 +11,22 @@
 // and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod): a pod keeps its sessions
 // as files on the issue's volume, where a resume reads them, unless the runtime keeps them in a
 // database (runtime.kubernetes.session_store postgres), where it starts every generation with
-// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. And the
-// state-home directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
-// (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where that
-// directory exists. Apply, the overlay and the baseline together, runs only in a pod, for a
-// worker's shim (`legion worker-shim --pod-safety`) and for the image probe (`legion probe-image
-// --pod-safety`), which certifies the baseline a worker's Oh My Pi starts on. The state home is the
-// shim's alone: every role the shim starts is told one of its own (sandbox.roleStateHome), which in
-// an issue pod keeps a role's browser broker lock apart from its siblings', and the probe pod runs
-// one container and is told none. A pane gets the overlay alone, which runtime/tmux writes and
-// names itself (writeTurnScopeOverlay, panePairs).
+// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The
+// state-home directory: the one Oh My Pi's state root resolves to under the role's
+// XDG_STATE_HOME (EnsureStateHome), made before Oh My
+// Pi starts, since Oh My Pi reads the variable only where that directory exists. And the scratch
+// directories: each directory the runtime tells a role to write what it writes without being told
+// where — its temporary directory, its cache and data homes, its Go build and module caches and
+// bun's install cache (EnsureScratch) — made before Oh My Pi starts, since a role told a temporary
+// directory nothing created cannot run. Apply, the overlay and the baseline together, runs only in
+// a pod, for a worker's shim (`legion worker-shim --pod-safety`) and for the image probe (`legion
+// probe-image --pod-safety`), which certifies the baseline a worker's Oh My Pi starts on. The
+// directories are the shim's alone: every role the shim starts is told a state home of its own
+// (sandbox.roleStateHome), which in an issue pod keeps a role's browser broker lock apart from its
+// siblings', and a scratch directory of its own (sandbox.roleScratch) on the issue's volume, while
+// the probe pod runs one container, on the image's own directories, and is told neither. A pane
+// gets the overlay alone, which runtime/tmux writes and names itself (writeTurnScopeOverlay,
+// panePairs).
 package podsafety
 
 import (
@@ -165,6 +171,50 @@ func EnsureStateHome(environ []string) error {
 	}
 	if root != dir {
 		return fmt.Errorf("pod safety: Oh My Pi would keep its state under %s, not under %s, the directory made under XDG_STATE_HOME: the state home changes nothing (an honoured PI_CODING_AGENT_DIR elsewhere turns Oh My Pi's XDG lookup off)", root, dir)
+	}
+	return nil
+}
+
+// scratchVariables are the variables EnsureScratch makes the directory of, in the order it makes
+// them: what sandbox.roleEnvironment tells a role container to write under its own scratch, less
+// XDG_STATE_HOME, which is EnsureStateHome's.
+var scratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR"}
+
+// EnsureScratch makes every directory environ names in scratchVariables — TMPDIR, XDG_CACHE_HOME,
+// XDG_DATA_HOME, GOCACHE, GOMODCACHE and BUN_INSTALL_CACHE_DIR — with every parent, before Oh My
+// Pi starts. A name environ leaves unset or empty, or sets to a relative path, makes nothing: the
+// runtime always sets absolute ones (sandbox.roleEnvironment, under the role's own scratch on the
+// issue's volume), a relative one is not the shim's to resolve, and making it under whatever
+// working directory the pod happens to have would be worse than leaving the tool its own default.
+// A directory that cannot be made is a refusal naming the variable and the path, so a role whose
+// volume cannot be written never starts half-configured rather than part way through its first
+// turn. XDG_STATE_HOME is not here: EnsureStateHome keeps that one, since it makes Oh My Pi's
+// profile directory under the state home rather than the state home itself, and its refusal
+// carries its own reason.
+//
+// `go` and `bun` make their own cache directories, so GOCACHE, GOMODCACHE and BUN_INSTALL_CACHE_DIR
+// would come up by themselves; TMPDIR has no creator at all — mktemp and every library equivalent
+// fail where the directory the variable names does not exist, and the pod's role containers are
+// told no other temporary directory. The list is the whole told set rather than that one name, so
+// the shim makes what the runtime said it would use whatever the tool reading it does.
+//
+// The shim is what makes them, not the kubelet: a subPath mount per directory would have the
+// kubelet create each one, but it would also contradict the rule that these paths sit on the issue
+// volume's own mount (sandbox.TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume), add
+// forty-two mount entries to an issue pod, and rest on an unproven ownership behaviour — what mode
+// a kubelet gives a nested sub-path directory it creates on a fresh volume. The shim runs as the
+// pod's own user, which can write the volume, and makes exactly the directories the runtime told
+// it to use, read from the same environment the agent starts on, so the names cannot drift.
+func EnsureScratch(environ []string) error {
+	env := lookup(environ)
+	for _, name := range scratchVariables {
+		dir := env[name]
+		if dir == "" || !filepath.IsAbs(dir) {
+			continue
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("pod safety: make the directory %s names, %s: %w", name, dir, err)
+		}
 	}
 	return nil
 }
