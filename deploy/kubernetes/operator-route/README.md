@@ -7,6 +7,14 @@ is the operator's, delivered through `runtime.kubernetes.pod` and `provider_keys
 [`models.yml`](models.yml) and [`overlay.yml`](overlay.yml) are the two files its ConfigMap holds,
 on the model names every other agent uses. The Go live harnesses run on all three.
 
+**The key-file alternative.** An operator with no model gateway in front of Anthropic — Stage 4a's
+GKE run, `LEGION_E2E_MODEL_ROUTE=key-file` — uses [`pod-key-file.yml`](pod-key-file.yml) and
+[`models-key-file.yml`](models-key-file.yml) instead: `provider_keys` (`runtime.kubernetes.
+provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}`) delivers the key straight into the agent's environment as a
+providers-Secret key, so there is no gateway token to audience and `pod-key-file.yml` carries no
+`operator-token` volume. Everything else — the ConfigMap mount, the ServiceAccount, the Foundry
+override — is unchanged from `pod.yml`.
+
 ## What an operator supplies
 
 - **A ConfigMap** with two keys, named where `pod.yml` names it (`legion-operator-route`):
