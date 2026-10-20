@@ -28,6 +28,9 @@ const BROADCAST_SEND = ["broadcast-send"];
 export interface BroadcastSend {
   readonly input: CreateBroadcastInput;
   readonly selected: readonly string[];
+  /** Whether the sender picked the mode, rather than the page taking the selection's own; Restore
+   *  draft puts that back too, so a restored default still follows the selection. */
+  readonly picked: boolean;
 }
 
 /** A send as the queue holds it: `pressed` is its press's place in the strip, which Retry keeps,

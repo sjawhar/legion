@@ -67,6 +67,11 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		// name: a launch on a repository that names none has no base to start a new branch at.
 		{"a repository with no default branch", func(s *SpawnSpec) { s.DefaultBranch = "" },
 			"spawn legion-omp-legion-43-tester: no default branch for repository sjawhar/legion"},
+		{"an unknown backend", func(s *SpawnSpec) { s.Backend = "codex" }, `spawn legion-omp-legion-43-tester: backend "codex" is not one of claude, omp`},
+		{"an architect on Claude Code", func(s *SpawnSpec) {
+			s.Role, s.Claim, s.Backend = claim.RoleArchitect, "legion-omp-legion-43-architect", BackendClaude
+		}, "spawn legion-omp-legion-43-architect: the architect does not run on claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: " +
+			"an architect is woken by notices on its Envoy role topic and the controller by its own, and Claude Code's print mode delivers no channel notification"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := spawnSpec()
@@ -82,6 +87,8 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		"with a credential's pointer": func(s *SpawnSpec) { s.Env["GH_TOKEN_FILE"] = "/state/gh-token" },
 		"resuming a session":          func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/tester.jsonl" },
 		"recovering a lost workspace": func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
+		"on Oh My Pi by name":         func(s *SpawnSpec) { s.Backend = BackendOmp },
+		"on Claude Code":              func(s *SpawnSpec) { s.Backend = BackendClaude },
 	} {
 		spec := spawnSpec()
 		mutate(&spec)
@@ -111,8 +118,9 @@ func controllerSpec() SpawnSpec {
 func TestValidateSpawnSpecHoldsTheControllersLaunchToItsOwnShape(t *testing.T) {
 	owned := map[string]bool{"LEGION_BOOT_TOKEN_FILE": true}
 	for name, mutate := range map[string]func(*SpawnSpec){
-		"as it is":           func(*SpawnSpec) {},
-		"resuming a session": func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/controller.jsonl" },
+		"as it is":            func(*SpawnSpec) {},
+		"resuming a session":  func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/controller.jsonl" },
+		"on Oh My Pi by name": func(s *SpawnSpec) { s.Backend = BackendOmp },
 	} {
 		spec := controllerSpec()
 		mutate(&spec)
@@ -140,6 +148,9 @@ func TestValidateSpawnSpecHoldsTheControllersLaunchToItsOwnShape(t *testing.T) {
 		{"no role prompt", func(s *SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-controller: no role prompt"},
 		{"a credential as a value", func(s *SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "sk-x" },
 			"spawn legion-omp-controller: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},
+		{"on Claude Code", func(s *SpawnSpec) { s.Backend = BackendClaude },
+			"spawn legion-omp-controller: the controller does not run on claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: " +
+				"an architect is woken by notices on its Envoy role topic and the controller by its own, and Claude Code's print mode delivers no channel notification"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := controllerSpec()

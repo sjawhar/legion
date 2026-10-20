@@ -5,16 +5,21 @@
 # shared lib/rig.sh and lib/workflow.sh; the small scratch-service rig below is this run's own, so
 # its lifecycle belongs to this run.
 #
-# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with two required inputs:
-# LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint, and SMOKE_UPSTREAM_NATS,
-# the production Envoy NATS the GitHub bridge subscribes on, by its fully-qualified name. It needs
-# agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked: the
-# agents' model is Anthropic through the Hawk model gateway (lib/install-model-gateway.sh), the
-# route every devbox agent session uses, and no Anthropic key reaches a pane. The proof human's
-# reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent
-# App), never a Legion App, so run the script from the operator's own Oh My Pi session, not a Legion
-# pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses to start otherwise
-# (require_proof_human, lib/workflow.sh).
+# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh` with three required inputs:
+# LEGION_E2E_MODEL_ROUTE (`gateway` or `key-file`), SMOKE_UPSTREAM_NATS (the production Envoy NATS
+# the GitHub bridge subscribes on, by its fully-qualified name), and, depending on the route:
+#   - `gateway`: LEGION_E2E_MODEL_GATEWAY_URL, the model gateway's Anthropic endpoint. It needs
+#     agent-tier secrets and the operator's own hawk login, with the keyring holding it unlocked:
+#     the agents' model is Anthropic through the Hawk model gateway
+#     (lib/install-model-gateway.sh), and no Anthropic key reaches a pane.
+#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE, a 0600 file holding a plaintext Anthropic key, for
+#     a devbox with no Hawk gateway at all (lib/install-key-file-model-route.sh). No Anthropic key
+#     reaches a pane here either — only the key command, baked in at install time, ever reads the
+#     file.
+# The proof human's reviews and merge are the devbox's ordinary gh (the dotfiles shim, acting as the
+# sjawhar-agent App), never a Legion App, so run the script from the operator's own Oh My Pi
+# session, not a Legion pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses
+# to start otherwise (require_proof_human, lib/workflow.sh).
 # The App private keys are resolved through private_key_command by the daemon, and by
 # lib/app-logins.ts once to read each App's bot login from GitHub (read_app_logins,
 # lib/workflow.sh); they never enter this shell, a pane, an argv, or this transcript.
@@ -52,8 +57,8 @@ state="$work/state"
 omp_home="$work/omp-home"
 profile_agent="$omp_home/.omp/profiles/$profile/agent"
 repo="sjawhar/legion-smoke"
-# Anthropic through the gateway: the Google provider answered long workflow turns with empty
-# responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
+# Anthropic through the configured route: the Google provider answered long workflow turns with
+# empty responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
 pg_container="legion-e2e3-pg-$$"
 nats_container="legion-e2e3-nats-$$"
 daemon_pid=
@@ -116,6 +121,11 @@ cleanup() {
   # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
   # command the trap interrupted, not the cleanup command that failed.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower (the production audit, closing pull requests) can hang or be
+  # SIGKILLed mid-teardown: the key-file route's own key command, which bakes in --key-file's
+  # resolved path, must never survive this script on any exit, so it is never conditioned on how
+  # the rest of cleanup goes.
+  rm -rf "$work/model-gateway-key" || true
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
     production_audit >&2 || audit_failed=1
@@ -228,8 +238,10 @@ nats_urls:
   - nats://127.0.0.1:$port_nats
 dispatch_url: http://127.0.0.1:$port_dispatch
 dispatch_token_file: $work/dispatch-token
+# The project's repository is Dispatch's mapping (the PUT below makes $repo its default), not a key of
+# legion.yaml.
 projects:
-  $project: { repo: $repo }
+  $project: {}
 gates:
   design: root-issues
 admission_cap: 2
@@ -255,9 +267,10 @@ start_daemon() {
       write_legion_config
     fi
     offset=$(log_size daemon)
-    # Every pane's gh is the daemon's PATH's (the pane inherits it), so the real gh's directory goes
-    # first, ahead of this box's gh wrapper (prerequisites).
-    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$(dirname "$real_gh"):$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
+    # Every pane's gh and jj are the daemon's PATH's (the pane inherits it, environment.go's
+    # paneEnvAllowList), so the real binaries' directory goes first, ahead of this box's own
+    # shims for both (prerequisites, real_bin_path).
+    HOME="$omp_home" OMP_PROFILE="$profile" PATH="$realbin:$PATH" env -u NATS_NKEY_SEED -u NATS_NKEY_SEED_FILE \
       -u NATS_DAEMON_NKEY_SEED -u NATS_DAEMON_NKEY_SEED_FILE -u GH_PUBLIC_REPO_PAT -u LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 \
       -u GH_AGENT_APP_PRIVATE_KEY_B64 -u GH_REVIEW_APP_PRIVATE_KEY_B64 \
       "$work/legion" start --config "$work/legion.yaml" >>"$evidence/logs/daemon.log" 2>&1 &
@@ -341,8 +354,8 @@ claim_pane_pid() {
 }
 pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
 # endpoint_mismatch OMP_PID prints the first rig endpoint the OMP process does not carry, or the
-# ANTHROPIC_API_KEY it must not carry: the agents' model is the gateway's, and a key in OMP's
-# environment would take the turn off that route.
+# ANTHROPIC_API_KEY it must not carry: the agents' model is the configured route's, and a key in
+# OMP's environment would take the turn off that route.
 endpoint_mismatch() {
   local omp=$1 name want got
   for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
@@ -427,8 +440,8 @@ production_audit() {
   audited=1
   sessions=$(rig_sessions_json)
   printf '%s\n' "$sessions" >"$evidence/rig-sessions.json"
-  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions" |
-    jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]')
+  envoy=$(curl -fsS --max-time 10 "$prod_envoy_url/v1/sessions") || { printf 'could not read %s/v1/sessions\n' "$prod_envoy_url"; return 1; }
+  envoy=$(jq -c --argjson ids "$sessions" --arg work "$work" '[.[] | select((.session_id as $s | $ids | index($s)) or ((.dir // "") | startswith($work)))]' <<<"$envoy")
   printf '%s\n' "$envoy" >"$evidence/production-envoy-rig-sessions.json"
   if [ "$envoy" != "[]" ]; then
     printf 'production Envoy listener holds rig sessions: %s\n' "$envoy"
@@ -486,6 +499,25 @@ assert_ready_gate_closed() {
     .issues[$issue].phase == "merging" and .issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion
   ' "$file" >/dev/null
 }
+# await_tree_suspended ISSUE WHAT waits for ISSUE's tree architect to be suspended once its tree
+# lingers. The daemon holds that suspension for the architect's turn and names it no deadline
+# (packages/daemon/internal/supervise/suspend.go, holdSuspension), so the wait's bound is the
+# proof's turn budget, phase_seconds. A timeout prints the claim as `legion claims list` shows it:
+# working with its suspension held is a turn still running; idle and held, a stop the runtime keeps
+# refusing; neither suspended nor held, no suspension held for it (a start dropped the hold, or a
+# daemon restart forgot it before the outbox asked again).
+suspension_issue=
+await_tree_suspended() {
+  suspension_issue=$1
+  timeout_hook=report_architect_suspension
+  until_true "$phase_seconds" "$2" tree_suspended "$1"
+  timeout_hook=
+}
+report_architect_suspension() {
+  note "the architect of $suspension_issue in legion claims list: $("$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
+    jq -c --arg issue "$suspension_issue" '[.claims[] | select(.issue == $issue and .role == "architect")
+      | {state, suspensionHeld: (.suspensionHeld // false), suspendedBy: (.suspendedBy // null), pending: (.pending.id // null)}]')"
+}
 # The design gate in the daemon's state: closed while the spec's current version is past the one a
 # human approved, open while the approved version is the current one; design_gate_version ISSUE
 # prints the spec version the gate currently names.
@@ -525,7 +557,7 @@ approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.ki
 
 begin prerequisites
 refuse_leftovers legion-e2e3
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -545,6 +577,12 @@ case "$until" in
   *) fail "STAGE3_UNTIL must be prerequisites or rework, not $until" ;;
 esac
 [ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 # The bridge dials the production Envoy NATS by the operator's fully-qualified name for it, never
 # a bare alias a resolver's search domain would complete. The value is never printed.
 upstream_nats=${SMOKE_UPSTREAM_NATS:-}
@@ -559,24 +597,45 @@ nats_url='^([A-Za-z][A-Za-z0-9+.-]*://)?([^@/?#,[:space:]]+@)?[A-Za-z0-9_-]+(\.[
 [[ "$upstream_nats" =~ $nats_url ]] ||
   fail "SMOKE_UPSTREAM_NATS is not one NATS URL naming a fully-qualified host: a bare alias resolves through whatever search domain the box has; name the production Envoy NATS as nats://envoy-nats.<tailnet>.ts.net:4222"
 development=${from:+from $from}${until:+until $until}
-# A pane's gh is whatever the daemon's PATH gives, since every pane inherits it. This box's PATH
-# heads with a gh wrapper (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to
-# `knives gh`), so the proof starts the daemon with mise's gh first on its PATH (start_daemon), the
-# precondition an operator meets on such a box (docs/deployment.md).
+# Every pane's gh and jj are whatever the daemon's PATH gives, since every pane inherits it
+# (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go, includes PATH). This
+# box's own gh and jj resolve through the dotfiles+mise shim chain, which a pane's own relocated
+# HOME breaks (real_bin_path, lib/rig.sh); the proof starts the daemon with both tools' real
+# binaries first on its PATH (start_daemon) instead. real_gh is also in-agent-credentials' own
+# negative control and note below.
 real_gh=$(mise which gh) || fail "mise has no gh"
+realbin=$(real_bin_path "$work/realbin" gh jj)
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-# The model route, installed while this shell still holds the operator's HOME and XDG directories,
-# which the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
-# run here, by name. The key command's log is evidence.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+# The model route, installed while this shell still holds the operator's HOME and XDG directories
+# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
+# it, but is installed the same way, here, for one setup step regardless of route). The gateway
+# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
+# route's own preflight read stops the run here just as loudly if the file cannot be read. The key
+# command's log is evidence either way.
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+    fail "the agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
+# The call record (.log/.calls) always sits under $evidence/model-gateway, beside $key_command
+# itself for the gateway route; the key-file route's own $key_command lives under its own
+# --key-dir instead, under $work, which cleanup removes unconditionally, so the record is
+# addressed separately.
+key_record="$evidence/model-gateway/$(basename "$key_command")"
 pinned=$(sed -n 's/^  default: //p' "$profile_agent/config.yml")
 [ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $profile_agent/config.yml"
-note "the agents' model route: $pinned through the gateway, keyed by $key_command"
+note "the agents' model route: $pinned through $model_route, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -615,7 +674,7 @@ until_true 60 "NATS to be ready" sh -c "docker logs '$nats_container' 2>&1 | gre
 start_listener
 start_dispatch
 dispatch_human POST projects "$(jq -cn --arg key "$project" --arg name "Stage 3 proof $project" '{key:$key,name:$name}')" >/dev/null
-dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project}')" >/dev/null
+dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null
 # This is the production Envoy ingress bridge, subscribe-only from its perspective. GitHub events
 # are observed, never manufactured, and only the smoke repository is forwarded to this run's NATS.
 SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
@@ -920,7 +979,7 @@ primary_issue() {
   fi
   wait_for_phase "$root_issue" "done"
   until_true 60 "the daemon's done status on the Dispatch board" dispatch_status_is "$root_issue" "done"
-  until_true 120 "the lingering tree's architect to be suspended" tree_suspended "$root_issue"
+  await_tree_suspended "$root_issue" "the lingering tree's architect to be suspended"
   note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit; the daemon resumed production_check, the implementer's completion reached the architect, and its sign-off closed the issue; the tree lingers with its architect suspended"
   pass
 
@@ -988,7 +1047,7 @@ else
   begin "development-run-from-$from"
   # The proof human closes the first root, which frees its admission slot as its sign-off would.
   set_status "$root_issue" "done"
-  until_true 120 "the closed tree's architect to be suspended" tree_suspended "$root_issue"
+  await_tree_suspended "$root_issue" "the closed tree's architect to be suspended"
   pr_number=${STAGE3_PR:-$(gh -R "$repo" pr list --state all --limit 1 --json number --jq '.[0].number')}
   [ -n "$pr_number" ] || fail "no smoke pull request for the credential check; set STAGE3_PR"
   note "STAGE3_FROM=$from is a development run, never the proof: $root_issue closed by the proof human, credential check against $repo#$pr_number"
@@ -1022,7 +1081,7 @@ no_change_close() {
     fail "a status write on $nochange_issue was not the daemon's; see $evidence/nochange-events.json"
   session_contains "$nochange_issue" architect '"close_root"' || fail "the architect of $nochange_issue did not call close_root"
   token=$(claim_token "$nochange_issue" architect)
-  until_true 60 "the no-change tree's architect to be suspended" tree_suspended "$nochange_issue"
+  await_tree_suspended "$nochange_issue" "the no-change tree's architect to be suspended"
   # daemon.log carries the daemon's stderr too, so each line is parsed on its own, as every other
   # reader of it does: one line that is not JSON must not end the run.
   jq -R -c --arg issue "$nochange_issue" --arg token "$token" 'fromjson? | select(
@@ -1079,9 +1138,11 @@ restart_scenarios() {
 
   begin in-agent-credentials
   # One bash command on purpose. The pane's gh is the launcher directory's wrapper (`legion gh`),
-  # which runs the real gh the pane is told (LEGION_GH_PATH, mise's here: the daemon was started
-  # with its directory first, ahead of this box's gh wrapper) with GH_CONFIG_DIR at the directory of
-  # the owner the command names in the claim's gh bundle (LEGION_GH_OWNERS_DIR), which the daemon
+  # which runs the real gh the pane is told (LEGION_GH_PATH: $realbin's own gh, a symlink to mise's
+  # real gh and the first gh on the daemon's own PATH — real_bin_path, lib/rig.sh; the daemon's own
+  # resolveTools walks its own PATH the same way a pane's command -v would, and returns that
+  # symlink's own path, never its resolved target) with GH_CONFIG_DIR at the directory of the
+  # owner the command names in the claim's gh bundle (LEGION_GH_OWNERS_DIR), which the daemon
   # writes: the repository's owner's, with the role's App token; no grant is in the path of a
   # GitHub call, and GH_TOKEN is set empty so nothing outranks the file. Each output carries a
   # marker the instruction itself cannot produce (the instruction holds the unexpanded command), so
@@ -1089,7 +1150,7 @@ restart_scenarios() {
   send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-REAL=\$LEGION_GH_PATH\"; echo \"CRED-DIR=\$GH_CONFIG_DIR\"; echo \"CRED-OWNERS=\$(ls \"\$LEGION_GH_OWNERS_DIR\" | tr '\\n' ' ')\"; echo \"CRED-TOKEN=\${GH_TOKEN-unset}.\"; echo \"CRED-VIEWER=\$(gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(gh pr view $pr_number --repo $repo --json url --jq .url)\". Wait after reporting."
   owner=$(tr '[:upper:]' '[:lower:]' <<<"${repo%%/*}")
   until_true 240 "the real Go pane bash tool to resolve the launcher directory's gh wrapper" session_contains "$restart_issue" implementer "CRED-GH=$state/bin/gh"
-  until_true 240 "the implementer pane to name the real gh its wrapper runs" session_contains "$restart_issue" implementer "CRED-REAL=$real_gh"
+  until_true 240 "the implementer pane to name the real gh its wrapper runs" session_contains "$restart_issue" implementer "CRED-REAL=$realbin/gh"
   until_true 240 "the implementer pane to name its claim's gh directory" session_contains "$restart_issue" implementer "CRED-DIR=$state/secrets/"
   until_true 240 "the implementer pane to list the bundle's one owner" session_contains "$restart_issue" implementer "CRED-OWNERS=$owner "
   until_true 240 "the implementer pane to carry an empty GH_TOKEN" session_contains "$restart_issue" implementer "CRED-TOKEN=."
@@ -1105,7 +1166,7 @@ restart_scenarios() {
   cred_dir=$(pane_value "$cred_omp" GH_CONFIG_DIR)
   [[ $cred_root == "$state/secrets/"*-implementer-gh ]] || fail "the implementer's OMP carries LEGION_GH_OWNERS_DIR=$cred_root, want the claim's bundle under $state/secrets"
   [ "$cred_dir" = "$cred_root/$owner" ] || fail "the implementer's OMP carries GH_CONFIG_DIR=$cred_dir, want $owner's directory of $cred_root"
-  [ "$(pane_value "$cred_omp" LEGION_GH_PATH)" = "$real_gh" ] || fail "the implementer's OMP carries LEGION_GH_PATH=$(pane_value "$cred_omp" LEGION_GH_PATH), want $real_gh"
+  [ "$(pane_value "$cred_omp" LEGION_GH_PATH)" = "$realbin/gh" ] || fail "the implementer's OMP carries LEGION_GH_PATH=$(pane_value "$cred_omp" LEGION_GH_PATH), want $realbin/gh"
   session_contains "$restart_issue" implementer "CRED-DIR=$cred_dir" || fail "the implementer's bash printed another GH_CONFIG_DIR than its OMP carries ($cred_dir)"
   for dir in "$cred_root" "$cred_dir"; do
     [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
@@ -1128,7 +1189,7 @@ restart_scenarios() {
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
-  note "real implementer pane ran $state/bin/gh, the wrapper, over $real_gh with GH_CONFIG_DIR=$cred_dir ($owner's directory of $cred_root; 0700, config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number; the shared clone's helper is !legion git-credential with credential.useHttpPath"
+  note "real implementer pane ran $state/bin/gh, the wrapper, over $realbin/gh (-> $real_gh) with GH_CONFIG_DIR=$cred_dir ($owner's directory of $cred_root; 0700, config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number; the shared clone's helper is !legion git-credential with credential.useHttpPath"
   pass
 
   begin pending-dispatch-status-write
@@ -1198,7 +1259,7 @@ begin production-untouched
 every_launch_checked
 note "$(wc -l <"$evidence/pane-endpoints-checked.txt") launched panes endpoint-checked when their OMP started, before registration"
 if ! production_audit; then
-  fail "the rig touched production; see $evidence/production-dispatch-audit.json and $evidence/production-envoy-rig-sessions.json"
+  fail "the rig touched production, or the audit could not check it; the reason is above (see $evidence/production-dispatch-audit.json and $evidence/production-envoy-rig-sessions.json, when the audit got far enough to write either)"
 fi
 pass
 
@@ -1219,15 +1280,15 @@ TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fai
 note "the watcher, daemon, Dispatch, listener, bridge, private tmux server and every proof process stopped; both containers removed"
 pass
 
-begin model-turns-through-the-gateway
+begin model-turns-through-the-route
 # Every agent turn of the run, in every session of the isolated profile, each subagent's included,
-# was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
+# was served by the anthropic provider, the route's; and the same check refuses a copy of one
 # captured session with a turn rewritten as Bedrock's, kept in the evidence. It reads the profile
 # only now, with every agent process gone, and before the profile is copied and removed.
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
-  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+  --control "$evidence/model-route-control") || fail "an agent turn left the configured route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log" || true) times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log" || true) ($evidence/model-gateway/hawk-token.log)"
+note "the key command ran $(grep -c ' invoked by pid ' "$key_record.log" || true) times and served $(grep -c $'\tserved\t' "$key_record.calls" || true) ($key_record.log, $key_record.calls)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

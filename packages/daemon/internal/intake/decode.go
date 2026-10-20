@@ -62,6 +62,11 @@ func decodeMessage(subject, project string, repositories []ghrepo.Repository, da
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
 		}
 		fact, err = decodeDispatchFact(subject, project, envelope.Payload)
+	case strings.HasPrefix(subject, dispatchProjectPrefix):
+		if envelope.Source != "dispatch" {
+			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
+		}
+		fact, err = decodeDispatchProjectFact(subject, project, envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.github."):
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
@@ -138,18 +143,30 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 	switch event.Type {
 	case "issue.created", "issue.updated", "issue.closed":
 		var issue struct {
-			Key    string   `json:"key"`
-			Status string   `json:"status"`
-			Title  string   `json:"title"`
-			Parent *string  `json:"parent"`
-			Rank   string   `json:"rank"`
-			Labels []string `json:"labels"`
+			Key          string          `json:"key"`
+			Status       string          `json:"status"`
+			Title        string          `json:"title"`
+			Parent       *string         `json:"parent"`
+			Rank         string          `json:"rank"`
+			Labels       []string        `json:"labels"`
+			ResolvedRepo json.RawMessage `json:"resolved_repo"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
 		}
 		if issue.Key != event.IssueKey {
 			return nil, fmt.Errorf("Dispatch issue event payload key disagrees with event issue_key")
+		}
+		// A Dispatch that resolves an issue's repository sends resolved_repo on every issue event,
+		// null for none. An event JetStream retained from an older Dispatch has no such field: it
+		// still carries its actor and sequence, which the workflow's fences read, so it is decoded
+		// with its repository missing, for the consumer's PrepareRepository to fill.
+		missing := issue.ResolvedRepo == nil
+		var resolved *string
+		if !missing {
+			if err := json.Unmarshal(issue.ResolvedRepo, &resolved); err != nil {
+				return nil, fmt.Errorf("decode Dispatch issue payload resolved_repo: %w", err)
+			}
 		}
 		parent := ""
 		if issue.Parent != nil {
@@ -163,7 +180,9 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		if event.Actor.Kind == "session" && !daemonActor {
 			actorSession = event.Actor.ID
 		}
-		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor}, nil
+		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
+			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
+			ResolvedRepoMissing: missing}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
@@ -216,6 +235,51 @@ func dispatchSubjectKey(subject string) (string, bool) {
 	return key, key != ""
 }
 
+// dispatchProjectPrefix begins every Dispatch event of a project rather than an issue
+// (packages/envoy/internal/dispatch/outbox/publisher.go envelope): notifications.dispatch.project.
+// <KEY>.<type>.
+const dispatchProjectPrefix = "notifications.dispatch.project."
+
+// repoMappingType is the project event Dispatch emits when a repository's mapping to a project
+// changes, on the project it changed for (a move emits on the project left and the one joined).
+const repoMappingType = "settings.repo_project.updated"
+
+// mappingSubject is the subject Dispatch publishes project's mapping changes on, which the
+// Dispatch consumer hears beside every issue event.
+func mappingSubject(project string) string {
+	return dispatchProjectPrefix + project + "." + repoMappingType
+}
+
+// decodeDispatchProjectFact decodes one Dispatch project event: the mapping change of project is a
+// RepoMappingChanged, and any other project's event, or another type, is no fact.
+func decodeDispatchProjectFact(subject, project, payload string) (Fact, error) {
+	subjectProject, eventType, ok := strings.Cut(strings.TrimPrefix(subject, dispatchProjectPrefix), ".")
+	if !ok || subjectProject == "" {
+		return nil, fmt.Errorf("Dispatch project subject has no project key: %s", subject)
+	}
+	if subjectProject != project || eventType != repoMappingType {
+		return nil, nil
+	}
+	var event struct {
+		Project string `json:"project"`
+		Type    string `json:"type"`
+	}
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return nil, fmt.Errorf("decode Dispatch project event: %w", err)
+	}
+	if event.Project != subjectProject || event.Type != eventType {
+		return nil, fmt.Errorf("Dispatch project event %s of %s disagrees with its subject %s", event.Type, event.Project, subject)
+	}
+	return RepoMappingChanged{Project: project}, nil
+}
+
+func deref(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 func isJSONObject(raw json.RawMessage) bool {
 	var item map[string]json.RawMessage
 	return json.Unmarshal(raw, &item) == nil && item != nil
@@ -227,10 +291,11 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 		return nil, nil, nil
 	}
 	// The payload names the event's repository; the subject's segments cannot, since a name may hold
-	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
-	// registers a pull request only for its issue's repository (reducers.ts registerPrFenced).
+	// a dot. Only the event of a repository GitHub intake hears (ConsumerSpec.Repositories, as
+	// SetRepositories changes them) is this daemon's, matched case-insensitively as GitHub matches
+	// owner and repository names, and its fact names the heard repository.
 	repo, _ := rawString(raw, "repo")
-	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
+	at := slices.IndexFunc(repositories, func(heard ghrepo.Repository) bool { return strings.EqualFold(heard.String(), repo) })
 	if at < 0 {
 		return nil, nil, nil
 	}

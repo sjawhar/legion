@@ -848,7 +848,7 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 		ctx, records := context.Background(), record.NewStore()
 		until, root := time.Now().Add(time.Hour), "LEGION-212"
 		awaiting := func(key, status string) record.Issue {
-			return record.Issue{Key: key, Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 1, Status: status, Rank: "U"}
+			return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: "LEGION", Title: key, Phase: phase.AwaitingMerge, Generation: 1, Status: status, Rank: "U"}
 		}
 		lingering := awaiting("LEGION-213", "retro")
 		lingering.Tree, lingering.Parent = root, &root
@@ -864,11 +864,16 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 				{awaiting("LEGION-209", "retro"), "MANUAL_MERGE_REQUIRED: pull request #43 matches a by_hand merge rule; do not auto-arm it", record.PullRequestOpen},
 				{awaiting("LEGION-210", "retro"), "", record.PullRequestClosed},
 				{awaiting("LEGION-211", "done"), "", record.PullRequestOpen},
-				{record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", Rank: "T", LingerUntil: &until}, "", ""},
+				{record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", Rank: "T", LingerUntil: &until}, "", ""},
 				{lingering, "", record.PullRequestOpen},
 				{merging, "", record.PullRequestOpen},
 			} {
-				if err := records.PutIssue(ctx, tx, seeded.issue); err != nil {
+				// The seed runs at a schema before 0047, which the record store's PutIssue writes
+				// beyond, so it writes the columns that schema has.
+				if _, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, linger_until, last_dispatch_seq)
+					values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 0)`,
+					seeded.issue.Key, seeded.issue.Tree, seeded.issue.Project, seeded.issue.Title, seeded.issue.Parent, string(seeded.issue.Phase),
+					int64(seeded.issue.Generation), seeded.issue.Status, seeded.issue.Rank, seeded.issue.LingerUntil); err != nil {
 					return err
 				}
 				if seeded.pr == "" {

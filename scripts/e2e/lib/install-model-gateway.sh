@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Routes a named OMP profile's model turns to the Hawk model gateway (middleman) on the operator's
-# own identity, so a tmux stage proof's panes reach Anthropic with no provider key: the route every
-# devbox agent session uses (~/.omp/agent/models.yml: `X-Api-Key: !hawk-token`).
+# own identity, so a tmux stage proof's panes reach Anthropic with no provider key: the route a
+# devbox's agent sessions use when it is configured for the gateway (~/.omp/agent/models.yml:
+# `X-Api-Key: !hawk-token`).
 #
 #   scripts/e2e/lib/install-model-gateway.sh --profile <name> --home <dir> --dest <dir> --cache-dir <dir>
 #

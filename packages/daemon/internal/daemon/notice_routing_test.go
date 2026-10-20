@@ -85,14 +85,14 @@ func (p *holderPublisher) snapshot() (int, []outboxPublish) {
 func noticeTree(t *testing.T, pool *pgxpool.Pool, records record.Store, lingers bool) {
 	t.Helper()
 	root, child := "LEGION-1", "LEGION-2"
-	rootIssue := record.Issue{Key: root, Project: "LEGION", Tree: root, Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	rootIssue := record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root, Title: "Root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	if lingers {
 		until := time.Now().Add(time.Hour)
 		rootIssue.Phase, rootIssue.Status, rootIssue.LingerUntil = phase.Done, "done", &until
 	}
 	putOutboxIssue(t, pool, records, rootIssue)
-	putOutboxIssue(t, pool, records, record.Issue{Key: child, Project: "LEGION", Tree: root, Parent: &root, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-3", Project: "LEGION", Tree: root, Parent: &child, Title: "Grandchild", Phase: phase.Testing, Generation: 1, Status: "testing"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root, Parent: &root, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-3", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root, Parent: &child, Title: "Grandchild", Phase: phase.Testing, Generation: 1, Status: "testing"})
 }
 
 func architectClaim(t *testing.T, sup *supervisor, issue string, state supervise.ClaimState) claim.Token {
@@ -147,11 +147,11 @@ func mustClaimToken(t *testing.T, issue string, role claim.Role) claim.Token {
 func TestTheArchitectThatOwnsANotice(t *testing.T) {
 	root, child, unrecorded, elsewhere := "LEGION-1", "LEGION-2", "LEGION-77", "LEGION-50"
 	tree := map[string]record.Issue{
-		root:       {Key: root, Tree: root},
-		child:      {Key: child, Tree: root, Parent: &root},
-		"LEGION-3": {Key: "LEGION-3", Tree: root, Parent: &child},
-		"LEGION-4": {Key: "LEGION-4", Tree: root, Parent: &unrecorded},
-		"LEGION-5": {Key: "LEGION-5", Tree: root, Parent: &elsewhere},
+		root:       {Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root},
+		child:      {Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Parent: &root},
+		"LEGION-3": {Key: "LEGION-3", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Parent: &child},
+		"LEGION-4": {Key: "LEGION-4", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Parent: &unrecorded},
+		"LEGION-5": {Key: "LEGION-5", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Parent: &elsewhere},
 	}
 	for _, tc := range []struct {
 		name         string
@@ -564,7 +564,7 @@ func TestAHeldChildCloseHoldsTheArchitectsLaterNotices(t *testing.T) {
 func reparent(t *testing.T, pool *pgxpool.Pool, records record.Store, parent string) {
 	t.Helper()
 	root := "LEGION-1"
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: root, Parent: &parent, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root, Parent: &parent, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 }
 
 // A child re-parented under an issue the workflow has not recorded stays in its tree: its notice
@@ -599,7 +599,7 @@ func TestANoticeOfAChildReparentedUnderAnotherTreeStaysWithItsOwnTree(t *testing
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-50", Project: "LEGION", Tree: "LEGION-50", Title: "Other root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-50", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-50", Title: "Other root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	reparent(t, pool, records, "LEGION-50")
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
@@ -624,7 +624,7 @@ func TestAnUnroutableNoticeHoldsNothingBackAndFinishesOnItsOwnAttempt(t *testing
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
 	root := "LEGION-1"
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-4x", Project: "LEGION", Tree: root, Parent: &root, Title: "Malformed", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-4x", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root, Parent: &root, Title: "Malformed", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
 	clock := time.Now()
@@ -659,8 +659,8 @@ func TestANoticeOfAChildMovedUnderAnotherTreesSubArchitectStaysWithItsOwnTree(t 
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
 	other := "LEGION-50"
-	putOutboxIssue(t, pool, records, record.Issue{Key: other, Project: "LEGION", Tree: other, Title: "Other root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-51", Project: "LEGION", Tree: other, Parent: &other, Title: "Other child", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: other, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: other, Title: "Other root", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-51", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: other, Parent: &other, Title: "Other child", Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
 	reparent(t, pool, records, "LEGION-51")
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	architectClaim(t, sup, "LEGION-1", supervise.StateWorking)
@@ -683,7 +683,7 @@ func TestANoticeOfATreeWhoseRootIsNotRecordedFinishesUndelivered(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	root := "LEGION-1"
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Project: "LEGION", Tree: root, Parent: &root, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root, Parent: &root, Title: "Child", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
 	var logged bytes.Buffer

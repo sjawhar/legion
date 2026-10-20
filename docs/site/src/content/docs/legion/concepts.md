@@ -17,17 +17,35 @@ section can use the words without stopping to explain them.
   under the repository's rules.
 - **Agents** are [Oh My Pi](https://github.com/sjawhar/oh-my-pi) sessions. Under the Kubernetes
   runtime every agent the daemon starts runs in a pod of its own, from one published worker image,
-  and talks to the daemon over a connection the pod dials back.
+  and talks to the daemon over a connection the pod dials back. Under the tmux runtime a phase
+  worker's role may run on Claude Code instead (`worker_backends` in `legion.yaml`); it does the same
+  work through the same `legion` tool and keeps its conversation the same way.
 - **[Dispatch](/legion/dispatch/)** is where people and agents meet: the issue, its spec, the
   questions an agent asks you, the approvals, the messages and the status everyone reads. Legion
   never reads or writes a GitHub issue.
-- **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue. Legion acts
-  there through two GitHub Apps, so the account that reviews a change is never the one that wrote
-  it. The daemon creates a root's branch at the repository's default branch, as GitHub names it
-  (`main`, `develop` or `release/v7.1` alike), when it admits the root, before its architect
-  starts, and a child's when the child starts planning in its tree, so no agent's push is the one
-  that creates a branch: GitHub can refuse that push on a large repository. An issue's workspace
-  with no branch to start from starts at that default branch too.
+- **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue, in the
+  issue's repository. A project spans every repository Dispatch maps to it (Settings →
+  Repositories → Projects); each issue targets one of them, the one Dispatch resolves for it (its
+  own, else its nearest ancestor's, else the project's default), which Legion records, with that
+  repository's default branch as GitHub names it, when it first records the issue, and keeps.
+  Legion acts there through two GitHub Apps, so the account that reviews a change is never the one
+  that wrote it. The daemon creates a root's branch at the recorded default branch (`main`,
+  `develop` or `release/v7.1` alike) when it admits the root, before its architect starts, and a
+  child's when the child starts planning in its tree, so no agent's push is the one that creates a
+  branch: GitHub can refuse that push on a large repository. An issue's workspace with no branch to
+  start from starts at that default branch too. A pull request or push names its repository, and
+  counts for an issue only in the issue's own.
+
+## Several repositories
+
+One Legion deployment can work issues across several GitHub repositories, under several owners,
+with exactly one repository per issue — never two. A change that spans repositories is a parent
+issue with one child per repository, each child's own `--repo` fixed when the daemon records it.
+Every pane and pod holds a write token, minted from the role's GitHub App, for its own issue's
+owner alone, and a read-only token for every other owner the project maps (`legion gh`, the `gh`
+wrapper every pane and pod runs, picks the directory by the owner the command names); `git` reaches
+the same bundle through a credential helper keyed the same way, so a push to another owner's
+repository is refused there, not merely discouraged.
 
 ## The controller
 

@@ -2124,6 +2124,20 @@ the synchronous listener call records the sent or failed attempt instead of blin
   checks only from GitHub's own read. A settlement NATS refuses anyway (a server whose max payload
   is set lower) marks the record overflowed too, logged once as `checks settlement refused`, rather
   than being published again every tick.
+- The listener's HTTP server gives every route 10 s from the request's start to read its header
+  and body, and 10 s from the end of its header to write its answer (`newHTTPServer`,
+  `cmd/listener/main.go`). The GitHub webhook route alone moves its own connection's deadlines
+  (`extendDeadlines`): 60 s from the handler's start to read the body (`githubBodyDeadline`) and
+  15 s more to answer (`githubHandleDeadline`), so a body of several megabytes that a proxy sends
+  slowly is read whole and published. The bounds are absolute: a body is kept only if it arrives
+  within 60 s (10 MB at about 170 KB/s, the 25 MB cap at about 440 KB/s), and a sender that stalls
+  holds its connection for up to about 70 s (the header's 10 s, then 60 s) and at most twice the
+  bytes it has sent (`bodyBudget`) for 60 s. A delivery waiting for room behind it reads its body
+  under the same 60 s (a context deadline, since nothing reads its connection while it waits), so
+  its wait ends there and it is answered 400. Only the GitHub route's answer can outlast the HTTP
+  shutdown's 10 s. A body read that fails is logged
+  `github body read failed` with the delivery id, event, declared length, bytes read and elapsed
+  time, and answered 400 (413 past GitHub's 25 MB cap).
 - A `pull_request_review` payload carries the review's own `commit_id` and the PR's current
   `head_sha` so consumers can tell whether the review is at head, and `submitted_at` (GitHub's
   RFC 3339 time) and `review_id` (GitHub's review id as a decimal string), so consumers can order
@@ -2336,8 +2350,8 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and source (its ARN, or its Secret Manager
-resource name: `policy.Secret.Source`), is recorded on every request, and a
+SHA-256 of every served secret's name, owner, tier and source (its ARN, its Secret Manager
+resource name, or `gcp-token:<service account>` for a minted secret: `policy.Secret.Source`), is recorded on every request, and a
 live grant is re-checked once it has moved, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
@@ -2685,6 +2699,10 @@ entries, each name `record.ValidService`'s form, not `shared` and given once, an
 to one name, never a namespace's `default` account (every pod there that names no account runs as
 it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
+`BROKER_MINT_TARGETS` (optional; whitespace-separated `<NAME>=<service account email>=<owner email>`
+entries, keyed by name in `Config.MintTargets`: the minted secrets served, each only with that
+account in its `mint-service-account` tag, that owner and the human tier; refused under any store
+but `gcp-secret-manager` and beside `BROKER_FAKE_SECRETS_FILE`; unset, no minted secret is served),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
 entries, the ServiceAccounts that log in as a service with their own token, each account given
 once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
@@ -2906,7 +2924,8 @@ folded into an ordinary `deny` decision — no request row is written either, ma
 time" wording; a name needing approval that names a *different* approver than an
 already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
 the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
-refused on a machine login), or, when it names none, until its session ends (`grants.expires_at`
+refused on a machine login; a request naming a minted secret must sign at most 3600, else
+`400 MINT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
 null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
 lifetime, except that a no-lifetime request takes the live grant of a request written before
 migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
@@ -2954,7 +2973,9 @@ before `endEnrollment` wrote one, reads as `cancelled` from its request row. A m
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
 `anyone`) for every approver. `Values` releases a
 live grant's values, each read from the secret its request froze (its source: the ARN, or the
-Secret Manager resource name), re-checking the
+Secret Manager resource name), or, for a minted secret's `gcp-token:<account>` source, minted for
+that account (`Machine.MintToken`, lasting the shorter of an hour and the grant's remaining life)
+once `Current.StillMinted` finds the store still serving it so (held 30 s per name), re-checking the
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
 since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
 not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name

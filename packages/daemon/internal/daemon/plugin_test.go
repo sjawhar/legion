@@ -95,7 +95,7 @@ func TestRunRelaunchesAClaimOnAnotherPluginContractAtBootChargingNothing(t *test
 	}
 	contracts := map[claim.Token]int{architect: 0, implementer: 23}
 	seedWorkflowTree(t, cfg.PostgresDSN, project,
-		record.Issue{Key: root, Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
+		record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
 		supervise.Claim{Token: architect, Project: project, Tree: root, Issue: root, Role: claim.RoleArchitect,
 			Generation: 1, State: supervise.StateReady, Session: "ses_architect", SessionFile: sessionFiles[architect],
 			PluginContract: contracts[architect], Locator: pluginTestLocator(architect)},
@@ -168,7 +168,7 @@ func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *test
 	}
 	sessionFile := filepath.Join(cfg.StateDir, "implementer.jsonl")
 	seedWorkflowTree(t, cfg.PostgresDSN, project,
-		record.Issue{Key: root, Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
+		record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
 		supervise.Claim{Token: stale, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer,
 			Generation: 1, State: supervise.StateWorking, Session: "ses_implementer", SessionFile: sessionFile,
 			PluginContract: 0, Locator: pluginTestLocator(stale),
@@ -258,7 +258,7 @@ func TestRunLeavesAClaimAtTheDaemonsContractAloneAtBoot(t *testing.T) {
 	}
 	currentSessionFile := filepath.Join(cfg.StateDir, "architect.jsonl")
 	seedWorkflowTree(t, cfg.PostgresDSN, project,
-		record.Issue{Key: root, Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
+		record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
 		supervise.Claim{Token: current, Project: project, Tree: root, Issue: root, Role: claim.RoleArchitect,
 			Generation: 1, State: supervise.StateReady, Session: "ses_architect", SessionFile: currentSessionFile,
 			PluginContract: api.DaemonAPIVersion, Locator: pluginTestLocator(current)},
@@ -497,7 +497,7 @@ func TestARelaunchedProcessStillStaleIsChargedUntilWorkerDied(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"}
 	putOutboxIssue(t, pool, records, issue)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPhase(ctx, tx, record.PhaseRow{Issue: issue.Key, Role: claim.RolePlanner, Claim: "planner", HandoffCommit: "plan-1", LastHandoff: "plan-1"})
@@ -509,7 +509,7 @@ func TestARelaunchedProcessStillStaleIsChargedUntilWorkerDied(t *testing.T) {
 	sup.deps.PluginRelaunchable = true
 	sup.deps.Limits.LaunchFailures = 2
 	sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds
-	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	sup.OnTerminal((&workflowRuntime{pool: pool, records: records, handlers: []intake.Handler{engine}, log: quietLogger()}).terminal)
 	planner, err := claim.NewToken("legion", issue.Key, claim.RolePlanner)
 	if err != nil {

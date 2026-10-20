@@ -22,10 +22,14 @@ related_issues:
   one that met the limit. It is runtime-wide, not per endpoint: a read of `/pulls/{n}/reviews/{id}`
   and a read of `/collaborators/{login}/permission` spend the same installation's hour.
 - A new read added beside an existing one does not copy the existing read's call shape; it reuses
-  the existing read's prelude and its hold. In `packages/daemon/internal/daemon/review_permission.go`
-  that is `reviewedRepository` (the pull-request record, then the repository), `rateLimitRefusal`
-  (the standing-limit gate) and `holdIfLimited` (the hold on any `intake.RetryLater` the read
-  returns), and both `reviewerCanWrite` and `reviewBody` go through all three.
+  the existing read's prelude and holds the limit where it meets it. In
+  `packages/daemon/internal/daemon/review_permission.go` that is `reviewedRepository` (the
+  pull-request record, then the repository), `rateLimitRefusal` (the standing-limit gate) and
+  `reviewAppClient` (the mint, which holds the limit itself on a transient mint failure), and each
+  read calls `holdRateLimit` in the branch where GitHub answered with its rate limit:
+  `readPermission` for `reviewerCanWrite`, and `reviewBody`. A hold applied to every
+  `intake.RetryLater` a read returns would also hold the limit for an answer that is no rate
+  limit, such as a 401 for a token GitHub has not yet accepted.
 - The test that pins a rate-limited read asserts the hold, not just the error: after the
   rate-limited answer `rateLimitLeft() > 0`, and a second read inside the window makes no GitHub
   call.

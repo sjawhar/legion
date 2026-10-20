@@ -11,11 +11,15 @@
     "bin/**",
     "dist/**",
     "hooks/**",
+    "legion/**",
     "scripts/**",
     "src/**",
     "README.md",
     "AGENTS.md"
   ],
+  "legion": {
+    "daemonApiVersion": 32
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/sjawhar/legion"
@@ -31,6 +35,7 @@
   "dependencies": {
     "@legion/contracts": "workspace:*",
     "@legion/envoy-client": "workspace:*",
+    "@legion/pi-shared": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ky": "^2.0.2",
     "nats": "^2.29.2",

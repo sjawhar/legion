@@ -13,11 +13,18 @@ There is no Monitor and no native Claude messaging socket path. The server's too
 `envoyToolSpecs` alone, the ten `envoy_*` tools and `slack_post`: agents reach Dispatch through the
 `dispatch` command, which `bin/dispatch` puts on the Bash tool's `PATH`.
 
-The session advertises only the `aside` capability - never `btw`, never `steer`. `btw` remains
-intentionally unsupported until there is a server-owned pending-delivery/reply-ack design; `steer`
-cannot be honoured because Claude Code queues channel notifications for the model's next turn. Permission relay is also intentionally
-absent: without a sender-authenticated reply path and reply-ack design, declaring it would allow
-an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch.
+A session advertises the delivery modes its deliveries' path can honour, never `btw`, and none at
+all when its deliveries are channel notifications Claude Code did not load (`src/claude-channel.ts`;
+a Legion pane's go to the bridge's inbox instead, so the gate does not apply to it). One whose
+deliveries are channel notifications advertises `aside` alone (`CHANNEL_CAPABILITIES`): Claude Code
+queues a notification for the model's next turn, so a `steer` cannot be honoured. A Legion pane
+whose deliveries go to `legion claude-bridge`'s inbox advertises `aside` and `steer`
+(`INBOX_CAPABILITIES` in `src/legion-inbox.ts`): the bridge starts a turn with a delivery when
+Claude Code is idle and sends it as the next user message of the running turn otherwise. `btw`
+remains intentionally unsupported until there is a server-owned pending-delivery/reply-ack design.
+Permission relay is also intentionally absent: without a sender-authenticated reply path and
+reply-ack design, declaring it would allow an Envoy input to decide Claude Code permissions.
+Dispatch asks stay on Dispatch.
 
 ## Where to look
 
@@ -31,12 +38,16 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 | Channel configuration | `.mcp.json`, `bin/envoy-channel.ts` | Launch is `bun ${CLAUDE_PLUGIN_ROOT}/dist/envoy-channel.js`; stdout remains pure MCP protocol. The `env` block passes through `CLAUDE_PROJECT_DIR` only — an unset `${VAR}` is substituted literally, so optional inputs are inherited, never listed. |
 | Hook command | `hooks/hooks.json`, `hooks/session-hook.ts` | One bundle, `dist/session-hook.js`, whose argument picks the mode; each mode is a hook of its own, because Claude Code caps each hook's output at 10,000 characters. `open-asks` (every `SessionStart`) names the `dispatch` command's host and hands on the session's envoy.json in `CLAUDE_ENV_FILE`, records the current session id per Claude process and injects the open-asks summary; always exits 0. `dispatch-first` (every `SessionStart`, and every `SubagentStart`, since a subagent runs the same `dispatch` command) injects the `dispatch-first` skill as `hookSpecificOutput.additionalContext` under the input's `hook_event_name` when Dispatch is configured, reading `${CLAUDE_PLUGIN_ROOT}/skills/dispatch-first/SKILL.md` at run time and exiting non-zero naming it when it is missing. On a resume or fork Claude Code adds a SessionStart hook's context only when the transcript does not already hold the same text (measured on 2.1.283), so a resumed session keeps one copy and one opened without the skill gets it; the hook itself checks nothing. |
 | Inbound channel server | `src/envoy-channel-server.ts`, `src/envoy-off.ts` | MCP capability, notification queue, NATS registration, session-id handoff, role persistence, rejected-frame replies, and the Envoy tools, on the envoy.json Claude Code's rule picks (`@legion/envoy-client/session-settings`); why a section is off, and that inbound messages are off, goes to stderr once as `envoy-channel: <notice>`. `runEnvoyChannelServer` chooses between that server and the two reduced modes of `src/envoy-off.ts`. With Envoy off it runs `serveEnvoyOff` instead: an MCP server that lists no tool, refuses every call with `Envoy is off for this session: <why>` (the section's notice or error), opens no NATS connection and calls no listener, and exits 0 when stdin ends or on SIGTERM, SIGINT or SIGHUP. With Envoy on and inbound messages off (`inbound.off`: no NATS server, from `envoy.natsUrls` or `ENVOY_NATS_URL`, or its seed refused), it serves the tools on `inboundOffChannelSession`: no NATS connection, nothing registered with the listener, an empty inbox, `envoy_subscribe` refused naming why, and a role `envoy_role_set` claims still persisted. |
+| Channel gate | `src/claude-channel.ts` | Whether Claude Code loaded this server as a channel, which it never tells the server: the command line of the nearest ancestor whose program is `claude` (`claudeCommandLine`; Claude Code may run the server through a shell prefix or a `bun` shim), read from `/proc` (exact, with its stdout's terminal and its directory) or `ps` (split on whitespace), against Claude Code's own gate as of 2.1.301: a `plugin:claude-envoy@…` entry when `CLAUDE_PLUGIN_ROOT` says it runs as a plugin, any `server:` entry from a bare config; `--channels` entries before development ones; `--dangerously-load-development-channels` only in an interactive session (`asksForPrintMode`, the arguments skipped as Claude Code's scanner skips them, and a terminal on stdout where `/proc` shows it); the marketplace it is loaded from (`loadedMarketplace`: `inline` for `--plugin-dir`, else the cache's, compared after Claude Code's cache-name sanitizing); for `--channels`, `allowedChannelPlugins` (object or `plugin@marketplace` entries, each invalid one dropped alone) from the managed source that owns it (`remote-settings.json`, else `managed-settings.json` with its non-dot drop-ins; under `managedSourcesBehavior: "merge"` the highest that sets it). Not loaded, the session registers `capabilities: []`. `ENVOY_CHANNEL_LOADED=1`/`0` overrides it. A command line it cannot read, or no `claude` ancestor, counts as loaded, and so does one Node overwrote with `process.title = "claude"` (on Linux, the title alone followed by NUL padding, whatever the executable's name; elsewhere one word from a program named `node…`). |
 | Session identity | `src/session-identity.ts`, `src/claude-session.ts` | `SessionIdentity` is the one mutable id holder; handoff file `sessions/<claude-pid>/session-id`; role file `roles/<session-id>.json` (`readPersistedRole`, `writePersistedRole`). `CLAUDE_CODE_SESSION_ID`, or explicit `ENVOY_SESSION_ID` for QA. |
+| Session title | `src/session-title.ts` | The title every registration sends, which Dispatch's Agents page shows in place of the id: `ENVOY_SESSION_TITLE` on one line when it holds a character that shows, else a name and the current id's first eight characters (a function of the id, so it follows a `/clear` handoff, and keeps two sessions in one tmux window apart). The name is the pane's tmux name (`TMUX` and `TMUX_PANE`, one bounded `tmux -S <socket> display-message` at startup, used only when the answering server's pid is the one in `TMUX` and the pane's process is one of this process's ancestors (`isAncestor`); `session:window` when the window's `automatic-rename` is off, else the session, never a window index; for grouped sessions the group's name), else the project directory's name (outside tmux, a refused or missing answer, or a session named only by digits in a window nobody named). Worked out once as the server starts; the listener replaces the stored title on every registration, and `register` also stamps it (`stampTitle`: `writeSessionTitle` in the session's Dispatch state directory) once per id, where the `dispatch` command reads it for the `session_title` on its writes; with inbound messages or Envoy off, nothing registers, so `runEnvoyChannelServer` stamps it once for the starting id (a `/clear` there leaves the new id unstamped); nothing is stamped when the session starts with Dispatch off or under `ENVOY_SESSION_ID`. |
 | NATS topic consumer | `src/channel-forwarder.ts` | Dedupe through the shared `createDeliveryDedupe`: a re-send by its `dedupe_key` (never by `event_id` alone, which the listener mints fresh for every send, so a Dispatch Retry would pass as new), and a second copy of one publish arriving on overlapping subscriptions by its `event_id`; surface the envelope's topic, and drain safely at shutdown. The promise the dedupe keeps is stated on `DELIVERY_DUPLICATE_WINDOW_MS` in `packages/contracts`. |
 | Outbound transport | `src/envoy-client.ts`, `bin/envoy-send.ts` | Envoy listener HTTP client for `envoy-send`, which sends to the listener and with the bearer `envoySettings` resolves over the envoy.json `envoyConfigPath("command")` chooses. |
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
 | Manual channel smoke | `scripts/smoke-channel.sh` | Real smoke, unattended (answers every startup dialog, captures the pane); documented and deliberately excluded from CI. |
 | Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: this package); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
+| Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
+| Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand: `scripts/build.ts` stages pi-legion's skills and converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped). `scripts/build.ts --check` and `tests/legion-plugin-fresh.test.ts` fail on drift. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
 
 ## Critical conventions
 
@@ -73,8 +84,13 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 - Pass a `ChannelInboundMessage` built field by field; a nats.js `Msg` exposes `subject`, `data`, and
   `reply` through prototype getters that an object spread silently drops. The forwarder decodes
   `data` once into `raw`; downstream code reads `raw`, never re-decodes.
-- Register `capabilities: ["aside"]`, never `btw` and never `steer`: Claude Code channel
-  notifications queue for the next turn, so a steer at the next tool boundary cannot be honoured.
+- Register the capabilities the delivery path honours, never `btw`: `CHANNEL_CAPABILITIES`
+  (`["aside"]`) for channel notifications, which queue for the next turn, so a steer at the next
+  tool boundary cannot be honoured, and none when Claude Code did not load the channel;
+  `INBOX_CAPABILITIES` (`["aside", "steer"]`) when `LEGION_CLAUDE_INBOX` routes deliveries to the
+  bridge, which needs no channel. Dispatch refuses a targeted delivery in a mode the session does
+  not advertise, and a message with no command goes in the mode the addressed sessions take
+  (`plainDelivery`), as a broadcast does (`broadcastDelivery`).
   The direct NATS receipt occurs immediately after notification enqueue; it cannot imply model
   processing because Claude Code does not acknowledge channel notifications.
 - Preserve the held role at `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json` (keyed by session id so
@@ -92,8 +108,9 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   output nor plugin data.
 - Deployment is `--channels plugin:claude-envoy@legion-plugins` under managed settings
   (`channelsEnabled`, `allowedChannelPlugins`); `--dangerously-load-development-channels` is for
-  entries outside the allowlist and cannot be combined with a `--channels` entry naming the same
-  plugin from another marketplace. `claude -p` has no interactive plan approval, multiple-choice,
+  entries outside the allowlist and cannot be combined with any `--channels` entry naming the same
+  plugin: Claude Code matches the `--channels` entry first, which then needs the allowlist and its
+  own marketplace. `claude -p` has no interactive plan approval, multiple-choice,
   or consent surfaces; workers need pre-approved configuration.
 - Rebuild `dist/` (`bun run build`, on the Bun in `.bun-version`) in the same commit as any source
   change, including a change to `@legion/contracts` or `@legion/envoy-client`; `check-dist` in CI

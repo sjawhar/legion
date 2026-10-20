@@ -66,7 +66,7 @@ import type {
   ComposerOwner,
   ReplyTarget,
 } from "./composer-model";
-import { MODE_LABELS } from "./delivery";
+import { MODE_LABELS, plainDelivery } from "./delivery";
 import { ReplyQuote } from "./ReplyQuote";
 import {
   DELIVERY_COMMANDS,
@@ -791,16 +791,35 @@ export function MentionComposer({
         : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
     kind,
     owner,
+    plainDelivery: plainMode,
     replyTo,
   });
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
+  const effectiveTargets: readonly string[] =
+    owner.kind === "session"
+      ? [`session:${owner.sessionId}`]
+      : replyTo?.parentKind === "message" && replyTo.thread !== undefined
+        ? [replyTo.thread.target]
+        : activeMentions.map((mention) => mention.target);
+  const targetOptions = effectiveTargets.flatMap((target) => {
+    const option = options.find((candidate) => candidate.target === target);
+    return option === undefined ? [] : [option];
+  });
+  // What a message with no command goes in: Send, or the mode every addressed session takes
+  // when one of them refuses Send - an Aside to a Claude Code session.
+  const plainMode = plainDelivery(targetOptions.map((option) => option.capabilities));
+  // Whether this draft goes in that plain mode: a reply to a thread keeps the thread's mode.
+  const sendsPlain =
+    owner.kind === "session"
+      ? replyTo?.thread?.delivery === undefined
+      : replyTo?.parentKind !== "message" && activeMentions.length > 0;
   const inheritedDelivery =
     owner.kind === "session"
-      ? (replyTo?.thread?.delivery ?? "steer")
+      ? (replyTo?.thread?.delivery ?? plainMode)
       : replyTo?.parentKind === "message"
         ? replyTo.thread?.delivery
         : activeMentions.length > 0
-          ? "steer"
+          ? plainMode
           : undefined;
   const outbound = deliveryPlan(body, inheritedDelivery);
   // A closed owner takes no send: the composer is only still here for a send of its own that is
@@ -854,23 +873,24 @@ export function MentionComposer({
             ? "Reason"
             : "Comment";
   const title = edit !== undefined ? "Save" : kind === "ask" ? "Ask" : "Send";
-  const effectiveTargets: readonly string[] =
-    owner.kind === "session"
-      ? [`session:${owner.sessionId}`]
-      : replyTo?.parentKind === "message" && replyTo.thread !== undefined
-        ? [replyTo.thread.target]
-        : activeMentions.map((mention) => mention.target);
   const outboundMode = outbound.delivery;
   const unsupportedOptions =
     outboundMode === undefined
       ? []
-      : effectiveTargets.flatMap((target) => {
-          const option = options.find((candidate) => candidate.target === target);
-          return option !== undefined && !option.capabilities.includes(outboundMode)
-            ? [option]
-            : [];
-        });
+      : targetOptions.filter((option) => !option.capabilities.includes(outboundMode));
   const unsupported = unsupportedOptions.length > 0;
+  // Sessions that advertise no mode at all take no message in any mode: a Claude Code session
+  // whose Envoy channel Claude Code did not load says so by advertising none.
+  const deaf =
+    unsupported && unsupportedOptions.every((option) => option.capabilities.length === 0);
+  // The plain mode, named whenever it is not Send, so the reader knows what their words become.
+  const plainNotice =
+    sendsPlain && plainMode !== "steer" && outboundMode === plainMode && outbound.body === body
+      ? // A session that advertises no mode gets its own warning, not this line.
+        targetOptions.filter(
+          (option) => option.capabilities.length > 0 && !option.capabilities.includes("steer")
+        )
+      : [];
   // The prefixed modes a person could send in instead: only one every target refusing this mode
   // advertises, so the warning never suggests a mode those sessions refuse too (an aside-only
   // session is offered /aside, never /btw).
@@ -1092,7 +1112,21 @@ export function MentionComposer({
           ) : null}
         </div>
       )}
-      {unsupported ? (
+      {plainNotice.length > 0 ? (
+        <p className={`text-sm ${textMutedOnSurface}`}>
+          Sending as {MODE_LABELS[plainMode]}:{" "}
+          {plainNotice.map((option) => option.title).join(" and ")}{" "}
+          {plainNotice.length > 1 ? "do" : "does"} not advertise Send.
+        </p>
+      ) : null}
+      {deaf ? (
+        <p className={`text-sm ${dangerText}`}>
+          {unsupportedOptions.map((option) => option.title).join(" and ")}{" "}
+          {unsupportedOptions.length > 1 ? "advertise" : "advertises"} no delivery mode, so sending
+          it records a failed attempt. A Claude Code session takes messages only when it was started
+          with its Envoy channel.
+        </p>
+      ) : unsupported ? (
         <p className={`text-sm ${dangerText}`}>
           {unsupportedOptions.map((option) => option.title).join(" and ")}{" "}
           {unsupportedOptions.length > 1 ? "do" : "does"} not advertise{" "}

@@ -37,13 +37,14 @@ envoy_token_file: ./envoy-token
 nats_urls: [nats://nats.example.com:4222]
 
 projects:
-  WIDGETS:                             # each Dispatch project the daemon runs, and its repository
-    repo: acme/widgets
-    # merge:                           # optional: a pull request touching a by_hand path is merged by a
-    #   by_hand: ['^migrations/versions/'] # person; each pattern matches anywhere in a path, so anchor it
-    # slack_channels: [C00000000]      # optional: Slack channels whose @Legion mentions reach this
-    #                                  # project's controller, which answers in the thread; needs
-    #                                  # controller: daemon and runtime.kubernetes.agent_secrets
+  WIDGETS: {}                          # each Dispatch project the daemon runs; its repositories are
+                                       # mapped in Dispatch (Settings → Repositories → Projects), one
+                                       # of them its default
+  # WIDGETS:                           # optional: a pull request touching a by_hand path is merged by a
+  #   merge: { by_hand: ['^migrations/versions/'] } # person; each pattern matches anywhere in a path, so anchor it
+  #   slack_channels: [C00000000]      # optional: Slack channels whose @Legion mentions reach this
+  #                                    # project's controller, which answers in the thread; needs
+  #                                    # controller: daemon and runtime.kubernetes.agent_secrets
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:
@@ -53,6 +54,12 @@ github_apps:
   review:
     app_id: "100002"
     private_key_command: cat ./review-app.pem
+# worker_backends:                     # runtime: tmux only: a phase worker's role (planner, implementer,
+#   implementer: claude                # tester, reviewer, merger) on omp, the default, or claude: Claude Code
+#                                      # in its pane under `legion claude-bridge`, which needs LEGION_CLAUDE_PLUGIN_DIR
+#                                      # (and LEGION_CLAUDE_PATH, LEGION_BUN_PATH, else PATH) in the daemon's
+#                                      # environment. Under runtime: kubernetes, as in this file, the loader
+#                                      # refuses claude: the worker image carries no Claude Code.
 
 runtime:
   kubernetes:
@@ -74,6 +81,12 @@ runtime:
     #                                  # implementer and tester, 10Gi for the rest, over a 1Gi ephemeral_storage_request
     #                                  # for every role. A six-role issue pod sums to 3 CPU and 19Gi at the defaults,
     #                                  # its disk limits to 80Gi over 6Gi of requests
+    # repository_cache:                # each mapped repository's cache pod, which every issue pod's feed is
+    #   volume: 20Gi                   # filled from before GitHub is asked for the rest: the cache's own volume,
+    #   refresh_minutes: 10            # holding a bare clone; how often it fetches GitHub; how long it outlives
+    #   retain_hours: 168              # its repository leaving the mapping; and its one container's reservation,
+    #   resources: { cpu: 1, memory: 4Gi, ephemeral_storage: 2Gi, ephemeral_storage_request: 1Gi }   # as a role's.
+    #                                  # These are the defaults. Issue pods reach the cache pods on port 8418.
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
     # plugins:                         # the exact pi-legion/pi-envoy pair a stale-plugin relaunch installs

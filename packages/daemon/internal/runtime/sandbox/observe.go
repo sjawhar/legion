@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -297,8 +299,43 @@ func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName str
 	if finished := v.sandbox.condition(conditionFinished); finished != nil {
 		fmt.Fprintf(&detail, "; sandbox Finished=%s %s", finished.Status, finished.Reason)
 	}
+	if kind == "init" && container == fetchContainer {
+		detail.WriteString(r.fetchCacheState(pod))
+	}
 	fmt.Fprintf(&detail, "; last lines of %s:\n%s", container, r.logTail(ctx, pod.Name, container))
 	return detail.String(), workspaceLost
+}
+
+// fetchCacheState is what a failed workspace-fetch's detail says of the repository cache it fills
+// a fresh feed from: that cache's state, with the kubelet's reason while it is failing, or that the
+// repository has none. The repository is the one the pod's fetch container names
+// (fetchRepository); a pod whose fetch names none says nothing.
+func (r *Runtime) fetchCacheState(pod *corev1.Pod) string {
+	repo, ok := fetchRepository(pod)
+	if !ok {
+		return ""
+	}
+	status, found := r.RepositoryCache(repo)
+	if !found {
+		return fmt.Sprintf("; %s has no repository cache, which a fresh feed comes from alone", repo)
+	}
+	state := fmt.Sprintf("; the repository cache of %s, which a fresh feed comes from alone, is %s", repo, status.State)
+	if status.Reason != "" {
+		state += ": " + status.Reason
+	}
+	return state
+}
+
+// fetchRepository is the repository pod's fetch container names (--repo), which the runtime wrote
+// there; false for a pod whose fetch names none that parses.
+func fetchRepository(pod *corev1.Pod) (ghrepo.Repository, bool) {
+	for _, c := range pod.Spec.InitContainers {
+		if at := slices.Index(c.Command, "--repo"); c.Name == fetchContainer && at >= 0 && at+1 < len(c.Command) {
+			repo, err := ghrepo.Parse("--repo", c.Command[at+1])
+			return repo, err == nil
+		}
+	}
+	return ghrepo.Repository{}, false
 }
 
 // failedInit includes a failed attempt the kubelet is restarting under restartPolicy Always.
@@ -323,6 +360,17 @@ func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 	for i := range pod.Status.ContainerStatuses {
 		if pod.Status.ContainerStatuses[i].Name == name {
 			return &pod.Status.ContainerStatuses[i]
+		}
+	}
+	return nil
+}
+
+// initContainerStatus is containerStatus for an init container: the status of pod's init
+// container name, or nil when the kubelet reports none for it yet.
+func initContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
+	for i := range pod.Status.InitContainerStatuses {
+		if pod.Status.InitContainerStatuses[i].Name == name {
+			return &pod.Status.InitContainerStatuses[i]
 		}
 	}
 	return nil

@@ -581,7 +581,7 @@ func TestTheInformersWatchOnTheirClientsAndALaunchsRequestsGoThroughTheRequests(
 		want   []string
 	}{
 		{"the informers' dynamic client", &informerDyn.Fake, []string{"list sandboxes", "watch sandboxes"}},
-		{"the informers' typed client", &informerKube.Fake, []string{"list pods", "watch pods"}},
+		{"the informers' typed client", &informerKube.Fake, []string{"list pods", "list services", "watch pods", "watch services"}},
 		{"the requests' dynamic client", &requestDyn.Fake, []string{"create sandboxes", "get sandboxes"}},
 		{"the requests' typed client", &requestKube.Fake, nil},
 	} {

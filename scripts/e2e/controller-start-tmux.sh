@@ -208,7 +208,7 @@ begin check-config-names-each-broken-key
 marker=$work/private-key-command-ran
 workflow_tail="dispatch_url: https://dispatch.test
 projects:
-  $project: { repo: acme/widgets }
+  $project: {}
 github_apps:
   implement: { app_id: \"1\", private_key_command: \"touch $marker; exit 1\" }
   review: { app_id: \"2\", private_key_command: \"touch $marker; exit 1\" }"

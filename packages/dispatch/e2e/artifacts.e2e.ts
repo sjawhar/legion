@@ -341,29 +341,44 @@ test("an out-of-schema document names its repair and uploads replacement markdow
   expect((await getArtifactText(upload.artifact.id)).markdown).toBe("repaired\n");
 });
 
-test("an out-of-schema document does not reconnect from cached text", async ({ page }) => {
-  const sockets = countDocumentSockets(page);
+// The reader leaves the document and opens it again without a page load, so the page still holds
+// the text it read on the first visit. The second admission reads the text afresh and shows the
+// repair; connecting on the cached text would open a socket into a tree outside the schema. The
+// count is this document's sockets alone: the issue's own spec holds a socket of its own.
+test("an out-of-schema document does not reconnect from cached text", async ({
+  page,
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Do not reconnect from stale text" });
   const upload = await createIssueArtifact(issue.key, {
     content: "before\n",
     name: "cached-repair.md",
   });
+  const sockets = countDocumentSockets(page, upload.artifact.id);
+  const row = page.getByTestId(`artifact-${upload.artifact.slug}`);
+  const openDocument = () => row.getByRole("link", { name: "cached-repair.md" }).click();
 
-  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await page.goto(`/issues/${issue.key}`);
+  await openArtifacts(page, testInfo.project.name === "iphone");
+  // A page load would drop this marker, and the page's cached reads with it.
+  await page.evaluate(() => Object.assign(window, { __e2eNavMarker: true }));
+  await openDocument();
   await expect(documentEditor(page)).toContainText("before");
   await expect.poll(sockets).toBe(1);
 
-  await page.goto(`/issues/${issue.key}`);
+  await page.goBack();
+  await expect(row).toBeVisible();
   const corrupted = await postAsPage(
     page,
     `/api/v1/artifacts/${upload.artifact.id}/_test/outside-schema`
   );
   expect(corrupted.status()).toBe(204);
-  await page.goto(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await openDocument();
 
   await expect(page.getByText("replace the document from markdown to repair it")).toBeVisible();
-  await expect.poll(sockets).toBe(1);
+  await expect(documentEditor(page)).toBeHidden();
+  expect(await page.evaluate(() => "__e2eNavMarker" in window)).toBe(true);
+  expect(sockets()).toBe(1);
 });
 
 // A mounted editor's provider reconnects on its own after a dropped socket. Another client makes

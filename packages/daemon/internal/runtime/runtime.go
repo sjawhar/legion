@@ -174,7 +174,8 @@ func (k Known) Validate() error {
 // image's own copies; nil for every launch that installs nothing — every tmux launch, and every
 // Kubernetes launch that is not replacing a process on another plugin contract. The tmux runtime
 // ignores it: a pane always resumes on the plugin installed on the daemon's host, which the boot
-// gate already holds to the daemon's contract.
+// gate already holds to the daemon's contract. Backend is the harness the process runs
+// (`worker_backends`, Backends); "" is Oh My Pi (Of).
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string
@@ -191,6 +192,7 @@ type SpawnSpec struct {
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
 	Plugins                *PluginInstall
+	Backend                Backend
 }
 
 // PluginInstall is the plugin pair a Kubernetes launch installs before Oh My Pi starts, and the

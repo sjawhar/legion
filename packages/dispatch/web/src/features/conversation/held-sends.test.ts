@@ -14,6 +14,7 @@ const request: SentRequest = {
   edit: undefined,
   kind: "comment",
   owner: { issueKey: "CORE-1", kind: "issue" },
+  plainDelivery: "steer",
   replyTo: null,
 };
 

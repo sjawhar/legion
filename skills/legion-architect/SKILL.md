@@ -78,6 +78,15 @@ exercise a criterion end to end, building that path is a child issue of this tre
   answers the tree's asks); under a personal token it goes to that token's owner, whom
   `dispatch whoami` names. Set it only when a human told you a specific person owns that child.
 
+A change across repositories gets one child per repository, each created with
+`dispatch issue --project <project> --parent <root> --repo <owner/name> …`; a child's repository
+is fixed when the daemon records it, so choose it at creation. A child that depends on another
+repository's change is released (`release_children`) only after that change's pull request
+merges, and its task names the merged commit
+(`gh api repos/<owner>/<repo>/pulls/<n> --jq .merge_commit_sha`) to use — for a consumer that pins
+the toolchain, the pin is that commit. Read the other repositories with the read-only access your
+gh carries (`-R owner/repo`).
+
 Specifications written into Dispatch follow `skill://dispatch`'s [Writing a spec](skill://dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the
 handoffs; do not narrate them into the spec or a `dispatch message`. A to-do only a human can
@@ -242,9 +251,10 @@ No notice marks the last child's close as the end-game: each closure arrives as 
 `child-closed`, and none is a reason to close the parent. Today's daemon does not order the root's
 own phases after its children: when the design gate opens it starts every admitted issue of the
 tree, the root included, so the root's tester can run, and its pull request merge, before any
-child merges. To get parent integration evidence against current `main` after the last child
-merges, file the parent's integration check as a final child whose acceptance is every parent
-criterion proven on current `main`, release it with `release_children` only once every other
+child merges. To get parent integration evidence against the repository's default branch your
+addressing line names after the last child merges, file the parent's integration check as a final
+child whose acceptance is every parent criterion proven on that default branch, release it with
+`release_children` only once every other
 child has closed, and sign off the root only after it closes. This holds until the redesign's
 integrating phase ships (dispatch://LEGION-223). When that check's tester fails, the daemon sends
 the child back to its implementer; a failure whose fix belongs in other work becomes a new
@@ -269,9 +279,10 @@ back. Park a child first when its work should stop with the root.
 ## 4. Integration verification
 
 Read the integration check's tester evidence (section 3), not merely a child PR's check status.
-The parent test is successful only when every parent acceptance criterion has evidence against
-current main. Route a failed criterion into a corrective child wave; a passing result goes on to
-review and the merge-gate sequence by the daemon's table.
+The parent test is successful only when every parent acceptance criterion has evidence against the
+repository's default branch your addressing line names (never a hard-coded `main`) — the relevant
+repository's, for a criterion that spans more than one. Route a failed criterion into a corrective
+child wave; a passing result goes on to review and the merge-gate sequence by the daemon's table.
 
 ## 5. Retro
 
@@ -404,6 +415,7 @@ active phase worker.
 | `child-status` | A child of your tree left the workflow or re-entered it; the notice's reason names the child and its new status. `todo` (a human's move, your `release_children`, or your `rerun_child`) means the child runs again under your tree from planning, and the daemon starts it; you start nothing. `backlog`, `icebox` or `triage` (a human's move, or your `park_child`) means the daemon has suspended the child's workers, and it advances no further until it is set back to `todo`. What the rest of the tree does is your decision. |
 | `child-closed` | Read the child completion and remaining open children. Re-scope open work, park obsolete work with `park_child`, and release an appropriate next wave with `release_children`. When a worker waits on this child for a missing surface (see `phase-finished`), tell it to continue with `envoy_publish` to its role topic. The last child's close is not the end-game (section 3). |
 | `child-release-stalled` | Its `reason` names a child your `release_children` released while Dispatch already showed it `todo`, and that child's parent, whose release has not reached the daemon after three tries. Read the parent's record with the `legion` tool's `read_record` (`issue` the parent); run `release_children` for the child again once the parent is recorded in your tree, and tell the controller if it never is. |
+| `child-not-recorded` | Its `reason` names a child your tree did not record and why: its repository resolves to none (neither it nor an ancestor names one, and the project has no default), or to one not mapped to the project, or to one the daemon leaves out for a missing GitHub App. The daemon said why on the child too. Set the child's repository to one of the project's (`dispatch issue-update --repo owner/name`), then release it again with `release_children`; tell the controller when the repository it needs is not served. |
 | `design-approved` | Its `version` is the approved one. A human approved the root spec document at its current version; the gate is open. Proceed to section 2 — except on a root whose catch-up said `handed_over`: its workers already run their phases, so start nothing; the approval releases any READY the gate refused. One whose `version` is the version a human's own answer to a decision block wrote, after an earlier approval (Dispatch carried that approval to it, section 1), opens nothing new: carry on, and release no wave because of it. |
 | `design-changes-requested` | Its `version` and `reason`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec as the reason asks and request approval again as section 1 says; stay parked; the gate is closed. |
 | `phase-finished` | The daemon has already moved the issue to its next phase by its fixed table and started that phase's role; you start nothing. Read the committed handoff for the finishing phase; if it shows unresolved gaps, tell the role now working the issue (`envoy_publish` to its role topic). A `planner` notice that names a departure from the spec's design defers to section 1's full condition: when the approved Summary, Acceptance, scope and settled decisions still hold, the plan is the record; otherwise change the root spec and request approval again as section 1 says. A `reviewer` notice whose GitHub review is `CHANGES_REQUESTED` needs nothing from you: the daemon has returned the issue to `implementing` (Dispatch `in_progress`) and started the **implementer**, whose correction goes through the tester and the reviewer again, never straight to retro. A `reviewer` notice with an `APPROVED` review means the daemon has started retro (step 5). An `implementer` notice for `production_check` is its production report: read the record on the pull request and the issue, then run step 7. A `tester` notice with `verdict: "fail"` — its handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof — has gone back to the **implementer** by the daemon's table; never supply the proof from another role. A worker that reports no surface reaches the changed path sends that report instead of completing its phase, so the daemon starts nothing more on that issue and the worker stays idle in its session, not suspended: file a child issue in this tree to build the surface (infrastructure, tooling, or a skill), and when that child's `child-closed` arrives, tell the waiting worker to continue with `envoy_publish` to its role topic. That report is never a reason to advance the phase. |

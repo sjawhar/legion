@@ -59,6 +59,39 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The daemon client, the handoff-commit lookup and the jj lock come from `@legion/pi-shared`
+  (`./daemon-client`, `./handoff-commit`, `./git-lock`), so `claude-envoy`'s Legion tool uses the
+  same code (sjawhar/legion#2032). No behavior change.
+- The `legion` tool's phase ops (`read_record`, `handoff_complete`, `request_backward_move`) run
+  on the schema, description template and executor `@legion/pi-shared/legion-phase-ops` shares
+  with `claude-envoy`'s Legion tool, and the claim session boots through the claim boot both share
+  (`@legion/pi-shared/legion-claim-core`), in the same order and with the same log lines. The
+  template gives the tool the description and parameter schema pi-legion wrote itself, each
+  pinned byte for byte in `src/tools.test.ts`. Three things a phase op answers differ:
+  - A root architect's `handoff_complete` is refused as unavailable before its own fields are
+    read, after naming any field `handoff_complete` does not take:
+    `{op: "handoff_complete", phase: "plan"}` answers `handoff_complete does not accept field
+    "phase"; handoff_complete is not available to a root architect session, which runs no phase`,
+    where it answered the first clause alone.
+  - A refusal names every problem with the call's arguments, joined by `; `, where it named the
+    first: a field the operation does not take first, then each of its own fields in turn
+    (`request_backward_move requires to; request_backward_move requires reason`).
+  - `request_backward_move` checks `to` (a backward target) and `reason` before it mints a grant,
+    so a refused call mints none; a blank or non-string `to` is refused as `requires to`, and any
+    other value outside the backward targets as `request_backward_move's to is one of …`.
+- Daemon API contract 32 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
+  repository gets a repository cache pod running the image's `legion workspace-init cache`, and
+  an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only
+  the delta from GitHub; `legion state`'s `repositories` carries each mapped repository's `cache`
+  (its `state`: `starting`, `cloning`, `ready`, `failing`, or `refused` while a Service of its
+  name is not its own or the daemon's Services watch is failing) and the `caches` of repositories
+  no longer mapped. An image built before it is refused by the daemon's image probe. Install this
+  release with a `legion` built from the same commit.
+- Daemon API contract 31 (sjawhar/legion#1986): `read_record`, the controller's `read_state` and
+  `legion state --json` carry each recorded issue's `repo` and `defaultBranch`, its pull request's
+  `repo`, and the state's `repositories` (the project's mapping as the daemon serves it: `owners`,
+  `mapped`, and `refused` with each left-out repository's `reason`). The strict reader refuses a
+  state without `repositories`. Install this release with a `legion` built from the same commit.
 - Daemon API contract 30 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
   tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
   issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`

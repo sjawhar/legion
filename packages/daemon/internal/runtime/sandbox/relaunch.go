@@ -242,26 +242,43 @@ func boundRanOut(parent, bounded context.Context, bound time.Duration, err error
 // being deleted the wait's last Get, past its deadline, and the Get and Create after it (6); the
 // suspension patch (1); awaitPodGone's confirming Get, which may begin just before its deadline
 // (1); provision's retained-sessions store read, its token mint and its Secret upsert's Get,
-// Delete and Create (5); the Running patch (1); the stop of an earlier generation (1); the address
-// record patch (1); the Start frame (1). Per launcher role of the pod (relaunchRoleCalls, claim.Roles
-// for an issue pod, the most any pod has): launcherBound's Secret Get (1); writeLauncherSecrets'
-// credential mint and its upsert's Get, Delete and Create (4); bindLauncherSecrets' Get and Update,
-// and both again on a conflict (4).
+// Delete and Create (5), and its repository cache's ensure (cacheEnsureCalls); the Running patch
+// (1); the stop of an earlier generation (1); the address record patch (1); the Start frame (1).
+// Per launcher role of the pod (relaunchRoleCalls, claim.Roles for an issue pod, the most any pod
+// has): launcherBound's Secret Get (1); writeLauncherSecrets' credential mint and its upsert's Get,
+// Delete and Create (4); bindLauncherSecrets' Get and Update, and both again on a conflict (4).
 var relaunchCalls = relaunchPodCalls + relaunchRoleCalls*len(claim.Roles)
 
 const (
-	relaunchPodCalls  = 17
+	relaunchPodCalls  = 17 + cacheEnsureCalls
 	relaunchRoleCalls = 9
+	// cacheEnsureCalls is one ensure of a repository's cache (ensureRepositoryCache) at its most:
+	// ensureCacheSandbox's Get and Create, the Get after a Create that found the name taken, and
+	// for a Sandbox being deleted the wait's last Get and the Get and Create after it (6);
+	// writeCacheSecret's token mint, its Secret's Get, and its upsert's Get, Delete and Create (5);
+	// reconcileCachePod's suspension patch, awaitPodGone's confirming Get and the Running patch (3).
+	cacheEnsureCalls = 14
 )
 
 // launchBound is the longest one launch try may run once it holds its pod's launch turn, from the
 // runtime's boot timeout, ProvisionBound and termination grace (LaunchBound): the sum of a
 // replacing try's waits — ensureSandbox's wait for a Sandbox being deleted, awaitPodGone and
-// awaitNewPod, the boot timeout each; awaitRoleLauncher's backstop; the termination grace the
-// start frame has past the launcher deadline — and of its relaunchCalls calls at apiTimeout each.
+// awaitNewPod, the boot timeout each; provision's waits on its repository's cache (cacheWaits);
+// awaitRoleLauncher's backstop; the termination grace the start frame has past the launcher
+// deadline — and of its relaunchCalls calls at apiTimeout each.
 func launchBound(bootTimeout, provisionBound, terminationGrace time.Duration) time.Duration {
-	waits := 3*bootTimeout + launcherBackstop(bootTimeout, provisionBound) + terminationGrace
+	waits := 3*bootTimeout + cacheWaits(bootTimeout) + launcherBackstop(bootTimeout, provisionBound) + terminationGrace
 	return waits + time.Duration(relaunchCalls)*apiTimeout
+}
+
+// cacheWaits is the most a launch try's provision waits on its repository's cache: the cache's
+// turn (lockPod on its Sandbox), which at most one other ensure holds ahead of it in the worst case
+// — a launch of another of the repository's issues, or the sweep — with that ensure's two waits and
+// its cacheEnsureCalls calls, since an ensure after it finds the cache made; then this try's own
+// ensure's two waits, ensureCacheSandbox's for a cache Sandbox being deleted and
+// reconcileCachePod's awaitPodGone; then awaitCacheService. Each wait is the boot timeout.
+func cacheWaits(bootTimeout time.Duration) time.Duration {
+	return 2*bootTimeout + time.Duration(cacheEnsureCalls)*apiTimeout + 2*bootTimeout + bootTimeout
 }
 
 // launcherBackstop is await's own budget for a role launcher's wait (awaitRoleLauncher), given the
@@ -313,7 +330,7 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
-			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+			return false, fmt.Errorf("timed out after %s waiting for %s%s", deadline.Sub(start), what, r.stillFetching(view.pod))
 		}
 		if provisioning(view.pod) {
 			if first.IsZero() {
@@ -335,6 +352,17 @@ func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Tim
 		return limit
 	}
 	return deadline
+}
+
+// stillFetching is what a launch that gives up on pod says of it while its workspace-fetch still
+// runs: so, with the state of the repository cache that fetch fills a fresh feed from
+// (fetchCacheState), since the fetch's own failure, which names why it ran so long, has not come.
+// Nothing for a pod past its fetch.
+func (r *Runtime) stillFetching(pod *corev1.Pod) string {
+	if status := initContainerStatus(pod, fetchContainer); status == nil || status.State.Running == nil {
+		return ""
+	}
+	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
 }
 
 // provisioning is whether pod is running one of its init containers, workspace-fetch or

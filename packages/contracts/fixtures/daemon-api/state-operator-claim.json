@@ -37,5 +37,11 @@
   "pendingStatusWrites": [],
   "heldOutboxRows": [],
   "strandedClaims": [],
-  "capabilities": []
+  "capabilities": [],
+  "repositories": {
+    "owners": [],
+    "mapped": [],
+    "refused": [],
+    "caches": []
+  }
 }

@@ -20,7 +20,7 @@ import (
 // retried after a failed commit writes it once.
 func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", Rank: "U"})
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))
@@ -63,7 +63,7 @@ func TestTheDesignGateLogsItsRegistrationAndEachOpenOrClose(t *testing.T) {
 // A gate fact whose transaction does not commit writes no line: its retry writes it.
 func TestAGateFactThatDoesNotCommitLogsNothing(t *testing.T) {
 	pool := migratedPool(t)
-	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
+	seedIssue(t, pool, record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.Admitted,
 		Generation: 1, Status: "in_progress", Rank: "U"})
 	var logged bytes.Buffer
 	engine := testEngine(config.DesignGateRootIssues, slog.New(slog.NewTextHandler(&logged, nil)))

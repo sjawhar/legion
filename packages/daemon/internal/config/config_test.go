@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
 // The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
@@ -22,7 +21,7 @@ postgres_dsn: postgres://legion@127.0.0.1:5432/legion
 dispatch_url: http://127.0.0.1:8080
 dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 gates:
   design: root-issues
 github_apps:
@@ -119,7 +118,7 @@ func defaultsFor(port int) Config {
 		NatsURLs:                                []string{"nats://127.0.0.1:4222"},
 		DispatchURL:                             "http://127.0.0.1:8080",
 		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
-		Projects:                                map[string]Project{"DEMO": {Repo: ghrepo.MustParse("acme/widgets")}},
+		Projects:                                map[string]Project{"DEMO": {}},
 		Gates:                                   Gates{Design: DesignGateRootIssues},
 		GitHubApps: GitHubApps{
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
@@ -227,15 +226,15 @@ nats_nkey_seed_file: secrets/legion-pane.nk
 func TestLoadReadsEveryStage3Key(t *testing.T) {
 	path := writeConfigFile(t, strings.ReplaceAll(minimalFile, "dispatch_url: http://127.0.0.1:8080\n"+
 		"dispatch_token_file: /var/run/legion/DISPATCH_TOKEN\n"+
-		"projects:\n  DEMO: { repo: acme/widgets }\n"+
+		"projects:\n  DEMO: {}\n"+
 		"gates:\n  design: root-issues\n"+
 		"github_apps:\n  implement:\n    app_id: \"1\"\n    private_key: implement-test-key\n"+
 		"  review:\n    app_id: \"2\"\n    private_key: review-test-key\n", `dispatch_url: https://dispatch.example
 dispatch_token_file: tokens/DISPATCH_TOKEN
 projects:
-  DEMO: { repo: acme/widgets }
-  OTHER: { repo: acme/other, merge_queue_role: merge-queue }
-  EMPTY: { repo: acme/empty }
+  DEMO: {}
+  OTHER: { merge_queue_role: merge-queue }
+  EMPTY: {}
 gates:
   design: off
 github_apps:
@@ -262,9 +261,9 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {Repo: ghrepo.MustParse("acme/widgets")},
-		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue"},
-		"EMPTY": {Repo: ghrepo.MustParse("acme/empty")},
+		"DEMO":  {},
+		"OTHER": {MergeQueueRole: "merge-queue"},
+		"EMPTY": {},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}
@@ -283,8 +282,8 @@ max_fix_attempts: 4
 }
 
 func TestLoadReadsProjectMergeRules(t *testing.T) {
-	body := strings.Replace(minimalFile, "{ repo: acme/widgets }",
-		"{ repo: ACME/widgets, merge: { by_hand: ['^migrations/versions/'] } }", 1)
+	body := strings.Replace(minimalFile, "DEMO: {}",
+		"DEMO: { merge: { by_hand: ['^migrations/versions/'] } }", 1)
 	cfg, err := Load(writeConfigFile(t, body), noEnv)
 	if err != nil {
 		t.Fatalf("Load project merge rules: %v", err)
@@ -311,8 +310,8 @@ func TestLoadReadsProjectSlackChannels(t *testing.T) {
 // slackChannelsFile is kubernetesFile with the project's slack_channels set to channels, under
 // `controller: daemon` when daemon is true and with an agent_secrets block when enrolled is.
 func slackChannelsFile(channels string, daemon, enrolled bool) string {
-	body := kubernetesWith("  LEGSMOKE: { repo: sjawhar/legion-smoke }\n",
-		"  LEGSMOKE: { repo: sjawhar/legion-smoke, slack_channels: "+channels+" }\n")
+	body := kubernetesWith("  LEGSMOKE: {}\n",
+		"  LEGSMOKE: { slack_channels: "+channels+" }\n")
 	if daemon {
 		body = "controller: daemon\n" + body
 	}
@@ -332,7 +331,7 @@ func TestSlackChannelsNeedTheDaemonsControllerEnrolledWithTheBroker(t *testing.T
 	for _, tc := range []struct {
 		name, body, want string
 	}{
-		{"under tmux", strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, slack_channels: [C00000000] }", 1), "projects.DEMO.slack_channels " + why},
+		{"under tmux", strings.Replace(minimalFile, "DEMO: {}", "DEMO: { slack_channels: [C00000000] }", 1), "projects.DEMO.slack_channels " + why},
 		{"the operator's controller", slackChannelsFile("[C00000000]", false, true), "projects.LEGSMOKE.slack_channels " + why},
 		{"no broker", slackChannelsFile("[C00000000]", true, false), "projects.LEGSMOKE.slack_channels " + why},
 		{"neither", slackChannelsFile("[C00000000]", false, false), "projects.LEGSMOKE.slack_channels " + why},
@@ -358,38 +357,38 @@ func TestLoadRefusesProjectSlackChannels(t *testing.T) {
 	for _, tc := range []struct{ name, projects, want string }{
 		{
 			name:     "not a list",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: C00000000 }\n",
+			projects: "projects:\n  DEMO: { slack_channels: C00000000 }\n",
 			want:     "projects.DEMO.slack_channels must be an array of non-empty strings",
 		},
 		{
 			name:     "not a channel id",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [general] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [general] }\n",
 			want:     `projects.DEMO.slack_channels entry "general" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
 		},
 		{
 			name:     "a direct message",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [D00000000] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [D00000000] }\n",
 			want:     `projects.DEMO.slack_channels entry "D00000000" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
 		},
 		{
 			name:     "a subject wildcard",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: ['C*'] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: ['C*'] }\n",
 			want:     `projects.DEMO.slack_channels entry "C*" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
 		},
 		{
 			name:     "twice in one project",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [C00000000, C00000000] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [C00000000, C00000000] }\n",
 			want:     `projects.DEMO.slack_channels names "C00000000" twice`,
 		},
 		{
 			name: "in two projects",
-			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [C00000000] }\n" +
-				"  OTHER: { repo: acme/other, slack_channels: [C00000001, C00000000] }\n",
+			projects: "projects:\n  DEMO: { slack_channels: [C00000000] }\n" +
+				"  OTHER: { slack_channels: [C00000001, C00000000] }\n",
 			want: `projects.OTHER.slack_channels names "C00000000", which projects.DEMO.slack_channels already names: a channel's mentions reach one project's controller`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			body := strings.Replace(minimalFile, "projects:\n  DEMO: { repo: acme/widgets }\n", tc.projects, 1)
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", tc.projects, 1)
 			if body == minimalFile {
 				t.Fatal("the fixture's projects block was not replaced")
 			}
@@ -480,23 +479,6 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: "projects must configure OTHER, the daemon's own project",
 		},
 		{
-			name: "a repo whose owner is a dot segment",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: ./widgets }", 1),
-			want: `projects.DEMO.repo "./widgets" has a "." segment, which names no GitHub owner or repository`,
-		},
-		{
-			// The repository's names are joined into paths and GitHub API routes; a name holding
-			// whitespace is no GitHub owner's or repository's (ghrepo.Parse).
-			name: "a repo that holds whitespace",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/wid gets }", 1),
-			want: `projects.DEMO.repo "acme/wid gets" holds whitespace, which no GitHub owner or repository name does`,
-		},
-		{
-			name: "a repo whose name is a dot-dot segment",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/.. }", 1),
-			want: `projects.DEMO.repo "acme/.." has a ".." segment, which names no GitHub owner or repository`,
-		},
-		{
 			name: "dispatch_token_file is blank",
 			body: minimalFile + "dispatch_token_file: \"\"\n",
 			want: "dispatch_token_file must not be empty",
@@ -513,22 +495,24 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		},
 		{
 			name: "projects key is invalid",
-			body: minimalFile + "projects: {demo: {repo: acme/widgets}}\n",
+			body: minimalFile + "projects: {demo: {}}\n",
 			want: `projects key "demo" must match ^[A-Z][A-Z0-9]*$`,
 		},
 		{
-			name: "projects entry has no repo",
-			body: minimalFile + "projects: {DEMO: {}}\n",
-			want: `projects.DEMO.repo must be "owner/name" (got "undefined")`,
+			// The project's repositories are Dispatch's mapping, so a file that still names one is
+			// refused, naming where they are set.
+			name: "a project names its repository",
+			body: strings.Replace(minimalFile, "DEMO: {}", "DEMO: { repo: acme/widgets }", 1),
+			want: `Unknown key "projects.DEMO.repo": the project's repositories are Dispatch's mapping (Settings → Repositories → Projects)`,
 		},
 		{
 			name: "review_workflows is no longer a key",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/review.yml] }", 1),
+			body: strings.Replace(minimalFile, "DEMO: {}", "DEMO: { review_workflows: [.github/workflows/review.yml] }", 1),
 			want: `Unknown key "projects.DEMO.review_workflows"`,
 		},
 		{
 			name: "review_workflows is no longer a key, even empty",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [] }", 1),
+			body: strings.Replace(minimalFile, "DEMO: {}", "DEMO: { review_workflows: [] }", 1),
 			want: `Unknown key "projects.DEMO.review_workflows"`,
 		},
 		{
@@ -553,7 +537,7 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		},
 		{
 			name: "github_apps is required for workflow configuration",
-			body: "project: demo\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\nprojects: {DEMO: {repo: acme/widgets}}\n",
+			body: "project: demo\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\nprojects: {DEMO: {}}\n",
 			want: "github_apps is required",
 		},
 		{
@@ -1190,7 +1174,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 
 		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: modelled},
 		{key: "dispatch_token_file", line: "dispatch_token_file: /var/run/legion/DISPATCH_TOKEN", class: modelled},
-		{key: "projects", line: "projects: {DEMO: {repo: acme/widgets}}", class: modelled},
+		{key: "projects", line: "projects: {DEMO: {}}", class: modelled},
 		{key: "gates", line: "gates: {design: off}", class: modelled},
 		{key: "github_apps", line: "github_apps: {implement: {app_id: \"1\", private_key: key}, review: {app_id: \"2\", private_key: key}}", class: modelled},
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},

@@ -1138,7 +1138,7 @@ nats_urls:
 dispatch_url: $dispatch_base
 dispatch_token_file: $work/dispatch-token
 projects:
-  $project: { repo: $repo }
+  $project: {}
 gates:
   design: "${design_gate:-off}"
 admission_cap: $admission_cap
@@ -2991,6 +2991,16 @@ for key in $stale; do
   note "moved stale todo issue $key to backlog"
 done
 [ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "$project still holds todo issues"
+# The project's repository is Dispatch's mapping, not a key of legion.yaml: the daemon boots only
+# on a project with a repository mapped, and records an issue on the repository Dispatch resolves
+# for it, so $repo is mapped to $project as its default before the daemon starts. A mapping already
+# so is left as it is; the write names $project alone.
+if ! dispatch_get settings/repo-projects | jq -e --arg repo "$repo" --arg project "$project" \
+  'any(.[]; .repo == $repo and .project == $project and .default == true)' >/dev/null; then
+  dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$project" '{project:$project,default:true}')" >/dev/null ||
+    fail "map $repo to $project as its default repository in production Dispatch"
+  note "mapped $repo to $project as its default repository"
+fi
 # The configured stream carries both halves of the workflow's intake. Each `last` call reads one
 # ordered-consumer message under its 20-second budget instead of draining every matching subject.
 # Dispatch publishes every project's issue events under subjects that name the issue, so any
@@ -4133,8 +4143,8 @@ code_message=$(timeout 60 gh api "repos/$repo/commits/$code_head" --jq .commit.m
 code_checks() { [ "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" -gt 0 ] 2>/dev/null; }
 on_tree "$tree1" until_true 300 "a check run on the implementer's code head $code_head" code_checks
 printf 'planner handoff %s: 0 check runs, two empty lines then skip-checks: true as the last line\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
-# Negative control: the same gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
-if pod_viewer "$gh_pod" implementer /nonexistent >/dev/null 2>"$evidence/github-credential-negative.txt"; then
+# Negative control: the real gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
+if pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= /usr/local/bin/gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login" >/dev/null 2>"$evidence/github-credential-negative.txt"; then
   fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
 fi
 grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_CONFIG_DIR=/nonexistent failed without gh's own not-logged-in message: $(cat "$evidence/github-credential-negative.txt")"
@@ -5791,8 +5801,17 @@ note "the close suspended the architect, planner, implementer, tester, reviewer 
 # in the phase recorded here, which carried-child requires it keep in its own tree. Its Dispatch
 # status is recorded too: the daemon writes none before testing (workflow's table), so a child left
 # in planning or implementing still shows the todo it was released in, and carried-child's path
-# depends on it.
-until_true 300 "the close to suspend $child3's planner" issue_worker_state "$child3" planner suspended
+# depends on it. The daemon names this suspension no deadline either, so the wait is the proof's
+# turn budget (phase_seconds, lib/workflow.sh), and a planner still unsuspended when it runs out is
+# named with whether its suspension is held for a turn, as tree 1's roles are.
+child3_planner_unsuspended() {
+  note "$child3's planner not yet suspended: $(claims_cli list --json | jq -c --arg i "$child3" '[.claims[] | select(.issue == $i and .role == "planner")
+    | {state, suspensionHeld: (.suspensionHeld // false), pending: (.pending.phase // null)}]')"
+  limit_pending_blocked
+}
+timeout_hook=child3_planner_unsuspended
+until_true "$phase_seconds" "the close to suspend $child3's planner" issue_worker_state "$child3" planner suspended
+timeout_hook=limit_pending_blocked
 child3_phase=$(daemon_state | jq -er --arg issue "$child3" '.issues[$issue].phase') || fail "the daemon's state holds no phase for $child3"
 case $child3_phase in admitted | done | held) fail "$child3 is in $child3_phase when tree 1 closes, not mid-run in a phase a role works" ;; esac
 child3_status=$(dispatch_get "issues/$child3" | jq -er .status) || fail "Dispatch could not be read for $child3"
