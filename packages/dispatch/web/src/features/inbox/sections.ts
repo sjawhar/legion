@@ -1,9 +1,8 @@
 import type { AskTurn, InboxRow } from "../../api/types";
 import { isSnoozed } from "./snooze";
 
-/** Where a row sits: whose turn it is, the Later band the reader deferred it into, or - in the
- *  Mine view - the Unassigned band. */
-export type InboxSection = AskTurn | "later" | "unassigned";
+/** Where a row sits: whose turn it is, or the Later band the reader deferred it into. */
+export type InboxSection = AskTurn | "later";
 
 /**
  * The Inbox's bands, top to bottom. This list and `sectionOf` below are the whole grouping
@@ -11,13 +10,14 @@ export type InboxSection = AskTurn | "later" | "unassigned";
  * ordered is one `order by` in `listInbox` (`packages/envoy/internal/dispatch/api/inbox.go`):
  * the owning issue's priority, then whose turn it is, then the most recent activity.
  */
-export const INBOX_SECTIONS = ["human", "agent", "unassigned", "later"] as const;
+export const INBOX_SECTIONS = ["human", "agent", "later"] as const;
 
+/** The bands as the reader's own list names them; `sectionTitles` below picks the record a
+ *  filtered list needs. */
 export const SECTION_TITLES: Record<InboxSection, string> = {
   agent: "Waiting on agents",
   human: "Waiting on you",
   later: "Later",
-  unassigned: "Unassigned",
 };
 
 /** Bands the Inbox folds away until the reader opens them: rows they have already dealt with
@@ -30,9 +30,40 @@ export function isMine(row: InboxRow, viewer: string): boolean {
 }
 
 /** Rows nobody holds: asks on unassigned issues, and every document ask (a document has no
- *  assignee). */
+ *  assignee). Also what decides whether a row offers "Assign to me". */
 export function isUnassigned(row: InboxRow): boolean {
   return (row.issue?.assignee ?? null) === null;
+}
+
+/** The `?assignee=` value standing for rows nobody holds, shared by the filter control, the
+ *  route and `inAssigneeFilter` so the three cannot drift. */
+export const UNASSIGNED_FILTER_VALUE = "unassigned";
+
+/**
+ * Whether a row survives the assignee filter, the one place that decides what a filtered list
+ * holds. An empty selection is the cleared filter and keeps everything; otherwise a row is kept
+ * when its issue's assignee is one of the selected people, or when nobody holds it
+ * (`isUnassigned`, every document ask included) and `unassigned` is selected.
+ */
+export function inAssigneeFilter(row: InboxRow, selection: readonly string[]): boolean {
+  if (selection.length === 0) return true;
+  const assignee = row.issue?.assignee ?? null;
+  if (assignee === null) return selection.includes(UNASSIGNED_FILTER_VALUE);
+  return selection.includes(assignee);
+}
+
+/**
+ * The band titles for a selection. With the Unassigned band gone, another person's question now
+ * lands in a turn band for the first time, and "Waiting on you" would be false there: so only
+ * the reader's own list keeps the second person, and every other selection - cleared, anybody
+ * else, `unassigned` included - says "Waiting on a person".
+ */
+export function sectionTitles(
+  selection: readonly string[],
+  viewer: string
+): Record<InboxSection, string> {
+  if (selection.length === 1 && selection[0] === viewer) return SECTION_TITLES;
+  return { ...SECTION_TITLES, human: "Waiting on a person" };
 }
 
 /** A turn band, as opposed to one the reader's own act (an assignment, a snooze) put the row in. */
@@ -44,14 +75,10 @@ export function isTurnSection(section: InboxSection): section is AskTurn {
  * Which band a row belongs to. A snooze the reader set wins over everything: the whole point of
  * deferring an ask is that the agent answering it does not pull it back onto the list, so a row
  * inside its snooze window is in Later whatever its turn, its assignee, or how recently anyone
- * replied. A row the inbox lists without a turn belongs to no section, exactly as before the
- * views.
+ * replied. Everything else sits under whose turn it is, whoever the filter listed it for; a row
+ * the inbox lists without a turn belongs to no section.
  */
-export function sectionOf(
-  row: InboxRow,
-  { now, view, viewer }: { now: number; view: "everyone" | "mine"; viewer: string }
-): InboxSection | undefined {
+export function sectionOf(row: InboxRow, { now }: { now: number }): InboxSection | undefined {
   if (isSnoozed(row, now)) return "later";
-  if (view === "mine" && !isMine(row, viewer)) return "unassigned";
   return row.waiting_on;
 }
