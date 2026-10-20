@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-45",
+  "completed": "2026-10-20T05:40:46Z",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract this change runs under — the shared workspace, the jj commit/push procedure, the handoff-only `skip-checks: true` trailer, and the rule that no finding is deferred.",
+      "legion-worker/references/pr-body.md: the PR body template, the definition of a proof (acceptance criteria 1-4 each need one on a production-like surface, not a unit test), and the simplify pass this diff ends with.",
+      "dispatch-first and dispatch: the change edits `skills/dispatch/SKILL.md` itself, and every escalation or note goes to Dispatch under those rules.",
+      "ce-simplify-code: named by pr-body.md's simplify pass; this diff touches ~40 files and consolidates four copies of one number, exactly the settled-code case it covers."
+    ],
+    "test": [
+      "legion-worker: the tester's charter — drive the changed surface for real, judge whether the implementer's tests would catch what it breaks, and read CI for everything static.",
+      "legion-worker/references/pr-body.md: what the tester verifies in the implementer's `proof` array and what its own `E2E (tester)` line must record; the plan names the exact commands to re-run per criterion.",
+      "dispatch: the tester posts its findings under those rules; `bun run dispatch:local` plus the real `dispatch` CLI is acceptance criterion 2's surface."
+    ],
+    "review": [
+      "legion-worker: the review round's order (read the code commit's checks, then the handoff push, then the review of the head that push made, then completion).",
+      "legion-worker/references/review-threads.md: one disposition reply per thread, resolved one by one, never in bulk.",
+      "legion-worker/references/merge-gate.md: approval of the head, retro, READY, and the production check — the merger's packet limit is itself one of the numbers this change moves (1,956 to 31,956).",
+      "dispatch: acceptance criterion 6 is reviewer judgement for seven markdown lines, which the plan tabulates for exactly that read."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "1. The spec's central mechanism has no stated design: `gen-go.ts:46` has one output, inside `envoy/internal/`, which the daemon module may not import (Go's internal rule; `packages/daemon/internal/agentsecrets/contract_test.go:9-12` states the daemon's production build imports nothing from envoy). The spec does not say where the daemon's definition lands.",
+        "answer": "Decision D1: a second gen-go output, `packages/daemon/internal/dispatch/generated.go` (`package dispatch`, `const MessageBodyLimit`), rather than a public envoy package the daemon's production build would import. Verified by grep that no non-test daemon file imports envoy today. T1 turns the single `out` and single `--check` into a list, adds one `gen-go.test.ts` case per output path, and adds the new path to both CI paths-filters (`contracts` and `envoy`) so the file cannot be hand-edited unchecked."
+      },
+      {
+        "finding": "2. AC2 and AC3 have no automated surface in the repository; AC4's number is checked only in its derived form.",
+        "answer": "AC2's surface is the real CLI against a locally run Dispatch (`bun run dispatch:local` plus `bun packages/envoy-client/bin/dispatch.ts`), recorded as the implementer's proof; its pre-send refusal stays unit-pinned. AC3 gets a new, CI-run real-NATS test in `packages/envoy/internal/dispatch/outbox/` on the harness already there (`core_denied_test.go:29-60`), asserting a full-cap comment body arrives byte-identical. AC4 adds no literal pin (D4): `outbox_scratch_dispatch_test.go:73-131` already proves body+marker equals Dispatch's cap against a real Dispatch server, which is stronger than `== 31956`."
+      },
+      {
+        "finding": "3. The spec states the deploy ordering as a fact and assigns it to no one; and the gap analyst could not settle whether a stuck message row blocks the issue's whole board lane.",
+        "answer": "Settled by reading: `outboxInOrder` (`record/store.go:679-682`) orders only `dispatch_status` rows and the supervise/issue_branch pair, and `outboxLaneFree` (`:684-694`) ends 'Board rows are not under it: their lane runs them as they come due.' So an over-long post is one row retrying forever at a 64 s backoff cap (`daemon/outbox.go:379-402`), blocking nothing. T10 carries the ordering instruction in the `packages/envoy/CHANGELOG.md` entry and the PR body's deploy note, and names the symmetric hazard the spec omits: a new CLI or worker image against an old Dispatch gets 400 CAP_EXCEEDED."
+      },
+      {
+        "finding": "4. AC6 ('no text a person or an agent reads still gives 2,000') is not machine-checkable, and a blind grep hits timing budgets, tree depths, SVG namespaces and UUIDs.",
+        "answer": "Answered mechanically where the language allows and declared reviewer judgement where it does not. T4 interpolates `DISPATCH_BODY_MAX` into every tool description that spells the number (the `ASK_QUESTION_MAX` precedent) and T5 derives every pinned refusal from it, so none can drift again; T8 tabulates the seven hand-written markdown lines for a reviewer to check. T9 lists the false positives the sweep must not touch. No new grep-with-an-allowlist guard is added — scope the spec did not ask for, brittle against every future 2000; recorded with that reason in the plan."
+      },
+      {
+        "finding": "5. The spec names the 256 KiB per-record margin bound but not the 1 MiB TOTAL margin bound, which 16x actually threatens, and counts bodies as if a character were a byte.",
+        "answer": "Verified: `docs/growth.go:144-150`, `maxMarginBytes = pmdoc.MaxDocumentBytes = 1 << 20` (`pmdoc/elements.go:292`), refused 413. ~32 full ASCII comments (~10 CJK, since the margin weighs bytes and the cap counts UTF-16 units) fill a document's margin. Recorded as risk 3 and escalated to the architect as a product question; no code change planned, since the spec's scope leaves the margin alone."
+      },
+      {
+        "finding": "6. The spec's 'two browser tests ... sized to today's limit' is wrong — one is; the other 2000s in those files are millisecond budgets whose sweep would disable the backtracking guard.",
+        "answer": "Recorded as the plan's one spec departure: `Unfurl.test.tsx:334-342` is sized to the cap and is resized (and retitled); `composer-references.test.ts:17-40` runs at 1 MiB and 64 KiB and is left alone. Decision D5 makes the millisecond budgets (`Unfurl.test.tsx:342,383`, `composer-references.test.ts:38`) an explicit non-goal. T7.1 keeps the 2,000 ms budget and makes the measurement the deliverable: if the resized bodies exceed it, `isBareReferenceBody` is fixed here, not the budget raised."
+      },
+      {
+        "finding": "7. `search_pathological_test.go:34-37` justifies having no comment ladder on the ground that a comment is capped at 2,000 — the premise 16x removes — and is in none of the spec's sweep lists.",
+        "answer": "T7.2 makes it a measurement, not a wording edit: write a full-cap `a_` comment through the API harness, record the elapsed time, update the comment with the new number, and fix an unbounded write here. Context cited: `0056_search_text.up.sql:5-9` measured to_tsvector at 5 s for 25 KB of `a_` before `search_text` bounded it, and a full-cap comment is 32 KB of that shape. The per-row search vector itself is safe (`0087_search_vector_bound.up.sql:65-80` halves until it fits)."
+      },
+      {
+        "finding": "8. A comment's embedding cost rises up to 16x against a shared token-rate budget the spec does not mention.",
+        "answer": "Verified: `embed/embed.go:40-44` truncates at 32,000 runes, so a full-cap comment is now embedded whole, about 8,000 tokens by `EstimateTokens` against `tokenRateCeiling = 200_000` (`embedqueue/queue.go:69`). Recorded as risk 4 and escalated to the architect; spend is a product choice and no code change is planned."
+      },
+      {
+        "finding": "9. AC7 says 'go test ./... in both Go modules'; there are three Go modules and CI runs neither of the two with that command.",
+        "answer": "T11 lists the commands CI actually runs for each module and the acceptance table uses them; the plan states that `packages/envoy/infra` is a third module untouched by this change and that a bare `go test ./...` in `packages/envoy` additionally needs Docker. Recorded under 'What is not machine-checkable'."
+      },
+      {
+        "finding": "10. A 32,000-character body delivered as a session turn is cut at 16,000 by `AGENT_STREAM_LIMITS.partChars`, a cap the spec never mentions.",
+        "answer": "Verified and scoped: `partChars` is applied in `packages/pi-envoy/src/agent-stream.ts:189-201`, the stream the session publishes for the dashboard's Agent view — not the delivery envelope, so AC3 ('reaches a subscribed agent session whole') is unaffected. Recorded as risk 5 and escalated to the architect; no code change planned."
+      },
+      {
+        "finding": "11. AC4 covers the daemon's refusals but not the two behaviours that change 16x: the READY packet's 'link rather than quote' advice and the withdrawal's cut-to-fit.",
+        "answer": "The numbers follow the constant automatically (`handoff.go:109-112`, `ready.go:136-140`, `merger.md:7` pinned by `prompts_test.go:52-53`). Whether the advice still stands at 31,956 is a judgement about what a human should receive: recorded as risk 6 and escalated to the architect. The cut-to-fit mechanism stays; it will simply rarely fire."
+      },
+      {
+        "finding": "12. Whether `DISPATCH_BODY_MAX` moves to `dispatch-api.ts` is a convention question the spec does not settle, and its doc comment at `dispatch-tools.ts:204` is falsified by the change.",
+        "answer": "Decision D2: it stays in `dispatch-tools.ts` — `gen-go.ts:18-24` already generates from that file, and a move would churn the published `@legion/contracts/dispatch-tools` entry (`package.json:38`, `CHANGELOG.md:78`) for no gain. T1 rewrites the `:204` doc comment: it is what the server enforces, generated into Go as `contracts.DispatchBodyMax` and `dispatch.MessageBodyLimit`."
+      },
+      {
+        "finding": "13. The spec rules on the refusal's separator but not on the prose's, and the two would land inconsistently.",
+        "answer": "Decision D3, stated per surface: refusals keep `%d`/`${max}` and read `32000` (no code change — `server.go:721-726` and `tool-schema.ts:35-38` already print it bare); tool descriptions interpolate the constant, so they read `32000` and match the refusal an agent sees; hand-written markdown reads `32,000`, matching today's `2,000`. T5 lists every pinned wording that must be updated."
+      },
+      {
+        "finding": "14. AC5's second half names a behaviour but no file, so no regression test can be pointed at it.",
+        "answer": "Located: `packages/envoy/internal/dispatch/api/reviews.go:607-610` computes `maxAskQuestion16 - len16(ApprovalQuestion(name, maxApprovalVersion, \"\")) - 1`. AC5 is unchanged by construction (`asks.go:22` is untouched) and already covered by `reviews_test.go:314-391` and `packages/dispatch/e2e/approval.e2e.ts:401-413`; the acceptance table names both and T6.3 adds no new test."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The sweep list names 'the two browser tests that bound how long a body takes to render, whose text is sized to today's limit and which are the only evidence that a long body does not hang a reader's tab'.",
+      "plan": "One test is resized, not two. `packages/dispatch/web/src/features/refs/Unfurl.test.tsx:334-342` is resized from 1998 to the new cap and retitled; `packages/dispatch/web/src/features/refs/composer-references.test.ts:17-40` is left as it is, and the plan makes the 2000s at `Unfurl.test.tsx:342,383` and `composer-references.test.ts:38` an explicit non-goal.",
+      "evidence": "Only `Unfurl.test.tsx:337` sizes its body to the cap (`scheme.repeat(Math.floor(1998 / scheme.length))`). `composer-references.test.ts:22-34` runs bodies of `1 << 20` and `1 << 16` and its own comment at `:17` says 'A body near the server's 1 MiB request cap' — it was sized to the request cap, never to the body cap, so the new cap does not reach it. The three `2000`s the spec's wording would sweep are `performance.now()` budgets in milliseconds (`Unfurl.test.tsx:342,383`, `composer-references.test.ts:38`); setting them to 32000 would disable the catastrophic-backtracking guard those tests exist for.",
+      "outcome": {
+        "kind": "changed",
+        "summary": [
+          "'the two browser tests that bound how long a body takes to render, whose text is sized to today's limit' becomes one such test; the second bounds a body at the 1 MiB request cap and is unaffected by this change."
+        ]
+      }
+    }
+  ]
+}
