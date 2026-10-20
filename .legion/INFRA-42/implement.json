@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-42",
-  "completed": "2026-10-20T13:05:00Z",
+  "completed": "2026-10-20T14:45:00Z",
   "proof": [
     {
       "criterion": "Opening the Inbox lists only questions on issues assigned to the reader, every visit, with no switch and no Unassigned band on the page.",
@@ -53,12 +53,12 @@
       "negativeControl": "The seed for that test now also opens a question on Bob's issue in the same project (and its status band count moved from `In progress (1)` to `In progress (2)`, asserted in the same test); the pill stayed at 1, so another person's question in the project does not reach it."
     },
     {
-      "criterion": "An Agents card's second number counts what waits on that session in its own right, and each pill's number equals the number of rows its link opens.",
-      "surface": "The Dispatch dashboard's Agents page and the Inbox the pills link to, same Playwright harness and browsers.",
-      "command": "Run 39414768631, job `dispatch`; case `e2e/agents.e2e.ts:72` \"Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, …\".",
-      "observed": "The Planner's card reads `Needs you 1` (Alice's own question waiting on a person) and `Waiting on agent 2` (its own-turn questions on Alice's and Bob's issues); `Needs you` opens `/?agent=planner-session&section=needs-you` with exactly one row, and `Waiting on agent` opens `/?agent=planner-session&assignee=everyone` with exactly the two rows it counted, under the agent chip.",
-      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
-      "negativeControl": "Bob's question waiting on a person is in neither number, and the unit suite's `AgentsPage.test.tsx` case \"Agents counts a card's two numbers in their own right\" pins a snoozed human-turn question in neither - both of which the replaced `open_asks - needsYou` subtraction counted as the agent's."
+      "criterion": "An Agents card's second number counts what waits on that session in its own right (the first number's parity with the list its link opens is the `Needs you` pill's, which carries `?section=needs-you`).",
+      "surface": "The Dispatch dashboard itself, driven in this pod on the tester's rig (`.legion/INFRA-42/test.json`, `environment`): Debian's postgresql-17 with pgvector unpacked rootless under /legion/pgrig, the real Go server through `packages/dispatch/e2e/run-server.sh` on port 8777, the fake Envoy session registry, the production SPA from `bun run build:web`, and a real Chromium. Corroborating lane: CI run 39414768631's `dispatch` job, case `e2e/agents.e2e.ts:72`.",
+      "command": "bash /legion/pgrig/reseed.sh (the rig's scenario: the Planner session owns six open questions across Alice's two issues, Bob's one and an unowned one, plus a project document), then as alice in Chromium read /agents and followed each pill of the Planner's card, counting `[data-inbox-row]` and each row's `data-inbox-section`.",
+      "observed": "The Planner's card reads `Needs you 1` and `Waiting on agent 2`. `Needs you 1` links to `/?agent=planner-session&section=needs-you` and opens exactly 1 row, band `human` - the parity plan decision 8 asks of that pill. `Waiting on agent 2` links to `/?agent=planner-session&assignee=everyone` and opens that session's whole open list, 6 rows: 4 `human` and the 2 `agent` rows the pill counted. The number is counted in its own right - the agent-turn rows alone, snoozes ignored - and the list it opens is a superset of it, since `InboxRoute.section` has only the one value (`needs-you`) and no `section` narrows to the agents band. Run against the SPA built at 981f0966625bd5ad5dafe04a2779318bb727dfa7; this round changes only comments and this handoff, so the behaviour at the round's head is the same and CI re-runs the suite there.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "`/?agent=planner-session` - the same agent link left at the reader's default filter - opened 2 rows, 1 `human` and 1 `agent`: one of the two questions the pill counted is hidden, because it sits on an issue the reader does not hold. That is why the pill clears the filter, and it is the case that would show an empty list for a session whose questions sit on nobody's or somebody else's issues. A snoozed human-turn question and another person's question are in neither number (unit case `AgentsPage.test.tsx` \"Agents counts a card's two numbers in their own right\"), both of which the replaced `open_asks - needsYou` subtraction charged to the agent."
     },
     {
       "criterion": "\"Assign to me\" takes a question wherever the list shows it, and a question on a document never offers it.",
