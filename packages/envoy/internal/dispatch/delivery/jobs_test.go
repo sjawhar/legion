@@ -173,7 +173,7 @@ func TestAJobOfATrackedDeployRunRecordsItsJobsWhileItRuns(t *testing.T) {
 	fake.mu.Unlock()
 	clock := newFakeJobClock()
 	natsClient := intakeTestClient(t)
-	jobs := newJobIntake(natsClient, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(natsClient, pool, deliveryTestLeases(t, pool), fake.newTestClient(), clock)
 	runCtx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() { defer close(done); jobs.Run(runCtx) }()
@@ -236,7 +236,7 @@ func TestAJobIntakeRecordsTheConfiguredProductionApplyStep(t *testing.T) {
 	}
 	fake.mu.Unlock()
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	jobs.receive(ctx, jobPayload("acme/widgets", 500))
 	clock.Advance(jobQuiet)
 	stored, err := ListRunJobs(ctx, pool, "acme/widgets", 500)
@@ -262,7 +262,7 @@ func TestAJobOfAnUntrackedRunCostsNoGitHubCall(t *testing.T) {
 	seedDeliverySettings(t, ctx, pool)
 	fake := newJobsFake(t)
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	jobs.receive(ctx, jobPayload("acme/widgets", 999))
 	clock.Advance(jobMaxWait)
 	if armed, calls, mints := clock.armed(), fake.calls.Load(), fake.tokenMints.Load(); armed != 0 || calls != 0 || mints != 0 {
@@ -278,7 +278,7 @@ func TestAJobOfAnotherRepositoryIsIgnored(t *testing.T) {
 	seedRunningDeployRun(t, ctx, pool)
 	fake := newJobsFake(t)
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	jobs.receive(ctx, jobPayload("acme/other", 500))
 	clock.Advance(jobMaxWait)
 	if armed, calls, mints := clock.armed(), fake.calls.Load(), fake.tokenMints.Load(); armed != 0 || calls != 0 || mints != 0 {
@@ -294,7 +294,7 @@ func TestABurstOfJobsOfOneRunReadsItsJobsOnce(t *testing.T) {
 	seedRunningDeployRun(t, ctx, pool)
 	fake := newJobsFake(t)
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	for range 30 {
 		jobs.receive(ctx, jobPayload("acme/widgets", 500))
 		clock.Advance(time.Second / 30)
@@ -313,7 +313,7 @@ func TestABurstThatKeepsComingStillReadsWithinTenSeconds(t *testing.T) {
 	seedRunningDeployRun(t, ctx, pool)
 	fake := newJobsFake(t)
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	for second := range 15 {
 		jobs.receive(ctx, jobPayload("acme/widgets", 500))
 		clock.Advance(time.Second)
@@ -354,7 +354,7 @@ func TestAStaleJobsReadStaysForTheBackfill(t *testing.T) {
 	}
 	fake.mu.Unlock()
 
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), newFakeJobClock())
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), newFakeJobClock())
 	jobs.read(ctx, runKey{repo: "acme/widgets", runID: 500}, Production{})
 	if err := <-completed; err != nil {
 		t.Fatalf("store the run completion: %v", err)
@@ -404,7 +404,7 @@ func TestAReadThatLandsAfterTheRunEndedUndoesNothing(t *testing.T) {
 	}
 	fake.mu.Unlock()
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	jobs.receive(ctx, jobPayload("acme/widgets", 500))
 	read := make(chan struct{})
 	go func() { defer close(read); clock.Advance(jobQuiet) }()
@@ -460,7 +460,7 @@ func TestAJobsReadThatFailsIsLoggedAndTheRunIsReadAtItsEnd(t *testing.T) {
 	}
 	fake.mu.Unlock()
 	clock := newFakeJobClock()
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	jobs.receive(ctx, jobPayload("acme/widgets", 500))
 	clock.Advance(jobQuiet)
 
@@ -557,7 +557,7 @@ func TestTheJobIntakeReadsAtMostABoundedNumberOfRunsAtOnce(t *testing.T) {
 	t.Cleanup(releaseOnce)
 
 	clock := &concurrentJobClock{}
-	jobs := newJobIntake(nil, pool, github, clock)
+	jobs := newJobIntake(nil, pool, nil, github, clock)
 	for id := int64(600); id < 600+runs; id++ {
 		jobs.schedule(runKey{repo: "acme/widgets", runID: id}, Production{})
 	}
@@ -627,7 +627,7 @@ func TestAQueuedJobReadsDeadlineStartsOnceItHoldsItsSlot(t *testing.T) {
 	})
 
 	clock := &concurrentJobClock{}
-	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs := newJobIntake(nil, pool, nil, fake.newTestClient(), clock)
 	for id := int64(700); id < 700+runs; id++ {
 		jobs.schedule(runKey{repo: "acme/widgets", runID: id}, Production{})
 	}

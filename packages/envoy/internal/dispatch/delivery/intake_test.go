@@ -21,6 +21,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/testnats"
@@ -58,6 +59,28 @@ func deliveryTestPool(t *testing.T) (*store.Pool, context.Context) {
 		}
 	}
 	return pool, ctx
+}
+
+// deliveryTestLeases is the lease pool an intake reconciles its durable under (duty.Exclusive on
+// deliveryConsumerLease), taken from the test's own pool. Each lease is held on a connection of
+// its own, so a test can hold the lease from one caller while an intake tries for it from
+// another.
+func deliveryTestLeases(t *testing.T, pool *store.Pool) duty.Leases {
+	t.Helper()
+	leases, err := pool.Leases()
+	if err != nil {
+		t.Fatalf("open the leases pool: %v", err)
+	}
+	return leases
+}
+
+// forgetStandbyLogs clears the standby line's per-consumer throttle (standbyLogEvery), so a test
+// reading that line sees its own run's rather than being throttled by an earlier test's.
+func forgetStandbyLogs(t *testing.T) {
+	t.Helper()
+	standbyLog.mu.Lock()
+	defer standbyLog.mu.Unlock()
+	standbyLog.reported = map[string]time.Time{}
 }
 
 // seedDeliverySettings writes a delivery_settings row with acme/widgets-shaped placeholders.

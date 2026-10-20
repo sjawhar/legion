@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -44,11 +46,15 @@ type Intake struct {
 	nats   *bus.Client
 	pool   *store.Pool
 	github *githubapp.Client
+	// leases is the pool bind takes the delivery-consumers lease on, so that one process at a
+	// time reconciles this durable's configuration (bindDurableConsumer).
+	leases duty.Leases
 }
 
-// newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone.
-func newIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *Intake {
-	return &Intake{nats: natsClient, pool: pool, github: github}
+// newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone,
+// reconciling its durable under a lease it takes on leases.
+func newIntake(natsClient *bus.Client, pool *store.Pool, leases duty.Leases, github *githubapp.Client) *Intake {
+	return &Intake{nats: natsClient, pool: pool, github: github, leases: leases}
 }
 
 // Run binds the durable consumer and processes GitHub events until ctx is cancelled. Idle until a
@@ -59,6 +65,13 @@ func newIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Clien
 // published to the running handler, so a settings change -- a different deploy repository or
 // workflow path -- takes effect within one poll interval with no restart. route does all the
 // filtering, from those settings.
+//
+// Two tickers run, because an intake has two reasons to wake: the settings poll above, which a
+// bound intake needs as much as an unbound one, and the durable itself on durableBindInterval,
+// while nothing is bound. The durable admits one subscriber, so a second envoy-dispatch process
+// stands by on that second ticker -- for the life of the process, with no deadline -- and takes
+// the durable over within seconds of the process holding it going away, while reading settings
+// changes all along. The bind poll stops once this process is bound.
 //
 // The PR-checks workflow path is live-reachable only for a fork-originated pull request: Envoy's
 // own webhook normalizer (internal/contracts/normalize.go, untouched by this package) drops a
@@ -79,6 +92,10 @@ func (in *Intake) Run(ctx context.Context) {
 			_ = sub.Unsubscribe()
 		}
 	}()
+	reads := time.NewTicker(settingsPollInterval)
+	defer reads.Stop()
+	binds := time.NewTicker(durableBindInterval)
+	defer binds.Stop()
 
 	refresh := func() {
 		settings, err := GetSettings(ctx, in.pool)
@@ -94,31 +111,40 @@ func (in *Intake) Run(ctx context.Context) {
 			return
 		}
 		current.Store(&settings)
-		if sub != nil {
+	}
+	// bind tries the durable, until it holds it. It runs only once a settings row has been read:
+	// the handler routes by those settings, and an intake with none has nothing to do with a
+	// message.
+	bind := func() {
+		if sub != nil || current.Load() == nil {
 			return
 		}
-		newSub, ok := in.bind(func(ctx context.Context, payload string) (bool, error) {
+		bound, outcome := in.bind(ctx, func(ctx context.Context, payload string) (bool, error) {
 			settings := current.Load()
 			if settings == nil {
 				return false, nil
 			}
 			return in.route(ctx, *settings, payload)
 		})
-		if !ok {
+		if outcome != bindBound {
 			return
 		}
-		sub = newSub
+		sub = bound
+		// Nothing rebinds a bound intake, so the poll stops rather than waking every two seconds
+		// for the life of the process.
+		binds.Stop()
 	}
 
 	refresh()
-	ticker := time.NewTicker(settingsPollInterval)
-	defer ticker.Stop()
+	bind()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-reads.C:
 			refresh()
+		case <-binds.C:
+			bind()
 		}
 	}
 }
@@ -269,35 +295,158 @@ func deliveryConsumerConfig() natsgo.ConsumerConfig {
 	}
 }
 
+// durableBindInterval is how often an intake with nothing bound tries its durable again. It is
+// cmd/listener/durable.go's interval, for the reason measured there: a push durable's binding is
+// its holder's until that process stops, which took 35 to 71 s in production, so a two-second
+// poll lands the bind within one interval of the holder going away. The dead holder's work
+// resumes in seconds rather than up to a settings poll (settingsPollInterval, 30 s) later.
+//
+// Unlike the listener, which gives up at its durableBindDeadline and exits so the runtime starts
+// it again, Dispatch's standby polls for the life of the process: there is no deadline and no
+// exit. A durable another envoy-dispatch process holds is not a failed start but the ordinary
+// state of the second process, which has every other thing a Dispatch server does to get on with
+// meanwhile.
+const durableBindInterval = 2 * time.Second
+
+// standbyLogEvery bounds how often one consumer's standby is logged. The first refusal is logged
+// as it happens, so an operator sees at once which process stood by; the bind is then retried
+// every durableBindInterval, and an unthrottled line would be 1,800 an hour per durable, each
+// saying exactly what the first said.
+const standbyLogEvery = 30 * time.Second
+
+// deliveryConsumerLease names the lease the consumer reconciliation runs under: one process at a
+// time reads a durable's configuration and corrects it. Two processes -- two builds during a
+// rolling update, each re-running the reconciliation on every bind poll -- would otherwise
+// reconcile one durable against each other, the second undoing what the first had just done.
+const deliveryConsumerLease = "delivery-consumers"
+
+// bindOutcome is what one attempt at a durable did, which is three things rather than two: a
+// durable another process holds is neither a bind nor a fault.
+type bindOutcome int
+
+const (
+	// bindFailed is an attempt that got nowhere and says nothing about who holds the durable: the
+	// lookup, the create, the update or the subscribe failed, and the failure is logged at ERROR.
+	// The zero value, so an outcome nothing set is never read as a bind.
+	bindFailed bindOutcome = iota
+	// bindBound is this process holding the durable's push binding, with its subscription live.
+	bindBound
+	// bindStandby is NATS refusing the bind because another process is bound to the durable
+	// (consumerHeldElsewhere). It is not an error: the caller polls on, and binds once that
+	// process's interest goes away.
+	bindStandby
+)
+
+// consumerHeldElsewhere reports whether err is NATS refusing a bind because the push durable
+// already has a subscription on it ("consumer is already bound to a subscription"): the one
+// refusal that means another process holds the durable rather than something being wrong with it.
+// Matched on the message because the server sends it as a plain error with no code the client
+// surfaces -- cmd/listener/durable.go and cmd/listener/main.go rely on the same string.
+func consumerHeldElsewhere(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "consumer is already bound")
+}
+
+// standbyLog is where the standby line's throttle is kept, keyed by consumer: each durable has
+// one holder and one standby line to say so, whichever intake asked for it.
+var standbyLog = &standbyLogger{reported: map[string]time.Time{}}
+
+type standbyLogger struct {
+	mu       sync.Mutex
+	reported map[string]time.Time
+}
+
+// report logs that name is held elsewhere, unless it logged that within standbyLogEvery.
+func (l *standbyLogger) report(name string) {
+	l.mu.Lock()
+	last, seen := l.reported[name]
+	if seen && time.Since(last) < standbyLogEvery {
+		l.mu.Unlock()
+		return
+	}
+	l.reported[name] = time.Now()
+	l.mu.Unlock()
+	slog.Info("dispatch delivery: NATS consumer held by another process; standing by", "name", name)
+}
+
 // bind creates (on first run) or resumes (on a restart) the delivery durable and subscribes to it.
-func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*natsgo.Subscription, bool) {
-	return bindDurableConsumer(in.nats, deliveryConsumerConfig(), func(msg *natsgo.Msg) {
+func (in *Intake) bind(ctx context.Context, handle func(context.Context, string) (bool, error)) (*natsgo.Subscription, bindOutcome) {
+	return bindDurableConsumer(ctx, in.nats, in.leases, deliveryConsumerConfig(), func(msg *natsgo.Msg) {
 		in.deliver(msg, handle)
 	})
 }
 
 // bindDurableConsumer creates (on first run) or resumes (on a restart) a durable and subscribes to
-// it. It checks ConsumerInfo before AddConsumer, like cmd/listener/durable.go's
-// startListenerSubscription: a durable's DeliverSubject is a random inbox chosen once at creation,
-// and calling AddConsumer again with a freshly generated one on every restart would try to change a
-// durable's config out from under itself rather than resuming its cursor. Unlike the listener's own
-// consumer, this package skips the rolling-deploy bind-retry/backoff machinery
-// (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet. It subscribes through
-// client.Subscribe, which refuses a second durable on one bus.Client (bus.ErrSubscriptionHeld), so
-// each durable bound here takes a client of its own.
-func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bool) {
-	js := client.JS()
+// it, and reports which of three things happened: this process bound it, another process holds it
+// (bindStandby), or the attempt failed (bindFailed).
+//
+// The configuration reconciliation -- the ConsumerInfo lookup and every create, update and delete
+// it leads to -- runs under the deliveryConsumerLease (reconcileDurableConsumer), so one process
+// at a time reconciles a durable. A process that does not take the lease skips the reconciliation
+// altogether and goes straight to the subscribe: the process holding the lease is doing that
+// work, and this one's job is only to bind the durable or stand by for it.
+//
+// The durable admits one subscriber, which is how exactly one process does this durable's work
+// and how that process dying hands the work on: NATS refuses a second binder with "consumer is
+// already bound" and releases the binding once the holder's interest goes away, so a caller that
+// keeps polling (durableBindInterval) takes it over. It subscribes through client.Subscribe,
+// which refuses a second durable on one bus.Client (bus.ErrSubscriptionHeld), so each durable
+// bound here takes a client of its own.
+func bindDurableConsumer(ctx context.Context, client *bus.Client, leases duty.Leases, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bindOutcome) {
+	name, subject := wanted.Durable, wanted.FilterSubject
+	// True when the pass does not run -- the lease is held elsewhere, or could not be taken: a
+	// reconciliation that never ran failed nothing, and the subscribe below says what this
+	// process's own state is.
+	reconciled := true
+	duty.Exclusive(ctx, leases, deliveryConsumerLease, func(context.Context) {
+		reconciled = reconcileDurableConsumer(client.JS(), wanted)
+	})
+	if !reconciled {
+		return nil, bindFailed
+	}
+	// The subject must be the consumer's own filter subject: nats.go checks a bound
+	// subscription's subject against it, and refuses an empty one ("subject does not match
+	// consumer").
+	sub, err := client.Subscribe(subject, deliver, natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
+	switch {
+	case consumerHeldElsewhere(err):
+		standbyLog.report(name)
+		return nil, bindStandby
+	case err != nil:
+		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", subject, "error", err)
+		return nil, bindFailed
+	}
+	slog.Info("dispatch delivery: NATS consumer bound", "name", name, "subject", subject)
+	return sub, bindBound
+}
+
+// reconcileDurableConsumer brings a durable's configuration to wanted and reports whether it
+// could: it creates the durable when there is none, replaces one an earlier release left carrying
+// a filter-subject set, and corrects a filter or flow control in place. It checks ConsumerInfo
+// before AddConsumer, like cmd/listener/durable.go's startListenerSubscription: a durable's
+// DeliverSubject is a random inbox chosen once at creation, and calling AddConsumer again with a
+// freshly generated one on every restart would try to change a durable's config out from under
+// itself rather than resuming its cursor.
+//
+// Its caller runs it under the deliveryConsumerLease, so one process at a time is in here.
+func reconcileDurableConsumer(js natsgo.JetStreamContext, wanted natsgo.ConsumerConfig) bool {
 	name, subject := wanted.Durable, wanted.FilterSubject
 	info, err := js.ConsumerInfo(bus.Stream, name)
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
 		if _, err := js.AddConsumer(bus.Stream, &wanted); err != nil {
 			slog.Error("dispatch delivery: create NATS consumer", "name", name, "subject", subject, "error", err)
-			return nil, false
+			return false
 		}
 	case err != nil:
 		slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
-		return nil, false
+		return false
+	case len(info.Config.FilterSubjects) > 0 && info.PushBound:
+		// The replacement below deletes the durable, which would take the binding away from the
+		// process bound to it and leave that process delivering nothing, so it is never run
+		// against a bound consumer. Nothing is lost by waiting: this process is standing by for
+		// this durable anyway, since the subscribe below is refused while another process is
+		// bound, and the replacement happens on the poll after that process's interest goes away.
+		slog.Info("dispatch delivery: another process is bound to the NATS consumer; leaving its configuration alone", "name", name)
 	case len(info.Config.FilterSubjects) > 0:
 		// A durable an earlier release left carrying a filter-subject set, which withholds the
 		// workflow runs this slice exists to record (githubIntakeSubject). It is replaced rather
@@ -309,11 +458,11 @@ func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliv
 		recreate.OptStartSeq = info.AckFloor.Stream + 1
 		if err := js.DeleteConsumer(bus.Stream, name); err != nil {
 			slog.Error("dispatch delivery: replace multi-subject NATS consumer", "name", name, "error", err)
-			return nil, false
+			return false
 		}
 		if _, err := js.AddConsumer(bus.Stream, &recreate); err != nil {
 			slog.Error("dispatch delivery: create replacement NATS consumer", "name", name, "start_seq", recreate.OptStartSeq, "error", err)
-			return nil, false
+			return false
 		}
 		slog.Info("dispatch delivery: multi-subject NATS consumer replaced", "name", name, "subject", subject, "start_seq", recreate.OptStartSeq)
 	case info.Config.FilterSubject != wanted.FilterSubject ||
@@ -321,27 +470,20 @@ func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliv
 		info.Config.MaxAckPending != wanted.MaxAckPending:
 		// The durable carries an earlier release's filter or flow control: update it in place,
 		// preserving its delivery cursor, so this needs no operator to notice a log line and
-		// restart the server. Every field here is one NATS lets an existing consumer change;
-		// nothing touches its deliver policy or ack policy, which it does not.
+		// restart the server. Every field here is one NATS lets an existing consumer change, on a
+		// consumer another process is bound to as much as on a free one; nothing touches its
+		// deliver policy or ack policy, which it does not.
 		config := info.Config
 		config.FilterSubject = wanted.FilterSubject
 		config.AckWait = wanted.AckWait
 		config.MaxAckPending = wanted.MaxAckPending
 		if _, err := js.UpdateConsumer(bus.Stream, &config); err != nil {
 			slog.Error("dispatch delivery: update NATS consumer policy", "name", name, "configured_subject", info.Config.FilterSubject, "wanted_subject", wanted.FilterSubject, "error", err)
-			return nil, false
+			return false
 		}
 		slog.Info("dispatch delivery: NATS consumer policy updated", "name", name, "subject", wanted.FilterSubject, "ack_wait", wanted.AckWait, "max_ack_pending", wanted.MaxAckPending)
 	}
-	// The subject must be the consumer's own filter subject: nats.go checks a bound
-	// subscription's subject against it, and refuses an empty one ("subject does not match
-	// consumer").
-	sub, err := client.Subscribe(subject, deliver, natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
-	if err != nil {
-		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", subject, "error", err)
-		return nil, false
-	}
-	return sub, true
+	return true
 }
 
 // deliver unwraps one NATS message into its envelope payload, calls handle under
