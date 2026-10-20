@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-781",
+  "completed": "2026-10-20T23:10:28Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
+  "round": 1,
+  "reviewedHead": "4a1dec750a8aefe0335ababffc9271ea61ecee73",
+  "codeHead": "4a4b7b071def33a563fad673a5871918b83ffb6f",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "ci": "required set at main: lint, typecheck, test, pr-title (rulesets; branch protection names none); CI head 4a4b7b07 (newest pull_request run): Tests 39473631873, Worker Image 39473631185, Docs 39473631533, PR Title 39473631253 success; Legion Envoy and Contracts 39473631527 failure on the non-required dispatch job alone (envoy-go, envoy-go-race, contracts, pi-shared, pi-legion, claude-envoy success); compare 4a4b7b07...4a1dec75 touches .legion/ only",
+  "threads": "none on the pull request before this round (reviews: none, reviewThreads: none in gh api graphql)",
+  "census": "the body's ## Contract change census (added by the implementer during this round, a body edit) re-run at 4a4b7b07: production_check|ProductionCheck 42 files (the body says 43), every unmigrated hit listed (0004 immutable, three #2018 fixture hits and README:1730 named fast-follow); refusal codes 18/6/17/13/12 added and 0/0 removed, matching; production_check_reported 0 hits; daemonApiVersion 33 in both manifests, the fixture and version.go; the third durable's grant covered by DaemonPermissions' NOTIFICATIONS.> wildcards; stale 'two durable consumers' wording also at daemonpermissions/permissions.go:16, docs/kubernetes.md:1331, docs/site/.../dispatch/envoy.md:134, scripts/e2e/README.md:1346 (fast-follow)",
+  "thermonuclear": "deep-review and code-quality run once at 4a1dec75 (code 4a4b7b07); their reports are the agent outputs DeepReview2059 and CodeQuality2059 of the reviewer's session; the three correctness findings below are the deep-review's, each verified by the reviewer in the code",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/intake/decode.go:122",
+      "description": "Security[untrusted-input]/Security[prompt]: decodeServerStarted returns server.started's `commit` with no shape check; outbox.go:1356 concatenates it into the implement App's GitHub compare path (`/compare/<merge>...<build>`) and check.go:141 embeds it verbatim in the implementer's check task and the record's last_wake_detail. The listener's publish route takes `source: dispatch` and a free payload from any caller (packages/envoy/cmd/listener/api.go:329-335,613), so an agent-published envelope on notifications.dispatch.server.started with commit `main#<text>` is compared as `...main` (url.Parse cuts at #), answers ahead, and the whole string wakes the look and reaches the prompt; each distinct string is a new wake, each queues a check_compare row per open check. Fix: refuse a build that is not ^[0-9a-f]{7,40}$ at compareBuilds (covering the daemon's revision, server.started and Dispatch's /healthz build alike) or at decode, and build the compare path with url.PathEscape. ASVS v5.0.0-1.2.5."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/workflow/check.go:234",
+      "description": "The 'runs again' predicate `RoleFor(issue.Phase) != \"\"` (check.go:234 endLookPending, :270 closeCheck, :365 wake, :484 checkBound) is false for `admitted` and `held`, and `admitted` is where admit.readmit (admit.go:642) puts a root reopened inside its linger, with its open check untouched. A wake or the bound in that window starts a look: the check start row resumes the implementer and relaunches the Sandbox (outbox.go:740-743 fences the row on the check alone) for a tree that may be waiting for a slot, against the spec's 'starts no look and suspends nobody'. engine.go:575-583 claimFailed ends an open look before the done/lingering gate, so an implementer dying in a live phase with a stale open look is neither held nor reported (worker-died/held skipped). Fix: use inWorkflow(issue) (linger.go:158) at the four sites, gate claimFailed's look-end on !inWorkflow, and have checkLookHolds refuse a start whose issue is in the workflow (or close the open check at readmit as ReenterChild does, engine.go:379-392); a workflow test for a reopened root in admitted receiving a wake."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/workflow/linger.go:68",
+      "description": "leave derives `merged` from the status and the pull request alone and ends with openCheck (linger.go:110), which upserts on issue (record/store.go PutProductionCheck): a done child a human parks (backlog) and sets done again gets a fresh check over the recorded one (outcome and looks overwritten, the implementer woken again). Skip openCheck when a check for the same repo/pr_number/merge_sha already exists. Behavioural, so fixed in this round beside the two above."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/pi-shared/src/legion-phase-ops.ts:245",
+      "description": "The plugin's check-report test adds `record.check !== undefined` to the daemon's rule (handoff.go:90: implementer && phase done): a done issue whose check closed falls to the phase path, runs runtime.handoffCommit('done', role) and posts a commit the daemon answers CHECK_NOT_OPEN anyway. Match the daemon's condition so the agent sees the one refusal."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/multi-repo-acceptance.sh:568",
+      "description": "The #2018 proof still accepts the removed phase (`production_check | done`, comment at :541) and scripts/e2e/lib/multi-repo-second-owner.test.ts:234,864,905 stubs it as the default fixture; dead but misleading. Cleanup; may ride this round's push or the fast-follow."
+    }
+  ],
+  "fastFollow": "one LEGION-781 cleanup issue: the consumer-count wording (daemonpermissions/permissions.go:16, docs/kubernetes.md:1331, docs/site dispatch/envoy.md:134, scripts/e2e/README.md:1059,1346, infra/README.md:1417), named look-end cause constants beside the wake* constants (check.go:26; outbox.go:1248,1280, engine.go:581), a WorkerFor helper for the six architect carve-outs around RoleFor (effects.go:38,209,245; engine.go:372,838; resume.go:81; admit.go:987; stranded.go:101), outbox.go's check executors into outbox_check.go with one staleness predicate (outbox.go:1204-1410), a shared close body for leave and closeMerged (linger.go:46-110, pullrequest.go:252-274), openCheck's inert wake parameter (check.go:52)",
+  "security": "untrusted-input and prompt: finding 1 (decode.go:122, outbox.go:1356, check.go:141). authz: sign_off, request_backward_move and the check report are held to the owning architect's tree (architect.go:164-167, 657-715), RoleFor(phase) == requester (engine.go:681) and the issue's own implementer claim (handoff.go:90-91); the unauthorized caller gets 403 ISSUE_OUTSIDE_TREE/ISSUE_NOT_GRANTS, SIGNOFF_OUTSIDE_ACCEPTING or ACCEPTANCE_IS_SIGN_OFF. secret: nothing widened — check_compare mints the implement App's token for the check's own repository (outbox.go:1331), the App that merged. agent-def: skills, role prompts and AGENTS.md change; the reviewer prompt's one changed line restates the gate order (roles/reviewer.md:39) and the census/proof rules stand. supply-chain: no dependency, lockfile, image or Action changed."
+}
