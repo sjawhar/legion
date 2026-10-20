@@ -28,7 +28,7 @@ const bodyFirstRead = 512
 // request asks as soon as its buffer is full, before its next byte arrives, and any sender can
 // stop once its request holds the right. If that request's growth took the total past the limit,
 // no request can charge a byte, however small, until the others give back enough to bring the
-// total within it or the stalled request ends at the server's read timeout.
+// total within it or the stalled request ends at its route's body deadline (githubBodyDeadline).
 type bodyBudget struct {
 	mu    sync.Mutex
 	limit int64

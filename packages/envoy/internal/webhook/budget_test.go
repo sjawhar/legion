@@ -182,7 +182,7 @@ func TestGitHubHandlerBoundsTheBodyBytesItHoldsInABurst(t *testing.T) {
 }
 
 // A sender without the secret can declare a cap-sized body and then send it a few bytes at a time,
-// or send only its headers, holding its connection until the server's read timeout. It must not
+// or send only its headers, holding its connection until the route's body deadline. It must not
 // hold room for bytes it has not sent: GitHub gives a delivery 10 s, and one that waits behind such
 // senders is lost. Here three trickling senders and one that sent only headers are mid-body when a
 // signed 3.6 MB push arrives, and the push is served at once.
@@ -205,7 +205,7 @@ func TestGitHubHandlerServesADeliveryBehindSlowSenders(t *testing.T) {
 }
 
 // Connections that send only headers, or one byte of body, cost a sender almost nothing, so there
-// can be thousands of them, each held until the server's read timeout. They may hold room only for
+// can be thousands of them, each held until the route's body deadline. They may hold room only for
 // what they have sent: here enough of them to spend a whole budget at 16 KiB each, half with no
 // body byte yet and half with one, are waiting when a signed 3.6 MB push arrives, and the push is
 // served at once.
@@ -346,6 +346,45 @@ func TestGitHubHandlerServesADeliveryBehindASenderThatTookTheRightAtABufferBound
 			took := requireServedPushes(t, handler, secret, "a sender that took the right after "+tc.name+" and stopped", 1)
 			t.Logf("served in %s", took.Round(time.Millisecond))
 		})
+	}
+}
+
+// A delivery waiting for room behind a sender that holds the budget past its limit and stalls
+// ends its wait at its own body deadline, and is answered 400 there. Nothing reads its connection
+// while it waits, so only the read's own deadline can end the wait before the holder lets go.
+func TestAGitHubDeliveryWaitingForRoomEndsAtItsOwnDeadline(t *testing.T) {
+	previous := githubBodyDeadline
+	githubBodyDeadline = 300 * time.Millisecond
+	t.Cleanup(func() { githubBodyDeadline = previous })
+	const budget = 64 << 10
+	bodies := newBodyBudget(budget)
+	handler := githubHandler("s", "@legion", "", &mockPublisher{}, &mockRecorder{}, bodies)
+	holder := bodies.begin()
+	defer holder.release()
+	if err := holder.charge(context.Background(), budget+1); err != nil {
+		t.Fatalf("the holder's charge: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/webhook/github", &testBody{remaining: 4 << 10, stallAfter: -1})
+	req.ContentLength = 4 << 10
+	req.Header.Set("X-GitHub-Delivery", "delivery-waiting")
+	req.Header.Set("X-GitHub-Event", "push")
+	rr := httptest.NewRecorder()
+	start := time.Now()
+	answered := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rr, req)
+		close(answered)
+	}()
+	select {
+	case <-answered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting delivery was not answered within 5 s; its wait outlasted its own deadline")
+	}
+	if elapsed := time.Since(start); elapsed < githubBodyDeadline {
+		t.Fatalf("answered after %s, before its deadline of %s", elapsed.Round(time.Millisecond), githubBodyDeadline)
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rr.Code)
 	}
 }
 

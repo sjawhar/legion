@@ -234,10 +234,15 @@ export async function replyInThread(page: Page, rootId: string, body: string): P
   await reply.press("Control+Enter");
   await expect(composer.getByRole("textbox", { name: "Reply" })).toHaveValue("");
 }
-export function countDocumentSockets(page: Page): () => number {
+/** Document sockets the page has opened since the call, open or closed: every document's, or with
+ *  `documentId` that document's alone, for a page that holds another document beside it. */
+export function countDocumentSockets(page: Page, documentId?: string): () => number {
   let count = 0;
   page.on("websocket", (socket) => {
-    if (new URL(socket.url()).pathname.startsWith("/ws/doc/")) count += 1;
+    const path = new URL(socket.url()).pathname;
+    if (documentId === undefined ? path.startsWith("/ws/doc/") : path === `/ws/doc/${documentId}`) {
+      count += 1;
+    }
   });
   return () => count;
 }
