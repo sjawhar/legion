@@ -2,76 +2,62 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-44",
-  "completed": "2026-10-20T12:35:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-20T16:36:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 5,
-  "minor": 8,
+  "important": 0,
+  "minor": 5,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/activity/ActivityTab.tsx:122",
-      "description": "Event pinning moved to the new Activity tab and lost its failure feedback: a refused state write answers with a bare invalidateQueries([\"user-state\"]), so the optimistic pin silently reverts and the reader is told nothing. The same failure in the Conversation raises the `Couldn't save pin - retry` banner with Retry and Close (ConversationTab.tsx:1051-1066, 1145-1164), and these rows carried that behaviour before this change. Criterion 4 keeps pinning a turn working; a silently swallowed error is not it."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/activity/ActivityTab.tsx:137",
-      "description": "The Activity list is a plain <section> with no ViewportAnchor, while the same event rows sat inside the Conversation's ViewportAnchor before this change (pre-change ConversationTab at 0cee06ca: rows carried data-turn at :1477 inside the wrapper at :1239-1607). prependEventToLog writes each live event to the front of page 0 of [\"events\", issueKey] (api/sse.ts:366-383), the list this tab renders newest-first, so every arriving event pushes a reader scrolled down the page by one row. Each row already carries data-event-seq, so the anchor is one wrapper away."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:860",
-      "description": "`Jump to latest · N new` counts the unfiltered list (`conversations.filter(c => c.unread).length`) while the pill is gated on and acts over `shown` (:1219, :1227; useFollowLatest's jumpToLatest scrolls to the first [data-turn] in the document). Under Open or Closed the pill names unread conversations the active bucket hides and then jumps to a card carrying no `New` mark. Criterion 4 makes this pill the per-conversation unread mechanism, so the count must be the one it acts on."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/inbox_queries.go:111",
-      "description": "The shared loadInboxAskThreads now runs loadAskAnswersByAsk for the Inbox too, whose own query is `where a.state = 'open'` (inbox.go:90) - an ask.answered row cannot exist for any of those ids, and the contract says so (packages/contracts/src/dispatch-api.ts:768, \"empty on an Inbox row, which is an open ask\"). Every Inbox load - the shared [\"inbox\"] read behind the sidebar, the needs-you count, AgentsPage, useMarginItems and useAskAnswerForm - now pays an extra events scan with a provably empty result."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/asks.go:683",
-      "description": "listIssueAsks loads every ask's whole thread unconditionally (replies, edits, answers, followers), and three surfaces share that response under [\"asks\", key]: the Conversation (ConversationTab.tsx:823), the review margin on every issue and document page (features/margin/useAnsweredAsks.ts:25) and the Spec tab's decision blocks (features/doc/ProofDocument.tsx). Only the Conversation renders a thread, so opening a Spec tab or any page that mounts the margin now downloads every ask's reply bodies and follower list it will not draw, on an unpaged list."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/margin/useMarginSheet.ts:191",
+      "description": "The review margin's own pin write still answers a refusal with a bare invalidateQueries, so the optimistic pin reverts silently. Not a regression - every margin pin has behaved this way on main - but this change gives that path a second item kind through the Pinned tab's conversation Unpin (useMarginSheet.ts:605, PinnedTab.tsx:41-46), so it is now the one pin surface the new usePinWrites hook does not cover. Named as the round's fast-follow, a follow-up on the margin rather than a change to this pull request, since the margin's behaviour was deliberately held still."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:968",
-      "description": "The focus-scroll effect latches scrolledToFocus on whichever anchor it finds first, and the effect that opens the named comment's thread is declared after it (:982-992), so on the commit where focus first becomes defined the reply row is not mounted and the card anchor wins. A /issues/<KEY>/comments/<replyId> link into a comment thread therefore marks the reply but centres the card; ask links are unaffected, since AskThreadDisclosure renders replies without the fold."
+      "file": "packages/dispatch/web/src/features/margin/useMarginItems.ts:316-334",
+      "description": "pinnedMessages is one Promise.all over N getMessage reads, so a single failed read rejects the whole query and every pinned conversation card built from a message drops silently (pinnedCards returns [] for a marker whose record is missing, and no isError is read); PinnedTab can then print `No pinned items.` while dismissed still holds the markers. Transient only: no route deletes a message (no DELETE in routes_table.go for messages), so a permanent 404 is unreachable, and React Query refetches."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/delivery.ts:101",
-      "description": "receiptAnsweredWithError and features/refs/markdown-fragment.ts's replyPreviewMarkdown lost their last production caller in this diff and survive with only their tests; packages/dispatch/AGENTS.md:247 still describes replyPreviewMarkdown as a live surface."
+      "file": "packages/dispatch/web/src/features/issue/state-write-queue.ts:110-119",
+      "description": "enqueue stores the caller's worker only on the branch that creates the per-issue entry and never refreshes it, so a pin made on one tab while the other tab's write is still in flight has its refusal reported to the other tab's banner. The entry is deleted on drain (:282), so the window is a single in-flight write, and the mechanism predates this change; what this change adds is a second pin surface on the same page."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/issue/IssuePage.tsx:120",
-      "description": "The keyboard doc comment still explains its rule with `Show activity`, a control this diff deletes."
+      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:969-978",
+      "description": "The reply anchor is a document-wide querySelector over `[data-reply][aria-current=\"true\"]`, an attribute three features now write, and the latch is left unset when the named reply can never mount, so a card whose ask-thread read errored is re-centred on every change of `shown`. Both edges are narrow; recorded in the PR body's Not proven / risk rather than held against the head."
     },
     {
       "severity": "minor",
-      "file": "docs/site/src/content/docs/dispatch/issues-and-projects.md:164",
-      "description": "The published docs call Activity \"everything else that happened to the issue\", while buildActivityItems filters nothing (features/activity/activity-model.ts:199-221) and criterion 1 asks for the whole event history, comment and ask events included."
-    },
-    {
-      "severity": "minor",
-      "file": "pull request body, `E2E (implementer)` and the `Change` bullet on the margin",
-      "description": "Two claims in the body are not accurate at this head: `The review margin is unchanged` (PinnedTab.tsx:32-49, useMarginItems.ts:306-345 and ThreadCard.tsx:431-433 all change), and the E2E line's assertion that the Playwright and Go suites cannot run in a Legion worker pod, which the tester disproved by running them there (.legion/INFRA-44/test.json notes)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:885-903",
-      "description": "`shown` concatenates the conversations held in hand after the filtered list, so one kept visible under Open or Closed loses its newest-reply-first position; under `all` the array is copied twice."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/contracts/src/dispatch-api.ts:2172",
-      "description": "AskRead restates AskThread's four fields and their doc comments instead of extending it, and IssueAskRow carries the newest reply twice (last_reply and thread.replies' last element), which conversation-model.ts:104-107 folds over twice."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/margin/useMarginItems.ts:337",
-      "description": "The conversation pin id is spelled inline as `${kind}:${id}` rather than through conversationItemId (features/issue/pins.ts:40), the helper whose doc comment claims to be its one spelling; the file already imports from ../issue/pins."
+      "file": "packages/dispatch/web/src/features/conversation/ConversationTab.tsx:812-815",
+      "description": "An issue page with the Conversation open now reads the unpaged ask list twice: the thin row under [\"asks\", key] for the margin and the decision blocks, and the ?thread=1 row under [\"asks\", key, \"thread\"] for the tab. The deliberate trade for every document and Spec page reading no thread at all; a select over one key could collapse it later."
     }
-  ]
+  ],
+  "roundOne": {
+    "head": "58da59b8ba10fbb6d50dc970c6648f0b8b4b51f8",
+    "decision": "changes_requested",
+    "findingsVerifiedFixed": [
+      "ActivityTab pin refusal: usePinWrites consumed at ActivityTab.tsx:40, banner at :113, every row's Pin disabled by pins.blocked at :165.",
+      "Activity list viewport stability: ViewportAnchor as=section item=data-event-seq label=Activity at ActivityTab.tsx:107-112, with the ol's own aria-label intact.",
+      "Jump to latest count: unreadCount counts shown at ConversationTab.tsx:894, declared after the one-pass shown at :874-890.",
+      "Inbox's empty answers query: loadAskThreads (inbox_queries.go:92-124) reads replies, edits and followers only; attachIssueAskThreads merges answers caller-side at asks.go:714-721.",
+      "Ask-list payload: ?thread=1 gate at asks.go:676-698, Thread an omitempty pointer at :657, parseAskListThread refusing anything but 1 at :740-749, margin and ProofDocument left on the thread-less read.",
+      "Deep-link reply latch: ConversationTab.tsx:969-978 latches only on an anchor of the kind the link named, with shown a real read at :960.",
+      "shown ordering: one filter pass with matchesFilter (conversation-model.ts:221); filterConversations removed from the tree.",
+      "Docs-site Activity bullet rewritten to the whole event history.",
+      "useMarginItems.ts:342 calls conversationItemId."
+    ],
+    "fastFollowLanded": "receiptAnsweredWithError, replyPreviewMarkdown and the packages/dispatch/AGENTS.md clause advertising the second are gone; IssuePage.tsx's doc comment no longer names the deleted Show activity control."
+  },
+  "gateFacts": {
+    "ciHead": "7573cc79e9f31b236af106b3d59e94c6943c9cd0",
+    "requiredChecks": "lint, typecheck, test, pr-title (main's rulesets; no branch-protection check set) - every one present, completed and success at the CI head; 24 check runs green except attest and deploy, which are skipped",
+    "compareToHead": "7573cc79...fb92071e is ahead and lists only .legion/INFRA-44/implement.json and .legion/INFRA-44/test.json",
+    "threads": "9, all opened by the reviewer in round 1, each answered by the implementer with its fixing commit, each answered again by the reviewer at this head, all resolved by the pull request's author; no bot thread exists",
+    "e2e": "E2E (implementer) and E2E (tester) both present; the tester's round-2 proof runs at 87cdef8e, whose only delta from the CI head is .legion/INFRA-44/implement.json",
+    "thermo": "pair run once at fb92071e: deep-review no critical and no important, three minor; code-quality changes-requested on structure alone, no correctness finding",
+    "contractCensus": "The round adds one refusal at a process boundary (400 INVALID_ASK_THREAD for ?thread= other than 1). The reviewer ran the census: the route's only non-test callers are packages/dispatch/web/src/api/client.ts:467 and :475 and the e2e helper packages/dispatch/e2e/api.ts:351, none of which sends any other value, and no caller exists outside this repository, so the refusal is unreachable by anything that exists today.",
+    "approvedHead": "the head the reviewer's handoff push makes, named by SHA in the submitted APPROVE"
+  }
 }
