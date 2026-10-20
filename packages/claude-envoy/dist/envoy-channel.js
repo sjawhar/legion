@@ -47187,8 +47187,13 @@ function processCommandLine(pid, executable = processExecutable) {
   if (process.platform === "linux") {
     try {
       const pieces = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00");
-      while (pieces.length > 0 && pieces.at(-1) === "")
+      let trailing = 0;
+      while (pieces.length > 0 && pieces.at(-1) === "") {
         pieces.pop();
+        trailing++;
+      }
+      if (trailing > 1)
+        return;
       const argv = pieces;
       const terminal = stdoutIsTerminal(pid);
       const cwd = workingDirectory(pid);
@@ -47211,8 +47216,7 @@ function processCommandLine(pid, executable = processExecutable) {
   }
   if (commandLine2 === undefined || commandLine2.argv.length > 1)
     return commandLine2;
-  const program = basename2(executable(pid) ?? "");
-  return program === "node" || program === "nodejs" ? undefined : commandLine2;
+  return basename2(executable(pid) ?? "").startsWith("node") ? undefined : commandLine2;
 }
 function parentProcess(pid) {
   try {

@@ -886,6 +886,29 @@ test("a mention of a session that takes only Aside goes as an Aside", async () =
   }
 });
 
+test("the Sending as Aside line leaves out a mentioned session that takes no messages", () => {
+  const aside: Agent = { ...planner, capabilities: ["aside"] };
+  const deaf: Agent = { ...worker, capabilities: [] };
+  const { view } = renderComposer({
+    agents: [aside, deaf],
+    seedMentions: [
+      { target: "session:A", title: "Planner" },
+      { target: "session:B", title: "Worker" },
+    ],
+  });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), {
+      target: { value: "@Planner @Worker hello" },
+    });
+    // The session that takes none gets its own warning, not the Aside line.
+    expect(screen.getByText("Sending as Aside: Planner does not advertise Send.")).toBeTruthy();
+    expect(screen.getByText(/Worker advertises no delivery mode/)).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("mentioning two targets that both lack the outbound mode names both in the warning", async () => {
   const { view } = renderComposer({ agents: [planner, worker] });
 

@@ -87,12 +87,18 @@ events and sends them to the current Claude Code session as supported
   third-party provider (Bedrock, Vertex or Foundry), and for an organization whose managed settings
   do not set `channelsEnabled: true`; outside Linux it cannot tell whether stdout is a terminal;
   Claude Code skips a channel on a connection that negotiated an MCP protocol revision with no
-  unsolicited notifications; and the check runs once at startup, so a channel an SDK host turns on
-  later is not seen. Claude Code then shows `--dangerously-load-development-channels ignored` (or
+  unsolicited notifications. Claude Code then shows `--dangerously-load-development-channels ignored` (or
   `--channels ignored`) with the reason when the session starts, and drops every notification. The
   server still advertises Aside, so Dispatch records a message to that session as sent while the
   model never sees it. If the session shows that warning, start it with `ENVOY_CHANNEL_LOADED=0`
   so it advertises no delivery mode.
+
+  The other way round, the check runs once at startup, so a channel an SDK host turns on later
+  (`enableChannel`) is not seen: that session advertises no mode and Dispatch refuses messages
+  Claude Code would pass on. Start such a session with `ENVOY_CHANNEL_LOADED=1`. And because the
+  install path holds a marketplace name as Claude Code writes it into its cache (every character
+  outside `[A-Za-z0-9_-]` made `-`), a flag naming `legion-plugins` for a plugin installed from
+  `legion.plugins` counts as a match, though Claude Code refuses it.
 - A targeted Dispatch delivery the shared renderer rejects is never shown to the model: when it
   names a message, the server posts `Invalid Dispatch targeted delivery frame` to
   `POST /api/v1/messages/{id}/reply` so the attempt fails visibly; otherwise it is logged and dropped.

@@ -85,9 +85,10 @@ test("a server: entry naming this plugin's server loads it, as Claude Code match
 const node = Bun.which("node")
 
 test.skipIf(node === null)(
-  "a Node process that set its title reads as one word, which counts as unreadable",
+  "a Node process that set its title cannot be read, whatever its executable is named",
   async () => {
-    // Node writes process.title over its argument area and pads the rest with NULs.
+    // Node writes process.title over its argument area and pads the rest with NULs; a versioned
+    // Node (`node-22`) is not named `node`, so the padding, not the name, is what says so.
     const child = spawn(
       node ?? "node",
       [
@@ -102,7 +103,8 @@ test.skipIf(node === null)(
     try {
       await Bun.sleep(300)
       const pid = child.pid ?? 0
-      expect(processCommandLine(pid, () => "/bin/cat")?.argv).toEqual(["claude"])
+      expect(processCommandLine(pid, () => "/usr/bin/node-22")).toBe(undefined)
+      expect(processCommandLine(pid, () => "/bin/cat")).toBe(undefined)
       expect(processCommandLine(pid)).toBe(undefined)
     } finally {
       child.kill()
@@ -430,6 +432,7 @@ test("a one-word command line counts as unreadable only when Node runs it", asyn
     const pid = child.pid ?? 0
     await Bun.sleep(50)
     expect(processCommandLine(pid, () => "/usr/local/bin/node")).toBe(undefined)
+    expect(processCommandLine(pid, () => "/usr/bin/node-22")).toBe(undefined)
     expect(processCommandLine(pid, () => "/bin/cat")?.argv).toHaveLength(1)
   } finally {
     child.kill()

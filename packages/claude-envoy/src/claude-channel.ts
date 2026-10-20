@@ -13,7 +13,9 @@ import { z } from "zod"
  * `--dangerously-load-development-channels`; a plugin entry must name the marketplace the plugin
  * is installed from; and a `--channels` entry must be allowlisted, which for this plugin means an
  * organization's `allowedChannelPlugins` in managed settings, since it is not on Anthropic's own
- * list. Claude Code's account and provider checks are not repeated here.
+ * list. Claude Code's account and provider checks are not repeated here, and neither is a channel
+ * an SDK host turns on after startup (`enableChannel`): the check runs once, so such a session
+ * advertises no mode and Dispatch refuses messages Claude Code would pass on.
  */
 export type ChannelGate =
   | { readonly loaded: true }
@@ -323,7 +325,9 @@ export function claudeChannelGate(input: {
   }
   const asked = `plugin:${entry.name}@${entry.marketplace}`
   // The install path holds the marketplace as Claude Code names its cache directory, with every
-  // character outside [A-Za-z0-9_-] made "-", while the flag holds it as written.
+  // character outside [A-Za-z0-9_-] made "-", while the flag holds it as written. So both are
+  // compared that way; a flag naming `legion-plugins` for a plugin from `legion.plugins` therefore
+  // counts as a match here, which Claude Code refuses, since the path no longer says which it was.
   if (
     plugin?.marketplace !== undefined &&
     cacheDirectoryName(entry.marketplace ?? "") !== cacheDirectoryName(plugin.marketplace)
@@ -398,9 +402,10 @@ function workingDirectory(pid: number): string | undefined {
  * The command line of process `pid`, or undefined when it cannot be read: `/proc` on Linux
  * (exact, with whether its stdout is a terminal), `ps` elsewhere (split on whitespace, which no
  * channel entry contains), and nothing on Windows. Claude Code sets `process.title` to `claude`,
- * which under Node overwrites the arguments `ps` and `/proc` show, so a one-word command line from
- * a Node process cannot be read either; a native (Bun) build keeps its arguments, and its one-word
- * command line means `claude` alone.
+ * which under Node overwrites the arguments `ps` and `/proc` show, so such a command line cannot
+ * be read either: on Linux it is the title followed by NUL padding over the old arguments, and
+ * elsewhere one word from a program whose name starts with `node` (`node-22`, `nodejs`). A native
+ * (Bun) build keeps its arguments, and its one-word command line means `claude` alone.
  */
 export function processCommandLine(
   pid: number,
@@ -409,12 +414,17 @@ export function processCommandLine(
   let commandLine: CommandLine | undefined
   if (process.platform === "linux") {
     try {
-      // Each argument ends in NUL, and a process that set its title (Node, for `process.title`)
-      // pads the rest of its argument area with NULs, so the empty pieces at the end are dropped.
-      // An empty argument before the last one (a blank option value) stays, since dropping it
-      // would shift which word is a value.
+      // Each argument ends in one NUL. More than one empty piece at the end is the padding a
+      // process that set its title leaves over its old arguments, so its arguments are gone. An
+      // empty argument before the last one (a blank option value) stays, since dropping it would
+      // shift which word is a value.
       const pieces = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0")
-      while (pieces.length > 0 && pieces.at(-1) === "") pieces.pop()
+      let trailing = 0
+      while (pieces.length > 0 && pieces.at(-1) === "") {
+        pieces.pop()
+        trailing++
+      }
+      if (trailing > 1) return undefined
       const argv = pieces
       const terminal = stdoutIsTerminal(pid)
       const cwd = workingDirectory(pid)
@@ -439,8 +449,7 @@ export function processCommandLine(
     commandLine = line === "" ? undefined : { argv: line.split(/\s+/), exact: false }
   }
   if (commandLine === undefined || commandLine.argv.length > 1) return commandLine
-  const program = basename(executable(pid) ?? "")
-  return program === "node" || program === "nodejs" ? undefined : commandLine
+  return basename(executable(pid) ?? "").startsWith("node") ? undefined : commandLine
 }
 
 /** The parent of process `pid`, or undefined when it cannot be read. */

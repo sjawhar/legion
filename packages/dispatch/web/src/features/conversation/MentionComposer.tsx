@@ -886,7 +886,10 @@ export function MentionComposer({
   // The plain mode, named whenever it is not Send, so the reader knows what their words become.
   const plainNotice =
     sendsPlain && plainMode !== "steer" && outboundMode === plainMode && outbound.body === body
-      ? targetOptions.filter((option) => !option.capabilities.includes("steer"))
+      ? // A session that advertises no mode gets its own warning, not this line.
+        targetOptions.filter(
+          (option) => option.capabilities.length > 0 && !option.capabilities.includes("steer")
+        )
       : [];
   // The prefixed modes a person could send in instead: only one every target refusing this mode
   // advertises, so the warning never suggests a mode those sessions refuse too (an aside-only
