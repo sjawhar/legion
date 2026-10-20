@@ -102,10 +102,10 @@ function markPageLeaving(): void {
 // (Dispatch's Download version links) fires `navigate` to another document too, with
 // `downloadRequest` set, and then downloads the file and leaves the page where it is. Firefox
 // (Playwright's build, at least) then fires a second `navigate` for the same click, to the same
-// URL with no `downloadRequest`, so the next navigation to another document after a download is
-// skipped when it goes to the download's URL. Any other navigation to another document leaves the
-// page. iOS Safari fires `navigate` from 26.2, for a link followed or a form submitted but not for
-// an address the reader types.
+// URL with no `downloadRequest`, so that immediate navigation is skipped. Once the page is
+// plainly still in use, the next navigation to that URL leaves like any other. iOS Safari fires
+// `navigate` from 26.2, for a link followed or a form submitted but not for an address the reader
+// types.
 let lastDownloadUrl: string | undefined;
 
 function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
@@ -125,11 +125,12 @@ function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
 
 function markPageStaying(): void {
   leavingPage = false;
+  lastDownloadUrl = undefined;
 }
 
 function markPageStayingWhenVisible(): void {
   if (document.visibilityState === "visible") {
-    leavingPage = false;
+    markPageStaying();
   }
 }
 

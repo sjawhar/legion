@@ -150,6 +150,31 @@ test("a link answered with a download does not mark the page as left", () => {
   }
 });
 
+test("a page shown after a download marks a later navigation to that URL as leaving", () => {
+  window.sessionStorage.clear();
+  const navigation = new EventTarget();
+  Object.defineProperty(window, "navigation", { configurable: true, value: navigation });
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const url = "http://localhost/api/v1/artifacts/spec/versions/1";
+
+  try {
+    installChunkFailureRecovery();
+    navigation.dispatchEvent(navigateEvent(false, "", url));
+    // This is no longer Firefox's second event from the download click: the page stayed in use.
+    window.dispatchEvent(new Event("pageshow"));
+    navigation.dispatchEvent(navigateEvent(false, null, url));
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+
+    expect(reload).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+  } finally {
+    window.dispatchEvent(new Event("pageshow"));
+    Reflect.deleteProperty(window, "navigation");
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
 test("the second navigate Firefox fires for one Download click does not mark the page as left", () => {
   window.sessionStorage.clear();
   // Firefox follows the download's `navigate` with another for the same click: to the same URL,
