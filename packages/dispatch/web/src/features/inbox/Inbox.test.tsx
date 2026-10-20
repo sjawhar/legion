@@ -5,7 +5,7 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
-import type { Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
+import type { AskRead, Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { DIALOG_SCOPE } from "../shell/keymap";
 import { Inbox } from "./Inbox";
@@ -130,7 +130,13 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
   );
 
   try {
-    await screen.findByText("Reply 20");
+    await waitFor(() =>
+      expect(
+        rows.map(
+          (row) => queryClient.getQueryData<AskRead>(["ask-thread", row.id])?.replies[0]?.body
+        )
+      ).toEqual(rows.map((row) => row.thread.replies[0]?.body))
+    );
     expect(getInbox).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
     await waitFor(() => expect(mocks.getReferences).toHaveBeenCalledTimes(0));

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,7 +28,8 @@ import (
 // (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
 // current policy still allows the session, with the names its operator withheld from it, every
 // granted name under the login that decided it (stillAllowed). Each value is read from the secret
-// the request froze.
+// the request froze, or, for a minted secret, minted for the service account its source names,
+// lasting the shorter of MaxMintLifetime and what is left of the grant.
 // It holds no pooled connection across a Secrets Manager read: the grant's names are read into
 // memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, *time.Time, error) {
@@ -73,7 +75,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	values := map[string]string{}
 	released := []string{}
 	for _, g := range granted {
-		value, err := m.Secrets.Read(ctx, g.source)
+		value, err := m.release(ctx, g, expires)
 		if errors.Is(err, secrets.ErrNotFound) {
 			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
@@ -88,6 +90,34 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 		return nil, nil, err
 	}
 	return values, expires, nil
+}
+
+// release is one granted name's value: read from its frozen source, or minted when the source is
+// a minted secret's (policy.MintSourcePrefix), for at most MaxMintLifetime and never past expires,
+// once the store still serves that name as that minted secret (policy.Current.StillMinted), so a
+// secret deleted or retagged since mints nothing more.
+func (m *Machine) release(ctx context.Context, g requestedSecret, expires *time.Time) (string, error) {
+	sa, minted := strings.CutPrefix(g.source, policy.MintSourcePrefix)
+	if !minted {
+		return m.Secrets.Read(ctx, g.source)
+	}
+	if m.MintToken == nil {
+		return "", fmt.Errorf("secret %s is a minted kind, but this broker has no token minter", g.name)
+	}
+	still, err := m.Policy.StillMinted(ctx, g.name, g.source)
+	if err != nil {
+		return "", err
+	}
+	if !still {
+		return "", fmt.Errorf("%w: %s is no longer served as this grant's minted secret", ErrGrantNotLive, g.name)
+	}
+	life := MaxMintLifetime
+	if expires != nil {
+		if left := time.Until(*expires); left < life {
+			life = left
+		}
+	}
+	return m.MintToken(ctx, sa, life)
 }
 
 // requestedSecret is one name a request asked for that the policy did not deny when the request

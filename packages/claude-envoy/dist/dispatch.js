@@ -18432,9 +18432,10 @@ var PICTURE_EXTENSIONS = {
   "image/webp": "webp"
 };
 function sessionStateRoot(env) {
-  if (env.DISPATCH_STATE_DIR)
-    return env.DISPATCH_STATE_DIR;
-  return join(env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "dispatch");
+  const stateDir = env["DISPATCH_STATE_DIR"];
+  if (stateDir)
+    return stateDir;
+  return join(env["XDG_STATE_HOME"] || join(homedir(), ".local", "state"), "dispatch");
 }
 function sessionDirectory(env, sessionId) {
   if (!SESSION_ID.test(sessionId) || sessionId === "." || sessionId === "..") {
@@ -18520,6 +18521,10 @@ function writeLongOutput(dir, text) {
   const path = join(out, `${new Date().toISOString().replaceAll(":", "-")}-${process.pid}.md`);
   writeFileSync(path, text, { mode: PRIVATE_FILE });
   return path;
+}
+function writeSessionTitle(dir, title) {
+  ensureDirectory(dir);
+  writeAtomically(join(dir, "title"), title);
 }
 function readSessionTitle(dir) {
   return readIfPresent(join(dir, "title")) || undefined;

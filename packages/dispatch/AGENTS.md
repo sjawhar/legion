@@ -174,6 +174,21 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   exclusion reason are diagnostics agents and scripts read, so the SPA does not rewrite them.
 - The mention composer suggests only a prefix every refusing target advertises, and a card offers
   BTW only when its session takes it.
+- A message with no `/aside ` or `/btw ` command that answers no thread goes in `plainDelivery`
+  (`features/conversation/delivery.ts`): Send when every live session it addresses that takes any
+  mode advertises Send, else Aside when every one advertises Aside (a Claude Code session), else
+  Send, which the composer warns about; BTW is never picked for the reader. An agent card's reply
+  (`exchangeDelivery` in `AgentsPage.tsx`) falls back the same way for a session that takes
+  neither Send nor BTW. The composer computes it from the
+  addressed sessions' capabilities and freezes it into the `SentRequest` (`plainDelivery`), says
+  "Sending as Aside: … does not advertise Send." while it is not Send, and words its warning for
+  a session that advertises no mode at all ("advertises no delivery mode"), which the agent card
+  shows as `Takes no messages` and the live view as `agent-takes-no-messages`.
+- A broadcast's mode is null in `useBroadcastComposition` until the sender picks one; the page
+  then sends in `broadcastDelivery` (`features/conversation/delivery.ts`) of the selected live
+  sessions: BTW, else Aside when every selected session that takes any mode takes Aside and one
+  refuses BTW (a Claude Code session), and the composer says "Sending as Aside: … does not
+  advertise BTW.". The server still never switches a mode it is sent.
 - The Agents broadcast page renders recipients in the order the server returns them: the send's
   tick order after exclusions.
 - A refused broadcast's Restore draft refuses in turn while a broadcast has been begun since:
@@ -739,7 +754,7 @@ bun run build:web
 bun run check:classes
 bun run typecheck
 bun run lint
-bun test
+bun run test
 bun run dispatch:local
 ```
 

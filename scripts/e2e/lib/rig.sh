@@ -28,6 +28,33 @@
 # newest" is a sibling's as soon as two trees act within the same minute. A deliberately run-wide
 # read — every pod's shape, the admission cap, a negative over the whole log — says so in its comment.
 
+# real_bin_path DEST NAME... symlinks DEST/NAME to the real NAME binary mise resolves for the
+# caller's own environment, for every NAME given, and prints DEST. The daemon and every pane it
+# launches run with HOME relocated to the run's own isolated home (make_omp_home,
+# lib/omp-home.sh), which hides mise's global config from the dotfiles jj shim: it searches PATH
+# for mise's own shim first and, under a HOME mise has no pin for, gets handed the call straight
+# back — jj is unusable inside a pane until this is worked around. A caller prepends this
+# directory to the daemon's own PATH before launching it, so the daemon and every pane it spawns
+# use it: `PATH="$(real_bin_path "$work/realbin" gh jj):$PATH"`. PATH reaches every pane
+# (paneEnvAllowList, packages/daemon/internal/runtime/tmux/environment.go). gh still needs this
+# directory too: resolveTools runs in the daemon's own process, under the same relocated HOME, and
+# the dotfiles gh shim hits mise's own shim-recursion guard there the same way jj's shim loops —
+# without this, the daemon itself has no real gh to resolve at all. A pane's own gh is the daemon's
+# wrapper (legion gh, LEGION_GH_PATH), which resolves "the real gh" by walking its own PATH the
+# same way (resolveTools, packages/daemon/internal/daemon/tools.go) — so this directory's gh is
+# what LEGION_GH_PATH ends up naming, one step removed from a pane's own PATH lookup, not instead
+# of it. jj has no such wrapper and keeps resolving through this directory directly.
+real_bin_path() {
+  local dest=$1 name target
+  shift
+  mkdir -p "$dest"
+  for name in "$@"; do
+    target=$(mise which "$name" 2>/dev/null) || fail "real_bin_path: mise which $name failed; is $name pinned in mise.toml?"
+    ln -sfn "$target" "$dest/$name"
+  done
+  printf '%s\n' "$dest"
+}
+
 # until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
 # polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run
 # included, and says what it waits for on entry and every 60 s while it does (polls and seconds),

@@ -1,0 +1,58 @@
+# The key-file alternative to models.yml, for an operator with no model gateway: anthropic is
+# Anthropic's own endpoint, keyed directly by ANTHROPIC_API_KEY — a `provider_keys` entry
+# (`runtime.kubernetes.provider_keys: {ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}`) the shim exports
+# straight into Oh My Pi's environment, which this file's apiKey and header commands read back
+# out. `auth: apiKey` keeps these models plain API-key callers, as models.yml's does.
+#
+# The model ids and their metadata are the same standard names models.yml's own block gives the
+# gateway (overlay.yml's enabledModels and modelRoles, which this file pairs with unchanged, name
+# only these — never a `-legion` alias, which exists in models.yml solely so a session a pre-#1989
+# gateway deployment started on one still resumes; key-file is a route with no such history, so
+# this file carries no alias block).
+#
+# Pair with pod-key-file.yml, which carries no gateway token volume. The live harnesses run on
+# this file under LEGION_E2E_MODEL_ROUTE=key-file.
+providers:
+  anthropic:
+    baseUrl: https://api.anthropic.com
+    auth: apiKey
+    api: anthropic-messages
+    apiKey: "!printf %s \"$ANTHROPIC_API_KEY\""
+    headers:
+      X-Api-Key: "!printf %s \"$ANTHROPIC_API_KEY\""
+    models:
+      - id: claude-fable-5
+        name: Claude Fable 5
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5}
+      - id: claude-fable-5-1
+        name: Claude Fable 5.1
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5}
+      - id: claude-opus-4-8
+        name: Claude Opus 4.8
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
+      - id: claude-opus-5
+        name: Claude Opus 5
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25}
+      - id: claude-sonnet-5
+        name: Claude Sonnet 5
+        reasoning: true
+        input: [text, image]
+        contextWindow: 1000000
+        maxTokens: 128000
+        cost: {input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5}

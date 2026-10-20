@@ -28,8 +28,12 @@
 op() { timeout --foreground 300 kubectl --context "$operator" -n "$namespace" "$@"; }
 
 # kinds are what a run creates: the runtime's Sandboxes, their Secrets, PVCs and pods, the
-# ConfigMaps an operator's pod mounts, and the operator's providers Secret when the run has one.
-kinds=sandboxes,secrets,pvc,pods,configmaps
+# ConfigMaps an operator's pod mounts, the operator's providers Secret when the run has one, and
+# (Stage 4a's own bridge mode, lib/bridge-tunnel.sh) a scratch Service and an auth Secret, both
+# already deleted by exact name in bridge_stop — services is here as the same safety net the other
+# kinds already are, so a bridge_stop that somehow left its Service behind still shows up in
+# namespace-clean's own before/after diff rather than silently passing.
+kinds=sandboxes,secrets,pvc,pods,configmaps,services
 
 # snapshot FILE: the run's own objects of those kinds, as the operator sees them: those labelled
 # with its project, and those with no project label whose name run_named counts as the run's. It
