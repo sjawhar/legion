@@ -28,6 +28,31 @@ const (
 	retryInterval       = 5 * time.Second
 	compactInterval     = 24 * time.Hour
 	documentTopicPrefix = "notifications.dispatch.document."
+	// claimWindow is how long scanPendingEvents' claim keeps an event out of every other
+	// process's batch. Two envoy-dispatch processes serve one Postgres and one NATS, and a
+	// plain select would hand both the same rows and publish every one of them twice. The
+	// claim is one statement (select ... for update skip locked, then push next_attempt_at
+	// out by this), never a transaction held open across the publishes that follow: an open
+	// cursor or transaction holds its pooled connection, which is exactly what pendingEvent's
+	// comment above scanBatch's drain exists to avoid.
+	//
+	// One minute: a batch is batchSize (100) events, each a NATS round trip plus the write
+	// that records it, so a healthy batch finishes well inside it, and a process that dies
+	// mid-batch leaves its rows claimed for no longer than that before the other process
+	// picks them up. A publish that fails is backed off by scheduleRetry, whose write
+	// legitimately overwrites the claim with the retry's own (usually shorter) wait;
+	// published_at, not this, is what marks an event done.
+	//
+	// What the claim gives: two healthy processes no longer publish one event twice, and each
+	// events row still reaches published_at exactly once. What it does not: a process that
+	// dies between a successful publish and its published_at write leaves the row claimed but
+	// unmarked, and the other process republishes it once the window lapses. That is
+	// at-least-once on the role lanes (notifications.role.*), which go over core NATS with no
+	// nats.MsgId on the envelope (internal/bus/nats.go) and so carry no deduplication of their
+	// own; their receivers already drop the repeat by its dedupe key
+	// (internal/contracts/dedupe.go). A JetStream destination suppresses the repeat inside the
+	// stream's duplicate window. Neither is fixed here.
+	claimWindow = time.Minute
 	// maxCommentThreadDepth bounds the reply_to walk in loadRootCommentAuthor so a
 	// malformed cycle (comments.reply_to has no acyclicity constraint) cannot spin the
 	// recursive query and stall the outbox scan.
@@ -159,23 +184,39 @@ func retryEvent(ctx context.Context, deps Deps, item pendingEvent, what string, 
 	return false
 }
 
+// scanPendingEvents claims at most batchSize eligible events, lowest id first, and returns each
+// with the issue and artifact columns a publish reads. The claim and the read are one statement:
+// the ids are taken under for update skip locked, so a second process's concurrent scan skips
+// them rather than waiting on them, their next_attempt_at is pushed out by claimWindow, and the
+// claimed ids are joined back to events for the columns the scan needs. The returned rows keep
+// the order by id every batch has always had.
 func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
+		with claimed as (
+			update events set next_attempt_at = now() + $2
+			where id in (
+				select id from events
+				where published_at is null
+				  and (next_attempt_at is null or next_attempt_at <= now())
+				  and coalesce(payload ->> 'pending', 'false') <> 'true'
+				order by id
+				limit $1
+				for update skip locked
+			)
+			returning id
+		)
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
 		       coalesce(ar.slug, ''), coalesce(i.route, ai.route)
-		from events e
+		from claimed c
+		join events e on e.id = c.id
 		left join issues i on i.key = e.issue_key
 		left join artifacts ar on ar.id = e.artifact_id
 		left join issues ai on ai.key = ar.issue_key
-		where e.published_at is null
-		  and (e.next_attempt_at is null or e.next_attempt_at <= now())
-		  and coalesce(e.payload ->> 'pending', 'false') <> 'true'
 		order by e.id
-		limit $1
-	`, batchSize)
+	`, batchSize, claimWindow)
 	if err != nil {
-		return nil, false, fmt.Errorf("select unpublished events: %w", err)
+		return nil, false, fmt.Errorf("claim unpublished events: %w", err)
 	}
 	defer rows.Close()
 
@@ -204,7 +245,11 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, er
 			// row ends the batch and rows.Err() below repeats the same error. Carrying the
 			// row on as a failure backs it off like any other unpublishable event, which is
 			// what lets the events queued behind it be read at all; e.id is the first
-			// destination, so the row scanned that far before it failed.
+			// destination, so the row scanned that far before it failed. The rest of the
+			// batch was claimed by the statement above and is never read here, so those
+			// events wait out claimWindow before any process reads them again - the same
+			// delay a process crashing mid-batch costs them, and the reason this row is
+			// backed off rather than left to poison every batch after it too.
 			item.failure = fmt.Errorf("read event: %w", err)
 			item.failureLog = "dispatch outbox: read event"
 			unreadable = true
