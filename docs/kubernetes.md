@@ -1860,7 +1860,14 @@ only how files leave the cache. The install Legion renders for an installing lau
 `/usr/bin/flock` on the cache directory, after a `mkdir -p` of it so the lock's inode exists before
 anything fills the cache, and retries the install once (`installScript`,
 `packages/daemon/internal/runtime/sandbox/plugins.go`), so a plugin-version bump, which makes the
-pair cold for every role of a kept pod at once, does not fail their launches; `flock` is advisory
+pair cold for every role of a kept pod at once, does not fail their launches. That wait is
+bounded (`installLockWaitSeconds`), since `flock` otherwise waits forever and one stalled install
+would be charged to every role of the pod: the bound is long enough for the last of six roles to
+queue behind five serialised installs of the pair, and short enough that two timed-out waits still
+leave the install and the agent's start inside the daemon's registration deadline
+(`worker_boot_timeout_seconds` times `worker_boot_registration_deadline_intervals`). A wait that
+times out exits 1, so it takes the retry and then the script's named failure — that one bump's
+launch fails the way it did before the lock existed, rather than hanging. `flock` is advisory
 and per-inode, which holds exactly where this needs it — the six containers of one pod share a
 kernel and that inode on the issue's volume — and nowhere wider, so two pods would not be covered.
 Two agents of one issue running `bun install` at once against a cold shared cache can fail the

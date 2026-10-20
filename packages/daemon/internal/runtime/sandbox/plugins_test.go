@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,12 +26,15 @@ func testPlugins() *runtime.PluginInstall {
 // `--backend=copyfile`, which keeps bun from hardlinking the installed plugin files out of the
 // role's bun install cache: the cache and the generation directory share the issue's volume, and a
 // hardlinked install is one inode with the cache's copy, so an in-place edit of either corrupts
-// the other for the life of that volume. It takes /usr/bin/flock on that cache directory, after a
-// `mkdir -p` of it so the lock's inode exists before anything fills the cache, and runs twice
-// before the failure branch: filling a cold cache entry is not concurrency-safe, an installing
-// launch renders this script for every role of a kept pod and a plugin bump makes the pair cold
-// for all of them at once, so without the lock a bump fails five of six launches, and without the
-// retry an agent's own `bun install` racing the same cold entry fails one.
+// the other for the life of that volume. The rest of what it pins is the script's answer to the
+// one race that was measured: six concurrent installs of the pair into six directories against one
+// empty shared cache leave several of the six failing with `ENOENT: failed copying files from
+// cache to destination`, where the same six against the cache they just filled all succeed. So the
+// script reads BUN_INSTALL_CACHE_DIR with no default, which leaves `set -u` to abort if the
+// runtime ever stops setting it, makes that directory (mkdir -p) so the lock's inode exists before
+// anything fills the cache, takes /usr/bin/flock on it with a bounded wait
+// (installLockWaitSeconds, since an unbounded one would charge a stalled holder to every role of
+// the pod), and runs the install twice before the failure branch.
 func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -57,8 +61,8 @@ func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	for _, want := range []string{
 		spec.Plugins.PiLegion, spec.Plugins.PiEnvoy, genDir, "/g*",
 		"--backend=copyfile", "exec \"$@\"", "} 1>&2", "set -eu",
-		"cache=${BUN_INSTALL_CACHE_DIR:-", "mkdir -p -- \"$cache\"",
-		"/usr/bin/flock -- \"$cache\" /usr/local/bin/bun add",
+		"cache=\"$BUN_INSTALL_CACHE_DIR\"", "mkdir -p -- \"$cache\"",
+		fmt.Sprintf("/usr/bin/flock -w %d -- \"$cache\" /usr/local/bin/bun add", installLockWaitSeconds),
 		"legion_install || legion_install",
 	} {
 		if !strings.Contains(script, want) {

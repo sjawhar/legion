@@ -78,6 +78,18 @@ if (got !== want) {
 }
 `
 
+// installLockWaitSeconds is how long installScript's flock waits for the shared bun install cache
+// before giving up. Two timed-out waits have to fit inside the daemon's registration deadline with
+// room left over for the install that then runs and for the agent to start, since a timeout exits
+// 1 and the script runs the install twice: the deadline is worker_boot_timeout_seconds (120 by
+// default) times worker_boot_registration_deadline_intervals (3 by default), 360 seconds, so
+// 2 x 120 = 240 seconds of waiting leaves 120 seconds for the install and the agent's start, and
+// the launch fails by its own failure branch rather than being retired by the deadline. The bound
+// is at the same time generous for the legitimate case it must not cut short: the last of a pod's
+// six roles queues behind five serialised installs of the plugin pair, which 120 seconds allows 24
+// seconds each.
+const installLockWaitSeconds = 120
+
 // installScript is the install wrapper an installing launch's agent argv runs before Oh My Pi
 // starts (LEGION-164): it drops any earlier generation's install under the role's plugins
 // root (one role's directory is never another's, and no earlier generation of it should ever run
@@ -102,27 +114,35 @@ if (got !== want) {
 //
 // The install is serialised on the cache directory and retried once, each for its own reason.
 // Filling a cold entry of a bun install cache is not concurrency-safe: six concurrent
-// `bun add --backend=copyfile --exact` into six separate directories against one empty
-// BUN_INSTALL_CACHE_DIR leave one exit 0 and five exit 1 with
+// `bun add --backend=copyfile --exact` of the rendered pair into six separate directories against
+// one empty BUN_INSTALL_CACHE_DIR leave several of the six exiting 1 with
 // `ENOENT: failed copying files from cache to destination`, where the same six against the cache
 // they just filled all exit 0 — the race is the cold entry fill, not the install out of it, and
-// `--backend=copyfile` governs only how files leave the cache. This script is exposed to that
-// race because the issue's roles share one install cache (roleEnvironment, manifest.go) and an
-// installing launch renders it for every role of a kept pod whose recorded contract differs from
-// the daemon's, so a plugin-version bump makes the pair cold for all six at once; a failed
-// `bun add` here takes the failure branch and the role's agent never execs.
+// `--backend=copyfile` governs only how files leave the cache. How many of the six fail is not a
+// property to rely on: four runs of the rendered pair left 3, 4, 2 and 3 of six failed, so the
+// failure is reliable and its rate is not (the one probe whose rate was measured, over chalk and
+// lodash, is scoped where it belongs, under "Sharing BUN_INSTALL_CACHE_DIR" in docs/kubernetes.md).
+// This script is exposed to that race because the issue's roles share one install cache
+// (roleEnvironment, manifest.go) and an installing launch renders it for every role of a kept pod
+// whose recorded contract differs from the daemon's, so a plugin-version bump makes the pair cold
+// for all six at once; a failed `bun add` here takes the failure branch and the role's agent
+// never execs.
 //   - The lock, /usr/bin/flock on the cache directory, covers the installs Legion itself renders,
-//     which is the case that reaches production. Its scope is exactly that and no wider: flock is
-//     advisory and per-inode, which holds for the containers of one pod, sharing a kernel and an
-//     inode on the issue's volume, and not across pods, where two pods of two issues have two
-//     volumes and two inodes anyway. The directory is made (mkdir -p) before the lock is taken, so
-//     the lock's inode exists before anything fills the cache — EnsureScratch makes the cache root,
-//     but this script cannot assume the generation's turn order. The cache directory is read as
-//     ${BUN_INSTALL_CACHE_DIR:-<generation directory>}: the runtime always sets that variable for a
-//     role container (roleEnvironment, manifest.go, and runtimeOwned refuses anyone else setting
-//     it), and the default keeps the script, which runs under `set -eu`, from aborting if it is
-//     somehow unset — with no shared cache there is nothing cross-role to serialise, so locking the
-//     role's own generation directory is the honest fallback.
+//     which is the case that reaches production. It waits at most installLockWaitSeconds, because
+//     a wait with no bound charges one stalled install to every role of the pod and to every
+//     relaunch, which renders the same script and queues again: a timed-out wait exits 1, falls
+//     into the retry below and then into the named failure branch, so the launch fails loudly,
+//     and says why, while the daemon is still watching it. Its scope is exactly that and no
+//     wider: flock is advisory and per-inode, which holds for the containers of one pod, sharing
+//     a kernel and an inode on the issue's volume, and not across pods, where two pods of two
+//     issues have two volumes and two inodes anyway. The directory is made (mkdir -p) before the
+//     lock is taken, so the lock's inode exists before anything fills the cache — EnsureScratch
+//     makes the cache root, but this script cannot assume the generation's turn order. The cache
+//     directory is $BUN_INSTALL_CACHE_DIR itself, with no default behind it: the runtime sets that
+//     variable for every role container (roleEnvironment, manifest.go; runtimeOwned refuses anyone
+//     else setting it, and TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes pins that the
+//     runtime names it), and a default would silence, for the one variable this script is about,
+//     the `set -u` abort that is how a broken invariant should announce itself.
 //   - The retry covers what no lock of ours can reach: an agent's own `bun install` filling the
 //     same cold entry at the same moment. One retry, then the failure branch.
 func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
@@ -134,10 +154,10 @@ func installScript(stateHome string, generation uint64, plugins *runtime.PluginI
 {
   rm -rf -- %s/g*
   mkdir -p -- %s && cd -- %s
-  cache=${BUN_INSTALL_CACHE_DIR:-%s}
+  cache="$BUN_INSTALL_CACHE_DIR"
   mkdir -p -- "$cache"
   legion_install() {
-    /usr/bin/flock -- "$cache" /usr/local/bin/bun add --backend=copyfile --exact %s %s
+    /usr/bin/flock -w %d -- "$cache" /usr/local/bin/bun add --backend=copyfile --exact %s %s
   }
   legion_install || legion_install \
     || { echo %s; exit 1; }
@@ -147,7 +167,7 @@ exec "$@"
 `,
 		shellprefix.Literal(root),
 		shellprefix.Literal(genDir), shellprefix.Literal(genDir),
-		shellprefix.Literal(genDir),
+		installLockWaitSeconds,
 		shellprefix.Literal(legionSpec), shellprefix.Literal(envoySpec),
 		shellprefix.Literal(failMsg),
 		shellprefix.Literal(pluginCheckScript),
