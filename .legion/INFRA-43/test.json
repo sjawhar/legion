@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-43",
+  "completed": "2026-10-20T10:34:00Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's own command on the same surface it names - the built SPA in a real browser (Playwright chromium and iphone) against the real Go Dispatch server (packages/dispatch/e2e/run-server.sh, DISPATCH_TEST_HOOKS=1) and a real Postgres 17 + pgvector on the issue volume (/legion/harness/setup.sh, env.sh, both re-run idempotently): `bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium --project=iphone` gives 25 passed, 9 skipped, which is the implementer's 14/3 and 11/6 in one run. Every one of its six proof entries was exercised by that run, and I drove the same surface independently with nine scenarios of my own (below) rather than reading its rows alone. The one proof entry I could not re-run as written is its negative control against this branch's base (a throwaway probe row on a checkout it no longer has); I replaced it with mutation checks at this head, which fail the same rows: `settleRebuild` jumping to the end instead of compensating fails the browser rebuild row (Expected \"m12\", Received \"m32\"), and removing the compensation fails the two unit rows that lock it (Expected 50, Received 150)."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Scrolled back, the reader's position in the transcript is unchanged when a turn starts and while text streams into the turn being written, including a scroll-back made during the streaming.",
+      "surface": "A real browser (Playwright chromium and iphone) driving the built SPA against the real Go Dispatch server (packages/dispatch/e2e/run-server.sh, DISPATCH_TEST_HOOKS=1) and a real Postgres 17 + pgvector, all on the issue volume (/legion/harness/env.sh).",
+      "command": "cd packages/dispatch && . /legion/harness/env.sh && bunx playwright test --config e2e/playwright.config.ts agent-view.e2e.ts --project=chromium --project=iphone (row \"keeps their place\"), plus a throwaway spec of my own: a reader pinned at scrollTop 0 taking fifteen snapshots of one streaming turn, each taller than the last.",
+      "observed": "The suite row passes on both projects (threadScrollTop stays 1200 across a published turn and three streaming snapshots, and 900 across a scroll-back made mid-stream). My own row: the topmost turn is m0 at top 16 before and after fifteen growing snapshots, with `PROBE5 … scrollTop=0` - thousands of pixels of growth below a reader at the very top of the transcript moved them by nothing, and the control read \"Jump to latest · 1 new\".",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "Mutating settleRebuild to jumpToEnd() and rebuilding the SPA fails the suite's rebuild row with `Expected: \"m12\" Received: \"m32\"`, so the rows read a real position rather than a tautology; the mutation was reverted and the final run made on the clean head."
+    },
+    {
+      "criterion": "The control carries the number of messages that arrived since the reader scrolled back, whoever wrote them, and carries no number before any arrive; tapping it, or scrolling to the end by hand, puts the newest turn in view, clears the count and resumes following.",
+      "surface": "The same browser harness.",
+      "command": "The same command (rows \"keeps their place\" and \"a transcript shorter than the viewport\"), plus my own row: scroll back, two turns arrive, tap the control, scroll back again, one more turn arrives.",
+      "observed": "The suite row walks \"Jump to latest\" to \"· 1 new\" to \"· 2 new\" (one turn however many snapshots carry it) to \"· 3 new\" (another person's Dispatch message), then the tap and the by-hand scroll each put the newest turn above the composer with the control gone. My own row proves the count restarts rather than accumulating: after the tap and a second scroll-back it reads \"Jump to latest\" and then \"· 1 new\", not \"· 3 new\".",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "The second half of my row is the control for the first: a count that carried over from before the tap would read \"· 3 new\" and fail it."
+    },
+    {
+      "criterion": "Sending a message from the composer takes the reader to the live end; a send the session refused leaves them where they are. Opening a session, switching sessions and reloading land at the newest text with no count carried over.",
+      "surface": "The same browser harness, with the fake Envoy refusing the delivery for the refused half, and two sessions with transcripts of their own for the arrivals.",
+      "command": "The same command (rows \"refused send\" and \"land the reader at the newest text\").",
+      "observed": "The accepted send puts the reader's own message at the live end with no control; the refused send leaves threadScrollTop at 1200 with agent-send-error above the transcript; each of the three arrivals shows that session's own last turn above the composer with no count, including a switch and a reload made while scrolled back to 1200.",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "The refused half is the send half's own control - the same gesture with a 503 from /api/v1/agents/<id>/messages moves the reader nowhere - and the arrivals row scrolls back to 1200 first, so a page that merely kept its offset would fail both halves."
+    },
+    {
+      "criterion": "After a rebuild that still carries the turn the reader was reading, that turn sits where it sat before, proved on a rebuild that drops turns above the reader; after a rebuild that no longer carries it, the newest turn is in view and no count is shown.",
+      "surface": "The same browser harness, with the page's own reconnect driven by the agent-stream test hook (POST /api/v1/agents/<id>/stream/_test/publish?as=drop).",
+      "command": "The same command (rows \"rebuilt transcript\"), plus three rows of my own: two rebuilds in a row, a rebuild landing while a turn streams, and a rebuild that adds twenty turns above the reader.",
+      "observed": "The suite's surviving-turn row asserts the reader's turn and its offset, not threadScrollTop - `after.id === before.id` and `|after.top - before.top| <= 1` - over a rebuild whose eight oldest turns are gone (Turn 7 absent, threadScrollHeight fallen), so holding the scroll offset alone would show them a different turn; the gone-turn row lands at the newest text with no control. My own rows hold the same way: two rebuilds in a row keep m20 at top -8 with the count going 1 then 2; a rebuild landing after two streaming snapshots keeps m12 at top -8 with \"· 1 new\"; a rebuild that adds twenty turns above the reader (a budget that grew, the opposite direction) keeps m25 at top -8.",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "settleRebuild mutated to jumpToEnd() fails the suite row (`Expected: \"m12\" Received: \"m32\"`), and the compensation removed fails the two unit rows that lock it (use-live-follow.test.tsx, `Expected: 50 Received: 150`). Worth the reviewer's eye: with the compensation removed the browser row still passes, because Chromium's own scroll anchoring holds the turn there; the unit rows are what pin the compensation itself."
+    },
+    {
+      "criterion": "A reader at the live end when a rebuild lands is still at the live end (spec v9's third reconnect branch, the one line of the spec's proof list that no browser row in the suite holds).",
+      "surface": "The same browser harness, same ?as=drop reconnect.",
+      "command": "A throwaway spec of my own: open the session, stay at the live end, then a reconnect answered with a replay whose eight oldest turns are gone and which carries two turns written while the viewer was away.",
+      "observed": "`PROBE1 scrollTop=1597 bottom=1597` - the reader is at the live end to the pixel after the rebuild, the newest turn sits above the composer, no control is shown, and the next published turn is followed into view. Two viewers of one session, one reading back and one following, each get their own answer to the one reconnect (the follower at the live end with no control, the reader on m12 at top -8 with \"· 2 new\").",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "The rebuild drops eight turns above and adds two below, so a view that held scrollTop rather than following would be 1597-minus-the-dropped-height short of the end and would fail the equality; the same mutation that fails the other rebuild rows (jumpToEnd in place of the compensation) leaves this one passing, which is why it is recorded as a separate scenario rather than folded into them."
+    },
+    {
+      "criterion": "The ?as=drop mode this branch adds to the agent-stream hook is reachable only under DISPATCH_TEST_HOOKS, and only by a human (the architect's question on the implement round).",
+      "surface": "The production Go binary itself - `go build ./cmd/dispatch` from packages/envoy, run against an isolated Postgres database with DISPATCH_TEST_HOOKS unset, and the e2e harness server with it set.",
+      "command": "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' 'http://127.0.0.1:18779/api/v1/agents/<id>/stream/_test/publish?as=drop' against the hooks-off binary, and the same against the harness server (hooks on), anonymous and with 'authorization: Bearer <agent token>'.",
+      "observed": "Hooks off: 404 {\"code\":\"NOT_FOUND\",\"error\":\"no route for POST /api/v1/agents/<id>/stream/_test/publish\"} for ?as=drop, ?as=replay and no query at all - the route is not mounted. Hooks on: 401 {\"code\":\"NO_IDENTITY\"} anonymous, 403 {\"code\":\"HUMAN_ONLY\",\"error\":\"only users may perform this action\"} with the agent token. The branch adds no route (the diff touches agent_stream.go and agentstream/memory.go only; the route itself predates it in routes_table.go's TestHooksEnabled block), so what is new is one more `as` value on a route that was already test-only.",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "Two mounted routes on the same hooks-off server answer 401 NO_IDENTITY (POST /api/v1/agents/<id>/messages, GET /api/v1/agents), so the 404 is the gate refusing the route rather than the server refusing everything."
+    },
+    {
+      "criterion": "The control neither covers the composer nor changes how far the transcript scrolls, the live view's existing browser checks still pass unchanged, and no input breaks the view.",
+      "surface": "The same browser harness at 390x844 and 1280x800, the whole agent-view.e2e.ts file on both projects, plus adversarial rebuilds of my own.",
+      "command": "The same command for the file; my own rows for a rebuild carrying no frames at all and a rebuild identical to what is on screen, both with the reader scrolled back, listening on page errors.",
+      "observed": "25 passed, 9 skipped across chromium and iphone, every pre-existing row among them (the phone keyboard row that holds a reader's place across a raise and a lower, the covers-none-of-the-composer row, the short-transcript slash-command row). A rebuild with an empty frame list leaves no page error at all (`PROBE7 pageerrors=[]`), no stale control, the composer still on screen, and the next published turn shows and is followed. A rebuild identical to what is on screen keeps m12 at top -8 and counts the next turn once.",
+      "headSha": "ed22f09052fb38ad464189e35c970a2dc9c7033d",
+      "negativeControl": "The empty-rebuild row fails on any uncaught exception (pageerror listener) and on a control left behind with a count for turns that no longer exist; the identical-rebuild row republishes the live turn until it shows, so a lost reconnect cannot pass it silently."
+    }
+  ],
+  "ciRead": "Everything static is CI's at the code head 35c894a35010, which this PR head carries unchanged: Tests run 39399491834 (lint, typecheck, test success), Legion Envoy and Contracts run 39399491874 (changes, dispatch, dispatch-memory, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go, pi-legion success - the `dispatch` job is the whole e2e suite on every project, webkit-iphone included), PR Title run 39399491848, Docs run 39399491857, Worker Image run 39399491855. No lane was re-run here.",
+  "notes": [
+    "Test-coverage gap, no defect found: the spec's proof list carries eleven browser checks and the suite holds ten of them. \"A reader at the live end when a rebuild lands is still at the live end\" has no browser row; use-live-follow.test.tsx:473 locks it at the unit level for the immediate path only, and the deferred path (assistant-ui applying a rebuild a commit later, which is the production one) is locked nowhere. I drove it live and it holds (proof entry 5), so it is a missing regression lock rather than a failure - for the architect to decide whether the implementer adds the row.",
+    "For the reviewer: the browser rebuild row passes with the compensation in settleRebuild removed, because Chromium's own scroll anchoring holds the reader's turn in that scenario; what fails is the two unit rows. The compensation is therefore locked only at the unit level, and the engines the rebuild rows do not run in (WebKit) are where it would earn its keep.",
+    "My nine scenarios were a throwaway spec (packages/dispatch/e2e/tester-probe.e2e.ts), deleted after the run; nothing of it is committed, and no red test was written because none was earned.",
+    "The harness at /legion/harness is shared and idempotent: setup.sh re-run, Postgres left running on 55432 for the next role, the isolated dispatch_hookprobe database created for the hooks-off negative control dropped again, and the SPA rebuilt from the clean head after the mutation checks."
+  ]
+}
