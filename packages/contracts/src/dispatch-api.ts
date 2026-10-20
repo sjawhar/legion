@@ -764,7 +764,7 @@ export interface AskThread {
   /** Every rewording of the question, oldest first; empty when never edited. */
   readonly edits: AskEdit[];
   /** Every answer, oldest first: empty on an Inbox row, which is an open ask, and the answers of
-   *  an answered ask on an issue's ask list. */
+   *  an answered ask on `GET /api/v1/issues/{key}/asks?thread=1`. */
   readonly answers: AskAnswer[];
   /** The sessions this ask's answer and replies reach directly, oldest first. */
   readonly followers: AskFollower[];
@@ -782,12 +782,20 @@ export interface InboxRow extends Ask {
   readonly thread: AskThread;
 }
 
-/** One ask of `GET /api/v1/issues/{key}/asks`. The row is an `Ask` plus the two fields a list
+/** One ask of `GET /api/v1/issues/{key}/asks`. The row is an `Ask` plus the one field a list
  *  surface cannot compute for itself: `last_reply`, the sort key for ordering a page by its
- *  newest reply, and `thread`, which renders the card whole without a fetch per ask. */
+ *  newest reply. It carries no thread: the list is unpaged, and the readers that render the ask
+ *  alone - a document's decision blocks and the review margin - would pay for every reply body,
+ *  follower and answer on the issue to draw none of them. */
 export interface IssueAskRow extends Ask {
   /** The newest reply in this ask's thread, or null when nobody has replied. */
   readonly last_reply: AskLastReply | null;
+}
+
+/** One ask of `GET /api/v1/issues/{key}/asks?thread=1`: the row above, plus the thread that
+ *  renders the card whole without a fetch per ask. A reader asks for this shape by asking for
+ *  the thread, so the thread is always there. */
+export interface IssueAskThreadRow extends IssueAskRow {
   /** The card's initial thread; `["ask-thread", id]` remains its targeted live refresh. */
   readonly thread: AskThread;
 }

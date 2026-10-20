@@ -23,7 +23,9 @@ type inboxDocument struct {
 
 // askThread is the initial data a card renders beside an ask: its reply chain, the rewordings
 // the question went through, its answers, and the sessions it reaches. The Inbox and an issue's
-// ask list both carry one per ask, so a client renders a thread without a fetch per ask.
+// ask list asked for a thread both carry one per ask, so a client renders a thread without a
+// fetch per ask. `answers` is empty on an Inbox row, which is an open ask; the issue ask list
+// fills it for the answered asks on the page.
 type askThread struct {
 	Replies   []model.Comment     `json:"replies"`
 	Edits     []model.AskEdit     `json:"edits"`
@@ -143,7 +145,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	threads, err := s.loadInboxAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

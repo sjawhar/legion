@@ -147,11 +147,10 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
 
 test("after Ask back on a decision block, the hosted card's turn label follows the refetched issue asks to the agent's turn", async () => {
   const openAsk: Ask = { ...blockAsk, waiting_on: "human" };
-  // The list route answers rows: the ask plus its newest reply and its thread.
+  // The list route answers rows: the ask plus its newest reply, and no thread unasked.
   const handedOver: IssueAskRow = {
     ...blockAsk,
     last_reply: null,
-    thread: { answers: [], edits: [], followers: [], replies: [] },
     waiting_on: "agent",
   };
   const queryClient = createQueryClient();

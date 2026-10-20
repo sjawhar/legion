@@ -471,12 +471,14 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 20 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 21 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the stream connection, the active-sessions read,
-  // the primary artifact's comments and the margin's own list of the issue's asks -
-  // which are the two reads the Conversation's own list shares rather than fetching
-  // again - the issue's message threads, the two one-row event reads the unread mark
+  // the primary artifact's comments - which the Conversation's own list shares rather
+  // than fetching again - the margin's own list of the issue's asks and the
+  // Conversation's, which asks the same route for each ask's thread (`?thread=1`) and so
+  // is a request of its own, not the margin's shared,
+  // the issue's message threads, the two one-row event reads the unread mark
   // needs (the first event past the watermark, and the issue's head),
   // Conversation's live-agent query, the one block-schema fetch every document
   // surface shares for the session, the header's lookup of the project's
@@ -493,10 +495,10 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // and the Activity panel is unmounted until its tab is opened, so it adds nothing here.
   // The header's assignee picker reads who has signed in only once the reader
   // reaches for it, so it is not in this count. The phone project (iphone) does not
-  // fetch the sidebar while its drawer is closed, so it uses 18. Asserted exactly (not
+  // fetch the sidebar while its drawer is closed, so it uses 19. Asserted exactly (not
   // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 18 : 20);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 19 : 21);
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/settings/repo-projects"))
   ).toHaveLength(1);

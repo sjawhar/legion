@@ -4,7 +4,7 @@ import type {
   Ask,
   Comment,
   Event,
-  IssueAskRow,
+  IssueAskThreadRow,
   Message,
   MessageRead,
 } from "../../api/types";
@@ -31,7 +31,7 @@ const baseAsk: Ask = {
   urgency: "med",
 };
 
-function askRow(ask: Partial<Ask> = {}, replies: Comment[] = []): IssueAskRow {
+function askRow(ask: Partial<Ask> = {}, replies: Comment[] = []): IssueAskThreadRow {
   return {
     ...baseAsk,
     ...ask,
@@ -80,7 +80,7 @@ function thread(root: Message, replies: Message[] = []): MessageRead {
 }
 
 const build = (input: {
-  asks?: IssueAskRow[];
+  asks?: IssueAskThreadRow[];
   comments?: Comment[];
   messages?: MessageRead[];
   unreadFrom?: string;

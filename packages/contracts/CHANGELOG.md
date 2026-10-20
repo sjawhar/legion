@@ -97,9 +97,12 @@
   stored row without rendering the document (LEGION-481). It stays optional, absent on a document
   version from a server that predates it.
 - `IssueAskRow`, one element of `GET /api/v1/issues/{key}/asks`: an `Ask` plus `last_reply`, the
-  sort key a page ordered by its newest reply needs, and `thread`, which renders the card without
-  a fetch per ask. `Ask.last_reply` now names that list beside the Inbox rows and the issue
-  detail's `open_asks` (INFRA-44).
+  sort key a page ordered by its newest reply needs. `IssueAskThreadRow` is one element of
+  `GET /api/v1/issues/{key}/asks?thread=1`, which adds `thread`, the replies, rewordings,
+  answers and followers that render the card without a fetch per ask; the list is unpaged, so a
+  reader that draws no thread asks for none. Any other `thread` value is `400 INVALID_ASK_THREAD`.
+  `Ask.last_reply` now names that list beside the Inbox rows and the issue detail's `open_asks`
+  (INFRA-44).
 
 ### Changed
 

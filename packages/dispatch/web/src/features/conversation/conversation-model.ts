@@ -1,4 +1,10 @@
-import type { Comment, CommentDelivery, IssueAskRow, Message, MessageRead } from "../../api/types";
+import type {
+  Comment,
+  CommentDelivery,
+  IssueAskThreadRow,
+  Message,
+  MessageRead,
+} from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import { conversationItemId } from "../issue/pins";
 import { rowAnsweredWithError } from "./delivery";
@@ -28,7 +34,7 @@ interface ConversationBase {
  *  its replies, or a message thread, targeted or not. Each is built from the issue's own entity
  *  list, so a conversation older than any window of the event log is listed like every other. */
 export type Conversation =
-  | (ConversationBase & { readonly kind: "ask"; readonly ask: IssueAskRow })
+  | (ConversationBase & { readonly kind: "ask"; readonly ask: IssueAskThreadRow })
   | (ConversationBase & {
       readonly kind: "comment";
       readonly root: Comment;
@@ -52,7 +58,7 @@ export type Conversation =
 export type MessageConversation = Extract<Conversation, { kind: "message" | "targeted-message" }>;
 
 export interface ConversationInput {
-  readonly asks: readonly IssueAskRow[];
+  readonly asks: readonly IssueAskThreadRow[];
   readonly comments: readonly Comment[];
   readonly messages: readonly MessageRead[];
   /** `created_at` of the first event the reader has not read. Without one nothing is unread:
@@ -99,7 +105,7 @@ export function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Co
   return root;
 }
 
-function askConversation(ask: IssueAskRow, unreadFrom: string | undefined): Conversation {
+function askConversation(ask: IssueAskThreadRow, unreadFrom: string | undefined): Conversation {
   let at = ask.created_at;
   for (const reply of ask.thread.replies) {
     at = newest(at, reply.created_at);

@@ -816,12 +816,15 @@ export function ConversationTab({
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
   // The three reads the list is built from, each the issue's whole set: a conversation is listed
   // however old it is, which no window of the event log could promise.
-  // The asks and the comments are the reads the margin already holds for this issue, under the
-  // keys it owns (`features/margin/useAnsweredAsks.ts`, `features/margin/useMarginItems.ts`):
-  // the same requests, shared rather than fetched and stored a second time.
+  // The comments are the read the margin already holds for this issue, under the key it owns
+  // (`features/margin/useMarginItems.ts`): the same request, shared rather than fetched and
+  // stored a second time. The asks are not: this tab draws each ask's thread and asks the list
+  // for it, where the margin and a document's decision blocks render the ask alone and read
+  // `["asks", issueKey]` without one. Hence a key of its own - beneath that prefix, so every
+  // `invalidateQueries({ queryKey: ["asks", key] })` already written reaches this read too.
   const asks = useQuery({
-    queryKey: ["asks", issueKey],
-    queryFn: () => api.listIssueAsks(issueKey, "all"),
+    queryKey: ["asks", issueKey, "thread"],
+    queryFn: () => api.listIssueAskThreads(issueKey, "all"),
   });
   const comments = useQuery({
     queryKey: ["comments", issueKey],

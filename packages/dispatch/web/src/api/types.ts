@@ -139,6 +139,7 @@ export type {
   InboxRow,
   Issue,
   IssueAskRow,
+  IssueAskThreadRow,
   IssueChild,
   IssueClaim,
   IssueClaimEventPayload,

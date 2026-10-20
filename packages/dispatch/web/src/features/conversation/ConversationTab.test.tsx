@@ -17,7 +17,7 @@ import type {
   Comment,
   CommentDelivery,
   Event,
-  IssueAskRow,
+  IssueAskThreadRow,
   Message,
   MessageDelivery,
   MessageRead,
@@ -130,7 +130,7 @@ const baseAsk: Ask = {
   urgency: "med",
 };
 
-function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAskRow {
+function askRow(overrides: Partial<Ask> = {}, replies: Comment[] = []): IssueAskThreadRow {
   return {
     ...baseAsk,
     ...overrides,
@@ -190,7 +190,7 @@ const secondaryDocument: Artifact = {
 
 interface Lists {
   agents?: Agent[];
-  asks?: IssueAskRow[];
+  asks?: IssueAskThreadRow[];
   comments?: Comment[];
   /** The issue's newest event, which a dwell on the newest card marks read through. */
   head?: Event[];
@@ -205,7 +205,7 @@ interface Lists {
 function stubLists(initial: Lists = {}): { lists: Lists; restore: () => void } {
   const lists: Lists = { ...initial };
   const spies = [
-    spyOn(api, "listIssueAsks").mockImplementation(async () => lists.asks ?? []),
+    spyOn(api, "listIssueAskThreads").mockImplementation(async () => lists.asks ?? []),
     spyOn(api, "listComments").mockImplementation(async () => lists.comments ?? []),
     spyOn(api, "listIssueMessages").mockImplementation(async () => lists.messages ?? []),
     spyOn(api, "listAgents").mockImplementation(async () => lists.agents ?? []),

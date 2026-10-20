@@ -50,13 +50,12 @@ const unanchoredAsk: Ask = {
   question: "Approve the release?",
 };
 
-/** One row of `listIssueAsks`: the ask plus the list's own `last_reply` and `thread`. The margin
- *  reads the ask itself, so a fixture row carries no reply and an empty thread. */
+/** One row of `listIssueAsks`: the ask plus the list's own `last_reply`. The margin reads the
+ *  ask itself and asks for no thread, so a fixture row carries no reply either. */
 function askRow(ask: Ask): IssueAskRow {
   return {
     ...ask,
     last_reply: null,
-    thread: { answers: [], edits: [], followers: [], replies: [] },
   };
 }
 
