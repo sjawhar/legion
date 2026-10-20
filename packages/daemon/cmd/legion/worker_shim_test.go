@@ -17,12 +17,30 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
+// socketDir answers a directory short enough to hold a unix socket path: Linux's sun_path is 107
+// bytes, and t.TempDir() sits under TMPDIR, which is no longer short anywhere — a Legion role
+// container's TMPDIR is its own scratch on the issue's volume (/legion/scratch/<role>/tmp), and a
+// developer's macOS TMPDIR is a ~49-byte path under /var/folders. Under either, t.TempDir()'s own
+// per-test name pushes the socket past sun_path and the listen fails with "bind: invalid argument"
+// before the test does anything. /tmp is the shortest base every machine has, so the socket's
+// directory is made there and removed with the test; every other file a test writes stays under
+// t.TempDir().
+func socketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "legion-shim")
+	if err != nil {
+		t.Fatalf("socket directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // Every refusal the shipped command makes before it dials or spawns (worker-shim.ts:630-676,
 // 590-620), each naming the flag or path at fault: the daemon's pane has nothing to show but
 // this line, and a shim that dialled first would register a pane that can never start OMP.
 func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -101,7 +119,7 @@ func TestWorkerShimRefusesBeforeDialOrSpawn(t *testing.T) {
 // pane, and the runtime watching it, see.
 func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -170,7 +188,7 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 // ends with the agent (the test below), and the shim returns the moment both are done.
 func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -227,7 +245,7 @@ func TestWorkerShimWarmsTheWorkspacesCodegraphIndexOnceTheAgentStarts(t *testing
 // lease must be gone.
 func TestWorkerShimLetsAnInFlightWarmUpReleaseItsLeaseBeforeItExits(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -286,7 +304,7 @@ esac
 // cannot be made, the shim refuses naming it, before anything is dialled or spawned.
 func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
-	socket := filepath.Join(dir, "s")
+	socket := filepath.Join(socketDir(t), "s")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
