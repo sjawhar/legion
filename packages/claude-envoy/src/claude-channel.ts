@@ -32,6 +32,9 @@ export interface AllowedChannelPlugin {
   readonly plugin: string
 }
 
+/** The name `.mcp.json` gives this plugin's server. */
+const PLUGIN_SERVER = "envoy"
+
 /** The flags that name channels, and whether each is the development one. */
 const CHANNEL_FLAGS: Readonly<Record<string, boolean>> = {
   "--channels": false,
@@ -298,7 +301,11 @@ export function claudeChannelGate(input: {
   ).find((candidate) =>
     plugin === undefined
       ? candidate.kind === "server"
-      : candidate.kind === "plugin" && candidate.name === plugin.name,
+      : // Claude Code names a plugin's server `plugin:<plugin>:<server>`, which a `server:` entry
+        // can name too.
+        (candidate.kind === "plugin" && candidate.name === plugin.name) ||
+        (candidate.kind === "server" &&
+          candidate.name === `plugin:${plugin.name}:${PLUGIN_SERVER}`),
   )
   if (entry === undefined) {
     return {
@@ -402,9 +409,9 @@ export function processCommandLine(
   let commandLine: CommandLine | undefined
   if (process.platform === "linux") {
     try {
-      const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8")
-        .split("\0")
-        .filter((argument) => argument !== "")
+      // Each argument ends in NUL, so only the last piece is empty; an empty argument itself (a
+      // blank option value) stays, since dropping it would shift which word is a value.
+      const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").slice(0, -1)
       const terminal = stdoutIsTerminal(pid)
       const cwd = workingDirectory(pid)
       commandLine =

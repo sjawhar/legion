@@ -69,6 +69,52 @@ test("a development channel is dropped when the session's stdout is not a termin
   expect(claudeChannelEntries(argv, true, undefined)).toHaveLength(1)
 })
 
+test("a server: entry naming this plugin's server loads it, as Claude Code matches it", () => {
+  expect(
+    claudeChannelGate({
+      commandLine: exact(
+        "--dangerously-load-development-channels",
+        "server:plugin:claude-envoy:envoy",
+      ),
+      plugin,
+      allowlist: undefined,
+    }),
+  ).toEqual({ loaded: true })
+})
+
+test("an empty argument on the real command line keeps its place", async () => {
+  // `--append-system-prompt ""` takes the empty value; dropping it would read the channel flag as
+  // that option's value.
+  const child = spawn(
+    "sh",
+    [
+      "-c",
+      "sleep 5",
+      "claude",
+      "--append-system-prompt",
+      "",
+      "--dangerously-load-development-channels",
+      "x",
+    ],
+    { stdio: "ignore" },
+  )
+  try {
+    await Bun.sleep(50)
+    expect(processCommandLine(child.pid ?? 0)?.argv).toEqual([
+      "sh",
+      "-c",
+      "sleep 5",
+      "claude",
+      "--append-system-prompt",
+      "",
+      "--dangerously-load-development-channels",
+      "x",
+    ])
+  } finally {
+    child.kill()
+  }
+})
+
 test("a command line split on whitespace skips no value and is not ended by --", () => {
   // From `ps`: a `--` or an option-looking word may belong to a prompt, so a later flag still counts.
   expect(

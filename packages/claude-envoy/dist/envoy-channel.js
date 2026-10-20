@@ -46907,6 +46907,7 @@ import { spawnSync } from "child_process";
 import { readdirSync as readdirSync2, readFileSync as readFileSync4, readlinkSync as readlinkSync2 } from "fs";
 import { homedir as homedir3 } from "os";
 import { basename as basename2, join as join3, resolve as resolve2, sep } from "path";
+var PLUGIN_SERVER = "envoy";
 var CHANNEL_FLAGS = {
   "--channels": false,
   "--dangerously-load-development-channels": true
@@ -47110,7 +47111,7 @@ function claudeChannelGate(input) {
   if (commandLine2 === undefined)
     return { loaded: true };
   const ours = plugin === undefined ? "server:<name>" : `plugin:${plugin.name}@${plugin.marketplace ?? "<marketplace>"}`;
-  const entry = claudeChannelEntries(commandLine2.argv, commandLine2.exact, commandLine2.stdoutIsTerminal).find((candidate) => plugin === undefined ? candidate.kind === "server" : candidate.kind === "plugin" && candidate.name === plugin.name);
+  const entry = claudeChannelEntries(commandLine2.argv, commandLine2.exact, commandLine2.stdoutIsTerminal).find((candidate) => plugin === undefined ? candidate.kind === "server" : candidate.kind === "plugin" && candidate.name === plugin.name || candidate.kind === "server" && candidate.name === `plugin:${plugin.name}:${PLUGIN_SERVER}`);
   if (entry === undefined) {
     return {
       loaded: false,
@@ -47185,7 +47186,7 @@ function processCommandLine(pid, executable = processExecutable) {
   let commandLine2;
   if (process.platform === "linux") {
     try {
-      const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00").filter((argument) => argument !== "");
+      const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00").slice(0, -1);
       const terminal = stdoutIsTerminal(pid);
       const cwd = workingDirectory(pid);
       commandLine2 = argv.length === 0 ? undefined : {
