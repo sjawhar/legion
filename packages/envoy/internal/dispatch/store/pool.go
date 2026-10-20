@@ -135,6 +135,7 @@ type Pool struct {
 	rooms  *pgxpool.Pool
 	health *pgxpool.Pool
 	listen *pgxpool.Pool
+	leases *pgxpool.Pool
 	closed bool
 }
 
@@ -244,6 +245,26 @@ func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
 	return conn.Hijack(), nil
 }
 
+// leasePoolSize bounds the pool a periodic maintenance loop takes its once-overall lease on
+// (duty.Exclusive). One connection per leased loop that can be inside a pass at the same moment is
+// the whole requirement, and INFRA-66 leases seven: the document compaction, the
+// suggestion-outcome sweep, the reference-excerpt reconciliation, the GitHub webhook redelivery
+// sweep, the architecture import, the delivery reconcile and the delivery consumers'
+// reconciliation. Eight leaves one spare for the next one. They cannot come from the shared pool:
+// a lease is held for the whole pass, which is minutes for the compaction, and sharedPoolSize's
+// sixteen are what every request reads through.
+const leasePoolSize = 8
+
+// Leases is where a periodic maintenance loop takes the connection it holds its lease on, so that
+// only one process runs each pass (duty.Exclusive). The lease is a session-level advisory lock, so
+// it lives on one connection for the length of the pass and dies with it; a connection of the
+// shared pool held that long would be one fewer for every request, and a pass that then read
+// through the shared pool - which is what a pass does - would be a caller holding two of its
+// connections (ErrNestedAcquire).
+func (p *Pool) Leases() (*pgxpool.Pool, error) {
+	return p.separate(&p.leases, leasePoolSize, "loop leases")
+}
+
 // separate opens the pool held at field on demand, sized at size and copied from the shared
 // pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
 // check-and-open so two of them cannot open two pools, and one opened after Close would be a
@@ -281,10 +302,10 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health, listen := p.rooms, p.health, p.listen
-	p.rooms, p.health, p.listen = nil, nil, nil
+	rooms, health, listen, leases := p.rooms, p.health, p.listen, p.leases
+	p.rooms, p.health, p.listen, p.leases = nil, nil, nil, nil
 	p.mu.Unlock()
-	for _, separate := range []*pgxpool.Pool{rooms, health, listen} {
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen, leases} {
 		if separate != nil {
 			separate.Close()
 		}
