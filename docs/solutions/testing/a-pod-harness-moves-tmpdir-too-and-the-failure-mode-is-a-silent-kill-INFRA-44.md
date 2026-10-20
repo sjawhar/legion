@@ -47,8 +47,10 @@ Not charged:
 
 - the issue volume `/legion`, and the read-only feed `/legion/feed` on it;
 - the sessions directory `/home/legion/.omp/profiles/legion/agent/sessions`;
-- the in-memory directories `/home/legion/.config`, `/var/run/legion/private`,
-  `/var/run/legion/state`, `/var/run/legion/launcher` and `/var/run/legion/gh`.
+- the in-memory `emptyDir`s `/home/legion/.config`, `/var/run/legion/private` and
+  `/var/run/legion/state`, which mount as `tmpfs rw`;
+- `/var/run/legion/launcher` and `/var/run/legion/gh`, which are not in-memory directories but
+  read-only credential mounts — Secret volumes, `9p ro`, which a reader cannot write to at all.
 
 **`/tmp` is not the exception a reader expects.** A role container mounts no `/tmp`: the
 memory-backed `tmp` volume belongs to the `workspace-fetch` init container alone, as that
@@ -57,8 +59,8 @@ container's own `TMPDIR` (`packages/daemon/internal/runtime/sandbox/podkind.go`,
 `packages/daemon/internal/runtime/sandbox/testdata/golden/root.json`, in which the architect,
 planner, implementer, tester, reviewer and merger containers mount the issue volume, the sessions
 directory, `/home/legion/.config` and four `/var/run/legion/*` directories, and no `/tmp`).
-`docs/kubernetes.md` states it in prose. A habit of "put the big download in /tmp" is evicted for
-here; nothing about `/tmp` in a role container is free.
+`docs/kubernetes.md` states it in prose. A habit of "put the big download in /tmp" gets the pod
+evicted here; nothing about `/tmp` in a role container is free.
 
 **1 GiB is not the number the configuration shows.** Every role's default reservation asks for a
 much larger ephemeral-storage limit over a 1 GiB request — 20 GiB for the implementer and tester,
@@ -121,9 +123,21 @@ role container actually mounts.
 - `df -k --output=used /` reads 14,392 KiB at rest. A 200 MiB write under `/tmp` takes it to
   219,192 KiB, and so does the same write under `/home/legion/.cache`; removing the file returns it
   to 14,392 KiB. The same 200 MiB written under `/legion`, or under `/home/legion/.config`, leaves
-  the container filesystem at 14,392 KiB and grows that volume instead — with the caveat that `du`
-  reports 0 blocks for such a file on this gVisor overlay, so `df` on `/` is the instrument that
-  sees the charge, not `du`.
+  the container filesystem at 14,392 KiB and grows that volume instead.
+- **`du` sees these files; `du -x` does not.** Pointed at a path, `du` reports a written file
+  normally: with a 200 MiB file under `/tmp`, `stat -c 'blocks=%b' /tmp/probe` prints
+  `blocks=409600` — 200 MiB in 512-byte blocks, not 0 — `du -sk /tmp/probe` prints `204800`, and
+  `du -sk /tmp` prints `217364`. What is blind is the one-filesystem walk, `du -x`: on this gVisor
+  overlay a written file reports a different device from its parent directory —
+  `stat -c '%n dev=%d'` gives `/tmp` dev=114 but `/tmp/probe` dev=112, and `/home/legion/.cache`
+  dev=114 but a file written in it dev=112 — so `du -x` treats every written file as living on
+  another filesystem and skips it: `du -sx -k /` stays `42348` across the write,
+  `du -x -a -d1 -k /` prints `0` for `/tmp`, and `du -sx -k /home` stays `13516` with 200 MiB under
+  `~/.cache`. So use `du -sh ~/.cache`, or `du -sh` on any directory, without `-x`, to find what a
+  directory holds — it reported `212M` with that probe in place — and `df -k --output=used /` to
+  measure the whole container filesystem against the limit; `du -x` and `df -x` are the ones to
+  avoid here. Verified twice, in two different role containers of this pod, and it is how the
+  4.4 GiB of Go caches quoted above was found.
 
 The limit of all of it: nobody inside a role container can read the kubelet's own per-container
 accounting, because the cluster refuses `nodes/proxy`.
