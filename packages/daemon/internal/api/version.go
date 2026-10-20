@@ -253,8 +253,9 @@ package api
 // names `TMPDIR` and `BUN_INSTALL_CACHE_DIR`. The two other new names, `GOCACHE` and
 // `GOMODCACHE`, are on the issue's volume too, but shared by the issue's roles rather than one
 // pair per role — `/legion/go/build` and `/legion/go/mod`, as `UV_CACHE_DIR` already was — since
-// both hold content addressed by its hash and the roles of one issue may fill them at once, and
-// six copies of identical content would be about 5.5 GB of a 20 GiB volume. `XDG_CONFIG_HOME` is
+// both hold content addressed by its hash and the roles of one issue may fill them at once, and a
+// pair is 751 MB of build cache and 375 MB of module cache for this repository, so the five
+// redundant copies would be about 5.6 GB of a 20 GiB volume spent on nothing. `XDG_CONFIG_HOME` is
 // unchanged, the pod's shared in-memory volume `workspace-init` writes the agents' jj
 // configuration in, and the issue pod's `workspace-init`, the one init container told any XDG
 // home, keeps every value it had. These directories are on the volume rather than the gigabyte of

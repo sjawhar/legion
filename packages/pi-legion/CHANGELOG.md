@@ -86,8 +86,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `XDG_STATE_HOME` (whose `/home/legion/.local/state/<role>` contract 18 declared) move under the
   role's own scratch, and `TMPDIR` and `BUN_INSTALL_CACHE_DIR` join them there, while `GOCACHE`
   and `GOMODCACHE` are one pair shared by the issue's roles beside uv's cache, `/legion/go/build`
-  and `/legion/go/mod` — both hold content addressed by its hash, and six copies of identical
-  content would be about 5.5 GB of a 20 GiB volume. The four new names are the runtime's own and
+  and `/legion/go/mod` — both hold content addressed by its hash, and a pair is 751 MB of build
+  cache and 375 MB of module cache for this repository, so the five redundant copies would be
+  about 5.6 GB of a 20 GiB volume spent on nothing. The four new names are the runtime's own and
   a spec or an operator's pod env is refused for setting them. `XDG_CONFIG_HOME` is
   unchanged, the pod's shared in-memory volume, and `workspace-init`, the one init container told
   any XDG home, keeps every value it had. A role container is admitted with about a gigabyte of
