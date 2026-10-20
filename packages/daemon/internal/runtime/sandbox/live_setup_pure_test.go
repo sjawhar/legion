@@ -13,8 +13,9 @@ import (
 )
 
 // liveSetupScript records, without any helper text, which credential helpers git runs for
-// https://github.com from the setup's own directory, and whether `git ls-remote` of $1 from /tmp,
-// outside the issue clone, succeeds with the role's helper and fails without it.
+// https://github.com from the setup's own directory, and whether `git ls-remote` of $1, run from a
+// fresh empty directory outside the issue clone, succeeds with the role's helper and is refused
+// without it.
 //
 // Every git it runs starts under `env -i` with this allowlist alone, so nothing else of the role's
 // environment (GIT_CONFIG, GIT_DIR, GIT_COMMON_DIR, GIT_CONFIG_PARAMETERS, an askpass, a token, a
@@ -28,7 +29,12 @@ import (
 //   - HOME at an empty temporary directory, GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1,
 //     so git reads no global, XDG or system configuration;
 //   - GIT_TERMINAL_PROMPT=0, so a missing credential fails rather than prompts;
-//   - LC_ALL=C, so git words that failure as liveSetupControlClass reads it.
+//   - LC_ALL=C, so git words that failure as liveSetupControlClass reads it;
+//   - for the two ls-remote calls alone, GIT_CEILING_DIRECTORIES at the parent of the fresh
+//     directory (mktemp -d) they run in, so git looks for no repository above it: a .git there (an
+//     operator's volume at /tmp, or one an earlier generation's agent wrote) could carry a
+//     url.insteadOf or http.extraHeader that answers the first call and refuses the second. The
+//     `git config` call runs in the setup's directory, the issue clone, whose local scope it reads.
 //
 // git builds one helper list for a request from credential.helper and every credential.<url>.helper
 // whose URL matches it, in its read order (system, global, local, worktree, command), and an empty
@@ -49,7 +55,10 @@ const liveSetupScript = `set -eu
 cwd=$(pwd -P)
 uid=$(id -u)
 home=$(mktemp -d)
-trap 'rm -rf -- "$home"' EXIT
+away=$(mktemp -d)
+trap 'rm -rf -- "$home" "$away"' EXIT
+away=$(cd "$away" && pwd -P)
+ceiling=$(dirname -- "$away")
 count=${GIT_CONFIG_COUNT:-0}
 case $count in ''|*[!0-9]*) count=0 ;; esac
 without_helper=
@@ -121,37 +130,48 @@ helper_class=other
 if [ "$helper_effective" -eq 1 ] && [ "$helper_scope" = command ] && [ -n "$helper_known" ] && [ "$helper" = '!legion git-credential' ]; then
   helper_class=expected
 fi
-if (cd /tmp && probe_git timeout 60 git ls-remote "$1" HEAD >/dev/null); then
+if (cd "$away" && probe_git GIT_CEILING_DIRECTORIES="$ceiling" timeout 60 git ls-remote "$1" HEAD >/dev/null); then
   git=ok
 else
   git=failed
 fi
 without_helper=1
 status=0
-control=$(cd /tmp && probe_git timeout 60 git ls-remote "$1" HEAD 2>&1 >/dev/null) || status=$?
-` + liveSetupControlClass + `printf 'setup:%s:%s/%s cwd=%s uid=%s ppid=%s git_from=/tmp helper=%s helper_count=%s helper_effective=%s helper_lines=%s git=%s git_without_helper=%s git_without_helper_error=%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" "$cwd" "$uid" "$PPID" "$helper_class" "$helper_count" "$helper_effective" "$helper_lines" "$git" "$git_without_helper" "$git_without_helper_error" >>"$LEGION_E2E_MARKER"
+control=$(cd "$away" && probe_git GIT_CEILING_DIRECTORIES="$ceiling" timeout 60 git ls-remote "$1" HEAD 2>&1 >/dev/null) || status=$?
+` + liveSetupControlClass + `printf 'setup:%s:%s/%s cwd=%s uid=%s ppid=%s git_from=%s helper=%s helper_count=%s helper_effective=%s helper_lines=%s git=%s git_without_helper=%s git_without_helper_error=%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" "$cwd" "$uid" "$PPID" "$away" "$helper_class" "$helper_count" "$helper_effective" "$helper_lines" "$git" "$git_without_helper" "$git_without_helper_error" >>"$LEGION_E2E_MARKER"
 `
 
 // liveSetupControlClass reads how the negative control's ls-remote ended, from its exit status
 // ($status) and what it wrote to stderr ($control), into git_without_helper and
 // git_without_helper_error. `ok` is a success. `refused` is git stopping for want of a credential:
 // with no helper and GIT_TERMINAL_PROMPT=0, git 2.43 answers a 401 with `fatal: could not read
-// Username for '<url>': terminal prompts disabled`, or `Password` when it already has a username
-// (TestGitRefusalReadsAsRefused holds the local git to both). GitHub answers 401 for a repository
-// it hides as well as for a private one, but the ls-remote before the control read this one with
-// the role's helper. Anything else is `failed`: git_without_helper_error is then its exit status
-// and first stderr line, with control characters removed and a GitHub token, a JWT and a URL's
-// user info each replaced by `***`.
+// Username for '<url>': terminal prompts disabled`, or `Password` when it already has a username,
+// and with nothing else on stderr. That one line must be the whole of stderr: a remote's ERR packet
+// reaches stderr as `fatal: remote error: <message>`, with the message's own newlines printed
+// unprefixed, so a remote can make any later line read as the refusal, the last one included, but
+// never the first (TestGitRefusalReadsAsRefused holds the local git to all of this). GitHub
+// answers 401 for a repository it hides as well as for a private one, but the ls-remote before the
+// control read this one with the role's helper. Anything else is `failed`: git_without_helper_error
+// is then its exit status and first stderr line, with control characters removed and a GitHub
+// token, a JWT and a URL's user info each replaced by `***`.
 const liveSetupControlClass = `git_without_helper_error=
+nl='
+'
 if [ "$status" -eq 0 ]; then
   git_without_helper=ok
-elif printf '%s\n' "$control" | grep -q -E '^fatal: could not read (Username|Password) for '"'"'[^'"'"']*'"'"': terminal prompts disabled$'; then
-  git_without_helper=refused
 else
-  git_without_helper=failed
-  first=$(printf '%s\n' "$control" | sed -n 1p | tr -d '\000-\037\177' |
-    sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_.-]+/\1***/g; s/eyJ[A-Za-z0-9_.-]+/***/g; s#(://)[^/@[:space:]]+@#\1***@#g')
-  git_without_helper_error="exit $status: ${first:-no stderr}"
+  case $control in
+    *"$nl"*) refusal= ;;
+    *) refusal=$control ;;
+  esac
+  if [ -n "$refusal" ] && printf '%s\n' "$refusal" | grep -q -E '^fatal: could not read (Username|Password) for '"'"'[^'"'"']*'"'"': terminal prompts disabled$'; then
+    git_without_helper=refused
+  else
+    git_without_helper=failed
+    first=$(printf '%s\n' "$control" | sed -n 1p | tr -d '\000-\037\177' |
+      sed -E 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_.-]+/\1***/g; s/eyJ[A-Za-z0-9_.-]+/***/g; s#(://)[^/@[:space:]]+@#\1***@#g')
+    git_without_helper_error="exit $status: ${first:-no stderr}"
+  fi
 fi
 `
 
@@ -276,14 +296,18 @@ func setupHelperProblem(marker setupMarker) error {
 	return fmt.Errorf("setup helper classification %q with count %s, effective %s and lines %s, want expected", marker.helper, marker.helperCount, marker.helperEffective, marker.helperLines)
 }
 
-// setupGitProblem is nil when the ls-remote from /tmp, outside any clone, succeeded with the role's
-// helper and the same ls-remote without it was refused for want of a credential: then the private
-// repository was read through that helper. A control that failed for another reason names that
-// reason, so an outage reads as an outage.
+// setupGitProblem is nil when the ls-remote from the record's own directory (git_from, the fresh
+// directory the script made outside the issue clone) succeeded with the role's helper and the same
+// ls-remote without it was refused for want of a credential: then the private repository was read
+// through that helper. A control that failed for another reason names that reason, so an outage
+// reads as an outage.
 func setupGitProblem(marker setupMarker) error {
+	inClone := marker.gitFrom == marker.cwd || strings.HasPrefix(marker.gitFrom, strings.TrimSuffix(marker.cwd, "/")+"/")
 	switch {
-	case marker.gitFrom != "/tmp" || marker.git != "ok":
-		return fmt.Errorf("setup ls-remote from %s with the role's helper: git=%s, want /tmp and ok", marker.gitFrom, marker.git)
+	case !strings.HasPrefix(marker.gitFrom, "/") || inClone:
+		return fmt.Errorf("setup ls-remote ran in %q, want an absolute directory outside the setup's directory %q", marker.gitFrom, marker.cwd)
+	case marker.git != "ok":
+		return fmt.Errorf("setup ls-remote from %s with the role's helper: git=%s, want ok", marker.gitFrom, marker.git)
 	case marker.gitWithoutHelper == "refused":
 		return nil
 	case marker.gitWithoutHelper == "failed":

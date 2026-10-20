@@ -68,6 +68,12 @@ func (r *liveRig) checkSetupRecord(c *liveClaim) error {
 	if err := setupGitProblem(setup); err != nil {
 		return err
 	}
+	// The directory the ls-remote calls ran in is the setup's own, made fresh and removed on exit.
+	if left, err := r.exec(c, "sh", "-c", `if [ -e "$1" ]; then echo present; else echo absent; fi`, "gone", setup.gitFrom); err != nil {
+		return err
+	} else if left != "absent" {
+		return fmt.Errorf("the setup's ls-remote directory %s is still %s after it exited, want removed", setup.gitFrom, left)
+	}
 	if err := setupHelperProblem(setup); err != nil {
 		return err
 	}
@@ -104,7 +110,7 @@ func (r *liveRig) checkSetupRecord(c *liveClaim) error {
 	if workingDir != cwd {
 		return fmt.Errorf("the %s container WorkingDir is %q, want the agent cwd %q", c.role, workingDir, cwd)
 	}
-	note("operator", "%s setup marker before its agent marker: cwd %s; uid %s; git ls-remote from %s succeeded with the role's helper and failed without it; setup parent pid %s became the agent", c.name, setup.cwd, setup.uid, setup.gitFrom, setup.ppid)
+	note("operator", "%s setup marker before its agent marker: cwd %s; uid %s; git ls-remote from the fresh %s succeeded with the role's helper and was refused without it; setup parent pid %s became the agent", c.name, setup.cwd, setup.uid, setup.gitFrom, setup.ppid)
 	return nil
 }
 

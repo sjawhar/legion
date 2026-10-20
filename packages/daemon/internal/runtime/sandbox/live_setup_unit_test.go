@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,8 +125,15 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 	if setup.uid != strconv.Itoa(os.Getuid()) {
 		t.Errorf("setup uid %q, want %d", setup.uid, os.Getuid())
 	}
-	if setup.gitFrom != "/tmp" || setup.git != "ok" || setup.gitWithoutHelper != "refused" || setup.gitWithoutHelperError != "" {
-		t.Errorf("setup git record = from %q, git %q, git_without_helper %q (%q); want /tmp, ok and refused", setup.gitFrom, setup.git, setup.gitWithoutHelper, setup.gitWithoutHelperError)
+	ceiling, err := filepath.EvalSymlinks(r.tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(setup.gitFrom) != ceiling || setup.git != "ok" || setup.gitWithoutHelper != "refused" || setup.gitWithoutHelperError != "" {
+		t.Errorf("setup git record = from %q, git %q, git_without_helper %q (%q); want a fresh directory of %s, ok and refused", setup.gitFrom, setup.git, setup.gitWithoutHelper, setup.gitWithoutHelperError, ceiling)
+	}
+	if _, err := os.Stat(setup.gitFrom); !os.IsNotExist(err) {
+		t.Errorf("the setup's ls-remote directory %s outlived it: %v", setup.gitFrom, err)
 	}
 	if err := setupGitProblem(setup); err != nil {
 		t.Errorf("setupGitProblem = %v, want nil", err)
@@ -139,8 +148,8 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 		t.Errorf("the helper's password reached the marker or stderr: %q %q", lines, stderr)
 	}
 
-	withHelper := r.wantEnvironment(false)
-	audits := map[string][]string{"config": withHelper, "ls-remote-1": withHelper, "ls-remote-2": r.wantEnvironment(true)}
+	withHelper := r.wantEnvironment(false, "")
+	audits := map[string][]string{"config": withHelper, "ls-remote-1": r.wantEnvironment(false, ceiling), "ls-remote-2": r.wantEnvironment(true, ceiling)}
 	for call, want := range audits {
 		if got := r.audited(call + "-env"); !slices.Equal(got, want) {
 			t.Errorf("git %s environment =\n%s\nwant exactly\n%s", call, strings.Join(got, "\n"), strings.Join(want, "\n"))
@@ -150,8 +159,8 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 		}
 	}
 	for _, call := range []string{"ls-remote-1", "ls-remote-2"} {
-		if got := r.audited(call + "-cwd"); !slices.Equal(got, []string{"/tmp"}) {
-			t.Errorf("git %s ran in %q, want /tmp", call, got)
+		if got := r.audited(call + "-cwd"); !slices.Equal(got, []string{setup.gitFrom}) {
+			t.Errorf("git %s ran in %q, want the record's fresh directory %s", call, got, setup.gitFrom)
 		}
 	}
 }
@@ -208,46 +217,77 @@ func TestLiveSetupNegativeControl(t *testing.T) {
 	}
 }
 
-// git's own refusal, when it stops for want of a credential, is the one text liveSetupControlClass
+// git's own refusal, when it stops for want of a credential, is the one stderr liveSetupControlClass
 // reads as `refused`. A local server answers every request 401 with a Basic challenge, as GitHub
 // answers a private repository with no credential, and the real git, under the control's own
-// variables (GIT_TERMINAL_PROMPT=0, LC_ALL=C, no helper), says:
+// variables (GIT_TERMINAL_PROMPT=0, LC_ALL=C, no helper), writes exactly one line:
 //
 //	fatal: could not read Username for 'http://127.0.0.1:<port>': terminal prompts disabled
 //
-// and, when the request already names a username (credential.username), `Password` for
-// 'http://<user>@127.0.0.1:<port>'. Both read as `refused`, and a closed port, git's failure to
-// connect, reads as `failed`.
+// or, when the request already names a username (credential.username), `Password` for
+// 'http://<user>@127.0.0.1:<port>'; a 401's body never reaches stderr. A remote that answers the
+// ref advertisement with an ERR packet instead reaches stderr as `fatal: remote error: <message>`,
+// the message's own newlines printed unprefixed, so its later lines can read as the refusal, the
+// last one included: each such stderr, like a closed port's, reads as `failed`.
 func TestGitRefusalReadsAsRefused(t *testing.T) {
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	const forged = "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		errPacket := map[string]string{"/err/middle/": "first\n" + forged + "\nlast", "/err/final/": "first\n" + forged}
+		for prefix, message := range errPacket {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+				_, _ = io.WriteString(w, pktLine("ERR "+message))
+				return
+			}
+		}
 		w.Header().Set("WWW-Authenticate", `Basic realm="GitHub"`)
+		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusUnauthorized)
+		if strings.HasPrefix(r.URL.Path, "/forged-body/") {
+			_, _ = io.WriteString(w, forged+"\n")
+		}
 	}))
 	defer server.Close()
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closedURL := closed.URL
 	closed.Close()
 	home := t.TempDir()
+	refusal := "fatal: could not read Username for '" + server.URL + "': terminal prompts disabled"
 	for name, tc := range map[string]struct {
 		url    string
 		config []string
-		first  string
+		stderr []string
 		class  string
 	}{
 		"no username": {
-			url:   server.URL + "/sjawhar/legion-smoke",
-			first: "fatal: could not read Username for '" + server.URL + "': terminal prompts disabled",
-			class: "refused",
+			url:    server.URL + "/sjawhar/legion-smoke",
+			stderr: []string{refusal},
+			class:  "refused",
 		},
 		"a username and no password": {
 			url:    server.URL + "/sjawhar/legion-smoke",
 			config: commandConfig([2]string{"credential.username", "x-access-token"}),
-			first:  "fatal: could not read Password for '" + strings.Replace(server.URL, "://", "://x-access-token@", 1) + "': terminal prompts disabled",
+			stderr: []string{"fatal: could not read Password for '" + strings.Replace(server.URL, "://", "://x-access-token@", 1) + "': terminal prompts disabled"},
 			class:  "refused",
+		},
+		"a 401 whose body forges the refusal": {
+			url:    server.URL + "/forged-body/repo",
+			stderr: []string{refusal},
+			class:  "refused",
+		},
+		"an ERR packet whose middle line is the refusal": {
+			url:    server.URL + "/err/middle/repo",
+			stderr: []string{"fatal: remote error: first", forged, "last"},
+			class:  "failed",
+		},
+		"an ERR packet whose last line is the refusal": {
+			url:    server.URL + "/err/final/repo",
+			stderr: []string{"fatal: remote error: first", forged},
+			class:  "failed",
 		},
 		"a closed port": {
 			url:   closedURL + "/sjawhar/legion-smoke",
@@ -268,9 +308,8 @@ func TestGitRefusalReadsAsRefused(t *testing.T) {
 				}
 				status = exit.ExitCode()
 			}
-			first, _, _ := strings.Cut(stderr.String(), "\n")
-			if tc.first != "" && first != tc.first {
-				t.Errorf("git's first stderr line = %q, want %q", first, tc.first)
+			if got := strings.Split(strings.TrimRight(stderr.String(), "\n"), "\n"); tc.stderr != nil && !slices.Equal(got, tc.stderr) {
+				t.Errorf("git's stderr = %q, want exactly %q", got, tc.stderr)
 			}
 			class, detail := controlClass(t, status, stderr.String())
 			if class != tc.class {
@@ -279,6 +318,10 @@ func TestGitRefusalReadsAsRefused(t *testing.T) {
 		})
 	}
 }
+
+// pktLine is payload as one git pkt-line: its length, payload included, as four hex digits, then
+// the payload.
+func pktLine(payload string) string { return fmt.Sprintf("%04x%s", len(payload)+4, payload) }
 
 // controlClass runs liveSetupControlClass alone on a control's exit status and stderr, and returns
 // its git_without_helper and git_without_helper_error.
@@ -333,6 +376,68 @@ func TestLiveSetupControlErrorIsRedacted(t *testing.T) {
 				t.Errorf("control = %q, %q; want failed, %q", class, detail, tc.want)
 			}
 		})
+	}
+}
+
+// The ls-remote calls run in a fresh directory, with git's repository discovery stopped at its
+// parent (GIT_CEILING_DIRECTORIES). A .git in that parent, which an operator's volume at /tmp or an
+// earlier generation's agent could leave, with a url.insteadOf that sends github.com to a server
+// answering the first ls-remote and refusing the second, would otherwise make a broken helper read
+// as git=ok with the control refused. The server answers neither call, and the record is the one
+// the probe gives without that .git.
+func TestLiveSetupIgnoresARepositoryAboveItsDirectory(t *testing.T) {
+	for name, helper := range map[string]string{
+		"the role's helper": workspace.GitHubCredentialHelper,
+		"a broken helper":   "!different git-credential",
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newSetupRig(t, private)
+			r.roleEnv()
+			t.Setenv("GIT_CONFIG_VALUE_1", helper)
+			clean := r.probe(r.start)
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if requests.Add(1) == 1 {
+					w.Header().Set("Content-Type", "application/x-git-upload-pack-advertisement")
+					_, _ = io.WriteString(w, pktLine("# service=git-upload-pack\n")+"0000"+
+						pktLine("0123456789012345678901234567890123456789 HEAD\x00agent=forged\n")+"0000")
+					return
+				}
+				w.Header().Set("WWW-Authenticate", `Basic realm="GitHub"`)
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer server.Close()
+			r.git("init", "--quiet", r.tmp)
+			r.git("-C", r.tmp, "config", "url."+server.URL+"/.insteadOf", "https://github.com/")
+
+			attacked := r.probe(r.start)
+			if got, want := setupOutcome(attacked), setupOutcome(clean); got != want {
+				t.Errorf("record with a .git above its directory = %s, want the record without it, %s", got, want)
+			}
+			if n := requests.Load(); n != 0 {
+				t.Errorf("the rewritten server answered %d ls-remote calls, want none", n)
+			}
+		})
+	}
+}
+
+// setup-ran reads git_from as the directory the ls-remote calls ran in, and refuses one that is
+// not absolute or is the setup's own directory, the issue clone, or below it.
+func TestSetupGitProblemRefusesTheCloneDirectory(t *testing.T) {
+	base := setupMarker{cwd: "/legion/workspaces/sjawhar/legion-smoke/s4a-1", git: "ok", gitWithoutHelper: "refused"}
+	for gitFrom, accepted := range map[string]bool{
+		"/tmp/tmp.Ab12Cd": true,
+		"/legion/workspaces/sjawhar/legion-smoke/s4a-10":  true,
+		"/legion/workspaces/sjawhar/legion-smoke/s4a-1":   false,
+		"/legion/workspaces/sjawhar/legion-smoke/s4a-1/x": false,
+		"tmp.Ab12Cd": false,
+	} {
+		marker := base
+		marker.gitFrom = gitFrom
+		if err := setupGitProblem(marker); (err == nil) != accepted {
+			t.Errorf("setupGitProblem(git_from=%s) = %v, want accepted %t", gitFrom, err, accepted)
+		}
 	}
 }
 
@@ -570,20 +675,24 @@ func TestGitCredentialHelperURLForms(t *testing.T) {
 	}
 }
 
-// setupRig runs liveSetupScript through the real start wrapper from a directory of its own, with a
-// fake git first on PATH that hands `git config` to the real git and stands in for ls-remote, and a
-// fake `legion` whose `git-credential get` answers a password only under the owners directory the
-// rig names. The fake ls-remote succeeds when the configuration it reads, as a real ls-remote does
-// (never through GIT_CONFIG), names an http.extraHeader for github.com, or when the real git's
-// `credential fill` for sjawhar/legion-smoke, run with the environment the probe gave it, returns
-// a password. Otherwise it ends as the rig's network says: as git refuses a private repository with
-// no credential (TestGitRefusalReadsAsRefused quotes that text from the real git), or as git fails
-// when the host does not resolve, or on a GitHub 5xx. Each fake call records its environment, its
-// HOME's emptiness and its directory under the rig's audit directory.
+// setupRig runs liveSetupScript through the real start wrapper from a directory of its own, with
+// TMPDIR at a directory of the rig's own, where the script's mktemp makes the fresh directory its
+// ls-remote calls run in; a fake git first on PATH that hands `git config` to the real git and
+// stands in for ls-remote; and a fake `legion` whose `git-credential get` answers a password only
+// under the owners directory the rig names. The fake ls-remote reads its configuration through the
+// real git as a real ls-remote does: from the directory it runs in, with git's repository discovery
+// and GIT_CEILING_DIRECTORIES, never through GIT_CONFIG. It succeeds when that configuration
+// rewrites github.com with url.insteadOf (the rewritten server answers it) or names an
+// http.extraHeader for github.com, or when the real git's `credential fill` for
+// sjawhar/legion-smoke, run with the environment the probe gave it, returns a password. Otherwise it
+// ends as the rig's network says: as git refuses a private repository with no credential
+// (TestGitRefusalReadsAsRefused quotes that text from the real git), or as git fails when the host
+// does not resolve, or on a GitHub 5xx. Each fake call records its environment, its HOME's
+// emptiness and its directory under the rig's audit directory.
 type setupRig struct {
-	t                               *testing.T
-	root, start, bin, audit, owners string
-	marker, realGit                 string
+	t                                    *testing.T
+	root, start, bin, audit, owners, tmp string
+	marker, realGit                      string
 }
 
 // setupNetwork is how the rig's fake ls-remote ends when nothing authenticates it. The three
@@ -648,6 +757,8 @@ ls-remote)
     esac
   fi
   if [ "$network" != public ]; then
+    rewrite=$(env -u GIT_CONFIG "$real" config --get-regexp '^url\..*\.insteadof$' 2>/dev/null) || rewrite=
+    [ -z "$rewrite" ] || exec "$real" "$@"
     header=$(env -u GIT_CONFIG "$real" config --get-urlmatch http.extraheader https://github.com/ 2>/dev/null) || header=
     if [ -z "$header" ]; then
       answer=$(printf 'protocol=https\nhost=github.com\npath=sjawhar/legion-smoke.git\n\n' | "$real" credential fill 2>/dev/null) || answer=
@@ -685,10 +796,10 @@ func newSetupRig(t *testing.T, network setupNetwork) *setupRig {
 	root := t.TempDir()
 	r := &setupRig{
 		t: t, root: root, start: filepath.Join(root, "start"), bin: filepath.Join(root, "bin"),
-		audit: filepath.Join(root, "audit"), owners: filepath.Join(root, "owners"), marker: filepath.Join(root, "marker"),
-		realGit: realGit,
+		audit: filepath.Join(root, "audit"), owners: filepath.Join(root, "owners"), tmp: filepath.Join(root, "tmp"),
+		marker: filepath.Join(root, "marker"), realGit: realGit,
 	}
-	for _, dir := range []string{r.start, r.bin, r.owners} {
+	for _, dir := range []string{r.start, r.bin, r.owners, r.tmp} {
 		if err := os.Mkdir(dir, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -705,7 +816,7 @@ func newSetupRig(t *testing.T, network setupNetwork) *setupRig {
 	// The test process may inherit command-scope git entries of its own; the rig starts with none.
 	for name, value := range map[string]string{
 		"GIT_CONFIG_COUNT": "0", "LEGION_E2E_MARKER": r.marker, "LEGION_ROLE": "architect", "POD_UID": "pod-1",
-		"LEGION_GENERATION": "3", "LEGION_GH_OWNERS_DIR": r.owners,
+		"LEGION_GENERATION": "3", "LEGION_GH_OWNERS_DIR": r.owners, "TMPDIR": r.tmp,
 	} {
 		t.Setenv(name, value)
 	}
@@ -837,14 +948,17 @@ func (r *setupRig) audited(name string) []string {
 
 // wantEnvironment is the whole environment, HOME aside, that liveSetupScript's allowlist gives
 // every git under roleEnv: gitCredentialPairs as command-scope entries, with each helper key's
-// value emptied for the negative control, the role's PATH (runStart's) and owners directory, and
-// the three fixed git variables.
-func (r *setupRig) wantEnvironment(withoutHelper bool) []string {
+// value emptied for the negative control, the role's PATH (runStart's) and owners directory, the
+// four fixed variables, and, for an ls-remote call, GIT_CEILING_DIRECTORIES at ceiling.
+func (r *setupRig) wantEnvironment(withoutHelper bool, ceiling string) []string {
 	env := []string{
 		"PATH=" + r.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"LEGION_GH_OWNERS_DIR=" + r.owners,
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C",
 		"GIT_CONFIG_COUNT=" + strconv.Itoa(len(gitCredentialPairs)),
+	}
+	if ceiling != "" {
+		env = append(env, "GIT_CEILING_DIRECTORIES="+ceiling)
 	}
 	for i, pair := range gitCredentialPairs {
 		value := pair[1]
