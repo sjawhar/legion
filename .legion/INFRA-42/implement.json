@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-42",
-  "completed": "2026-10-20T14:45:00Z",
+  "completed": "2026-10-20T16:20:00Z",
   "proof": [
     {
       "criterion": "Opening the Inbox lists only questions on issues assigned to the reader, every visit, with no switch and no Unassigned band on the page.",
@@ -96,7 +96,9 @@
     "A row whose `Assign to me` write is live is kept in the list even once the filter would drop it - taking a question under the Unassigned filter is exactly that case, and unmounting the control would take `Assigning…`, the refusal and its Retry with it.",
     "The banner now reads the whole inbox and is scoped by the count rather than by the list, so it agrees with the rail whatever the filter shows.",
     "On the iphone project a tap leaves the reader's hand on the row, which `heldRow` keeps where they last saw it; the Assign-to-me assertion reads the list again rather than waiting for a release it is not about.",
-    "This pod has no Postgres, docker or root (`command -v psql`/`docker` answer nothing), so the Playwright suite cannot run here; the recorded proof is CI's `dispatch` job, which runs that same suite against the real server. The local unit suite also cannot resolve the `proof-sdk-upstream` git dependency, so its Markdown-rendering tests fail here and pass in CI."
+    "This pod has no Postgres, docker or root (`command -v psql`/`docker` answer nothing), so the Playwright suite cannot run here; the recorded proof is CI's `dispatch` job, which runs that same suite against the real server. The local unit suite also cannot resolve the `proof-sdk-upstream` git dependency, so its Markdown-rendering tests fail here and pass in CI.",
+    "Review round 1: the five findings were documentation and comments, with one behaviour correction. `needsYou` no longer short-circuits on an unresolved viewer: `waitingOnYou` already keeps no ask without a login, and a pending credential request is nobody's issue and decidable by anyone signed in, so the guard was only suppressing requests. Driven on the rig at the rebuilt head: while `/auth/whoami` is in flight the shell renders nothing but the title, so neither the rail nor the banner is on screen to show either number - the guard's user-visible effect was nil and the unit case now names the rule rather than the side effect.",
+    "The second Agents number counts a snoozed agent-turn question (plan decision 7: `waiting_on` is `agent`, snoozes ignored). The comment and the PR bullet had claimed any snoozed question was in neither number, which is true only of a human-turn one the reader snoozed - the case the old `open_asks - needsYou` subtraction charged to the agent. `AgentsPage.test.tsx` now seeds both and pins `Waiting on agent 2`."
   ],
   "deviations": [
     "The project page's `Blocked on you` pill carries no credential request, departing from the spec's sentence that lists it among the counts that do. A credential request belongs to no project (the pending list is global), so counting one there would make a project's number partly about another page. The architect settled this on 2026-10-20 ('the pill follows the settled rule alone') and the plan records it as a departure.",
