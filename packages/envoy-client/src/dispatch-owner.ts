@@ -95,8 +95,10 @@ export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
     };
   }
 
+  // `activity` is the Activity tab's spelling of the same event list `log` has always named, so
+  // both read the issue's events; it is no kind of its own.
   const issueReference = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
+    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
   );
   if (!issueReference) return null;
   const [, issue, spec, log, children, artifact, version, ask, comment, message] = issueReference;

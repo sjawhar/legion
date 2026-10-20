@@ -664,8 +664,11 @@ test("a human can unsubscribe an agent from an issue and the session is told", a
       )
       .toBe(true);
 
+    // The removal is an event, so it is the Activity tab's line and not a Conversation card.
+    await page.getByRole("tab", { name: "Activity" }).click();
+    await expect(page.getByRole("list", { name: "Issue activity" })).toContainText("unsubscribed");
     await page.getByRole("tab", { name: "Conversation" }).click();
-    await expect(page.getByRole("list", { name: "Conversation turns" })).toContainText(
+    await expect(page.getByRole("list", { name: "Conversation turns" })).not.toContainText(
       "unsubscribed"
     );
   } finally {

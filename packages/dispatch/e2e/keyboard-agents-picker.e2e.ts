@@ -367,9 +367,10 @@ test.describe("agents page", () => {
           new URL(request.url()).pathname === `/api/v1/issues/${issueKey}/comments`
       );
       await row.getByRole("button", { name: "Retry" }).click();
+      // Planner takes Aside and BTW but not Send, so a plain message to it is an Aside.
       expect((await retried).postDataJSON()).toEqual({
         body: "@Planner Yes",
-        delivery: "steer",
+        delivery: "aside",
         mentions: [{ target: `session:${plannerSession.session_id}` }],
       });
     } finally {
@@ -416,7 +417,7 @@ test.describe("agents page", () => {
           new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       await row.getByRole("button", { name: "Retry" }).click();
-      expect((await retried).postDataJSON()).toEqual({ body: "Status please", delivery: "steer" });
+      expect((await retried).postDataJSON()).toEqual({ body: "Status please", delivery: "aside" });
     } finally {
       await context.close();
     }
@@ -809,17 +810,17 @@ test.describe("agents page", () => {
       const mentions = [{ target: `session:${plannerSession.session_id}` }];
       expect(sends).toEqual([
         {
-          body: { body: "@Planner first", delivery: "steer", mentions },
+          body: { body: "@Planner first", delivery: "aside", mentions },
           ok: true,
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "@Planner second", delivery: "steer", mentions },
+          body: { body: "@Planner second", delivery: "aside", mentions },
           ok: true,
           path: `/api/v1/issues/${issueKey}/comments`,
         },
         {
-          body: { body: "third", delivery: "steer" },
+          body: { body: "third", delivery: "aside" },
           ok: true,
           path: `/api/v1/agents/${plannerSession.session_id}/messages`,
         },

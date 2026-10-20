@@ -6,7 +6,7 @@ coordinator — unit tests do not gate a stage, these do; others prove one capab
 against the world it will run in. A later stage's script lands beside these; `lib/` holds what
 the stage scripts share: standalone helpers they run, and the files they source
 ([`lib/rig.sh`](#librigsh), [`lib/workflow.sh`](#libworkflowsh),
-[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
+[`lib/namespace-rig.sh`](#libnamespace-rigsh), [`lib/kind-sandbox.sh`](#libkind-sandboxsh), [`lib/omp-home.sh`](#libomp-homesh)), which `shellcheck` follows from this directory
 through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
@@ -19,6 +19,7 @@ through `scripts/e2e/.shellcheckrc`.
 | `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the implementer `memory_request: 8Gi` under `memory: 32Gi` is admitted, scheduled and recorded `Burstable` with exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable role and refuses a request past its limit or that is no quantity, naming the key |
+| `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer`'s App leases, rendered as the gh files a pane's `GH_CONFIG_DIR` holds, make the real `gh` identify as the implementer and reviewer bots, an empty `GH_CONFIG_DIR` authenticates nobody, and `git` clones the smoke repository through `gh auth git-credential` from the implement App's files alone. Devbox only |
 | `TestRealGitHubReadyHoldsTheHeadToRetrosCommits` | the daemon's `POST /legion/v1/handoff/complete` with `ready: true`, over a real Postgres and as the real implement App, holds a pull request's head to its review round's approved head plus retro's commits: GitHub's compare of the two must show nothing outside `docs/solutions/` and `.legion/<issue>/`, or READY is refused `READY_UNREVIEWED_CHANGE` naming the paths. Devbox only |
 
@@ -1785,28 +1786,60 @@ LEGION_E2E_IMAGE=<worker image@sha256> bash scripts/e2e/burstable-kind.sh     # 
 Runs on an amd64 (x86_64) Linux host only: the gVisor release it installs and the static test binary
 it builds are amd64. Needs `docker`, `go`, `kubectl`, `curl`, `zstd`, a `tar` that supports `--zstd`
 (GNU tar 1.31 or later) and `kind` (`LEGION_E2E_KIND` names the binary when it is not on `PATH`).
-It creates a kind cluster of its own, `legion-burstable-<pid>`, whose kubeconfig
-is a file in the run's work directory: every `kubectl` call names that file and the cluster's
-`kind-…` context, and the Go driver refuses any other context, so the caller's kubeconfig and its
-current context are never read. The cluster is deleted on any exit.
+Its cluster is [`lib/kind-sandbox.sh`](#libkind-sandboxsh)'s, `legion-burstable-<pid>`, whose
+kubeconfig is a file in the run's work directory: every `kubectl` call names that file and the
+cluster's `kind-…` context, and the Go driver refuses any other context, so the caller's kubeconfig
+and its current context are never read. The cluster is deleted on any exit.
 
 | check | what it holds |
 | :--- | :--- |
-| `cluster` | the kind cluster, its one node labelled `legion.dev/pool=legion`, the `legion` namespace and the `standard` storage class |
-| `agent-sandbox` | Agent Sandbox v1.0.3's release manifest, pinned by sha256, applied and its controller rolled out |
-| `gvisor` | gVisor's dated release, pinned by sha512, installed into the node's containerd as the `runsc` handler with a `gvisor` RuntimeClass; a `runtimeClassName: gvisor` pod's `dmesg` says `Starting gVisor` |
-| `launch` | `TestBurstableRoleRendersABurstablePodLive` (`internal/daemon/burstable_live_test.go`, `-tags e2e`), built as a static test binary and run in a container on the kind network, writes two `legion.yaml` files, reads each with the daemon's loader, translates it with `sandboxOptions`, runs the cluster check, and launches one issue's root through the Sandbox runtime's `Spawn` on a worker stream bound to that container's address (pods reach the kind network's containers, while a host firewall can keep them from the host itself); it holds the implementer container to the file's request and limit and the pod to its QoS class |
+| `cluster`, `agent-sandbox`, `gvisor` | the lib's: the kind cluster, its one node labelled `legion.dev/pool=legion`, the `legion` namespace and the `standard` storage class; Agent Sandbox v1.0.3's release manifest, pinned by sha256, applied and its controller rolled out; gVisor's dated release, pinned by sha512, installed into the node's containerd as the `runsc` handler with a `gvisor` RuntimeClass, and a `runtimeClassName: gvisor` pod's `dmesg` says `Starting gVisor` |
+| `image` | the worker image, pulled into the node's containerd by digest |
+| `launch` | `TestBurstableRoleRendersABurstablePodLive` (`internal/daemon/burstable_live_test.go`, `-tags e2e`), built as a static test binary and run in a container on the kind network, writes two `legion.yaml` files, reads each with the daemon's loader, translates it with `sandboxOptions`, runs the cluster check, and launches one issue's root through the Sandbox runtime's `Spawn` on a worker stream bound to that container's address (pods reach the kind network's containers, while a host firewall can keep them from the host itself); the launch makes the repository's cache first, as every issue pod's does; it holds the implementer container to the file's request and limit and the pod to its QoS class |
 | `qos-class` | `kubectl get pod <pod> -o jsonpath='{.status.qosClass}'` reads `Burstable` for the file with `implementer: {memory: 32Gi, memory_request: 8Gi}` and `Guaranteed` for the file with no `resources` block; each pod is `PodScheduled=True` under `runtimeClassName: gvisor`, and its manifest is kept as evidence |
 | `check-config` | `legion start --check-config` passes both files, printing the `resources: Burstable roles …` line for the first and none for the second, and refuses `memory_request: 40Gi` (`… exceeds memory 32Gi`) and `memory_request: lots` (`… must be a positive Kubernetes quantity …`) with exit 1 |
 
 What the proof stands in for lies outside the reservation path: each role's agent is a sleep stub,
 so nothing dials a model, Dispatch or NATS (their addresses in the files are documentation
-placeholders); the store answers as the daemon's does for an issue's first launch; the repository
-is a public one GitHub clones without asking for the placeholder provisioning token; and the
-roles' gh files hold a placeholder token. The pod's reservation, its admission, scheduling and QoS
-class, Agent Sandbox's pod and gVisor are the real ones. `BURSTABLE_EVIDENCE_DIR` (default a fresh
-`/tmp` directory, kept and printed) keeps the transcript, both `legion.yaml` files and each pod's
-manifest as the API server holds it.
+placeholders); the store answers as the daemon's does for an issue's first launch; the mapping
+names one public repository, which GitHub clones for its cache without asking for the placeholder
+provisioning token; and the roles' gh files hold a placeholder token. The pod's reservation, its
+admission, scheduling and QoS class, Agent Sandbox's pod and gVisor are the real ones.
+`burstable_kind_test.go`, untagged, builds both files through the loader and each runtime through
+`sandboxOptions` and `sandbox.New` on every `go test`, so a contract change that refuses either
+fails CI, not the next live run. `BURSTABLE_EVIDENCE_DIR` (default a fresh `/tmp` directory, kept
+and printed) keeps the transcript, both `legion.yaml` files and each pod's manifest as the API
+server holds it.
+
+## controller-sweep-kind.sh
+
+```sh
+LEGION_E2E_IMAGE=<worker image@sha256> bash scripts/e2e/controller-sweep-kind.sh     # → "controller sweep kind e2e: PASS in <n>s", exit 0
+```
+
+Runs on an amd64 (x86_64) Linux host only, with the tools `burstable-kind.sh` needs; its cluster is
+[`lib/kind-sandbox.sh`](#libkind-sandboxsh)'s, `legion-controller-sweep-<pid>`, deleted on any exit
+with the Postgres container the run starts beside it on the kind network.
+
+| check | what it holds |
+| :--- | :--- |
+| `drivers` | two static test binaries of `TestTheControllerOrphanSweepLive` (`internal/daemon/controller_sweep_live_test.go`, `-tags e2e`): the checkout's, and the negative control's, built from a scratch copy of the checkout whose `controllerOwned` answers false before it reads the store, so its sweep judges the controller's Sandbox by the known set alone |
+| `cluster`, `agent-sandbox`, `gvisor` | as `burstable-kind.sh`'s, through the lib |
+| `image` | the worker image, pulled into the node's containerd by digest |
+| `store` | the CI's pinned pgvector Postgres on the kind network, migrated by the driver |
+| `sweep` | the checkout's driver, in a container on the kind network, reads the claims, stores the controller's claim `launching`, and launches the controller through the runtime's `Spawn` (`controller-launch`: its Sandbox, its `gvisor` pod and its volume claim on the API server); five `ReconcileOrphans` at grace 0 told the claims read before the launch each leave the Sandbox, its uid unchanged and not terminating, and its volume claim (`sweep-keeps-launched-controller`); with the claim stored `retired`, a sweep deletes the Sandbox, and the API server holds neither it nor its volume claim (`retired-controller-swept`); the `legion` namespace then holds no Sandbox or volume claim |
+| `negative-control` | the negative control's driver, on the same store and cluster, makes the same launch and sweep, and a sweep at grace 0 deletes the Sandbox of the controller whose claim the store holds `launching` (`reverted-sweep-deletes-launched-controller`) |
+
+What the proof stands in for lies outside the sweep: the controller's agent is a sleep stub, so
+nothing dials a model, Dispatch or NATS (their addresses in the file are documentation
+placeholders); its App tokens are placeholders; and no repository is mapped, so its gh files name
+no owner. The claim the supervisor would store is written to the store by the driver, as the
+supervisor writes it before a launch begins. The store, the runtime's sweep and launch, Agent
+Sandbox's controller, its foreground deletion of the volume claim, and gVisor are the real ones.
+`controller_sweep_kind_test.go`, untagged, builds the proof's `legion.yaml` through the loader and
+its runtime through boot's factory and `sandbox.New` on every `go test`, so a contract change that
+refuses either fails CI, not the next live run. `CONTROLLER_SWEEP_EVIDENCE_DIR` (default a fresh
+`/tmp` directory, kept and printed) keeps the transcript and, on a failure, what the cluster held.
 
 ## lib/free-port.sh
 
@@ -2647,6 +2680,28 @@ The caller sets `op`, `note`, `fail` (from `lib/namespace-rig.sh`, sourced first
 | :--- | :--- |
 | `bridge_start PORT SESSION_DB_PORT` | creates a run-labelled Secret (`$bridge_name-auth`, a random `AUTH` value), then a chisel server Pod (`--host 127.0.0.1`, reading `AUTH` from the Secret through `secretKeyRef`, never argv) and a ClusterIP Service naming it, both `create`d so no `last-applied-configuration` annotation ever carries the auth; forwards the devbox's `kubectl port-forward` to the pod's control port, starts a chisel client with `AUTH` in its own environment opening the two reverse listeners pods dial (the worker stream and the session database), and starts the watchdog that restarts a dropped port-forward (up to 60 s) and fails the run if the client's own bounded reconnect budget is exhausted |
 | `bridge_stop` | runs once and never fails: stops the watchdog and the chisel client, kills the port-forward (both the one it is tracking and the current global one, so a restart in flight is never orphaned), and deletes the Secret, the Pod and the Service by their one exact name |
+
+## lib/kind-sandbox.sh
+
+A throwaway kind cluster running Agent Sandbox's controller under gVisor, for a live proof of the
+Sandbox runtime on an amd64 Linux host. `burstable-kind.sh` and `controller-sweep-kind.sh` source it.
+
+```sh
+. "$root/scripts/e2e/lib/kind-sandbox.sh"     # sourced, never run
+```
+
+The caller defines `note` and `fail`, which exits, and calls `kind_sandbox_teardown` from its `EXIT`
+trap. `LEGION_E2E_KIND` names the kind binary when it is not on `PATH`.
+
+| function | does |
+| :--- | :--- |
+| `kind_sandbox_create NAME WORK` | creates the cluster `NAME`, its kubeconfig a file of `WORK` (`kind_kubeconfig`) and its context `kind-NAME` (`kind_context`); labels its one node (`kind_node`) `legion.dev/pool=legion`, the pool the runtime places every pod on; creates the `legion` namespace and checks kind's `standard` storage class |
+| `kind_k ARGS…` | `kubectl` against that kubeconfig and context alone, so the caller's kubeconfig and its current context are never read |
+| `kind_sandbox_install_agent_sandbox WORK` | applies Agent Sandbox v1.0.3's release manifest, pinned by sha256, and waits for its controller's rollout |
+| `kind_sandbox_install_gvisor WORK` | installs gVisor's dated release, pinned by sha512, into the node's containerd as the `runsc` handler with a `gvisor` RuntimeClass, and fails unless a `runtimeClassName: gvisor` pod's `dmesg` says `Starting gVisor` |
+| `kind_sandbox_load_image IMAGE` | pulls `IMAGE`, which must be named by digest, into the node's containerd, so a pod's start never waits on a registry |
+| `kind_sandbox_internal_kubeconfig FILE` | writes the kubeconfig a container on the kind network reads, whose server is the node's address on that network |
+| `kind_sandbox_teardown STATUS EVIDENCE` | when `STATUS` is not 0, writes the cluster's pods, the `legion` namespace's Sandboxes, volume claims, events and container logs to `EVIDENCE/cluster-at-failure.txt`; then deletes the cluster. It does nothing before `kind_sandbox_create` named a cluster, or once the cluster is gone |
 
 ## lib/secret-leaks.ts
 

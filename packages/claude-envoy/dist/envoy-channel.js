@@ -38278,7 +38278,7 @@ function parseDispatchRef(ref) {
       artifact: artifact2
     };
   }
-  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
+  const issueReference = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log|activity)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/);
   if (!issueReference)
     return null;
   const [, issue2, spec, log, children, artifact, version2, ask, comment, message] = issueReference;
@@ -40444,7 +40444,7 @@ function dispatchRefFromUrl(value, serverUrl) {
     const value2 = url2.searchParams.get(name);
     return value2 !== null && /^[1-9][0-9]*$/.test(value2) ? `@v${value2}` : "";
   };
-  const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
+  const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
     const [, key, page, artifact, ask, comment, message] = issuePage;
     const version2 = versionOf("v");
@@ -46930,6 +46930,469 @@ function createChannelForwarder(connection, options) {
   };
 }
 
+// src/claude-channel.ts
+import { spawnSync } from "child_process";
+import { readdirSync as readdirSync2, readFileSync as readFileSync4, readlinkSync as readlinkSync2 } from "fs";
+import { homedir as homedir3 } from "os";
+import { basename as basename2, join as join3, resolve as resolve2, sep } from "path";
+var PLUGIN_SERVER = "envoy";
+var CHANNEL_FLAGS = {
+  "--channels": false,
+  "--dangerously-load-development-channels": true
+};
+function parseEntry(value, dev) {
+  if (value.startsWith("plugin:")) {
+    const spec = value.slice("plugin:".length);
+    const at = spec.indexOf("@");
+    if (at <= 0 || at === spec.length - 1)
+      return;
+    return { kind: "plugin", name: spec.slice(0, at), marketplace: spec.slice(at + 1), dev };
+  }
+  if (value.startsWith("server:") && value.length > "server:".length) {
+    return { kind: "server", name: value.slice("server:".length), dev };
+  }
+  return;
+}
+var VALUE_OPTIONS = new Set([
+  "--prefill",
+  "--prefill-b64",
+  "--deep-link-repo",
+  "--deep-link-last-fetch",
+  "--deep-link-cwd-b64",
+  "--handle-uri",
+  "--settings",
+  "--managed-settings",
+  "--setting-sources",
+  "--client-data-url",
+  "--watch-artifact",
+  "--watch-artifact-no-autoreact",
+  "--team-name",
+  "--agent-id",
+  "--agent-name",
+  "--agent-color",
+  "--parent-session-id",
+  "--agent-type",
+  "--model",
+  "--agent",
+  "--routine",
+  "--effort",
+  "--fast-mode",
+  "--permission-mode",
+  "--inherit-permission-mode",
+  "--proactivity",
+  "--debug-file",
+  "--system-prompt",
+  "--system-prompt-file",
+  "--append-system-prompt",
+  "--append-system-prompt-file",
+  "--system-prompt-snapshot",
+  "--append-subagent-system-prompt",
+  "--append-subagent-system-prompt-file",
+  "--plan-mode-instructions",
+  "--permission-prompt-tool",
+  "--permission-prompts",
+  "--json-schema",
+  "--fallback-model",
+  "--advisor",
+  "--agents",
+  "--name",
+  "-n",
+  "--allowedTools",
+  "--allowed-tools",
+  "--disallowedTools",
+  "--disallowed-tools",
+  "--tools",
+  "--add-dir",
+  "--mcp-config",
+  "--betas",
+  "--file",
+  "--channels",
+  "--dangerously-load-development-channels",
+  "--plugin-dir",
+  "--plugin-dir-no-mcp",
+  "--plugin-url",
+  "--remote-control-session-name-prefix",
+  "--exec",
+  "-m",
+  "--sdk-url",
+  "--thinking",
+  "--thinking-display",
+  "--max-thinking-tokens",
+  "--max-turns",
+  "--max-budget-usd",
+  "--task-budget",
+  "--autocompact",
+  "--rewind-files",
+  "--resume-session-at",
+  "--resume-drops-turn",
+  "--workload",
+  "--output-format",
+  "--input-format",
+  "--teammate-mode",
+  "--messaging-socket-path",
+  "--session-id",
+  "--environment",
+  "--pool",
+  "--ref",
+  "--on-branch",
+  "--correlation-id",
+  "--forward-home-settings",
+  "--project-config-root",
+  "--attach-serve"
+]);
+var OPTIONAL_VALUE_OPTIONS = new Set([
+  "-d",
+  "--debug",
+  "-r",
+  "--resume",
+  "--from-pr",
+  "-w",
+  "--worktree",
+  "--teleport",
+  "--cloud",
+  "--remote",
+  "--project",
+  "--remote-control",
+  "--rc",
+  "--prompt-suggestions"
+]);
+var MULTI_VALUE_OPTIONS = new Set([
+  "--allowedTools",
+  "--allowed-tools",
+  "--disallowedTools",
+  "--disallowed-tools",
+  "--tools",
+  "--add-dir",
+  "--mcp-config",
+  "--betas",
+  "--file",
+  "--channels",
+  "--dangerously-load-development-channels"
+]);
+function isOption(argument) {
+  return argument.length > 1 && argument.startsWith("-");
+}
+function lastValueIndex(argv, index) {
+  const argument = argv[index] ?? "";
+  if (OPTIONAL_VALUE_OPTIONS.has(argument)) {
+    const next = argv[index + 1];
+    return next !== undefined && !isOption(next) ? index + 1 : index;
+  }
+  if (!VALUE_OPTIONS.has(argument))
+    return index;
+  let last = index + 1;
+  if (MULTI_VALUE_OPTIONS.has(argument)) {
+    while (last + 1 < argv.length && !isOption(argv[last + 1] ?? ""))
+      last++;
+  }
+  return last;
+}
+function asksForPrintMode(argv) {
+  for (let index = 1;index < argv.length; index++) {
+    const argument = argv[index] ?? "";
+    if (argument === "--")
+      return false;
+    if (argument === "-p" || argument === "--print" || argument === "--init-only" || argument.startsWith("--sdk-url")) {
+      return true;
+    }
+    index = lastValueIndex(argv, index);
+  }
+  return false;
+}
+function claudeChannelEntries(argv, exact = true, stdoutIsTerminal = undefined) {
+  const interactive = !exact || !asksForPrintMode(argv) && stdoutIsTerminal !== false;
+  const approved = [];
+  const development = [];
+  for (let index = 1;index < argv.length; index++) {
+    const argument = argv[index] ?? "";
+    if (exact && argument === "--")
+      break;
+    const equals = argument.indexOf("=");
+    const flag = equals === -1 ? argument : argument.slice(0, equals);
+    const dev = CHANNEL_FLAGS[flag];
+    if (dev === undefined) {
+      if (exact)
+        index = lastValueIndex(argv, index);
+      continue;
+    }
+    const values = [];
+    if (equals !== -1)
+      values.push(argument.slice(equals + 1));
+    else {
+      while (index + 1 < argv.length && !isOption(argv[index + 1] ?? "-")) {
+        values.push(argv[index + 1] ?? "");
+        index++;
+      }
+    }
+    if (dev && !interactive)
+      continue;
+    for (const value of values) {
+      const entry = parseEntry(value, dev);
+      if (entry !== undefined)
+        (dev ? development : approved).push(entry);
+    }
+  }
+  return [...approved, ...development];
+}
+function claudeChannelGate(input) {
+  const { commandLine: commandLine2, plugin, allowlist } = input;
+  if (commandLine2 === undefined)
+    return { loaded: true };
+  const ours = plugin === undefined ? "server:<name>" : `plugin:${plugin.name}@${plugin.marketplace ?? "<marketplace>"}`;
+  const entry = claudeChannelEntries(commandLine2.argv, commandLine2.exact, commandLine2.stdoutIsTerminal).find((candidate) => plugin === undefined ? candidate.kind === "server" : candidate.kind === "plugin" && candidate.name === plugin.name || candidate.kind === "server" && candidate.name === `plugin:${plugin.name}:${PLUGIN_SERVER}`);
+  if (entry === undefined) {
+    return {
+      loaded: false,
+      why: `claude was started without --channels ${ours} (or --dangerously-load-development-channels ${ours})`
+    };
+  }
+  if (entry.kind === "server") {
+    return entry.dev ? { loaded: true } : {
+      loaded: false,
+      why: `server:${entry.name} is not on Claude Code's approved channels allowlist (use --dangerously-load-development-channels server:${entry.name})`
+    };
+  }
+  const asked = `plugin:${entry.name}@${entry.marketplace}`;
+  if (plugin?.marketplace !== undefined && cacheDirectoryName(entry.marketplace ?? "") !== cacheDirectoryName(plugin.marketplace)) {
+    return {
+      loaded: false,
+      why: `claude asked for ${asked} but this plugin is installed from ${plugin.marketplace}`
+    };
+  }
+  if (entry.dev)
+    return { loaded: true };
+  if (allowlist === undefined) {
+    return {
+      loaded: false,
+      why: `${asked} is not on Claude Code's approved channels allowlist (an organization adds it with allowedChannelPlugins in managed settings; for one session use --dangerously-load-development-channels ${asked})`
+    };
+  }
+  return allowlist.some((allowed) => allowed.marketplace === entry.marketplace && allowed.plugin === entry.name) ? { loaded: true } : {
+    loaded: false,
+    why: `${asked} is not on your organization's approved channels list (allowedChannelPlugins in managed settings)`
+  };
+}
+function cacheDirectoryName(marketplace) {
+  return marketplace.replace(/[^a-zA-Z0-9\-_]/g, "-");
+}
+function processExecutable(pid) {
+  if (process.platform === "linux") {
+    try {
+      return readlinkSync2(`/proc/${pid}/exe`);
+    } catch {
+      return;
+    }
+  }
+  if (process.platform === "win32")
+    return;
+  const result = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "txt", "-Fn"], {
+    encoding: "utf8",
+    timeout: 2000
+  });
+  const first = (result.stdout ?? "").split(`
+`).find((line) => line.startsWith("n"));
+  return first === undefined ? undefined : first.slice(1);
+}
+function stdoutIsTerminal(pid) {
+  if (process.platform !== "linux")
+    return;
+  try {
+    const target = readlinkSync2(`/proc/${pid}/fd/1`);
+    return target.startsWith("/dev/pts/") || /^\/dev\/tty[^S]/.test(target) || target === "/dev/tty";
+  } catch {
+    return;
+  }
+}
+function workingDirectory(pid) {
+  try {
+    return readlinkSync2(`/proc/${pid}/cwd`);
+  } catch {
+    return;
+  }
+}
+function processCommandLine(pid, executable = processExecutable) {
+  let commandLine2;
+  if (process.platform === "linux") {
+    try {
+      const pieces = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\x00");
+      let trailing = 0;
+      while (pieces.length > 0 && pieces.at(-1) === "") {
+        pieces.pop();
+        trailing++;
+      }
+      if (trailing > 1 && pieces.length === 1)
+        return;
+      for (let blank = 1;blank < trailing; blank++)
+        pieces.push("");
+      const argv = pieces;
+      const terminal = stdoutIsTerminal(pid);
+      const cwd = workingDirectory(pid);
+      commandLine2 = argv.length === 0 ? undefined : {
+        argv,
+        exact: true,
+        ...terminal === undefined ? {} : { stdoutIsTerminal: terminal },
+        ...cwd === undefined ? {} : { cwd }
+      };
+    } catch {
+      commandLine2 = undefined;
+    }
+  } else if (process.platform !== "win32") {
+    const result = spawnSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 1000
+    });
+    const line = result.status === 0 ? result.stdout.trim() : "";
+    commandLine2 = line === "" ? undefined : { argv: line.split(/\s+/), exact: false };
+  }
+  if (commandLine2 === undefined || commandLine2.argv.length > 1)
+    return commandLine2;
+  return basename2(executable(pid) ?? "").startsWith("node") ? undefined : commandLine2;
+}
+function parentProcess(pid) {
+  try {
+    if (process.platform === "linux") {
+      const stat = readFileSync4(`/proc/${pid}/stat`, "utf8");
+      const parent2 = Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]);
+      return Number.isInteger(parent2) && parent2 > 0 ? parent2 : undefined;
+    }
+    if (process.platform === "win32")
+      return;
+    const result = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], {
+      encoding: "utf8",
+      timeout: 1000
+    });
+    const parent = Number((result.stdout ?? "").trim());
+    return result.status === 0 && Number.isInteger(parent) && parent > 0 ? parent : undefined;
+  } catch {
+    return;
+  }
+}
+var MAX_CLAUDE_DEPTH = 8;
+function claudeCommandLine(pid, read = processCommandLine, parent = parentProcess) {
+  let current = pid;
+  for (let depth = 0;current !== undefined && current > 1 && depth < MAX_CLAUDE_DEPTH; depth++) {
+    const commandLine2 = read(current);
+    if (commandLine2 === undefined)
+      return;
+    if (basename2(commandLine2.argv[0] ?? "") === "claude")
+      return commandLine2;
+    current = parent(current);
+  }
+  return;
+}
+function installedMarketplace(bundlePath) {
+  const parts = bundlePath.split(sep);
+  for (let index = 0;index + 2 < parts.length; index++) {
+    if (parts[index] === "plugins" && parts[index + 1] === "cache")
+      return parts[index + 2];
+  }
+  return;
+}
+var INLINE_MARKETPLACE = "inline";
+function loadedMarketplace(pluginRoot, bundlePath, commandLine2) {
+  if (commandLine2 !== undefined) {
+    const { argv, cwd } = commandLine2;
+    const root = resolve2(pluginRoot);
+    for (let index = 1;index < argv.length; index++) {
+      const argument = argv[index] ?? "";
+      if (argument === "--")
+        break;
+      const equals = argument.indexOf("=");
+      const flag = equals === -1 ? argument : argument.slice(0, equals);
+      if (flag === "--plugin-dir" || flag === "--plugin-dir-no-mcp") {
+        const value = equals === -1 ? argv[index + 1] : argument.slice(equals + 1);
+        if (value !== undefined && resolve2(cwd, value) === root)
+          return INLINE_MARKETPLACE;
+      }
+      if (equals === -1)
+        index = lastValueIndex(argv, index);
+    }
+  }
+  return installedMarketplace(bundlePath);
+}
+var AllowedChannelEntry = exports_external.union([
+  exports_external.object({ marketplace: exports_external.string(), plugin: exports_external.string() }),
+  exports_external.string().regex(/^[^@]+@[^@]+$/).transform((value) => {
+    const at = value.indexOf("@");
+    return { plugin: value.slice(0, at), marketplace: value.slice(at + 1) };
+  })
+]);
+function allowedEntries(value) {
+  if (!Array.isArray(value))
+    return;
+  return value.flatMap((entry) => {
+    const parsed = AllowedChannelEntry.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+function managedSettingsDirectory() {
+  switch (process.platform) {
+    case "darwin":
+      return "/Library/Application Support/ClaudeCode";
+    case "win32":
+      return "C:\\Program Files\\ClaudeCode";
+    default:
+      return "/etc/claude-code";
+  }
+}
+var COMPOSITION_KEYS = new Set([
+  "managedSourcesBehavior",
+  "wslInheritsWindowsSettings"
+]);
+function readChannelSettings(file2, asSource = false) {
+  try {
+    const value = JSON.parse(readFileSync4(file2, "utf8"));
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      return;
+    if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key)))
+      return;
+    const record3 = value;
+    const behavior = record3["managedSourcesBehavior"];
+    return {
+      list: allowedEntries(record3["allowedChannelPlugins"]),
+      behavior: typeof behavior === "string" ? behavior : undefined
+    };
+  } catch {
+    return;
+  }
+}
+function channelAllowlist(directories) {
+  const remote = readChannelSettings(join3(directories.configDirectory, "remote-settings.json"), true);
+  const dropIns = join3(directories.managedDirectory, "managed-settings.d");
+  let dropInFiles = [];
+  try {
+    dropInFiles = readdirSync2(dropIns).filter((name) => name.endsWith(".json") && !name.startsWith(".")).sort().map((name) => join3(dropIns, name));
+  } catch {
+    dropInFiles = [];
+  }
+  const files = [join3(directories.managedDirectory, "managed-settings.json"), ...dropInFiles].map((file2) => readChannelSettings(file2)).filter((settings) => settings !== undefined);
+  const lists = files.map((settings) => settings.list).filter((list) => list !== undefined);
+  const fileList = lists.length === 0 ? undefined : lists.flat();
+  const behavior = remote?.behavior ?? files.find((settings) => settings.behavior)?.behavior;
+  if (remote === undefined)
+    return fileList;
+  return behavior === "merge" ? remote.list ?? fileList : remote.list;
+}
+function detectClaudeChannel(input) {
+  const override = input.environment["ENVOY_CHANNEL_LOADED"]?.trim();
+  if (override === "1")
+    return { loaded: true };
+  if (override === "0")
+    return { loaded: false, why: "ENVOY_CHANNEL_LOADED=0" };
+  const configDirectory = input.environment["CLAUDE_CONFIG_DIR"]?.trim() || join3(homedir3(), ".claude");
+  const commandLine2 = claudeCommandLine(input.claudePid);
+  const pluginRoot = input.environment["CLAUDE_PLUGIN_ROOT"]?.trim();
+  const plugin = pluginRoot ? {
+    name: "claude-envoy",
+    marketplace: loadedMarketplace(pluginRoot, input.bundlePath, commandLine2?.exact && commandLine2.cwd !== undefined ? { argv: commandLine2.argv, cwd: commandLine2.cwd } : undefined)
+  } : undefined;
+  return claudeChannelGate({
+    commandLine: commandLine2,
+    plugin,
+    allowlist: channelAllowlist({ managedDirectory: managedSettingsDirectory(), configDirectory })
+  });
+}
+
 // src/claude-session.ts
 function configuredValue(value) {
   return value !== undefined && value.trim().length > 0 ? value : undefined;
@@ -46946,7 +47409,7 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname as dirname2, join as join3 } from "path";
+import { dirname as dirname2, join as join4 } from "path";
 var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 
 class SessionIdentity {
@@ -46964,13 +47427,13 @@ class SessionIdentity {
   }
 }
 function sessionHandoffDirectory(stateDirectory, claudePid) {
-  return join3(stateDirectory, "sessions", String(claudePid));
+  return join4(stateDirectory, "sessions", String(claudePid));
 }
 function sessionHandoffFile(stateDirectory, claudePid) {
-  return join3(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
+  return join4(sessionHandoffDirectory(stateDirectory, claudePid), "session-id");
 }
 function roleStateFile(stateDirectory, sessionId) {
-  return join3(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+  return join4(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
 }
 async function readPersistedRole(roleFile) {
   try {
@@ -47014,7 +47477,7 @@ function processExists(pid) {
   }
 }
 async function pruneStaleSessionHandoffs(stateDirectory) {
-  const sessions = join3(stateDirectory, "sessions");
+  const sessions = join4(stateDirectory, "sessions");
   const entries = await readdir(sessions).catch((error48) => {
     if (hasErrnoCode(error48, "ENOENT"))
       return [];
@@ -47023,7 +47486,7 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
   for (const entry of entries) {
     if (!/^\d+$/.test(entry) || processExists(Number(entry)))
       continue;
-    await rm(join3(sessions, entry), { recursive: true, force: true });
+    await rm(join4(sessions, entry), { recursive: true, force: true });
   }
 }
 
@@ -47074,7 +47537,7 @@ async function serveEnvoyOff(serverInfo, refusal) {
 
 // src/legion-claim.ts
 import { readdir as readdir2, stat } from "fs/promises";
-import { join as join4 } from "path";
+import { join as join5 } from "path";
 import { setTimeout as delay } from "timers/promises";
 
 // ../pi-shared/src/legion-claim-core.ts
@@ -47163,12 +47626,12 @@ function stopPane(why) {
   endPane();
 }
 async function waitForTranscript(configDir, sessionID, signal, pollMs = 100) {
-  const projects = join4(configDir, "projects");
+  const projects = join5(configDir, "projects");
   const name = `${sessionID}.jsonl`;
   for (;; ) {
     signal.throwIfAborted();
     for (const directory of await readdir2(projects).catch(() => [])) {
-      const file2 = join4(projects, directory, name);
+      const file2 = join5(projects, directory, name);
       if (await stat(file2).then((info) => info.isFile(), () => false))
         return file2;
     }
@@ -47447,8 +47910,8 @@ async function executeLegionTool(runtime, input) {
 
 // src/session-title.ts
 import { execFileSync } from "child_process";
-import { readFileSync as readFileSync4 } from "fs";
-import { basename as basename2 } from "path";
+import { readFileSync as readFileSync5 } from "fs";
+import { basename as basename3 } from "path";
 var TMUX_PANE_FORMAT = [
   "#{session_name}",
   "#{window_name}",
@@ -47470,7 +47933,7 @@ function visible(value) {
 function parentPid(pid) {
   try {
     if (process.platform === "linux") {
-      const stat2 = readFileSync4(`/proc/${pid}/stat`, "utf8");
+      const stat2 = readFileSync5(`/proc/${pid}/stat`, "utf8");
       const parent2 = Number(stat2.slice(stat2.lastIndexOf(")") + 2).split(" ")[1]);
       return Number.isInteger(parent2) ? parent2 : undefined;
     }
@@ -47529,13 +47992,14 @@ function sessionTitle(environment, directory, query = queryTmux, ownPane = (pane
   const socket = parts.slice(0, -2).join(",");
   const serverPid = parts.at(-2) ?? "";
   const pane = configuredValue(environment.TMUX_PANE)?.trim();
-  const directoryName = oneLine(basename2(directory) || directory);
+  const directoryName = oneLine(basename3(directory) || directory);
   const name = (socket === "" || serverPid === "" || pane === undefined ? undefined : tmuxPaneTitle(socket, serverPid, pane, ownPane, query)) ?? (visible(directoryName) ? directoryName : "session");
   return (sessionId) => `${name} ${sessionId.slice(0, SHORT_ID_LENGTH)}`;
 }
 
 // src/envoy-channel-server.ts
 var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
+var CHANNEL_INSTRUCTIONS = "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -48129,9 +48593,19 @@ async function runEnvoyChannelServer() {
     CLAUDE_CODE_SESSION_ID: process.env["CLAUDE_CODE_SESSION_ID"]
   }), directory);
   const stateDirectory = pluginStateDirectory();
+  const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
+  const channel = inboxSocket === undefined ? detectClaudeChannel({
+    claudePid: process.ppid,
+    bundlePath: process.argv[1] ?? "",
+    environment: process.env
+  }) : { loaded: true };
+  if (!channel.loaded) {
+    process.stderr.write(`envoy-channel: Claude Code did not load this server as a channel: ${channel.why}; the session advertises no delivery mode, so Dispatch refuses messages to it instead of losing them
+`);
+  }
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+    instructions: channel.loaded ? CHANNEL_INSTRUCTIONS : `${CHANNEL_INSTRUCTIONS} Claude Code did not load this channel for this session (${channel.why}), so no Envoy event or Dispatch message reaches you as a <channel> message, and the session advertises no delivery mode; envoy_inbox still lists what arrived.`
   });
   const client = createEnvoyClient({
     baseUrl: envoy.url,
@@ -48159,9 +48633,8 @@ async function runEnvoyChannelServer() {
       throw new Error("Envoy channel server is still starting");
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments));
   });
-  const inboxSocket = configuredValue(process.env[INBOX_VARIABLE]);
   const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket);
-  const capabilities = inboxSocket === undefined ? CHANNEL_CAPABILITIES : INBOX_CAPABILITIES;
+  const capabilities = inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : [];
   const booting = new AbortController;
   const stopped = Promise.withResolvers();
   let stopping = false;

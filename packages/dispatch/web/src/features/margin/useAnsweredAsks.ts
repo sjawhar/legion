@@ -33,6 +33,8 @@ export function useAnsweredAsks(owner: MarginOwner | undefined, artifactID: stri
   );
 
   return {
+    /** Every ask of the owner, unfiltered: what the Pinned tab resolves a pinned ask from. */
+    all: query.data ?? [],
     asks,
     error: query.isError ? query : undefined,
     pending: query.isPending,

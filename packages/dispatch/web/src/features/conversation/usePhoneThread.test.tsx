@@ -49,6 +49,7 @@ async function refuseReply(queryClient: QueryClient, mutationKey: MutationKey): 
     edit: undefined,
     kind: "comment",
     owner: { issueKey: "CORE-1", kind: "issue" },
+    plainDelivery: "steer",
     replyTo: reply,
   };
   try {

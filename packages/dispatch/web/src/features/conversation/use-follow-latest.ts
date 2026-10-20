@@ -1,29 +1,28 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const FOLLOW_POSITION_TOLERANCE_PX = 1;
-const NEWEST_TURN_SELECTOR = "[data-event-seq]";
+/** Every card and reply carries `data-turn`; the first in the document is the newest card. */
+const NEWEST_TURN_SELECTOR = "[data-turn]";
 
 export function useFollowLatest({
   enabled,
-  itemSeqs,
+  latestItemSeq,
   ownSendCount,
 }: {
   enabled: boolean;
-  itemSeqs: readonly number[];
+  /** A number that rises with the newest card's recency, or `undefined` while the list is
+   *  empty: the hook follows that card and needs nothing else about the list. */
+  latestItemSeq: number | undefined;
   ownSendCount: number;
 }): {
   atTop: boolean;
   jumpToLatest: () => void;
-  newItemCount: number;
   pinnedToTop: () => boolean;
 } {
   const [atTop, setAtTop] = useState(true);
-  const [newItemCount, setNewItemCount] = useState(0);
-  const latestItemSeq = itemSeqs.at(0);
   const atTopRef = useRef(true);
   const previousItemSeq = useRef<number | undefined>(undefined);
   const previousSends = useRef(ownSendCount);
-  const visibleThroughSeq = useRef<number | undefined>(undefined);
   const followScrollY = useRef<number | undefined>(undefined);
   const followsLatest = useCallback(
     () =>
@@ -49,25 +48,18 @@ export function useFollowLatest({
       window.scrollTo({ top: Math.max(target, 0) });
     }
     followScrollY.current = window.scrollY;
-    visibleThroughSeq.current = latestItemSeq;
-    setNewItemCount(0);
-  }, [latestItemSeq]);
+  }, []);
 
   useEffect(() => {
     const onScroll = () => {
       const nextAtTop = followsLatest();
-      const wasAtTop = atTopRef.current;
       atTopRef.current = nextAtTop;
       setAtTop(nextAtTop);
-      if (wasAtTop !== nextAtTop) {
-        visibleThroughSeq.current = latestItemSeq;
-        setNewItemCount(0);
-      }
     };
     window.addEventListener("scroll", onScroll, { passive: true });
     onScroll();
     return () => window.removeEventListener("scroll", onScroll);
-  }, [followsLatest, latestItemSeq]);
+  }, [followsLatest]);
 
   // The mutation's `onSuccess` bumps `ownSendCount` and invalidates the events query in the same
   // tick, but the SSE stream (features/api/sse.ts) can independently invalidate the same query
@@ -89,13 +81,7 @@ export function useFollowLatest({
     const first = previousItemSeq.current === undefined;
     const changed = previousItemSeq.current !== latestItemSeq;
     previousItemSeq.current = latestItemSeq;
-    const visibleThrough = visibleThroughSeq.current ?? latestItemSeq;
     if (!changed && !ownSend) {
-      // The newest turn is the same, but the list beneath it may not be: a refetch can fill in
-      // a turn the stream skipped. The count is what the reader has not seen, whatever brought it.
-      if (!atTopRef.current) {
-        setNewItemCount(itemSeqs.filter((seq) => seq > visibleThrough).length);
-      }
       return;
     }
     // A server event may render before the browser dispatches the scroll event that preceded it.
@@ -106,15 +92,12 @@ export function useFollowLatest({
     setAtTop(followsLatestNow);
     if (followsLatestNow) {
       jumpToLatest();
-      return;
     }
-    setNewItemCount(itemSeqs.filter((seq) => seq > visibleThrough).length);
-  }, [enabled, followsLatest, itemSeqs, jumpToLatest, latestItemSeq, ownSendCount]);
+  }, [enabled, followsLatest, jumpToLatest, latestItemSeq, ownSendCount]);
 
   return {
     atTop,
     jumpToLatest,
-    newItemCount,
     pinnedToTop: followsLatest,
   };
 }

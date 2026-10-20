@@ -1,641 +1,266 @@
-import type { Actor, Ask, CommentDelivery, CommentMention, Event } from "../../api/types";
-import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
-import { receiptAnsweredWithError, rowAnsweredWithError } from "./delivery";
+import type {
+  Comment,
+  CommentDelivery,
+  IssueAskThreadRow,
+  Message,
+  MessageRead,
+} from "../../api/types";
+import { compareTimestamps } from "../../lib/timestamps";
+import { conversationItemId } from "../issue/pins";
+import { rowAnsweredWithError } from "./delivery";
 
-const GROUP_WINDOW_MS = 5 * 60 * 1000;
-
-export type MessageEvent = Extract<Event, { type: "message.created" | "message.answered" }>;
-export type TargetedMessageEvent = Extract<Event, { type: "message.created" }>;
-export type MessageDeliveryEvent = Extract<Event, { type: "message.delivery" }>;
-export type MessageAnsweredEvent = Extract<Event, { type: "message.answered" }>;
-export type CommentEvent = Extract<
-  Event,
-  {
-    type:
-      | "comment.created"
-      | "comment.anchor_refreshed"
-      | "comment.answered"
-      | "comment.resolved"
-      | "comment.reopened"
-      | "comment.edited"
-      | "suggestion.accepted"
-      | "suggestion.rejected";
-  }
->;
-export type CommentDeliveryEvent = Extract<Event, { type: "comment.delivery" }>;
-export type AskEvent = Extract<
-  Event,
-  {
-    type:
-      | "ask.opened"
-      | "ask.anchor_refreshed"
-      | "ask.edited"
-      | "ask.handed_back"
-      | "ask.answered"
-      | "ask.resolved";
-  }
->;
-
-interface Turn {
-  id: string;
-  at: string;
-  seq: number;
-  lastSeq: number;
-  pinEventId: number;
-  author: Actor;
-}
-
-/** A reply in a message thread: a message whose parent is loaded, shown nested under the
- *  thread's root in the order it was sent. A reply a human sent into a targeted thread was
- *  delivered too, so it carries its own attempts. */
-export interface ThreadReply {
-  id: string;
-  event: MessageEvent;
-  author: Actor;
-  at: string;
-  seq: number;
-  deliveries: MessageDeliveryEvent[];
-}
-/** Stored initial delivery rows include `pending`; later delivery events replace their row.
- *  `answeredWithError` is read off whichever of the two it came from (`DeliveryOutcome`). */
+/** Stored delivery rows include `pending`; `answeredWithError` is read off the row the same way
+ *  a receipt's is (`DeliveryOutcome`). */
 export type CommentDeliveryAttempt = CommentDelivery & { readonly answeredWithError: boolean };
 
-/** A message turn owns its thread: the replies beneath it and when the thread last moved. The
- *  turn sits in the conversation at `lastSeq`, so a reply on an old thread brings the thread to
- *  the top the way a new message would. */
-interface Thread {
-  replies: ThreadReply[];
-  lastAt: string;
+/** Which conversations the reader asked for. Closed is an answered or resolved ask, or a comment
+ *  thread somebody resolved or whose suggestion was accepted or rejected; a message thread is
+ *  never closed, so it is listed under All and under Open. */
+export type ConversationFilter = "all" | "closed" | "open";
+
+interface ConversationBase {
+  /** `ask:<id>`, `comment:<id>` or `message:<id>`: the card's `data-turn`, the id its pin is
+   *  stored under (`features/issue/pins.ts`), and the tie-break that makes the order total. */
+  readonly id: string;
+  /** The conversation's newest activity: its root, its newest reply, and for an ask its answer
+   *  and its resolution. An edit is not activity and never moves a card. */
+  readonly at: string;
+  readonly closed: boolean;
+  /** The newest activity is at or after the reader's unread boundary. */
+  readonly unread: boolean;
 }
 
-/** A reply nested below a comment root, including its independent mention deliveries. */
-export interface CommentReply {
-  at: string;
-  author: Actor;
-  deliveries: CommentDeliveryAttempt[];
-  event: CommentEvent;
-  id: string;
-  seq: number;
-}
+/** One card of the Conversation: an ask with its replies and its answer, a comment thread with
+ *  its replies, or a message thread, targeted or not. Each is built from the issue's own entity
+ *  list, so a conversation older than any window of the event log is listed like every other. */
+export type Conversation =
+  | (ConversationBase & { readonly kind: "ask"; readonly ask: IssueAskThreadRow })
+  | (ConversationBase & {
+      readonly kind: "comment";
+      readonly root: Comment;
+      readonly replies: readonly Comment[];
+    })
+  | (ConversationBase & {
+      readonly kind: "message";
+      readonly root: Message;
+      readonly replies: readonly Message[];
+    })
+  | (ConversationBase & {
+      readonly kind: "targeted-message";
+      readonly root: Message;
+      readonly replies: readonly Message[];
+      /** The first reply a session sent: the card reads "Answered by" that session. */
+      readonly answer?: Message;
+    });
 
-interface CommentThread {
-  replies: CommentReply[];
-  lastAt: string;
-}
-
-export type ConversationItem =
-  | (Turn & Thread & { kind: "message"; event: MessageEvent; continued: boolean })
-  | (Turn &
-      Thread & {
-        kind: "targeted-message";
-        event: TargetedMessageEvent;
-        deliveries: MessageDeliveryEvent[];
-        /** The first reply a session sent: the card reads "Answered by" that session. */
-        answer?: ThreadReply;
-      })
-  | (Turn &
-      CommentThread & {
-        kind: "comment";
-        event: CommentEvent;
-        deliveries: CommentDeliveryAttempt[];
-        continued: boolean;
-      })
-  | (Turn & { kind: "ask"; ask: Ask })
-  | (Turn & { kind: "activity"; event: Event; description: string })
-  | { kind: "day-divider"; id: string; date: string; label: string }
-  | { kind: "unread-divider"; id: "unread-divider" };
+/** A message thread's card: the two kinds that render a root message, its deliveries and its
+ *  replies. */
+export type MessageConversation = Extract<Conversation, { kind: "message" | "targeted-message" }>;
 
 export interface ConversationInput {
-  /** Live session titles from the agent registry, so an activity line names a session the
-   *  same way every other surface does. */
-  readonly titles?: ReadonlyMap<string, string>;
-  events: Event[];
-  lastReadSeq: number;
-  /** Local YYYY-MM-DD. */
-  today: string;
+  readonly asks: readonly IssueAskThreadRow[];
+  readonly comments: readonly Comment[];
+  readonly messages: readonly MessageRead[];
+  /** `created_at` of the first event the reader has not read. Without one nothing is unread:
+   *  either they have read the issue through its head, or its watermark has not been read. */
+  readonly unreadFrom?: string;
 }
 
-export function dateKey(iso: string): string {
-  const date = new Date(iso);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+export function commentDeliveries(
+  deliveries: readonly CommentDelivery[]
+): CommentDeliveryAttempt[] {
+  return deliveries.map((row) => ({ ...row, answeredWithError: rowAnsweredWithError(row) }));
 }
 
-function localDate(key: string): Date {
-  const [year, month, day] = key.split("-").map(Number);
-  return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
+/** Whether a comment thread is done with: resolved, or its suggestion accepted or rejected. */
+function isClosedComment(comment: Comment): boolean {
+  return comment.resolved || (comment.suggestion !== null && comment.suggestion.accepted !== null);
 }
 
-export function dayLabel(date: string, today: string): string {
-  if (date === today) return "Today";
-
-  const yesterday = localDate(today);
-  yesterday.setDate(yesterday.getDate() - 1);
-  if (date === dateKey(yesterday.toISOString())) return "Yesterday";
-
-  const sameYear = date.slice(0, 4) === today.slice(0, 4);
-  return new Intl.DateTimeFormat(undefined, {
-    day: "numeric",
-    month: "long",
-    weekday: "long",
-    ...(sameYear ? {} : { year: "numeric" }),
-  }).format(localDate(date));
-}
-
-function isAskEvent(event: Event): event is AskEvent {
-  return (
-    event.type === "ask.opened" ||
-    event.type === "ask.anchor_refreshed" ||
-    event.type === "ask.edited" ||
-    event.type === "ask.handed_back" ||
-    event.type === "ask.answered" ||
-    event.type === "ask.resolved"
-  );
-}
-
-function isConversationComment(event: Event): event is CommentEvent {
-  return (
-    (event.type === "comment.created" ||
-      event.type === "comment.anchor_refreshed" ||
-      event.type === "comment.answered" ||
-      event.type === "comment.resolved" ||
-      event.type === "comment.reopened" ||
-      event.type === "comment.edited" ||
-      event.type === "suggestion.accepted" ||
-      event.type === "suggestion.rejected") &&
-    event.payload.ask_id === null
-  );
-}
-
-// A comment event recorded before 2026-09-18 carries no `mentions` or `deliveries`
-// (`CommentEventPayload` in @legion/contracts); read either through these, never directly.
-export function commentMentions(payload: CommentEvent["payload"]): readonly CommentMention[] {
-  return payload.mentions ?? [];
-}
-
-export function commentDeliveries(payload: CommentEvent["payload"]): CommentDeliveryAttempt[] {
-  return (payload.deliveries ?? []).map((row) => ({
-    ...row,
-    answeredWithError: rowAnsweredWithError(row),
-  }));
-}
-
-/** Whether two actors are the same writer: one session id, or one human login. */
-function sameActor(left: Actor, right: Actor): boolean {
-  return left.kind === right.kind && left.id === right.id;
-}
-
-export function activityDescription(
-  event: Event,
-  previousStatus?: string,
-  titles?: ReadonlyMap<string, string>
-): string {
-  switch (event.type) {
-    case "project.created":
-      return `created project ${event.payload.key}`;
-    case "project.updated":
-      return `updated project ${event.payload.key}`;
-    case "settings.repo_project.updated":
-      return `${event.payload.deleted ? "removed" : "updated"} repository mapping ${event.payload.mapping.repo}`;
-    case "settings.architecture_source.updated":
-      return `${event.payload.deleted ? "removed" : "updated"} architecture source ${event.payload.source.repo}`;
-    case "architecture.synced":
-      return `synced the architecture model at ${event.payload.commit.slice(0, 12)}`;
-    case "architecture.sync_failed":
-      return `failed to sync the architecture model: ${event.payload.error}`;
-    case "user_state.updated":
-      return "updated user state";
-    case "user_agent_state.updated":
-      return "updated agent conversation state";
-    case "user_thread_state.updated":
-      return "read a thread";
-    case "issue.created":
-      return "created the issue";
-    case "issue.updated":
-      return previousStatus === "done" && event.payload.status !== "done"
-        ? `reopened the issue into ${event.payload.status}`
-        : "updated the issue";
-    case "issue.closed":
-      return "closed the issue";
-    case "issue.claimed":
-      return event.payload.previous_claim === undefined
-        ? "claimed the issue"
-        : `took the claim from ${actorLabel(event.payload.previous_claim.actor, titles)}`;
-    case "issue.released": {
-      // A release always carries the claim it cleared (the server appends the event only with a
-      // claim in hand), so the only question is whose it was: naming the releaser's own claim
-      // back at them reads as somebody else's.
-      if (event.payload.reason === "closed") {
-        return "released the claim with the close";
-      }
-      const released = event.payload.previous_claim.actor;
-      return sameActor(released, event.actor)
-        ? "released the claim"
-        : `released ${actorLabel(released, titles)}'s claim`;
-    }
-    case "issue.deployed":
-      return `deployed ${event.payload.repo}#${event.payload.number} to production (run ${event.payload.run_id})`;
-    case "artifact.created":
-      return `added ${event.payload.artifact.name}`;
-    case "artifact.version":
-      return `saved ${event.payload.name} v${event.payload.version.number}`;
-    case "comment.created":
-      if (event.payload.ask_id !== null) {
-        return `replied to “${event.payload.ask_question ?? "an ask"}”`;
-      }
-      if (event.payload.reply_to !== null) return "replied to a comment";
-      return `commented on ${event.payload.artifact_name}: “${event.payload.anchor?.quote ?? ""}”`;
-    case "comment.answered":
-      return "answered a comment";
-    case "comment.delivery":
-      return `delivered a comment mention to ${event.payload.target}`;
-    case "comment.resolved":
-      return `resolved a comment on ${event.payload.artifact_name}`;
-    case "comment.anchor_refreshed":
-      return event.payload.anchor?.orphaned
-        ? `made a comment on ${event.payload.artifact_name} lose its quote`
-        : `re-anchored a comment on ${event.payload.artifact_name} after an edit`;
-    case "comment.reopened":
-      return `reopened a comment on ${event.payload.artifact_name}`;
-    case "artifact.approved":
-      return `approved ${event.payload.name} v${event.payload.version}`;
-    case "artifact.changes_requested":
-      return `requested changes on ${event.payload.name} v${event.payload.version}`;
-    case "comment.edited":
-      return `edited a comment on ${event.payload.artifact_name}`;
-    case "suggestion.accepted":
-      return `accepted a suggestion on ${event.payload.artifact_name}`;
-    case "suggestion.rejected":
-      return `rejected a suggestion on ${event.payload.artifact_name}`;
-    case "ask.resolved":
-      return describeAskResolution(event.payload.resolution);
-    case "ask.opened":
-      return `asked “${event.payload.question}”`;
-    case "ask.anchor_refreshed":
-      return event.payload.anchor?.orphaned
-        ? `made an ask lose its quote: “${event.payload.question}”`
-        : `re-anchored an ask after an edit: “${event.payload.question}”`;
-    case "ask.edited":
-      return `edited the question "${event.payload.question}"`;
-    case "ask.handed_back":
-      return `handed “${event.payload.question}” back for approval`;
-    case "ask.answered":
-      return event.payload.previous_answer === undefined
-        ? `answered “${event.payload.question}”`
-        : `changed the answer to “${event.payload.question}”`;
-    case "message.created":
-      return "sent a message";
-    case "message.delivery":
-      return "delivered a message";
-    case "message.accepted":
-      return "took a message as its own turn";
-    case "message.answered":
-      return "answered a message";
-    case "child.status":
-      return `moved ${event.payload.child_key} from ${event.payload.from} to ${event.payload.to}`;
-    case "child.added":
-      return `added child ${event.payload.child_key}`;
-    case "child.removed":
-      return `removed child ${event.payload.child_key}`;
-    case "subscription.remove_requested":
-      return `requested unsubscribe for ${shortSessionId(event.payload.session_id)}`;
-    case "subscription.removed":
-      return `unsubscribed ${shortSessionId(event.payload.session_id)} from notifications`;
-    case "ask.follower_added":
-      return event.actor.kind === "session" && event.actor.id === event.payload.session_id
-        ? "followed an ask"
-        : `added ${shortSessionId(event.payload.session_id)} to an ask's followers`;
-    case "ask.follower_removed":
-      return event.actor.kind === "session" && event.actor.id === event.payload.session_id
-        ? "unfollowed an ask"
-        : `removed ${shortSessionId(event.payload.session_id)} from an ask's followers`;
-    case "block.repaired":
-      return `repaired server-owned state on block ${event.payload.block_id}`;
-    case "block.invalid":
-      return `marked decision ${event.payload.block_id} malformed: ${event.payload.reason}`;
+/** The later of two moments, ignoring a moment the record does not carry. */
+function newest(at: string, candidate: string | null | undefined): string {
+  if (candidate === null || candidate === undefined || candidate === "") {
+    return at;
   }
+  return compareTimestamps(candidate, at) > 0 ? candidate : at;
 }
 
-/** A retracted ask was withdrawn by its asker; it is history, not a decision to read, so the
- *  conversation hides it with the rest of the activity unless the reader asks to see it. */
-export function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
-  return ask.state === "resolved" && ask.resolution?.kind === "retracted";
+function isUnread(at: string, unreadFrom: string | undefined): boolean {
+  return unreadFrom !== undefined && compareTimestamps(at, unreadFrom) >= 0;
 }
 
-type MessageThreadRoot = Extract<ConversationItem, { kind: "message" | "targeted-message" }>;
-
-/** Where a turn sits in the conversation: a thread at its latest activity, anything else where
- *  it happened. */
-function orderSeq(turn: ConversationItem & { seq: number }): number {
-  return turn.kind === "message" || turn.kind === "targeted-message" || turn.kind === "comment"
-    ? turn.lastSeq
-    : turn.seq;
-}
-
-export function buildConversationItems({
-  events,
-  lastReadSeq,
-  today,
-  titles,
-}: ConversationInput): ConversationItem[] {
-  const ordered = [...events].sort((left, right) => left.seq - right.seq);
-  type AskItem = Extract<ConversationItem, { kind: "ask" }>;
-  type CommentRoot = Extract<ConversationItem, { kind: "comment" }>;
-  const askItems = new Map<string, AskItem>();
-  const messageThreadOf = new Map<string, MessageThreadRoot>();
-  const messageNodeOf = new Map<
-    string,
-    Extract<MessageThreadRoot, { kind: "targeted-message" }> | ThreadReply
-  >();
-  const commentThreadOf = new Map<string, CommentRoot>();
-  const commentNodeOf = new Map<string, CommentRoot | CommentReply>();
-  const turns: Exclude<ConversationItem, { kind: "day-divider" | "unread-divider" }>[] = [];
-  let previousIssueStatus: string | undefined;
-
-  for (const event of ordered) {
-    if (isAskEvent(event)) {
-      const askId = event.payload.id;
-      const existing = askItems.get(askId);
-      if (existing === undefined) {
-        const item: AskItem = {
-          kind: "ask",
-          id: `ask:${askId}`,
-          ask: event.payload,
-          author: event.payload.author,
-          at: event.created_at,
-          seq: event.seq,
-          lastSeq: event.seq,
-          pinEventId: event.payload.opened_event_id,
-        };
-        askItems.set(askId, item);
-        turns.push(item);
-      } else {
-        existing.ask = event.payload;
-        existing.lastSeq = event.seq;
-      }
-      // A rewording or a hand-back is also an activity line; other ask events are the card alone.
-      if (event.type !== "ask.edited" && event.type !== "ask.handed_back") continue;
+/** The comment at the top of `comment`'s reply chain: the first with no `reply_to`, or the last
+ *  one present when a parent is missing. A cyclic chain stops at the first repeated comment. */
+export function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Comment {
+  const visited = new Set<string>();
+  let root = comment;
+  while (root.reply_to !== null && !visited.has(root.id)) {
+    visited.add(root.id);
+    const parent = byId.get(root.reply_to);
+    if (parent === undefined) {
+      break;
     }
+    root = parent;
+  }
+  return root;
+}
 
-    if (isConversationComment(event)) {
-      const existing = commentNodeOf.get(event.payload.id);
-      const existingRoot = commentThreadOf.get(event.payload.id);
-      if (existing !== undefined && existingRoot !== undefined) {
-        existing.event = event;
-        existing.author = event.payload.author;
-        existing.at = event.payload.created_at;
-        if (event.payload.deliveries !== undefined) {
-          existing.deliveries = commentDeliveries(event.payload);
-        }
-        existingRoot.lastAt = event.created_at;
-        existingRoot.lastSeq = event.seq;
-        continue;
-      }
+function askConversation(ask: IssueAskThreadRow, unreadFrom: string | undefined): Conversation {
+  let at = ask.created_at;
+  for (const reply of ask.thread.replies) {
+    at = newest(at, reply.created_at);
+  }
+  at = newest(at, ask.last_reply?.created_at);
+  at = newest(at, ask.answer?.at);
+  at = newest(at, ask.resolution?.at);
+  return {
+    ask,
+    at,
+    closed: ask.state !== "open",
+    id: conversationItemId("ask", ask.id),
+    kind: "ask",
+    unread: isUnread(at, unreadFrom),
+  };
+}
 
-      const parentId = event.payload.reply_to;
-      const root =
-        parentId === null || parentId === undefined ? undefined : commentThreadOf.get(parentId);
-      if (root !== undefined) {
-        const reply: CommentReply = {
-          at: event.payload.created_at,
-          author: event.payload.author,
-          deliveries: commentDeliveries(event.payload),
-          event,
-          id: `comment:${event.payload.id}`,
-          seq: event.seq,
-        };
-        root.replies.push(reply);
-        root.lastAt = event.created_at;
-        root.lastSeq = event.seq;
-        commentThreadOf.set(event.payload.id, root);
-        commentNodeOf.set(event.payload.id, reply);
-        continue;
-      }
-      const rootComment: CommentRoot = {
-        at: event.payload.created_at,
-        author: event.payload.author,
-        continued: false,
-        deliveries: commentDeliveries(event.payload),
-        event,
-        id: `comment:${event.payload.id}`,
-        kind: "comment",
-        lastAt: event.created_at,
-        lastSeq: event.seq,
-        pinEventId: event.id,
-        replies: [],
-        seq: event.seq,
-      };
-      commentThreadOf.set(event.payload.id, rootComment);
-      commentNodeOf.set(event.payload.id, rootComment);
-      turns.push(rootComment);
+/** One card per root comment, including a root nobody has replied to. A comment under an ask
+ *  belongs to that ask's card, which renders the exchange itself. */
+function commentConversations(
+  comments: readonly Comment[],
+  unreadFrom: string | undefined
+): Conversation[] {
+  const byId = new Map(comments.map((comment) => [comment.id, comment]));
+  const threads = new Map<string, { replies: Comment[]; root: Comment }>();
+  for (const comment of comments) {
+    if (comment.ask_id !== null) {
       continue;
     }
-    if (event.type === "comment.delivery") {
-      const node = commentNodeOf.get(event.payload.comment_id);
-      const root = commentThreadOf.get(event.payload.comment_id);
-      if (node !== undefined && root !== undefined) {
-        const attempt: CommentDeliveryAttempt = {
-          answeredWithError: receiptAnsweredWithError(event),
-          attempt: event.payload.attempt,
-          comment_id: event.payload.comment_id,
-          created_at: event.created_at,
-          delivery: event.payload.delivery,
-          duplicate: event.payload.duplicate,
-          envelope_id: null,
-          error: event.payload.error ?? null,
-          reply_id: event.payload.reply_id,
-          resolve_error: null,
-          session_id: event.payload.session_id,
-          state: event.payload.state,
-          target: event.payload.target,
-        };
-        const prior = node.deliveries.findIndex(
-          (candidate) =>
-            candidate.target === attempt.target && candidate.attempt === attempt.attempt
-        );
-        if (prior < 0) {
-          node.deliveries.push(attempt);
-        } else {
-          node.deliveries.splice(prior, 1, attempt);
-        }
-        root.lastAt = event.created_at;
-        root.lastSeq = event.seq;
-        continue;
-      }
-    }
-
-    if (event.type === "message.created" || event.type === "message.answered") {
-      const parentId = event.payload.in_reply_to;
-      const root =
-        parentId === null || parentId === undefined ? undefined : messageThreadOf.get(parentId);
-      if (root !== undefined) {
-        const reply: ThreadReply = {
-          id: `message:${event.payload.id}`,
-          event,
-          author: event.actor,
-          at: event.created_at,
-          seq: event.seq,
-          deliveries: [],
-        };
-        root.replies.push(reply);
-        root.lastSeq = event.seq;
-        root.lastAt = event.created_at;
-        if (
-          root.kind === "targeted-message" &&
-          root.answer === undefined &&
-          event.actor.kind === "session"
-        ) {
-          root.answer = reply;
-        }
-        messageThreadOf.set(event.payload.id, root);
-        messageNodeOf.set(event.payload.id, reply);
-        continue;
-      }
-      const thread = { replies: [], lastAt: event.created_at };
-      const base = {
-        ...thread,
-        author: event.actor,
-        at: event.created_at,
-        seq: event.seq,
-        lastSeq: event.seq,
-      };
-      const item: MessageThreadRoot =
-        event.type === "message.created" && event.payload.target !== null
-          ? {
-              ...base,
-              kind: "targeted-message",
-              id: `message:${event.payload.id}`,
-              event,
-              deliveries: [],
-              pinEventId: event.id,
-            }
-          : {
-              ...base,
-              kind: "message",
-              id: `message:${event.id}`,
-              event,
-              continued: false,
-              pinEventId: event.id,
-            };
-      messageThreadOf.set(event.payload.id, item);
-      if (item.kind === "targeted-message") messageNodeOf.set(event.payload.id, item);
-      turns.push(item);
+    const root = rootOf(byId, comment);
+    if (root.reply_to !== null || root.ask_id !== null) {
       continue;
     }
-    if (event.type === "message.delivery") {
-      const node = messageNodeOf.get(event.payload.message_id);
-      const root = messageThreadOf.get(event.payload.message_id);
-      if (node !== undefined && root !== undefined) {
-        node.deliveries.push(event);
-        root.lastSeq = event.seq;
-        root.lastAt = event.created_at;
-        continue;
-      }
+    const thread = threads.get(root.id) ?? { replies: [], root };
+    if (comment.id !== root.id) {
+      thread.replies.push(comment);
     }
-
-    const base = {
-      at: event.created_at,
-      seq: event.seq,
-      lastSeq: event.seq,
-      pinEventId: event.id,
-      author: event.actor,
-    };
-    turns.push({
-      ...base,
-      kind: "activity",
-      id: `activity:${event.id}`,
-      event,
-      description: activityDescription(event, previousIssueStatus, titles),
-    });
-    if (
-      event.type === "issue.created" ||
-      event.type === "issue.updated" ||
-      event.type === "issue.closed"
-    ) {
-      previousIssueStatus = event.payload.status;
-    }
+    threads.set(root.id, thread);
   }
-
-  turns.sort((left, right) => orderSeq(left) - orderSeq(right));
-  const anyRead = turns.some((turn) => orderSeq(turn) <= lastReadSeq);
-  const anyUnread = turns.some((turn) => orderSeq(turn) > lastReadSeq);
-  const items: ConversationItem[] = [];
-  let currentDay: string | undefined;
-  let unreadPlaced = !(anyRead && anyUnread);
-  let previous: { author: Actor; atMs: number } | undefined;
-
-  for (const turn of [...turns].reverse()) {
-    const day = dateKey(
-      turn.kind === "message" || turn.kind === "targeted-message" || turn.kind === "comment"
-        ? turn.lastAt
-        : turn.at
+  return [...threads.values()].map(({ replies, root }) => {
+    replies.sort(
+      (left, right) =>
+        compareTimestamps(left.created_at, right.created_at) || left.id.localeCompare(right.id)
     );
-    if (day !== currentDay) {
-      currentDay = day;
-      items.push({
-        kind: "day-divider",
-        id: `day:${day}`,
-        date: day,
-        label: dayLabel(day, today),
-      });
-      previous = undefined;
+    let at = root.created_at;
+    for (const reply of replies) {
+      at = newest(at, reply.created_at);
     }
-    if (!unreadPlaced && orderSeq(turn) <= lastReadSeq) {
-      items.push({ kind: "unread-divider", id: "unread-divider" });
-      unreadPlaced = true;
-      previous = undefined;
-    }
-    if (
-      (turn.kind === "message" && turn.replies.length === 0) ||
-      (turn.kind === "comment" && turn.replies.length === 0)
-    ) {
-      const atMs = new Date(turn.at).getTime();
-      turn.continued =
-        previous !== undefined &&
-        sameActor(previous.author, turn.author) &&
-        previous.atMs - atMs < GROUP_WINDOW_MS;
-      previous = { author: turn.author, atMs };
-    } else if (turn.kind !== "activity") {
-      previous = undefined;
-    }
-    items.push(turn);
+    return {
+      at,
+      closed: isClosedComment(root),
+      id: conversationItemId("comment", root.id),
+      kind: "comment" as const,
+      replies,
+      root,
+      unread: isUnread(at, unreadFrom),
+    };
+  });
+}
+
+/** One card per root message, targeted or not: a targeted root keeps its delivery card, with
+ *  its replies beneath it, rather than becoming a second turn. */
+function messageConversation(read: MessageRead, unreadFrom: string | undefined): Conversation {
+  const replies = [...read.replies].sort(
+    (left, right) =>
+      compareTimestamps(left.created_at, right.created_at) || left.id.localeCompare(right.id)
+  );
+  let at = read.message.created_at;
+  for (const reply of replies) {
+    at = newest(at, reply.created_at);
   }
-
-  return items;
-}
-
-export interface ConversationVisibility {
-  showActivity: boolean;
-  /** Retracted asks are withdrawn history and stay hidden until asked for. */
-  showRetracted: boolean;
-}
-
-function isHiddenItem(item: ConversationItem | undefined, show: ConversationVisibility): boolean {
-  if (item === undefined) return false;
-  if (item.kind === "activity") return !show.showActivity;
-  if (item.kind === "ask") return !show.showRetracted && isRetractedAsk(item.ask);
-  return false;
-}
-
-export function countRetractedAsks(items: ConversationItem[]): number {
-  return items.filter((item) => item.kind === "ask" && isRetractedAsk(item.ask)).length;
-}
-
-export function visibleConversationItems(
-  items: ConversationItem[],
-  show: ConversationVisibility
-): ConversationItem[] {
-  if (show.showActivity && show.showRetracted) return items;
-
-  const kept: ConversationItem[] = [];
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index] as ConversationItem;
-    if (isHiddenItem(item, show)) continue;
-    if (item.kind === "day-divider") {
-      let next = index + 1;
-      while (next < items.length && isHiddenItem(items[next], show)) next += 1;
-      if (next >= items.length || items[next]?.kind === "day-divider") continue;
-    }
-    kept.push(item);
+  const base = {
+    at,
+    closed: false,
+    id: conversationItemId("message", read.message.id),
+    replies,
+    root: read.message,
+    unread: isUnread(at, unreadFrom),
+  };
+  if (read.message.target === null) {
+    return { ...base, kind: "message" };
   }
-  return kept;
+  const answer = replies.find((reply) => reply.author.kind === "session");
+  return { ...base, kind: "targeted-message", ...(answer === undefined ? {} : { answer }) };
+}
+
+/**
+ * The issue's conversations, newest activity first. Each of the three reads returns the issue's
+ * whole set, so the list is complete however old a conversation is; ties break on the card's own
+ * id, so the order is total and nothing shuffles between renders.
+ */
+export function buildConversations({
+  asks,
+  comments,
+  messages,
+  unreadFrom,
+}: ConversationInput): Conversation[] {
+  const conversations = [
+    ...asks.map((ask) => askConversation(ask, unreadFrom)),
+    ...commentConversations(comments, unreadFrom),
+    ...messages.map((read) => messageConversation(read, unreadFrom)),
+  ];
+  return conversations.sort(
+    (left, right) => compareTimestamps(right.at, left.at) || left.id.localeCompare(right.id)
+  );
+}
+
+/** Whether `conversation` belongs in the bucket `filter` names: an ask is closed once it is
+ *  answered, resolved or retracted, a comment thread once it is resolved or its suggestion is
+ *  decided, and a message thread never is. A predicate rather than a list pass, so a caller
+ *  that also keeps conversations of its own (the Conversation's threads held in hand) walks
+ *  the list once and keeps its order. */
+export function matchesFilter(conversation: Conversation, filter: ConversationFilter): boolean {
+  return filter === "all" || conversation.closed === (filter === "closed");
+}
+
+/** Where a deep link lands: the conversation that holds the item, and the reply inside it when
+ *  the link names a reply rather than the root. */
+export interface ConversationFocus {
+  readonly id: string;
+  readonly replyId?: string;
+}
+
+/**
+ * The conversation an item id belongs to. A reply under an ask resolves to that ask and a reply
+ * in a thread to its root, read off the issue's own lists - each is its whole set, so no
+ * per-item fetch can tell the tab anything these do not.
+ */
+export function focusConversation(
+  itemId: string | undefined,
+  { asks, comments, messages }: Omit<ConversationInput, "unreadFrom">
+): ConversationFocus | undefined {
+  if (itemId === undefined) {
+    return undefined;
+  }
+  if (asks.some((ask) => ask.id === itemId)) {
+    return { id: conversationItemId("ask", itemId) };
+  }
+  const comment = comments.find((row) => row.id === itemId);
+  if (comment !== undefined) {
+    if (comment.ask_id !== null) {
+      return { id: conversationItemId("ask", comment.ask_id), replyId: comment.id };
+    }
+    const root = rootOf(new Map(comments.map((row) => [row.id, row])), comment);
+    return root.id === comment.id
+      ? { id: conversationItemId("comment", root.id) }
+      : { id: conversationItemId("comment", root.id), replyId: comment.id };
+  }
+  for (const { message, replies } of messages) {
+    if (message.id === itemId) {
+      return { id: conversationItemId("message", message.id) };
+    }
+    if (replies.some((reply) => reply.id === itemId)) {
+      return { id: conversationItemId("message", message.id), replyId: itemId };
+    }
+  }
+  return undefined;
 }

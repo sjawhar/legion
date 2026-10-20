@@ -38,6 +38,7 @@ import type {
   MyRepliesResponse,
   Project,
   RepoProject,
+  SearchResponse,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -240,6 +241,17 @@ export function listIssues(project: string, options: ApiOptions = {}): Promise<I
 /** The viewer's Inbox rows, as the SPA's own `["inbox"]` query reads them. */
 export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
   return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
+}
+
+/** `GET /api/v1/search`: the palette's own read, so a row's `href` here is the path a reader
+ *  lands on by clicking that hit. */
+export function search(query: string, options: ApiOptions = {}): Promise<SearchResponse> {
+  return request<SearchResponse>(
+    `/api/v1/search?q=${encodeURIComponent(query)}`,
+    "GET",
+    undefined,
+    options
+  );
 }
 
 /** `GET /api/v1/me/answers`: the caller's own answers and ask replies, newest first, one page. */
@@ -869,14 +881,25 @@ export function setAgentStreamResponder(
 export function publishAgentStreamFrame(
   sessionID: string,
   frame: object,
-  as: "frame" | "replay" = "frame",
+  as: "frame" | "replay" | "drop" = "frame",
   options: ApiOptions = {}
 ): Promise<{ ok: boolean }> {
-  const query = as === "replay" ? "?as=replay" : "";
+  const query = as === "frame" ? "" : `?as=${as}`;
   return request<{ ok: boolean }>(
     `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish${query}`,
     "POST",
     frame,
     options
   );
+}
+
+/** Ends every open viewer stream for a session, as a connection lost on the way to the browser
+ *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
+ *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
+ *  replay into a page that is already open, which a published frame alone cannot do. */
+export function dropAgentStreamViewers(
+  sessionID: string,
+  options: ApiOptions = {}
+): Promise<{ ok: boolean }> {
+  return publishAgentStreamFrame(sessionID, {}, "drop", options);
 }

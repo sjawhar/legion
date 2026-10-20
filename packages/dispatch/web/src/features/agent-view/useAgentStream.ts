@@ -14,6 +14,11 @@ export type AgentStreamStatus = "connecting" | "live" | "reconnecting" | "unavai
 export interface AgentStreamState {
   readonly conversation: AgentConversation;
   readonly status: AgentStreamStatus;
+  /** The one signal that the whole transcript was rebuilt from the session's replay, counted up
+   *  once per rebuild: the first connection, a reconnect, and a new session's first replay. A
+   *  reader who has scrolled back is put back on the turn they were reading when it survives the
+   *  rebuild (`use-live-follow.ts`), so this has to count every rebuild, not only a reconnect. */
+  readonly replays: number;
   /** Whether the session answers the relay on its control subject; `undefined` until it says.
    *  `false` is a session that cannot stream - an older plugin, or one no longer running - and
    *  it can turn true on a later replay without this viewer reconnecting. */
@@ -30,6 +35,7 @@ export interface AgentStreamState {
 export function useAgentStream(sessionID: string): AgentStreamState {
   const [state, setState] = useState<AgentStreamState>({
     conversation: EMPTY_CONVERSATION,
+    replays: 0,
     responding: undefined,
     status: "connecting",
   });
@@ -39,7 +45,14 @@ export function useAgentStream(sessionID: string): AgentStreamState {
     let attempt = 0;
     let controller: AbortController | null = null;
     let reconnect: number | undefined;
-    setState({ conversation: EMPTY_CONVERSATION, responding: undefined, status: "connecting" });
+    // A new session starts its own count: its first replay is a rebuild of this viewer's
+    // transcript as much as a reconnect's is.
+    setState({
+      conversation: EMPTY_CONVERSATION,
+      replays: 0,
+      responding: undefined,
+      status: "connecting",
+    });
 
     const open = (): void => {
       const current = new AbortController();
@@ -59,6 +72,7 @@ export function useAgentStream(sessionID: string): AgentStreamState {
             // a conversation whose newest frames may already be gone from the session's ring.
             setState((previous) => ({
               conversation: applyFrames(EMPTY_CONVERSATION, replay.frames),
+              replays: previous.replays + 1,
               responding: previous.responding,
               status: "live",
             }));
@@ -68,6 +82,7 @@ export function useAgentStream(sessionID: string): AgentStreamState {
           const frame = JSON.parse(raw.data) as AgentStreamFrame;
           setState((previous) => ({
             conversation: applyFrame(previous.conversation, frame),
+            replays: previous.replays,
             // A frame is a session speaking, which is the same evidence the replay answer is.
             responding: true,
             status: "live",

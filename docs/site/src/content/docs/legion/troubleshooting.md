@@ -441,6 +441,43 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   defaults), often because the registration's answer never reached it. The daemon resumes the same
   session one generation later and counts a launch failure; after `launch_failure_limit` of them
   the claim fails.
+  While the tree's cleanup is reserved (the tree is closing), the retirement waits: the process is
+  kept, nothing is counted, and the deadline is tried again at the probe interval
+  (`probe_interval_seconds`, 30 seconds at the default). Each try logs **`supervise: timer`** at
+  Error with `timer=registration` and `error="retire <claim>, whose agent registered and never said
+  it was ready: launch claim <claim>: bind work of tree <tree>: tree cleanup is reserved"` (`whose
+  agent never registered` for an agent that never registered). A prompt retirement waits the same
+  way, its error `retire <claim> after <n> prompt failures: launch claim <claim>: bind work of tree
+  <tree>: tree cleanup is reserved`, on the Error line of the prompt failure that reached the limit:
+  `supervise: timer` with `timer=turn` for a prompt that started no turn, `supervise: prompt
+  outcome` for a prompt the agent refused, and `supervise: an event failed` with
+  `event=supervise.StreamLateRefusal` for a late refusal. Nothing to do: the lines stop once the
+  tree has closed.
+- **`supervise: the tree's cleanup is reserved and the retired process is stopped; suspending the
+  claim for the tree's close`** means the tree's cleanup was reserved while a retirement was
+  stopping the process. The claim is suspended by the daemon with no process, and the tree's close
+  retires it.
+- **`supervise: the lifecycle check of the retired process's relaunch failed; trying it again at
+  the probe interval`** means the daemon's Postgres did not answer the relaunch's lifecycle check
+  after a retirement stopped the process. The claim waits `launching` with no process and keeps
+  its task; the same relaunch is tried again every `probe_interval_seconds` until the store
+  answers, and the agent is handed its task once it is ready. A daemon restart meanwhile launches
+  the claim again as an unfinished launch. If the line keeps coming, look at the database.
+- **`supervise: the launch could not be written; trying it again at the probe interval`** means
+  the daemon's Postgres did not take a launch's write, after the launch had let the claim's process
+  go. The process is stopped and nothing is started; the claim waits `launching` with no process,
+  keeps its task, and the same launch is tried again every `probe_interval_seconds` until the write
+  lands. If the line keeps coming, look at the database.
+- **`supervise: restoring a launch the previous daemon did not finish as launch_uncertain; no
+  process is recorded for it`** at boot names a claim the store held live with no process, with the
+  state it was stored in (`stored=`): a launch the previous daemon began and never recorded. The
+  daemon relaunches its session once its orphan reconciliation has run. Nothing to do.
+- **`supervise: refused a registration: the launch at its generation records no process`** and
+  **`supervise: dropped a stale event`** with `event=StreamHello fence=process` mean a process
+  registered or said hello for a launch the claim records no process for: a launch the daemon's
+  stop cut short, or a retired process whose relaunch is waiting. The registration is refused with
+  409 and the claim stays `launching`; the next boot, or the relaunch, starts the claim's process.
+  Nothing to do.
 
 ## The work loops or stops
 

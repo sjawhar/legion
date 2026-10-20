@@ -11,13 +11,19 @@ import { compareTimestamps } from "../../lib/timestamps";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
-import { dispatchMetadata } from "./dispatch-marks";
+import { dispatchMetadata, type KeyedMessage, turnKey } from "./dispatch-marks";
 
 /** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
 function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
   return isViewer(message.author, viewer)
     ? undefined
     : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+}
+
+/** The id a stored Dispatch message is rendered under, which a streamed turn that took that
+ *  message over carries as its `turn` mark: one key for both, spelt here alone. */
+function dispatchId(messageId: string): string {
+  return `dispatch:${messageId}`;
 }
 
 /**
@@ -34,7 +40,9 @@ export function AgentRuntimeThread({
   conversation,
   empty,
   onNew,
+  ownSendCount,
   placeholder,
+  replayCount,
   resetKey,
   sessionId,
   stored,
@@ -45,7 +53,13 @@ export function AgentRuntimeThread({
   conversation: AgentConversation;
   empty: string;
   onNew: (message: { content: readonly { type: string; text?: string }[] }) => Promise<void>;
+  /** Bumped once per message this viewer sent that the session accepted, so their own send takes
+   *  them back to the live end (`AgentThread`'s `useLiveFollow`). */
+  ownSendCount: number;
   placeholder: string;
+  /** Bumped once per rebuild of the whole transcript from the session's replay
+   *  (`useAgentStream`'s `replays`). */
+  replayCount: number;
   resetKey: string;
   sessionId: string;
   stored: readonly MessageRead[];
@@ -73,7 +87,16 @@ export function AgentRuntimeThread({
       const source = byID.get(turn?.dispatchMessageId ?? "");
       if (turn === undefined || source === undefined || turn.text !== source.body) return message;
       taken.add(source.id);
-      return { ...message, metadata: dispatchMetadata({ author: otherAuthor(source, viewer) }) };
+      // The streamed turn keeps the key the stored copy would have had, so it is one turn under
+      // one key for `useLiveFollow` whether the reader sees this frame or, after a rebuild that
+      // dropped it, the stored copy below under that same `dispatch:<id>` id.
+      return {
+        ...message,
+        metadata: dispatchMetadata({
+          author: otherAuthor(source, viewer),
+          turn: dispatchId(source.id),
+        }),
+      };
     });
     // Dispatch's side of the conversation, interleaved with the stream by time: what the session
     // wrote is its reply, what the viewer wrote is theirs, and anything anyone else sent the
@@ -81,13 +104,13 @@ export function AgentRuntimeThread({
     // stream's times are whole milliseconds, so the merge below compares milliseconds; the stored
     // messages carry microseconds, so they are put in time order first, and the stable merge keeps
     // that order between two stored messages in one millisecond.
-    const dispatch: ThreadMessageLike[] = storedMessages
+    const dispatch: KeyedMessage[] = storedMessages
       .filter((message) => !taken.has(message.id))
       .sort((left, right) => compareTimestamps(left.created_at, right.created_at))
       .map((message) => {
         const content = [{ text: message.body, type: "text" as const }];
         const createdAt = new Date(message.created_at);
-        const id = `dispatch:${message.id}`;
+        const id = dispatchId(message.id);
         if (message.author.kind === "session" && message.author.id === sessionId) {
           return {
             content,
@@ -120,13 +143,24 @@ export function AgentRuntimeThread({
     onNew,
   });
 
+  // What `useLiveFollow` reads the transcript from, in render order; `AgentThread` renders the
+  // same key into each turn's `data-message-id`, so the hook can find the turn a reader was on.
+  const contentIds = useMemo(
+    () => messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id)),
+    [messages]
+  );
+
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <AgentThread
         commands={commands}
+        contentIds={contentIds}
         empty={empty}
+        ownSendCount={ownSendCount}
         placeholder={placeholder}
+        replayCount={replayCount}
         resetKey={resetKey}
+        sessionId={sessionId}
       />
     </AssistantRuntimeProvider>
   );

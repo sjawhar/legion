@@ -57,6 +57,7 @@ import {
   type ChannelInboundMessage,
   createChannelForwarder,
 } from "./channel-forwarder"
+import { type ChannelGate, detectClaudeChannel } from "./claude-channel"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
 import {
@@ -86,6 +87,8 @@ import {
 import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
+const CHANNEL_INSTRUCTIONS =
+  "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -1051,11 +1054,30 @@ export async function runEnvoyChannelServer(): Promise<void> {
     directory,
   )
   const stateDirectory = pluginStateDirectory()
+  // The Legion bridge's inbox takes the events itself; otherwise they go to Claude Code's channel.
+  const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
+  // Claude Code drops a notification from a channel it did not load without telling this server,
+  // so such a session advertises no delivery mode and Dispatch refuses a message to it rather than
+  // reporting it delivered. The bridge's inbox needs no channel.
+  const channel: ChannelGate =
+    inboxSocket === undefined
+      ? detectClaudeChannel({
+          claudePid: process.ppid,
+          bundlePath: process.argv[1] ?? "",
+          environment: process.env,
+        })
+      : { loaded: true }
+  if (!channel.loaded) {
+    process.stderr.write(
+      `envoy-channel: Claude Code did not load this server as a channel: ${channel.why}; the session advertises no delivery mode, so Dispatch refuses messages to it instead of losing them\n`,
+    )
+  }
 
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions:
-      "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
+    instructions: channel.loaded
+      ? CHANNEL_INSTRUCTIONS
+      : `${CHANNEL_INSTRUCTIONS} Claude Code did not load this channel for this session (${channel.why}), so no Envoy event or Dispatch message reaches you as a <channel> message, and the session advertises no delivery mode; envoy_inbox still lists what arrived.`,
   })
   const client = createEnvoyClient({
     baseUrl: envoy.url,
@@ -1082,9 +1104,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
   })
-  const inboxSocket = configuredValue(process.env[INBOX_VARIABLE])
   const notifier = inboxSocket === undefined ? server : createInboxNotifier(inboxSocket)
-  const capabilities = inboxSocket === undefined ? CHANNEL_CAPABILITIES : INBOX_CAPABILITIES
+  // A session whose deliveries are channel notifications Claude Code did not load shows the model
+  // nothing, so it advertises no delivery mode at all.
+  const capabilities =
+    inboxSocket !== undefined ? INBOX_CAPABILITIES : channel.loaded ? CHANNEL_CAPABILITIES : []
   const booting = new AbortController()
 
   const stopped = Promise.withResolvers<void>()

@@ -84,7 +84,17 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 	frames := make(chan agentstream.Frame, agentStreamBuffer)
 	overflow := make(chan struct{})
 	var overflowOnce sync.Once
+	// The relay ending this viewer's stream, which only the in-memory source's test hook does
+	// (agentstream.Memory.Drop): a session's own frame is never nil. The e2e suite has no other
+	// way to make a browser rebuild its transcript from a second replay, which is the one event
+	// that can take a reader's place in the history away from them.
+	dropped := make(chan struct{})
+	var droppedOnce sync.Once
 	stop, err := source.Subscribe(sessionID, func(frame agentstream.Frame) {
+		if frame == nil {
+			droppedOnce.Do(func() { close(dropped) })
+			return
+		}
 		select {
 		case frames <- frame:
 		default:
@@ -143,6 +153,11 @@ func (s *server) streamAgentConversation(w http.ResponseWriter, r *http.Request)
 			// The viewer fell behind far enough to lose a frame. Draining what is buffered
 			// first would stitch a gap into the middle of the conversation; the reconnect's
 			// replay is the honest answer.
+			return
+		case <-dropped:
+			// The relay dropped this viewer, as a lost connection does: the reconnect rebuilds
+			// from the session's own replay, which is what every other end of this stream
+			// leaves the viewer to do.
 			return
 		case frame := <-frames:
 			if err := writeStreamEvent(w, "frame", frame); err != nil {
@@ -239,6 +254,11 @@ func (s *server) publishAgentStreamFrame(w http.ResponseWriter, r *http.Request)
 	switch r.URL.Query().Get("as") {
 	case "replay":
 		memory.SetReplay(sessionID, frame)
+	case "drop":
+		// Ends every open viewer stream for this session, as a lost connection does. The live
+		// stream is not resumable, so the browser's reconnect asks the session for its replay
+		// again and rebuilds the whole transcript from whatever `as=replay` set by then.
+		memory.Drop(sessionID)
 	case "responder":
 		// Whether anyone is on the session's control subject, with no history behind it: a live
 		// session that has produced nothing, or one whose plugin cannot stream at all.

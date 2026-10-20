@@ -152,6 +152,13 @@ export default defineConfig({
         /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits|picture-link-click)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
+
+    {
+      name: "firefox-download-navigation",
+      testMatch: /shell\.e2e\.ts/,
+      grep: /a chunk that fails after a Download link was followed reloads the page/,
+      use: { ...devices["Desktop Firefox"] },
+    },
     {
       name: "chromium-plain-http",
       testMatch: plainHttpSpecs,

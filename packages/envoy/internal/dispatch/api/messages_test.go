@@ -2454,3 +2454,98 @@ func messageAttemptRow(t *testing.T, database *store.Store, messageID string, at
 	}
 	return row
 }
+
+// issueMessageRows is an issue's message list as a dashboard reads it: one row per thread root.
+func issueMessageRows(t *testing.T, handler http.Handler, issueKey string) []messageRead {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issueKey+"/messages", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("list issue messages: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[[]messageRead](t, response)
+}
+
+// An issue's message list is one row per thread root, oldest first: a reply belongs inside its
+// root's thread rather than beside it, a targeted root is an ordinary row carrying its delivery
+// attempts, and each row is what the per-message read it replaces hands back. Another issue's
+// message is not listed.
+func TestIssueMessageListCarriesEachRootWithItsThreadAndDeliveries(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue message list", "before")
+	other := createInteractionIssue(t, handler, "OTHER", "Another issue", "before")
+
+	root := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "Ship the build tonight"}, "alice")
+	reply := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Once the build is green.", "in_reply_to": root.ID,
+	}, "bob")
+	targeted := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can this ship?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	elsewhere := createIssueMessage(t, handler, other.Key, map[string]any{"body": "On another issue"}, "alice")
+
+	rows := issueMessageRows(t, handler, issue.Key)
+	if len(rows) != 2 {
+		t.Fatalf("issue message rows = %#v, want one per root (%s and %s)", rows, root.ID, targeted.ID)
+	}
+	if rows[0].Message.ID != root.ID || rows[1].Message.ID != targeted.ID {
+		t.Fatalf("listed ids = %s, %s; want %s then %s, oldest first", rows[0].Message.ID, rows[1].Message.ID, root.ID, targeted.ID)
+	}
+	if len(rows[0].Replies) != 1 || rows[0].Replies[0].ID != reply.ID {
+		t.Fatalf("plain root replies = %#v, want the one reply %s inside its root", rows[0].Replies, reply.ID)
+	}
+	if len(rows[0].Message.Deliveries) != 0 {
+		t.Fatalf("untargeted root deliveries = %#v, want none", rows[0].Message.Deliveries)
+	}
+	if got := rows[1].Message.Deliveries; len(got) != 1 || got[0].Attempt != 1 ||
+		got[0].SessionID != "s1" || got[0].State != "sent" {
+		t.Fatalf("targeted root deliveries = %#v, want its one sent attempt to s1", got)
+	}
+	if len(rows[1].Replies) != 0 {
+		t.Fatalf("targeted root replies = %#v, want none", rows[1].Replies)
+	}
+	for _, row := range rows {
+		if row.Message.ID == elsewhere.ID {
+			t.Fatalf("message %s on %s is listed on %s", elsewhere.ID, other.Key, issue.Key)
+		}
+	}
+
+	// Each row is the one GET /issues/{key}/messages/{id} returns for that root, so a client
+	// that listed the issue needs no per-thread fetch.
+	for index, id := range []string{root.ID, targeted.ID} {
+		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+id, nil, "alice")
+		if read.Code != http.StatusOK {
+			t.Fatalf("read message %s: status=%d body=%s", id, read.Code, read.Body.String())
+		}
+		if expected := decodeBody[messageRead](t, read); !reflect.DeepEqual(rows[index], expected) {
+			t.Fatalf("listed row for %s = %#v, want the message read's %#v", id, rows[index], expected)
+		}
+	}
+
+	// The other issue lists its own message, and only it.
+	if otherRows := issueMessageRows(t, handler, other.Key); len(otherRows) != 1 ||
+		otherRows[0].Message.ID != elsewhere.ID {
+		t.Fatalf("other issue rows = %#v, want its own message %s alone", otherRows, elsewhere.ID)
+	}
+}
+
+func TestIssueMessageListWithoutMessagesIsAnEmptyArray(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "No messages", "before")
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages", nil, "alice")
+	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != "[]" {
+		t.Fatalf("list an issue with no messages: status=%d body=%s, want []", response.Code, response.Body.String())
+	}
+}

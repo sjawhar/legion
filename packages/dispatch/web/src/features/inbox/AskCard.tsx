@@ -111,6 +111,9 @@ export interface AskCardProps {
    *  Conversation turn, its margin card, its decision block - so the Inbox, its drawer and the
    *  Answers page start no unread-set reads. */
   markRead?: boolean;
+  /** The reply a deep link named: the Conversation marks that reply and opens the card's
+   *  collapsed thread over it. No other surface lands on a reply. */
+  currentReplyId?: string;
 }
 
 /** The urgency notch's text colour, matching the urgency badge of the same level. */
@@ -168,6 +171,7 @@ export function AskCard({
   onAnswered,
   mode = "answer",
   markRead = false,
+  currentReplyId,
 }: AskCardProps): ReactNode {
   const {
     answerFailure,
@@ -327,6 +331,7 @@ export function AskCard({
       <AskThreadDisclosure
         ask={currentAsk}
         createReply={reply}
+        currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
         thread={threadQuery}
@@ -336,6 +341,7 @@ export function AskCard({
       <AskThread
         ask={currentAsk}
         createReply={reply}
+        currentReplyId={currentReplyId}
         embedded={completed === null}
         markNewest={answerIsNewest ? undefined : markNewest}
         thread={threadQuery}

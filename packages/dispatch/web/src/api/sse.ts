@@ -608,7 +608,8 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     const askID = payloadString(event, "ask_id");
     keys.push(["comments", event.issue_key]);
     // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
-    // block reads its turn from that list rather than from the Inbox.
+    // block reads its turn from that list rather than from the Inbox. The Conversation's card
+    // for that ask carries the reply itself.
     if (askID !== undefined) {
       keys.push(["asks", event.issue_key]);
     }
@@ -631,7 +632,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   if (isMessageEvent(event)) {
     const target = payloadString(event, "target");
     appendAgentConversationKey(keys, target);
-    keys.push(["messages", event.issue_key]);
+    keys.push(["messages", event.issue_key], ["issue-messages", event.issue_key]);
     // The Agents page groups a conversation under its thread root, so a reply belongs to that
     // root's conversation and not to a target of its own: a session answering a message aimed
     // at itself names no target at all, and the event carries the root's as `thread_target`.

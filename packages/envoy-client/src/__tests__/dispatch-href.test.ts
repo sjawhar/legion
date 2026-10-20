@@ -18,6 +18,17 @@ test("a dashboard URL from another server is not a reference", () => {
   expect(dispatchRefFromUrl("http://elsewhere.test/issues/CORE-1", server)).toBeUndefined();
 });
 
+// The Activity tab's own page and reference, and the Conversation's unchanged one: a reference
+// written before the Activity tab existed still names the conversation.
+test("the issue's activity and conversation pages keep their own references", () => {
+  expect(dispatchRefFromUrl(`${server}/issues/CORE-1/activity`, server)).toBe(
+    "dispatch://CORE-1/activity"
+  );
+  expect(dispatchRefFromUrl(`${server}/issues/CORE-1/conversation`, server)).toBe(
+    "dispatch://CORE-1/log"
+  );
+});
+
 test("an issue document URL carrying both item parameters is refused", () => {
   expect(
     dispatchRefFromUrl(`${server}/issues/CORE-1/spec?comment=c1&ask=a1`, server)

@@ -99,9 +99,10 @@ export function Tabs<Id extends string>({
   }, [activeTab]);
 
   const tabMinHeight = compact ? "min-h-11 md:min-h-9" : "min-h-11";
-  // Compact tabs sit tighter on phones so the issue's four tabs, one carrying a count pill, fit a
-  // 390 px viewport on one line; narrower still (360 px Android), the tablist scrolls sideways
-  // and `revealTab` keeps the focused or selected tab fully visible.
+  // Compact tabs sit tighter on phones, which is what keeps the shorter tablists on one line. The
+  // issue's five tabs, one carrying a count pill, no longer fit a 390 px viewport: there the
+  // tablist scrolls sideways, as it already did at 360 px, and `revealTab` keeps the focused or
+  // selected tab fully visible. Every tab stays reachable and keeps its 44 px target.
   const tabPadding = compact ? "px-1.5 md:px-2" : "px-3";
   const tabGap = compact ? "gap-0 md:gap-1" : "gap-1";
 

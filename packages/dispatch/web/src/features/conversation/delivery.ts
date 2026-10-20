@@ -25,6 +25,38 @@ export function capabilityLabel(capability: string): string {
 }
 
 /**
+ * The mode a message with no `/aside ` or `/btw ` command goes in when it answers no thread, from
+ * the capabilities of each live session it addresses: Send when every one of them advertises it,
+ * else Aside when every one of them advertises that - so a plain message to a Claude Code session,
+ * which takes only Aside, is an Aside rather than a Send recorded as failed. A session that
+ * advertises no mode takes none, so it does not decide the mode for the rest. BTW is never picked
+ * for the reader: it answers in a side turn that leaves the conversation as it was, which a plain
+ * message does not ask for. Otherwise, or with nobody live to ask, it is a Send, which the composer
+ * then warns about.
+ */
+export function plainDelivery(capabilities: readonly (readonly string[])[]): MessageDeliveryMode {
+  const taking = capabilities.filter((list) => list.length > 0);
+  const everyone = (mode: MessageDeliveryMode) => taking.every((list) => list.includes(mode));
+  return taking.length > 0 && !everyone("steer") && everyone("aside") ? "aside" : "steer";
+}
+
+/**
+ * The mode a broadcast goes in until its sender picks one, from the capabilities of each live
+ * session selected: BTW, the broadcast's own default, when every one of them advertises it, else
+ * Aside when every one advertises that - so a selection that holds a Claude Code session, which
+ * takes only Aside, reaches it rather than leaving it out. A session that advertises no mode takes
+ * none and does not decide it. Otherwise, or with nobody live, it is BTW, and the composer names
+ * who that leaves out.
+ */
+export function broadcastDelivery(
+  capabilities: readonly (readonly string[])[]
+): MessageDeliveryMode {
+  const taking = capabilities.filter((list) => list.length > 0);
+  const everyone = (mode: MessageDeliveryMode) => taking.every((list) => list.includes(mode));
+  return taking.length > 0 && !everyone("btw") && everyone("aside") ? "aside" : "btw";
+}
+
+/**
  * The one rule every delivery surface applies, so the dashboard cannot promise on one card what
  * it contradicts on another. Four surfaces render a delivery attempt — the targeted-message
  * card, the comment thread's "Mention deliveries" list, the issue event feed, and the broadcast
@@ -40,8 +72,8 @@ export interface DeliveryOutcome {
   readonly createdAt: string;
   readonly duplicate?: boolean;
   /** The session the attempt went to answered it with an error instead of a reply (a BTW whose
-   *  side turn failed, a frame the host refused), as `rowAnsweredWithError` or
-   *  `receiptAnsweredWithError` reads it off the attempt. Absent means it did not. */
+   *  side turn failed, a frame the host refused), as `rowAnsweredWithError` reads it off the
+   *  attempt. Absent means it did not. */
   readonly answeredWithError?: boolean;
 }
 
@@ -49,32 +81,14 @@ export interface DeliveryOutcome {
  * Whether an attempt row records its session's error answer. Dispatch writes an envelope id only
  * for a send the listener accepted (`sendResolvedDelivery`), and every failure Dispatch records
  * itself leaves it null, so a failed row that carries one was failed by the session's own error
- * reply after Dispatch recorded the send. A session that refuses the frame before Dispatch records
- * the send leaves a row no different from a failed send, which a row cannot tell apart; the
- * receipt can (`receiptAnsweredWithError`).
+ * reply after Dispatch recorded the send. A session that refuses the frame before Dispatch
+ * records the send leaves a row no different from a failed send, which a row cannot tell apart.
  */
 export function rowAnsweredWithError(row: {
   readonly state: string;
   readonly envelope_id: string | null;
 }): boolean {
   return row.state === "failed" && row.envelope_id !== null;
-}
-
-/**
- * Whether a delivery receipt records its session's error answer: the session's error reply
- * appends the attempt's receipt itself, as the session the attempt went to, whichever of it and
- * Dispatch's own record of the send landed first. Every other receipt is appended by whoever sent
- * the attempt.
- */
-export function receiptAnsweredWithError(receipt: {
-  readonly actor: { readonly kind: string; readonly id: string };
-  readonly payload: { readonly state: string; readonly session_id: string | null };
-}): boolean {
-  return (
-    receipt.payload.state === "failed" &&
-    receipt.actor.kind === "session" &&
-    receipt.actor.id === receipt.payload.session_id
-  );
 }
 
 /**

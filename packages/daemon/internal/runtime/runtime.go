@@ -76,7 +76,8 @@ type Runtime interface {
 	// process no sweep's known set names any more is the orphan sweep's. An entry that fails
 	// Validate is an error, and nothing of its claim is ended: tmux, which knows a claim's
 	// processes only by the locators it is given, then ends nothing at all. The sandbox deletes no
-	// issue Sandbox of a tree whose lifecycle is open or releasing: those are CleanupTree's alone.
+	// issue Sandbox of a tree whose lifecycle is open or releasing: those are CleanupTree's alone; and
+	// no controller Sandbox whose claim the store holds unretired when the delete is decided.
 	ReconcileOrphans(ctx context.Context, known []Known, grace time.Duration) error
 	// AdoptWorkingCopy hands the agent's working copy the git identity its commits are authored
 	// with, in the place the working copy actually lives (which under a sandbox is not a
