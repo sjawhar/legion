@@ -965,9 +965,9 @@ statuses, open, answered, snoozed and retracted asks, a spec decision block, a p
 with an ask, a BTW mention answered by its session, a direct message and a broadcast whose
 recipient order is not alphabetical, from five sessions of which one has no Dispatch activity and
 one is twenty minutes stale — and `e2e/workspace.e2e.ts` asserts every human-only surface it fills
-`seedWorkspace()` expects an empty database and returns the ids it made;
 (the Inbox's default list with its Later band and the document ask its `Unassigned` filter
 reaches, `/agents` with both folds, the broadcast page, an issue's Conversation).
+`seedWorkspace()` expects an empty database and returns the ids it made;
 it waits for the spec's decision block to be indexed, so `inboxRows` is exact when it resolves.
 
 `e2e/seed.ts` truncates the test database before each scenario. It first quiesces the server
