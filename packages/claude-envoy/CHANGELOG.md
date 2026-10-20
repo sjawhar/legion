@@ -54,13 +54,14 @@
   (INFRA-31): under the Kubernetes runtime the roles of an issue now share one scratch on the
   issue's volume, and the daemon tells every role container of a pod the same temporary directory,
   cache home, data home and bun install cache under it (`/legion/scratch/tmp`,
-  `/legion/scratch/cache`, `/legion/scratch/data` and `/legion/scratch/bun/install/cache`), with
-  the Go build and module caches the pair on that volume they already were, where
-  the container's own gigabyte of ephemeral storage no longer bounds them. The state home is the
-  one directory a role keeps to itself, `/legion/scratch/state/<role>`, since Oh My Pi's browser
-  broker lock is an abstract unix socket named from the state root and such a name is one across
-  every container of a pod. Nothing this plugin
-  reads or writes moved; a session of it registers with a daemon at 33.
+  `/legion/scratch/cache`, `/legion/scratch/data` and `/legion/scratch/bun/install/cache`), and
+  the same Go build and module caches, one pair for the issue on that volume beside the
+  workspaces (`GOCACHE=/legion/go/build` and `GOMODCACHE=/legion/go/mod`), names the runtime did
+  not set before. The container's own gigabyte of ephemeral storage no longer bounds any of them.
+  The state home is the one directory a role keeps to itself, `/legion/scratch/state/<role>`,
+  since Oh My Pi's browser broker lock is an abstract unix socket named from the state root and
+  such a name is one across every container of a pod. Nothing this plugin reads or writes moved;
+  a session of it registers with a daemon at 33.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions
   an Oh My Pi session keeps; Claude Code holds none, so the tools behave as before.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and

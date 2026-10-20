@@ -385,8 +385,8 @@ type stub struct {
 
 // socketPath answers a socket path short enough to bind wherever TMPDIR points: Linux's sun_path
 // holds 107 bytes, and t.TempDir() sits under TMPDIR, which is no longer short anywhere — a
-// Legion role container's TMPDIR is its own scratch on the issue's volume
-// (/legion/scratch/<role>/tmp, 31 bytes), and a developer's macOS TMPDIR is a path under
+// Legion role container's TMPDIR is the issue's shared scratch on its volume
+// (/legion/scratch/tmp, 19 bytes), and a developer's macOS TMPDIR is a path under
 // /var/folders. Under either, the test's own name pushes the socket past sun_path and the listen
 // fails with "bind: invalid argument" before the test does anything. /tmp is the shortest base
 // every machine has, so the socket's own directory is made there and removed with the test, while

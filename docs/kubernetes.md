@@ -1193,19 +1193,21 @@ and its requests to 6Gi. `issue_volume` sizes each issue's own volume: the clone
 uv's Pythons and packages, the roles' sessions, and everything a role container writes without
 being told where to put it. Four of those directories are the issue's, one set its roles share —
 `/legion/scratch/tmp`, `/legion/scratch/cache`, `/legion/scratch/data` and
-`/legion/scratch/bun/install/cache`, the bun install cache's cold fill for this repository 1.4 GB
-— beside the two the roles already shared, the Go build and module caches at `/legion/go/build`
-and `/legion/go/mod`, 1.3 GiB and 931 MiB for this repository after `go test -count=1 ./...` over
-`packages/daemon` alone — the figure an operator sizes from, because roles run tests — where a
-cold `go build ./...` of that same module with nothing tested leaves 751 MiB and 375 MiB, the
-reproducible cold-build measurement that
+`/legion/scratch/bun/install/cache`, the cache home holding the issue's one Playwright browser
+registry, a Chromium about 400 MB, and the bun install cache's cold fill for this repository
+1.4 GB — beside the Go pair this change adds, the build and module caches at
+`/legion/go/build` and `/legion/go/mod`, 1.3 GiB and 931 MiB for this repository after
+`go test -count=1 ./...` over `packages/daemon` alone — the figure an operator sizes from,
+because roles run tests — where a cold `go build ./...` of that same module with nothing tested
+leaves 751 MiB and 375 MiB, the reproducible cold-build measurement that
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) records below beside it. One directory is
-the role's own, its state home at `/legion/scratch/state/<role>`, with a Playwright Chromium under
-it about 400 MB; it is the role's for a mechanism, not caution: Oh My Pi names its browser
-broker's lock from the state root, the name is an abstract unix socket, an abstract socket name is
-one name across every container of a pod, so one state home would block every role's broker but
-the first. An operator's arithmetic is therefore the issue's: one set of four, one Go pair, and
-one state home per role the issue runs. The controller's pod owns a volume of the same size,
+the role's own, its state home at `/legion/scratch/state/<role>`, holding Oh My Pi's logs,
+Chromium's `browser-profiles` and the plugin generation an installing launch puts there; it is the
+role's for a mechanism, not caution: Oh My Pi names its browser broker's lock from the state
+root, the name is an abstract unix socket, an abstract socket name is one name across every
+container of a pod, so one state home would block every role's broker but the first. An
+operator's arithmetic is therefore the issue's: one set of four, one Go pair, and one state home
+per role the issue runs. The controller's pod owns a volume of the same size,
 holding its sessions alone.
 Nothing prunes `/legion/scratch`: it grows for the life of the issue, across every pod of it, and
 this change raises `issue_volume`'s default from `20Gi` to `50Gi` (`defaultIssueVolume`,

@@ -561,6 +561,12 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 // home-directory state home. The value is on the issue's volume, deliberately: Oh My Pi's logs,
 // Chromium's profiles and the installed plugin generation are charged to neither the pod's memory
 // nor the gigabyte of ephemeral storage the container is admitted with, and they outlive the pod.
+// Which mount holds it is the argument above, not housekeeping: a state home reached through a
+// sub-path mount, or one overlapping the workspace or uv's directories, is a directory whose
+// contents are no longer the role's alone, and the broker-lock reasoning quietly stops holding.
+// So each role's value is checked to sit on the issue volume's own mount and to overlap none of
+// those three, exactly as the shared six are
+// (TestTheIssuesRolesShareOneScratchAndOneGoCachePair).
 func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -569,9 +575,18 @@ func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	told := map[string]claim.Role{}
 	for _, role := range launcherRoles {
 		worker := workerOf(t, r, roleSpec(t, role))
-		got := envOf(worker)["XDG_STATE_HOME"]
+		env := envOf(worker)
+		got := env["XDG_STATE_HOME"]
 		if want := TreeRoot + "/scratch/state/" + string(role); got != want {
 			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, want %q", role, got, want)
+		}
+		if mount := mountHolding(worker, got); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
+			t.Errorf("%s: XDG_STATE_HOME %q is on mount %+v, want the issue volume's own mount at %s", role, got, mount, TreeRoot)
+		}
+		for _, theirs := range []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
+			if path := env[theirs]; path != "" && overlaps(got, path) {
+				t.Errorf("%s: XDG_STATE_HOME %q overlaps %s %q", role, got, theirs, path)
+			}
 		}
 		if other, taken := told[got]; taken {
 			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, %s's too", role, got, other)
