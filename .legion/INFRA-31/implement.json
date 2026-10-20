@@ -2,61 +2,58 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T20:19:00Z",
+  "completed": "2026-10-20T21:40:00Z",
   "proof": [
     {
-      "criterion": "The rendered plugin install no longer fails when the issue's six roles fill the shared bun install cache cold at the same time.",
-      "surface": "The daemon's own rendered install script (sandbox.installScript), one script per role state home, run as six concurrent processes in this issue's pod against one empty BUN_INSTALL_CACHE_DIR on the issue's volume, installing the published pair @sjawhar/pi-legion@10.14.0 and @sjawhar/pi-envoy@10.12.0 with /bin/echo AGENT-EXECED as the agent argv.",
-      "command": "rm -rf state cache && mkdir -p cache && export BUN_INSTALL_CACHE_DIR=$PWD/cache && for r in architect planner implementer tester reviewer merger; do ( sh $r.sh /bin/echo AGENT-EXECED >$r.out 2>&1; echo \"$r exit=$?\" ) & done; wait",
-      "observed": "At the script as it stood at df06f2b5ef8f: planner exit=1, implementer exit=1, reviewer exit=1, architect exit=0, tester exit=0, merger exit=0, the three failures carrying 'ENOENT: failed copying files from cache to destination for package @sjawhar/pi-legion' and '... @sjawhar/pi-envoy' with 'Failed to install 1 package' / 'Failed to install 2 packages'. At the script with the flock and the retry (7917b0c41abc): 6/6 exit=0, no ENOENT in any of the six logs, and every script reached its exec \"$@\" (AGENT-EXECED in each log).",
-      "headSha": "5edffedf9a11a59eb46333cf7a00f9064bfe87d6",
-      "negativeControl": "The before-run is the control: the same harness, the same cold start (cache and all six generation directories removed), the same payload, differing only in the flock and the retry — and it failed three of six."
+      "criterion": "The install lock's wait is bounded, so a stalled holder costs one bump its launch rather than making every role of the pod wait past the registration deadline.",
+      "surface": "The rendered install script itself, run against a cache directory a holder process holds the lock on, in this issue's pod; the bound rendered as `-w 1` for the measurement so the run is quick, and the pre-fix shape (no `-w`) run beside it as the control.",
+      "command": "setsid /usr/bin/flock -- cache sh -c 'sleep 12' & then: sh install-w1.sh /bin/echo AGENT-EXECED   and   timeout 5 sh install-nowait.sh /bin/echo AGENT-EXECED",
+      "observed": "Bounded: exit=1 after 2.03 s — two waits of the bound — with `legion plugins: installing @sjawhar/pi-legion@10.14.0 and @sjawhar/pi-envoy@10.12.0 failed` on stderr and the agent argv never exec'd. Unbounded (today's shape without the flag): still blocked when `timeout 5` killed it, exit=124 at 5.01 s, no output. The mechanism was confirmed before the bound was chosen, the way the reviewer found the defect: a bare `flock` waiter on a held directory under `timeout 3` exits 124 at 3.01 s where `flock -w 2` exits 1 at 2.00 s, so flock excludes on a directory and really did wait forever.",
+      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
+      "negativeControl": "The unbounded run is the control: same rendered script, same holder, same cache, one flag apart — it hangs where the bounded one fails loudly."
     },
     {
-      "criterion": "The state home's placement is fenced, not merely its value, so podsafety.go's citation of 'these paths sit on the issue volume's own mount' is true of the one directory with a mechanism behind it.",
-      "surface": "go test over the sandbox package's TestEachRolesAgentIsToldAStateHomeOfItsOwn, with roleStateHome mutated twice in manifest.go and restored after each.",
-      "command": "go test -count=1 -run TestEachRolesAgentIsToldAStateHomeOfItsOwn ./internal/runtime/sandbox/",
-      "observed": "Green unmutated. With roleStateHome returning TreeRoot + \"/workspaces\": 'architect: XDG_STATE_HOME \"/legion/workspaces\" overlaps LEGION_WORKSPACE \"/legion/workspaces/sjawhar/legion-smoke/legion-208\"' for every role. With it returning podHome + \"/state/\" + role: 'architect: XDG_STATE_HOME \"/home/legion/state/architect\" is on mount nil, want the issue volume's own mount at /legion'. Both mutations reverted with jj restore and the file diffs clean.",
-      "headSha": "5edffedf9a11a59eb46333cf7a00f9064bfe87d6",
-      "negativeControl": "The two mutations are the control: before this round the test asserted only the literal value and cross-role distinctness, so both mutations above would have passed it."
+      "criterion": "Two rendered installs of one pod actually serialise on the shared bun cache, rather than the script merely containing the word flock.",
+      "surface": "`TestTwoRenderedInstallsSerialiseOnTheSharedBunCache` in packages/daemon/internal/runtime/sandbox: two rendered scripts, one role state home each, one shared BUN_INSTALL_CACHE_DIR, run concurrently with a stand-in bun — substituted at the script's absolute bun path by the same strings.Replace bunInstallArgs already used, so no production signature widened — that logs `start <id>`, holds 300 ms, logs `end <id>`.",
+      "command": "go test -count=1 -run TestTwoRenderedInstallsSerialiseOnTheSharedBunCache ./internal/runtime/sandbox/ ; go test -count=10 -run TestTwoRenderedInstallsSerialiseOnTheSharedBunCache ./internal/runtime/sandbox/",
+      "observed": "PASS in 1.19 s; ten runs `ok github.com/sjawhar/legion/daemon/internal/runtime/sandbox 11.912s` with no flake. With installLockWaitSeconds mutated to 0 the test fails — `the locked run's log: the log is not two completed installs: [\"start a\" \"end a\"]` — and TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline fails with `installLockWaitSeconds = 0, want a positive bound`, while every substring assertion over the script still passes; restored, both green. With `-w` removed entirely the test still passes, which is right: an unbounded lock still serialises, and the bound is the other test's job.",
+      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
+      "negativeControl": "Built into the test and run every time: the identical harness with the rendered flock prefix stripped must interleave, and a control that fails to interleave in five attempts is a t.Fatal saying the locked run passed vacuously — so a harness that never exercised concurrency can never look green."
     },
     {
-      "criterion": "The operator-pod refusal that reserves /home/legion/.local/state states an owner that is real, and the tests pin the rendered message.",
-      "surface": "go test over the sandbox package, whose TestCheckPodRefusesWhatCollidesWithLegionsOwn compares CheckPod's error against the rendered string for a mount at, under and above the reserved path.",
-      "command": "go test -count=1 ./internal/runtime/sandbox/",
-      "observed": "ok github.com/sjawhar/legion/daemon/internal/runtime/sandbox 139.024s, with the three cases pinning 'runtime.kubernetes.pod.volume_mounts[0].mount_path ... overlaps /home/legion/.local/state, which Legion reserves in the image's home directory: a mount may be neither at, under, nor above Legion's reserved state home'.",
-      "headSha": "5edffedf9a11a59eb46333cf7a00f9064bfe87d6",
-      "negativeControl": "The reviewer's own check is the control for the claim behind the wording: pod.VolumeMounts is concatenated into the role containers (manifest.go:470) and the image probe's (probe.go:835) and nowhere else, so the previous owner (workspace-init) was unreachable by the rule; the Dockerfile creates nothing at that path either, which is why Legion rather than the image is named as the reserver."
+      "criterion": "The lock's binary is declared where the image's other tools are, so an image without it fails the build rather than every installing launch.",
+      "surface": "The `toolchain` capability row `legion probe-image` asserts (packages/daemon/internal/capabilities), exercised through its own suite with the stub PATH the capability tests build.",
+      "command": "go test -count=1 ./internal/capabilities/... , then the same with \"flock\" removed from capabilitiestest's stub binaries, then restored",
+      "observed": "Green as it stands (`ok … 23.507s`). With the stub removed: `capability toolchain is missing: flock is not on PATH` from deployment_test.go:45 and image_test.go:104 and :159. Restored: green again. The apt line now names `util-linux` with the reason beside it, and the Dockerfile's toolchain check runs `flock --version`.",
+      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
+      "negativeControl": "The stub removal above is the control; before this round the same removal changed nothing, since no list looked for flock."
     },
     {
-      "criterion": "The tester's red test keeps its assertions: this round's socket work is comment-only.",
-      "surface": "jj diff over packages/daemon/internal/shim/socketpath_test.go, filtered to non-comment changed lines, plus the package's own suite.",
-      "command": "jj -R \"$LEGION_WORKSPACE\" diff --git packages/daemon/internal/shim/socketpath_test.go | grep '^[+-][^+-]' | grep -v '//' ; go test -count=1 ./internal/shim/",
-      "observed": "The grep prints nothing — const want and every assertion byte-identical — and ok github.com/sjawhar/legion/daemon/internal/shim 3.691s.",
-      "headSha": "5edffedf9a11a59eb46333cf7a00f9064bfe87d6",
-      "negativeControl": "The same filter over the round's other test file, manifest_test.go, prints its added assertions, so the filter does detect code changes rather than passing everything."
+      "criterion": "The lock rather than the retry is what removes the cold-fill failures — the question this implementer's own before/after could not answer.",
+      "surface": "The tester's own control, recorded in .legion/INFRA-31/test.json round nine and cited here by name rather than re-derived: the rendered script with flock removed and the retry kept, run six-way cold in the tester's container.",
+      "command": "the tester's rendered six-way cold run with the flock prefix stripped and `legion_install || legion_install` left in place",
+      "observed": "2 of 6 failed both attempts on its first cold run, and the second run passed only with `ENOENT: failed copying files from cache to destination` in two roles' logs, succeeding on the retry. So the retry alone masks the race sometimes and not always; with the lock in place the tester's four post-fix cold runs were 6 of 6 exit 0 with ENOENT absent from every log.",
+      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
+      "negativeControl": "The tester's pre-fix cold runs (4 of 6 and 2 of 6 failing, no failing role reaching its exec) are the control for the post-fix runs; the flock-removed, retry-kept run is the control that separates the lock from the retry."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/plugins.go — the rendered install takes /usr/bin/flock on BUN_INSTALL_CACHE_DIR and retries once; the doc comment says which failure each covers, that flock is advisory and per-inode (one pod's containers, not across pods), why mkdir precedes the lock, and why the directory is read as ${BUN_INSTALL_CACHE_DIR:-<generation dir>}; the copyfile paragraph now calls the cache the issue's rather than the role's.",
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — four new pinned strings for the lock, the retry, the cache default and the mkdir.",
-    "docs/kubernetes.md — the bun cold-fill hazard stated beside Playwright's with the measured exit codes; the issue_volume sizing paragraph charges the ~400 MB Playwright Chromium to the shared cache home and leaves the state home holding Oh My Pi's logs, browser-profiles and the plugin generation; 'the two the roles already shared' corrected to the Go pair this change adds.",
-    "packages/daemon/cmd/legion/worker_shim.go — podSafeEnvironment's doc comment, the site above the EnsureScratch call, no longer states the deleted per-role rule backwards.",
-    "packages/claude-envoy/CHANGELOG.md, packages/pi-legion/CHANGELOG.md — contract 33's entry no longer tells a published reader the Go pair was already on the volume; at 32 the runtime set neither name.",
-    "packages/daemon/internal/runtime/sandbox/manifest_test.go — TestEachRolesAgentIsToldAStateHomeOfItsOwn regains the mount and overlap assertions the merge of the two scratch tests dropped.",
-    "packages/daemon/internal/shim/socketpath_test.go, packages/daemon/internal/shim/shim_test.go, packages/daemon/cmd/legion/worker_shim_test.go — the four socket comments derive the fence from the rendered /legion/scratch/tmp (19 bytes) and state that the 31-byte fixture is a kept margin; comment-only in the red test.",
-    "packages/daemon/internal/runtime/sandbox/operatorpod.go, operatorpod_test.go — the reserved state-home row names Legion as the reserver, with the reach of an operator's volume mounts recorded in the doc comment and the three test pins moved with it."
+    "packages/daemon/internal/runtime/sandbox/plugins.go — `/usr/bin/flock -w installLockWaitSeconds`, a named constant whose comment carries the arithmetic against the registration deadline (worker_boot_timeout_seconds x worker_boot_registration_deadline_intervals) with the script's two attempts counted; the bound stated before the advisory/per-inode sentence; the `${BUN_INSTALL_CACHE_DIR:-<genDir>}` default removed so `set -u` aborts if the runtime ever stops setting it, with the `mkdir -p` kept; and the race's rate restated as the rule plus the measured spread (3, 4, 2 and 3 of six) rather than another experiment's 5 of 6.",
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — the pins follow the new rendered text; `requireFlock` skips where /usr/bin/flock is absent instead of failing with a message that blames the install; `bunInstallArgs` pins BUN_INSTALL_CACHE_DIR under t.TempDir(), so an in-pod run no longer locks the cache the pod's other roles use and CI exercises the same branch; `TestTwoRenderedInstallsSerialiseOnTheSharedBunCache` with its lockless control; `TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline` reading the deadline from the daemon's own defaults.",
+    "packages/daemon/internal/capabilities/{image.go,capabilities.go,image_test.go,capabilitiestest/capabilitiestest.go} — flock joins the toolchain row's checked list, its Summary, the stub binaries and the pinned detail.",
+    "packages/daemon/docker/worker.Dockerfile — util-linux on the runtime apt line with the reason it must not be tidied away, `flock --version` in the toolchain check, and the three enumerating comments and the notices header's package list moved with them.",
+    "docs/kubernetes.md — the bun paragraph now says the wait is bounded, what the bound is sized against and what a timeout does, with the scoped chalk/lodash measurement left exactly as it was; the two operator-facing toolchain lists, the Dockerfile-step list and the `docker run` end-to-end check name flock."
   ],
   "trickyParts": [
-    "The flock is deliberately scoped and said to be: advisory and per-inode, so it serialises the containers of one pod sharing one inode on the issue's volume, and nothing across pods — where two issues have two volumes and two inodes anyway. The retry is the half that covers an agent's own concurrent bun install, which no lock Legion renders can reach.",
-    "The script runs under set -eu, so the cache directory is read as ${BUN_INSTALL_CACHE_DIR:-<generation dir>} and made with mkdir -p before the lock is taken: EnsureScratch makes the cache root, but the script cannot assume the generation's turn order, and the lock needs its inode to exist.",
-    "The six-way proof had to run the rendered script rather than a hand-typed bun add, which meant rendering one script per role state home (each has its own plugins root, so the script's rm -rf <root>/g* stays inside its own role) and pinning the contract to 32 so the published pair's check passes and the exit code reports the install alone."
+    "The bound is one number serving two opposing constraints, which is why the constant's comment shows the arithmetic rather than asserting a value: two timed-out waits (the script installs twice) must fit inside the 360 s registration deadline with room for the install and the agent's start, and the bound must still cover the legitimate case where the last of six roles queues behind five serialised installs. 120 s satisfies both: 2 x 120 = 240 < 360, and 120 s allows those five installs 24 s each.",
+    "`installScript` calls bun by absolute path, so a stub cannot be put on PATH. The way past it was already in the file: bunInstallArgs substitutes the stub for `/usr/local/bin/bun` with strings.Replace on the rendered text. That keeps the rendered script — the lock included — as the thing under test and widens no production signature, which the alternatives (parameterising the bun path, or testing a hand-built lock construct) would have done.",
+    "A serialisation assertion can pass vacuously when the second process merely starts after the first finishes, so the test runs its own lockless control in the same invocation and fails if that control never interleaves."
   ],
   "deviations": [
-    "The human's decision to share the scratch is not revisited: the cache stays shared and only the one install Legion renders is wrapped."
+    "The reviewer filed the behavioural serialisation test as fast-follow; the architect asked for it in this round and it is here, with its control. Nothing else was taken from the fast-follow list."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "bun 1.3.14 has no lock of its own over its install cache, and --backend=copyfile governs only how files leave the cache, not how an entry is filled: a cold fill from several processes at once is the race, and a warm cache is not."
+    "`flock` with no `-w` waits without limit, which converts a per-role failure into a pod-wide one as soon as several roles share a lock: the amplification is a property of the lock, not of bun, and it was found by measuring the mechanism (a holder-and-waiter rig) rather than by reading the diff."
   ]
 }
