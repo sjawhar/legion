@@ -497,11 +497,12 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
 // nothing an agent wrote reaches workspace-init's jj. The config home is the one home the two
-// agree on: a role container's cache, data and state homes are its own scratch's on the issue's
-// volume (TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume,
+// agree on: a role container's cache and data homes are the issue's scratch's on the issue's
+// volume and its state home its own directory there
+// (TestTheIssuesRolesShareOneScratchAndOneGoCachePair,
 // TestEachRolesAgentIsToldAStateHomeOfItsOwn), while the setup containers keep the image's home
-// directory ones, so nothing of a role's scratch reaches a container that holds the provisioning
-// token or provisions the issue's clone.
+// directory ones, so nothing of the issue's scratch reaches a container that holds the
+// provisioning token or provisions the issue's clone.
 func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -550,16 +551,16 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
-// The role containers of one issue pod share the pod's network namespace, the workspace path and
-// the Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named
-// from the lock path under its state root: one state root would make it one name in every
-// container, the first role's lock blocking every other role's broker. So each role's agent is
-// told a XDG_STATE_HOME of its own, the `state` directory of its own scratch
-// (`/legion/scratch/<role>/state`), differing from every other role's, and the controller's agent
-// one by the same rule; workspace-init, which runs alone, keeps the plain home-directory state
-// home. The value is on the issue's volume, deliberately: Oh My Pi's logs, Chromium's profiles and
-// the installed plugin generation are charged to neither the pod's memory nor the gigabyte of
-// ephemeral storage the container is admitted with, and they outlive the pod.
+// The role containers of one issue pod share the pod's network namespace, the workspace path, the
+// Oh My Pi profile path and the rest of the issue's scratch, and Oh My Pi's browser broker lock is
+// an abstract unix socket named from the lock path under its state root: one state root would
+// make it one name in every container, the first role's lock blocking every other role's broker.
+// So each role's agent is told a XDG_STATE_HOME of its own, its own directory under the scratch's
+// `state` (`/legion/scratch/state/<role>`), differing from every other role's, and the
+// controller's agent one by the same rule; workspace-init, which runs alone, keeps the plain
+// home-directory state home. The value is on the issue's volume, deliberately: Oh My Pi's logs,
+// Chromium's profiles and the installed plugin generation are charged to neither the pod's memory
+// nor the gigabyte of ephemeral storage the container is admitted with, and they outlive the pod.
 func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -569,7 +570,7 @@ func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	for _, role := range launcherRoles {
 		worker := workerOf(t, r, roleSpec(t, role))
 		got := envOf(worker)["XDG_STATE_HOME"]
-		if want := TreeRoot + "/scratch/" + string(role) + "/state"; got != want {
+		if want := TreeRoot + "/scratch/state/" + string(role); got != want {
 			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, want %q", role, got, want)
 		}
 		if other, taken := told[got]; taken {
@@ -597,106 +598,68 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 	return testSpec(t, token, role, testTree)
 }
 
-// The five directories a role's tools write to without being told where are under that role's own
-// scratch on the issue's volume, no two roles told the same one: its temporary directory, its
-// cache, data and state homes, and bun's install cache. A name per role rules out a collision
-// between the roles running at once, not reach: the role containers share the volume whole and
-// each can read and write what the others write. The rule this replaces was the opposite
-// one: bun's install cache sat on the container's own filesystem, private to the pod, because bun
-// hardlinks that cache's files into every worktree's node_modules and one shared cache corrupted
-// every checkout on a box at once (LEGION-198). The cache is 1.4 GB for this repository, more than
-// the gigabyte of ephemeral storage a role container is admitted with, so keeping it there is the
-// eviction this change exists to stop — and with the workspace on the volume and the cache off it,
-// the hardlink crossed devices anyway. The roles of an issue share one checkout
-// (workspace.Location names the repository and the issue, never a role), so a cache per role
-// isolates no node_modules from anything — a file edited in place there is already in the
-// packages every role runs from. What a cache per role bounds is afterwards: only that role's
-// later installs put the changed copy back, beside the one install Legion renders itself copying
-// rather than linking (plugins.go). Each directory is held by the issue volume's own mount,
-// exactly as uv's are (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the
-// workspace nor uv's directories. The two Go caches are not on this list: they are the issue's,
-// shared by its roles (TestTheIssuesRolesAreToldOneGoBuildAndModuleCache).
-func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
+// The six directories a role's tools write to without being told where are the issue's, not the
+// role's: every role container of a workflow pod and the controller's is told the same temporary
+// directory, cache home, data home and bun install cache — the four directly under the issue's
+// scratch on its volume — and the same Go build and module cache pair beside the workspaces. A
+// directory per role is what this replaces, by the human's decision of 2026-10-20: disk is cheap,
+// an issue gets the space it needs, and the roles within a pod are not kept from sharing a cache.
+// Splitting them bought no isolation the pod has anyway — the roles of an issue share the pod,
+// the volume whole, the one checkout they all work in (workspace.Location names the repository
+// and the issue, never a role), the sessions directory and uv's Pythons and cache, and each can
+// read and write what the others write — while costing a copy of every cache per role. Bun
+// hardlinks out of its install cache into whatever it installs for (LEGION-198, where that
+// hardlinking was first met), so a file edited in place in node_modules is already in the
+// packages every role runs from, whatever we do about caches; the one install Legion renders
+// itself copies rather than links (plugins.go). The two Go caches hold content addressed by its
+// hash and the roles of one issue may fill them at once: of the build cache `go help cache` says
+// "The cache is safe for concurrent invocations of the go command", and what reaches the module
+// cache is a module zip or go.mod the go command has verified against a known hash (`go help
+// module-auth`) in a directory it then makes read-only, which only `go build -modcacherw` leaves
+// writable; a pair is 751 MiB of build cache and 375 MiB of module cache for this repository, so
+// six roles with a pair each would hold five redundant copies, about 5.5 GiB spent on nothing.
+// Each directory is held by the issue volume's own mount, exactly as uv's are
+// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
+// directories, and no two of the six are one directory. The state home is the one thing of the
+// scratch that stays the role's own, for the browser broker's lock
+// (TestEachRolesAgentIsToldAStateHomeOfItsOwn).
+func TestTheIssuesRolesShareOneScratchAndOneGoCachePair(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	scratched := []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "BUN_INSTALL_CACHE_DIR"}
-	told := map[string]claim.Role{}
+	shared := [][2]string{
+		{"TMPDIR", TreeRoot + "/scratch/tmp"},
+		{"XDG_CACHE_HOME", TreeRoot + "/scratch/cache"},
+		{"XDG_DATA_HOME", TreeRoot + "/scratch/data"},
+		{"BUN_INSTALL_CACHE_DIR", TreeRoot + "/scratch/bun/install/cache"},
+		{"GOCACHE", TreeRoot + "/go/build"},
+		{"GOMODCACHE", TreeRoot + "/go/mod"},
+	}
 	for _, role := range launcherRoles {
 		main := workerOf(t, r, roleSpec(t, role))
 		env := envOf(main)
-		scratch := TreeRoot + "/scratch/" + string(role)
-		for _, name := range scratched {
+		told := map[string]string{}
+		for _, pair := range shared {
+			name, want := pair[0], pair[1]
 			dir := env[name]
-			if !strings.HasPrefix(dir, scratch+"/") {
-				t.Errorf("%s is told %s=%q, want a directory under its own scratch %s", role, name, dir, scratch)
+			if dir != want {
+				t.Errorf("%s is told %s=%q, want %q, the one directory every role of the issue is told", role, name, dir, want)
 				continue
 			}
 			if mount := mountHolding(main, dir); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
 				t.Errorf("%s: %s %q is on mount %+v, want the issue volume's own mount at %s", role, name, dir, mount, TreeRoot)
 			}
+			for _, theirs := range []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
+				if path := env[theirs]; path != "" && overlaps(dir, path) {
+					t.Errorf("%s: %s %q overlaps %s %q", role, name, dir, theirs, path)
+				}
+			}
 			if other, taken := told[dir]; taken {
-				t.Errorf("%s is told %s=%q, which %s is told too; one directory would be two roles'", role, name, dir, other)
+				t.Errorf("%s is told %s=%q and %s=%q; these are six directories, and the go command keeps its two caches apart", role, other, dir, name, dir)
 			}
-			told[dir] = role
-			for _, theirs := range []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
-				if path := env[theirs]; path != "" && overlaps(dir, path) {
-					t.Errorf("%s: %s %q overlaps %s %q", role, name, dir, theirs, path)
-				}
-			}
+			told[dir] = name
 		}
-	}
-}
-
-// Go's build cache and module cache are one pair for the whole issue — the same two directories in
-// every role container of a workflow pod and in the controller's — where the five directories
-// above are the role's own. Both hold content addressed by its hash and the roles of one issue may
-// fill them at once: of the build cache `go help cache` says "The cache is safe for concurrent
-// invocations of the go command", and what reaches the module cache is a module zip or go.mod the
-// go command has verified against a known hash (`go help module-auth`) in a directory it then
-// makes read-only, which only `go build -modcacherw` leaves writable. A pair is 751 MiB of build
-// cache and 375 MiB of module cache for this repository, so six roles with a pair each would hold
-// five redundant copies, about 5.5 GiB of a 20 GiB volume spent on nothing. Bun's install cache
-// does not join them, because bun hardlinks out of that cache into whatever it installs for and
-// the issue's roles share one checkout (workspace.Location names no role), so what a cache per
-// role bounds is which installs can put a hardlinked file back — that role's later ones alone,
-// the edited copy being in the shared node_modules already (LEGION-198, where bun's hardlinking
-// was first met); the state home does not, because Oh My Pi's browser broker takes its lock as an
-// abstract unix socket named from a path under it, one name across every container of the pod
-// (roleStateHome). The pair is on the issue volume's own mount, outside every role's scratch and
-// outside the workspace and uv's directories, exactly as uv's cache is
-// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume).
-func TestTheIssuesRolesAreToldOneGoBuildAndModuleCache(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	shared := map[string]string{}
-	for _, role := range launcherRoles {
-		main := workerOf(t, r, roleSpec(t, role))
-		env := envOf(main)
-		for _, name := range []string{"GOCACHE", "GOMODCACHE"} {
-			dir := env[name]
-			if mount := mountHolding(main, dir); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
-				t.Errorf("%s: %s %q is on mount %+v, want the issue volume's own mount at %s", role, name, dir, mount, TreeRoot)
-			}
-			if dir == scratchRoot || strings.HasPrefix(dir, scratchRoot+"/") {
-				t.Errorf("%s is told %s=%q, under the per-role scratch %s; the issue's roles are told one Go cache", role, name, dir, scratchRoot)
-			}
-			for _, theirs := range []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
-				if path := env[theirs]; path != "" && overlaps(dir, path) {
-					t.Errorf("%s: %s %q overlaps %s %q", role, name, dir, theirs, path)
-				}
-			}
-			if first, seen := shared[name]; seen && first != dir {
-				t.Errorf("the roles are told %s=%q and %q; want the one cache of the issue", name, first, dir)
-			}
-			shared[name] = dir
-		}
-	}
-	if shared["GOCACHE"] == shared["GOMODCACHE"] {
-		t.Errorf("GOCACHE and GOMODCACHE are both %q; the go command keeps the two caches apart", shared["GOCACHE"])
 	}
 }
 
@@ -707,10 +670,11 @@ func TestTheIssuesRolesAreToldOneGoBuildAndModuleCache(t *testing.T) {
 // equivalent would fail in its first turn, which is the failure EnsureScratch exists to prevent.
 // So each name on the shim's list, plus XDG_STATE_HOME, which the shim makes elsewhere
 // (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), is set to an
-// absolute path on the issue's volume — the role's own scratch for five of them, the issue's Go
-// caches for the other two — and, the other way, every variable the runtime sets to a path on that
-// volume is on that list, bar the three it names for a reason of their own, so neither a new
-// per-role directory nor a new one shared by the issue's roles can appear that nothing makes.
+// absolute path on the issue's volume — the issue's shared scratch for four of them, the issue's
+// Go caches for two, and the role's own state home for the last — and, the other way, every
+// variable the runtime sets to a path on that volume is on that list, bar the three it names for
+// a reason of their own, so neither a new directory of the issue's scratch nor a new per-role one
+// can appear that nothing makes.
 func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {

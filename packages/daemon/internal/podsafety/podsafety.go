@@ -15,18 +15,18 @@
 // state-home directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
 // (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where
 // that directory exists. And the scratch directories: each directory the runtime tells a role to
-// write what it writes without being told where — its temporary directory, its cache and data
+// write what it writes without being told where — the temporary directory, the cache and data
 // homes, bun's install cache and the two Go caches (EnsureScratch) — made before Oh My Pi
 // starts, since a role told a temporary directory nothing created cannot run. Apply, the
 // overlay and the baseline together, runs only in a pod, for a worker's shim (`legion worker-shim
 // --pod-safety`) and for the image probe (`legion probe-image --pod-safety`), which certifies the
 // baseline a worker's Oh My Pi starts on. The directories are the shim's alone: every role the
 // shim starts is told a state home of its own (sandbox.roleStateHome), which in an issue pod keeps
-// a role's browser broker lock apart from its siblings', and a scratch directory of its own
-// (sandbox.roleScratch) on the issue's volume, which holds all of those but the two Go caches the
-// issue's roles share, while the probe pod runs one container, on the image's own directories,
-// and is told neither. A pane gets the overlay alone, which runtime/tmux writes and names itself
-// (writeTurnScopeOverlay, panePairs).
+// a role's browser broker lock apart from its siblings', and the issue's scratch on the issue's
+// volume, which holds all of those but the two Go caches beside it and which every role of the
+// pod is told the same of, while the probe pod runs one container, on the image's own
+// directories, and is told neither. A pane gets the overlay alone, which runtime/tmux writes and
+// names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -177,13 +177,13 @@ func EnsureStateHome(environ []string) error {
 
 // ScratchVariables are the variables EnsureScratch makes the directory of, in the order it makes
 // them: what sandbox.roleEnvironment tells a role container to write in without being told where,
-// wherever on the issue's volume the runtime puts them — the role's own scratch for the temporary
-// directory, the cache and data homes and bun's install cache, the pair the issue's roles share
-// for the two Go caches — less XDG_STATE_HOME, which is EnsureStateHome's. The runtime is held to
-// this list rather than to a copy of it
-// (sandbox.TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes), so a directory the runtime
-// starts naming that the shim would never make is a test failure, not a role whose temporary
-// directory does not exist.
+// wherever on the issue's volume the runtime puts them — the issue's scratch for the temporary
+// directory, the cache and data homes and bun's install cache, the pair beside it for the two Go
+// caches, every one of them the same for every role of the pod — less XDG_STATE_HOME, which is
+// the role's own and EnsureStateHome's. The runtime is held to this list rather than to a copy
+// of it (sandbox.TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes), so a directory the
+// runtime starts naming that the shim would never make is a test failure, not a role whose
+// temporary directory does not exist.
 var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR"}
 
 // EnsureScratch makes every directory environ names in ScratchVariables — TMPDIR, XDG_CACHE_HOME,
@@ -205,13 +205,13 @@ var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GO
 //
 // The shim is what makes them, not the kubelet: a subPath mount per directory would have the
 // kubelet create each one, but it would also contradict the rule that these paths sit on the issue
-// volume's own mount (sandbox.TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume), ask
-// the kubelet for thirty-two directories — the five per-role ones in each of the issue pod's six
-// role containers, plus the one pair its roles share — and rest on an unproven ownership
-// behaviour: what mode a kubelet gives a nested sub-path directory it creates on a fresh volume.
-// The shim runs as the pod's own user, which can write the volume, and makes exactly the
-// directories the runtime told it to use, read from the same environment the agent starts on, so
-// the names cannot drift.
+// volume's own mount (sandbox.TestTheIssuesRolesShareOneScratchAndOneGoCachePair), ask the
+// kubelet for twelve directories — the four the issue's roles share, the two Go caches beside
+// them and a state home in each of the issue pod's six role containers — and rest on an unproven
+// ownership behaviour: what mode a kubelet gives a nested sub-path directory it creates on a
+// fresh volume. The shim runs as the pod's own user, which can write the volume, and makes
+// exactly the directories the runtime told it to use, read from the same environment the agent
+// starts on, so the names cannot drift.
 func EnsureScratch(environ []string) error {
 	env := lookup(environ)
 	for _, name := range ScratchVariables {

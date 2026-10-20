@@ -663,13 +663,13 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 
 // The XDG base directories, at the standard offsets from the image's HOME: what the issue pod's
 // workspace-init is told (xdgEnvironment), the state home xdgStateHome itself there. A role
-// container is told none of the three home-directory ones: its cache, data and state homes are
-// under its own scratch directory on the issue's volume (roleEnvironment), and the config home
-// alone is shared with workspace-init. The config home is the pod's shared in-memory volume: jj
-// keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what
-// workspace-init sets there (git.abandon-unreachable-commits false, no repository identity) is
-// what the agent's jj reads. It starts empty in every pod, so nothing an agent wrote reaches
-// workspace-init's jj.
+// container is told none of the three home-directory ones: its cache and data homes are the
+// issue's scratch's, shared with every other role of the pod, its state home its own directory
+// under that scratch (roleEnvironment), and the config home alone is shared with workspace-init.
+// The config home is the pod's shared in-memory volume: jj keeps a repository's `--repo`
+// configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
+// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads.
+// It starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
 const (
 	xdgConfigHome = podHome + "/.config"
 	xdgCacheHome  = podHome + "/.cache"
@@ -681,8 +681,8 @@ const (
 // workspace-init is told (initEnvironment), the one container of a pod told any of them besides
 // the role containers — workspace-fetch is told none (fetchEnvironment), and neither is the
 // controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role container is
-// told none of them but the config home; its cache, data and state homes are under its own
-// scratch (roleEnvironment).
+// told none of them but the config home; its cache and data homes are the issue's scratch's and
+// its state home its own directory there (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -692,19 +692,10 @@ func xdgEnvironment() []corev1.EnvVar {
 	}
 }
 
-// scratchRoot holds one scratch directory per role container (roleScratch), on the issue's volume,
-// which every role launcher mounts whole at TreeRoot.
+// scratchRoot is the issue's scratch, on the issue's volume, which every role launcher mounts
+// whole at TreeRoot: the four directories every role container of the pod is told the same one of
+// (roleEnvironment) and `state`, which holds one state home per role (roleStateHome).
 const scratchRoot = TreeRoot + "/scratch"
-
-// roleScratch is the scratch directory role's container is given, `/legion/scratch/<role>`: the
-// issue volume's own, not the gigabyte of ephemeral storage the container is admitted with, and
-// one per role because these names must not collide between the roles of an issue running at the
-// same time — not because a role container is isolated from its siblings, which it is not. They
-// share the pod, the issue's volume whole, the one workspace every role works in, the sessions
-// directory, uv's Pythons and cache and now the two Go caches (roleEnvironment below).
-func roleScratch(role claim.Role) string {
-	return scratchRoot + "/" + string(role)
-}
 
 // roleEnvironment is where a role container's agent puts what it writes without being told where:
 // its temporary directory, the three XDG homes a tool caches under, and the three tool caches that
@@ -712,42 +703,56 @@ func roleScratch(role claim.Role) string {
 // them is on the issue's volume, where neither the gigabyte of ephemeral storage the container is
 // admitted with nor the pod's memory bounds it: a bun install cache alone is 1.4 GB for this
 // repository, and charging it to the container's filesystem is what GKE Autopilot evicted issue
-// pods for. Five of them are under the role's own scratch (roleScratch), which no other role of
-// the pod is told: the temporary directory, the cache, data and state homes and bun's install
-// cache. The two Go caches are the issue's, one pair shared by its roles (goBuildCache,
-// goModCache), as uv's cache is (uvCacheDir). Only the config home stays the pod's shared
-// in-memory volume (xdgConfigHome): workspace-init writes the jj configuration the agents' jj
-// reads there. Every directory here outlives the pod, so a later pod of the issue reuses what an
-// earlier one downloaded and built.
+// pods for. All but the state home are the issue's, one directory every role of it is told the
+// same: the temporary directory, the cache and data homes and bun's install cache directly under
+// scratchRoot, and the two Go caches (goBuildCache, goModCache), as uv's cache already was
+// (uvCacheDir). A directory per role is what this replaces, by the human's decision of
+// 2026-10-20: the roles of an issue already share the pod, the issue's volume whole, the one
+// workspace they all work in, the sessions directory, uv's Pythons and cache and the two Go
+// caches, and each can read and write what the others write, so a cache per role bought an
+// isolation the pod does not have and cost a copy of every cache per role. Bun hardlinks out of
+// its install cache into whatever it installs for (LEGION-198, where that hardlinking was first
+// met), and the issue's roles share one checkout — workspace.Location names the repository and
+// the issue, never a role — so a file edited in place inside node_modules is already in the
+// packages every role runs from, whatever we do about caches. XDG_STATE_HOME alone stays the
+// role's own (roleStateHome), and for a mechanism rather than caution: Oh My Pi names its browser
+// broker's lock from the state root, the name is an abstract unix socket, and an abstract socket
+// name is one name across every container of the pod, so one state home would block every role's
+// broker but the first. Only the config home is neither the issue's scratch nor the role's: it
+// stays the pod's shared in-memory volume (xdgConfigHome), where workspace-init writes the jj
+// configuration the agents' jj reads. Every directory here outlives the pod, so a later pod of
+// the issue reuses what an earlier one downloaded and built.
 func roleEnvironment(role claim.Role) []corev1.EnvVar {
-	scratch := roleScratch(role)
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
-		{Name: "XDG_CACHE_HOME", Value: scratch + "/cache"},
-		{Name: "XDG_DATA_HOME", Value: scratch + "/data"},
+		{Name: "XDG_CACHE_HOME", Value: scratchRoot + "/cache"},
+		{Name: "XDG_DATA_HOME", Value: scratchRoot + "/data"},
 		{Name: "XDG_STATE_HOME", Value: roleStateHome(role)},
-		{Name: "TMPDIR", Value: scratch + "/tmp"},
+		{Name: "TMPDIR", Value: scratchRoot + "/tmp"},
 		{Name: "GOCACHE", Value: goBuildCache},
 		{Name: "GOMODCACHE", Value: goModCache},
-		{Name: "BUN_INSTALL_CACHE_DIR", Value: scratch + "/bun/install/cache"},
+		{Name: "BUN_INSTALL_CACHE_DIR", Value: scratchRoot + "/bun/install/cache"},
 	}
 }
 
-// roleStateHome is the XDG_STATE_HOME a role's agent is told, its scratch's `state` directory: a
-// state home of its own in a pod whose role containers share the network namespace and the
-// workspace path. Oh My Pi keeps its browser broker's lock under its state root
-// (`run/daemons/<hash of the workspace's real path>/broker.pid`), taken as an abstract unix socket
-// named from the lock path, and an abstract socket name is one name across every container of the
-// pod; with one state root the first role's lock would block every other role's broker, and their
-// `browser.open` would fail while `broker.sock` sits on the first container's own filesystem. The
-// shim makes Oh My Pi's profile directory under it before Oh My Pi starts
-// (podsafety.EnsureStateHome), since Oh My Pi reads the variable only where that directory exists.
-// It is on the issue's volume, which is neither the pod's memory nor the gigabyte of ephemeral
-// storage the container is admitted with, so Oh My Pi's logs, Chromium's `browser-profiles` and
-// the plugin generation an installing launch puts there (plugins.go) are charged to neither — and,
-// unlike both, the state home now outlives the pod.
+// roleStateHome is the XDG_STATE_HOME a role's agent is told, `/legion/scratch/state/<role>`: the
+// one directory of the issue's scratch that is the role's own rather than the issue's, in a pod
+// whose role containers share the network namespace, the workspace path and the rest of that
+// scratch. Oh My Pi keeps its browser broker's lock under its state root (`run/daemons/<hash of
+// the workspace's real path>/broker.pid`), taken as an abstract unix socket named from the lock
+// path, and an abstract socket name is one name across every container of the pod; with one state
+// root the first role's lock would block every other role's broker, and their `browser.open` would
+// fail while `broker.sock` sits on the first container's own filesystem. The per-role homes hang
+// under one `state` directory so that the shared and the per-role halves of the scratch stay
+// visibly apart and no role's name can collide with a shared directory's. The shim makes Oh My
+// Pi's profile directory under it before Oh My Pi starts (podsafety.EnsureStateHome), since Oh My
+// Pi reads the variable only where that directory exists. It is on the issue's volume, which is
+// neither the pod's memory nor the gigabyte of ephemeral storage the container is admitted with,
+// so Oh My Pi's logs, Chromium's `browser-profiles` and the plugin generation an installing launch
+// puts there (plugins.go) are charged to neither — and, unlike both, the state home now outlives
+// the pod.
 func roleStateHome(role claim.Role) string {
-	return roleScratch(role) + "/state"
+	return scratchRoot + "/state/" + string(role)
 }
 
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
@@ -788,15 +793,13 @@ const (
 	// -modcacherw` leaves writable. They are the issue's rather than the tree's because each issue
 	// has a volume of its own; a pair is 751 MiB of build cache and 375 MiB of module cache for this
 	// repository, so the six roles of an issue pod with a pair each would hold five redundant
-	// copies, about 5.5 GiB of a 20 GiB volume spent on nothing. Neither bun's install cache nor the
-	// state home joins them. Bun hardlinks out of its install cache into whatever it installs for
-	// (LEGION-198, where that hardlinking was first met), and the issue's roles share
-	// one checkout — workspace.Location names the repository and the issue, never a role — so a
-	// file edited in place inside node_modules is already in the packages every role runs from,
-	// whatever we do about caches; what a cache per role confines is afterwards, only that role's
-	// later installs putting the changed copy back. Oh My Pi's browser broker takes its lock as an
-	// abstract unix socket named from a path under the state home, one name across every container
-	// of the pod, so one state home would block every role's broker but the first (roleStateHome).
+	// copies, about 5.5 GiB of the issue's volume spent on nothing. They keep their own place at
+	// `/legion/go`, beside the workspaces rather than under the issue's scratch (scratchRoot),
+	// where they were the issue's one pair before the rest of the scratch became the issue's too.
+	// The state home is the one directory of that scratch no two roles share: Oh My Pi's browser
+	// broker takes its lock as an abstract unix socket named from a path under the state home, one
+	// name across every container of the pod, so one state home would block every role's broker
+	// but the first (roleStateHome).
 	goBuildCache = TreeRoot + "/go/build"
 	goModCache   = TreeRoot + "/go/mod"
 )
@@ -880,9 +883,9 @@ func (r *Runtime) LaunchBound() time.Duration {
 // rather than keeping files. None of them repeats another: the runtime refuses a spec naming one
 // of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
 // a spec's. The temporary directory, XDG homes and tool caches are the issue volume's
-// (roleEnvironment) — the role's own scratch directory's but the two Go caches, which the issue's
-// roles share — carried to the role's shim by the start command
-// (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
+// (roleEnvironment) — the issue's scratch and its Go caches, which every role of it is told the
+// same of, but the state home, which is the role's own — carried to the role's shim by the start
+// command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
 // API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
 // the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
 // issue's volume leads PATH.

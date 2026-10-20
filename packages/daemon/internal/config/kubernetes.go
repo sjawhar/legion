@@ -33,7 +33,7 @@ type Kubernetes struct {
 	// StorageClass is the issue volumes' class; required, because the cluster has no default.
 	StorageClass string
 	// IssueVolume is each issue's volume's size, a Kubernetes quantity, one volume per issue (the
-	// controller's pod owns one of its own); 20Gi when the file sets none.
+	// controller's pod owns one of its own); 50Gi when the file sets none.
 	IssueVolume string
 	// Kubeconfig is the credentials file the daemon's client reads; "" means in-cluster
 	// credentials. Context names the context in it to use, "" for its current context.
@@ -50,11 +50,12 @@ type Kubernetes struct {
 	// sums to 3 CPU and 19 GiB. A request below its limit makes the role's pod Burstable.
 	// EphemeralStorage bounds what the container writes to the node's disk — its root filesystem,
 	// which no volume backs: the role's $HOME, with the image's own content under it, and whatever a
-	// recipe writes elsewhere under the home directory (its temporary directory, its cache, data and
-	// state homes and bun's install cache are on the issue's volume under the role's own scratch,
-	// and the two Go caches one pair there shared by the issue's roles) — since pods of unrelated
-	// trees share a node and one role filling the node's disk would put every pod on it under
-	// DiskPressure; a container past its own limit has its pod evicted, the offending issue's alone.
+	// recipe writes elsewhere under the home directory (the temporary directory, the cache and data
+	// homes and bun's install cache are on the issue's volume under the scratch its roles share,
+	// the two Go caches one pair beside it, and each role's state home its own directory there) —
+	// since pods of unrelated trees share a node and one role filling the node's disk would put
+	// every pod on it under DiskPressure; a container past its own limit has its pod evicted, the
+	// offending issue's alone.
 	// EphemeralStorageRequest is what the scheduler fits to the node's allocatable ephemeral
 	// storage (its root volume), small by default so that it binds almost nothing.
 	Resources map[claim.Role]RoleResources
@@ -173,13 +174,13 @@ func below(request, limit string) bool {
 // boot on a full pool.
 // The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
 // filesystem: $HOME, with the image's own content under it, and whatever a recipe writes elsewhere
-// under the home directory; the role's temporary directory, its cache, data and state homes and
-// bun's install cache are on the issue's volume under its own scratch, and the two Go caches one
-// pair there shared by the issue's roles), 20Gi for the two roles that build, 10Gi for the rest;
-// the request is 1Gi for every role, since the scheduler fits it to the node's allocatable
-// ephemeral storage — its root volume, which nobody has sized for these pods — and a small
-// request binds scheduling to almost nothing. An operator who knows the root volume raises the
-// request so the scheduler reserves disk.
+// under the home directory; the temporary directory, the cache and data homes and bun's install
+// cache are on the issue's volume under the scratch the issue's roles share, the two Go caches one
+// pair beside it, and each role's state home its own directory there), 20Gi for the two roles
+// that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it
+// to the node's allocatable ephemeral storage — its root volume, which nobody has sized for
+// these pods — and a small request binds scheduling to almost nothing. An operator who knows the
+// root volume raises the request so the scheduler reserves disk.
 var defaultResources = map[claim.Role]RoleResources{
 	claim.RoleArchitect:   {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 	claim.RolePlanner:     {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
@@ -213,7 +214,7 @@ type PodConfig struct {
 const (
 	kubernetesKey      = "runtime.kubernetes"
 	podKey             = kubernetesKey + ".pod"
-	defaultIssueVolume = "20Gi"
+	defaultIssueVolume = "50Gi"
 	// poolLabel is the node label that selects the Legion pool. The runtime sets it on every pod,
 	// and the cluster's admission policy requires its value.
 	poolLabel = "legion.dev/pool"

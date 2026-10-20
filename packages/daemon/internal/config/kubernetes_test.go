@@ -165,7 +165,7 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 }
 
-// What a block that sets only its required members settles to: the issue volume at 20Gi, every
+// What a block that sets only its required members settles to: the issue volume at 50Gi, every
 // role's reservation at the daemon's default (the six workflow roles and the controller, each with
 // a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
 // ephemeral-storage limit, 20Gi for the implementer and tester and 10Gi for the rest, over a 1Gi
@@ -184,7 +184,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		name      string
 		got, want any
 	}{
-		{"issue_volume", block.IssueVolume, "20Gi"},
+		{"issue_volume", block.IssueVolume, "50Gi"},
 		{"resources", block.Resources, map[claim.Role]RoleResources{
 			claim.RoleArchitect:   {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
 			claim.RolePlanner:     {CPU: "250m", CPURequest: "250m", Memory: "1Gi", MemoryRequest: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
@@ -456,7 +456,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
-			// The runtime reads a zero volume as "use the default", so zero would be a silent 20Gi.
+			// The runtime reads a zero volume as "use the default", so zero would be a silent 50Gi.
 			name: "issue_volume zero",
 			body: kubernetesFile + "    issue_volume: 0\n",
 			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
