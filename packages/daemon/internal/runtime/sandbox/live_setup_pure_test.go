@@ -24,9 +24,8 @@ uid=$(id -u)
 home=$(mktemp -d)
 trap 'rm -rf -- "$home"' EXIT
 helpers=$(
-  env -u GIT_ASKPASS -u SSH_ASKPASS -u GH_TOKEN -u GITHUB_TOKEN \
-    -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_PARAMETERS \
-    GIT_CONFIG_NOSYSTEM=1 HOME="$home" GIT_TERMINAL_PROMPT=0 \
+  env -u GIT_ASKPASS -u SSH_ASKPASS -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME="$home" GIT_TERMINAL_PROMPT=0 \
     git config --show-scope --get-regexp '^credential(\.https://github\.com)?\.helper$'
 ) || helpers=
 tab='	'
@@ -75,9 +74,8 @@ if [ "$helper_effective" -eq 1 ] && [ "$helper_scope" = command ] && [ "$helper"
 fi
 if (
   cd /tmp
-  env -u GIT_ASKPASS -u SSH_ASKPASS -u GH_TOKEN -u GITHUB_TOKEN \
-    -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_PARAMETERS \
-    GIT_CONFIG_NOSYSTEM=1 HOME="$home" GIT_TERMINAL_PROMPT=0 \
+  env -u GIT_ASKPASS -u SSH_ASKPASS -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_PARAMETERS \
+    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME="$home" GIT_TERMINAL_PROMPT=0 \
     timeout 60 git ls-remote "$1" HEAD >/dev/null
 ); then
   git=ok

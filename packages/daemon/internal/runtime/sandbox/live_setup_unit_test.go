@@ -145,7 +145,7 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	if got, err := os.ReadFile(gitCWD); err != nil || strings.TrimSpace(string(got)) != "/tmp" {
 		t.Errorf("git cwd = %q, %v; want /tmp", got, err)
 	}
-	if got, err := os.ReadFile(gitRemoteEnv); err != nil || strings.TrimSpace(string(got)) != "unset|unset|unset|unset|unset|unset|1|3|empty|preserved" {
+	if got, err := os.ReadFile(gitRemoteEnv); err != nil || strings.TrimSpace(string(got)) != "unset|unset|unset|unset|/dev/null|unset|1|3|empty|preserved" {
 		t.Errorf("git ls-remote environment = %q, %v; want the same neutralized credential environment", got, err)
 	}
 	if lines[1] != "architect:pod-1/3" {
@@ -211,6 +211,56 @@ printf '0123456789012345678901234567890123456789\tHEAD\n'
 	}
 	if !strings.Contains(err.Error(), "lines 2") {
 		t.Fatalf("setup helper error %q does not name helper_lines", err)
+	}
+}
+
+// Every role container sets XDG_CONFIG_HOME, and git reads $XDG_CONFIG_HOME/git/config as its
+// global scope when GIT_CONFIG_GLOBAL is unset, so a helper written there must not count.
+func TestLiveSetupIgnoresTheXDGGlobalConfig(t *testing.T) {
+	repo, err := ghrepo.Parse("repo", "sjawhar/legion-smoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, bin, xdg := t.TempDir(), t.TempDir(), t.TempDir()
+	marker := filepath.Join(dir, "marker")
+	git := `#!/bin/sh
+if [ "$1" = config ]; then
+  exec "$LIVE_SETUP_REAL_GIT" "$@"
+fi
+printf '0123456789012345678901234567890123456789\tHEAD\n'
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(git), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(xdg, "git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "git", "config"), []byte("[credential \"https://github.com\"]\n\thelper = !xdg-global-helper\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	t.Setenv("LEGION_E2E_MARKER", marker)
+	t.Setenv("LEGION_ROLE", "architect")
+	t.Setenv("POD_UID", "pod-1")
+	t.Setenv("LEGION_GENERATION", "3")
+	for _, variable := range gitCredentialEnv() {
+		t.Setenv(variable.Name, variable.Value)
+	}
+	t.Setenv("LIVE_SETUP_REAL_GIT", realGit)
+	agent := []string{"/bin/sh", "-c", `printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER"`}
+	if got := runStart(t, dir, bin, "", nil, liveSetup(repo), agent); got.exit != 0 {
+		t.Fatalf("the wrapper exited %d: %s", got.exit, got.stderr)
+	}
+	setup, err := parseSetupMarker(readLines(t, marker)[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if setup.helper != "expected" || setup.helperLines != "2" {
+		t.Errorf("setup helper record = classification %q, lines %q; want expected and two, with the XDG global config unread", setup.helper, setup.helperLines)
 	}
 }
 
