@@ -49,8 +49,10 @@ type Kubernetes struct {
 	// every Legion pod is Guaranteed and bursts past nothing; at the defaults a six-role issue pod
 	// sums to 3 CPU and 19 GiB. A request below its limit makes the role's pod Burstable.
 	// EphemeralStorage bounds what the container writes to the node's disk — its root filesystem,
-	// which no volume backs: the role's $HOME, Oh My Pi's state home with its Chromium profiles and
-	// logs, the Go and Bun caches — since pods of unrelated trees share a node and one role filling
+	// which no volume backs: the role's $HOME, with the image's own content under it, and whatever a
+	// recipe writes elsewhere under the home directory (its temporary directory, its cache, data and
+	// state homes and its Go and bun caches are on the issue's volume, under the role's own
+	// scratch) — since pods of unrelated trees share a node and one role filling
 	// the node's disk would put every pod on it under DiskPressure; a container past its own limit
 	// has its pod evicted, the offending issue's alone. EphemeralStorageRequest is what the scheduler
 	// fits to the node's allocatable ephemeral storage (its root volume), small by default so that it
@@ -170,7 +172,9 @@ func below(request, limit string) bool {
 // since it starts one Oh My Pi at a time and runs no lane, and a probe sized as a role could not
 // boot on a full pool.
 // The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
-// filesystem: $HOME, the state home, the Go and Bun caches a build fills), 20Gi for the two roles
+// filesystem: $HOME, with the image's own content under it, and whatever a recipe writes elsewhere
+// under the home directory; the role's temporary directory, its cache, data and state homes and
+// its Go and bun caches are on the issue's volume, under its own scratch), 20Gi for the two roles
 // that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it to
 // the node's allocatable ephemeral storage — its root volume, which nobody has sized for these
 // pods — and a small request binds scheduling to almost nothing. An operator who knows the root

@@ -31,14 +31,15 @@ related_issues:
   `cpu_request` or `memory_request` runs `Guaranteed` pods; a lower request makes the pods holding
   that role `Burstable` (`checkReservation`, `internal/runtime/sandbox/sandbox.go`, holds each
   request at or below its limit). Ephemeral storage is a limit over a smaller request either way.
-- Ephemeral storage is the node's disk a container's root filesystem writes to (`$HOME`, the state
-  home with its browser profiles and logs, the Go and Bun caches a build fills); nothing else bounds
-  it once pods of unrelated trees share a node. The limit is the eviction fence: a container past it
-  has its own pod evicted, where node-wide `DiskPressure` evicts by the kubelet's ranking and can
-  take another tree's pod. The request is what the scheduler counts against the node's allocatable
-  ephemeral storage; a small default (1Gi) reserves almost nothing, so a node can be oversubscribed
-  by the pods' limits by design, and `ephemeral_storage_request` is the operator's lever once the
-  root volume is known. Do not "fix" the small request without that tradeoff
+- Ephemeral storage is the node's disk a container's root filesystem writes to (`$HOME`, and, when
+  this was written, the state home with its browser profiles and logs and the Go and Bun caches a
+  build fills, which have since moved onto the issue's volume under the role's own scratch); nothing
+  else bounds it once pods of unrelated trees share a node. The limit is the eviction fence: a
+  container past it has its own pod evicted, where node-wide `DiskPressure` evicts by the kubelet's
+  ranking and can take another tree's pod. The request is what the scheduler counts against the
+  node's allocatable ephemeral storage; a small default (1Gi) reserves almost nothing, so a node can
+  be oversubscribed by the pods' limits by design, and `ephemeral_storage_request` is the operator's
+  lever once the root volume is known. Do not "fix" the small request without that tradeoff
   (`defaultResources`, `internal/config/kubernetes.go`; docs/kubernetes.md "The node-disk bound").
 - Every container of every Legion pod carries a reservation, the init containers and the image
   probe included, so the daemon's boot now depends on pool room for the probe pod (it carries the

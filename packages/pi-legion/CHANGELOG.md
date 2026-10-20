@@ -79,6 +79,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   - `request_backward_move` checks `to` (a backward target) and `reason` before it mints a grant,
     so a refused call mints none; a blank or non-string `to` is refused as `requires to`, and any
     other value outside the backward targets as `request_backward_move's to is one of …`.
+- Daemon API contract 33 (INFRA-31): under the Kubernetes runtime every role container of a pod,
+  a workflow role's and the project controller's, is told a scratch directory of its own on the
+  issue's volume, `/legion/scratch/<role>`, and the values naming where it writes what nothing
+  told it where to put now point into that directory: `XDG_CACHE_HOME`, `XDG_DATA_HOME` and
+  `XDG_STATE_HOME` (whose `/home/legion/.local/state/<role>` contract 18 declared) move under it,
+  and `TMPDIR`, `GOCACHE`, `GOMODCACHE` and `BUN_INSTALL_CACHE_DIR` join them, four names the
+  runtime now owns and refuses a spec or an operator's pod env for setting. `XDG_CONFIG_HOME` is
+  unchanged, the pod's shared in-memory volume, and the two init containers keep every value they
+  had. A role container is admitted with about a gigabyte of ephemeral storage on GKE Autopilot,
+  and a container past that limit has its whole pod evicted — every role of the issue runs in that
+  one pod — which the Go, bun and browser caches a build fills had reached. Install this release's
+  pair with a daemon at 33.
 - Daemon API contract 32 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
   repository gets a repository cache pod running the image's `legion workspace-init cache`, and
   an issue pod's `workspace-init fetch` fills a fresh feed from that cache alone and fetches only

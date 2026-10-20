@@ -439,12 +439,15 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 ### What stays on the pod's disk
 
 Only the transcript moves. Tool artifacts, image blobs and `models.db` stay under the agent directory
-on local disk (`~/.omp/profiles/legion/agent/…`), and OMP's logs under the role's state home
-(`/home/legion/.local/state/<role>/omp/profiles/legion/logs`, [Anatomy of a Sandbox
-pod](#anatomy-of-a-sandbox-pod)); `.legion/` handoffs live in the repository. A pod that dies loses
-those local files as it does today — the conversation it does not. The workspace's CodeGraph index,
-`.codegraph/` in the workspace on the issue's own volume (185 MB for this repository), is built by a
-role's shim after its Oh My Pi starts and outlives the pod with the workspace.
+on local disk (`~/.omp/profiles/legion/agent/…`), and `.legion/` handoffs live in the repository. A
+pod that dies loses those local files as it does today — the conversation it does not. OMP's logs
+are under the role's state home (`/legion/scratch/<role>/state/omp/profiles/legion/logs`, [Anatomy
+of a Sandbox pod](#anatomy-of-a-sandbox-pod)), which is on the issue's volume under the role's own
+scratch: those logs, Chromium's `browser-profiles` and the plugin generation a stale-plugin
+relaunch installs outlive the pod and are there for the pod that replaces it, as the workspace's
+CodeGraph index is — `.codegraph/` in the workspace on the same volume (185 MB for this
+repository), built by a role's shim after its Oh My Pi starts and outliving the pod with the
+workspace.
 
 ### The extension under SQL storage
 
@@ -1050,9 +1053,12 @@ reads every claim — posts it again until one attempt starts).
 Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
 replacing it: the role container's shim runs an install script,
 `/bin/sh -c '<install script>' legion-plugins <omp argv…>`, which runs
-`bun add --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a tarball path or
-URL source is handed to `bun add` as written) into a fresh generation directory,
-`$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/home/legion/.local/state/<role>/legion-plugins/g<N>/`),
+`bun add --backend=copyfile --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a
+tarball path or URL source is handed to `bun add` as written; `--backend=copyfile` because the
+role's bun install cache and the generation directory now share the issue's volume, where bun would
+otherwise hardlink the installed files out of that cache and an in-place edit of either would
+corrupt the other for the life of the volume) into a fresh generation directory,
+`$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/legion/scratch/<role>/state/legion-plugins/g<N>/`),
 checks with a `node -e` snippet that the installed `pi-legion`'s `legion.daemonApiVersion` equals
 the daemon's own (exiting 1 before `exec`, printing
 `legion plugins: @sjawhar/pi-legion@<v> declares daemon API contract <got>; this daemon requires <want>`
@@ -1185,10 +1191,12 @@ At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, its ephemeral-sto
 and its requests to 6Gi. `issue_volume` sizes each issue's own volume, the clone, the workspace,
 uv's Pythons and packages, and the roles' sessions on it; the controller's pod owns one of the same
 size, holding its sessions alone. Ephemeral storage is what a role container writes outside every
-volume: its root filesystem, the node's disk — the role's `$HOME`, Oh My Pi's state home with its
-Chromium profiles and logs, the Go and Bun caches a build fills (a role container mounts no `/tmp`;
-its private and state directories and the config home are in-memory `emptyDir`s, whose pages the
-bound does not count). Pods of unrelated trees share a node, so one role filling the node's disk
+volume: its root filesystem, the node's disk — the role's `$HOME`, with the image's own content
+under it, and whatever a recipe writes elsewhere under the home directory (a role container mounts
+no `/tmp`; its private and state directories and the config home are in-memory `emptyDir`s, whose
+pages the bound does not count, and its temporary directory, its cache, data and state homes and
+its Go and bun caches are on the issue's volume, under the role's own scratch, which the bound does
+not count either). Pods of unrelated trees share a node, so one role filling the node's disk
 would put every pod on it under `DiskPressure`; the limit has the kubelet evict the pod of the
 container that passed it, the offending issue's alone, and the request is what the scheduler fits
 to the node's allocatable ephemeral storage, its root volume. The request is small by default so
@@ -1701,19 +1709,21 @@ join every role container's, and the providers Secret's configured keys when the
 `NATS_NKEY_SEED` key when the daemon has a NATS nkey seed. Each role's private and state directories
 and the XDG config home are in-memory, one set per role so no role's launcher or state collides
 with a sibling's; a role container mounts no `/tmp` (the `tmp` memory volume is `workspace-fetch`'s
-alone, `podkind.go`), so its `/tmp`, its `$HOME` and the state home below are its root filesystem,
-the node's disk, under the role's ephemeral-storage limit. Each role's agent is also told a state
-home of its own,
-`XDG_STATE_HOME=/home/legion/.local/state/<role>` (`roleStateHome`, `manifest.go`), a path on the
-container's own filesystem mounted from no volume, and its shim makes Oh My Pi's profile directory
-under it, `omp/profiles/legion`, before Oh My Pi starts (`podsafety.EnsureStateHome`; Oh My Pi
-reads the variable only where that directory already exists, falling back to the profile's config
-root otherwise). The role containers share the pod's network namespace, the workspace path and the
-Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named from the
-lock path under its state root — with one state root that name would be the same in every
-container, the first role's lock would block every other role's broker, and their `browser.open`
-would fail (`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's
-own filesystem. `workspace-init`, which runs alone, keeps the plain `/home/legion/.local/state`.
+alone, `podkind.go`), so the `/tmp` directory itself and its `$HOME` are its root filesystem, the
+node's disk, under the role's ephemeral-storage limit. What it writes without being told where is
+not: its temporary directory, its cache, data and state homes and its Go and bun caches are each
+under a scratch directory of its own on the issue's volume (below). Each role's agent is told a
+state home of its own, `XDG_STATE_HOME=/legion/scratch/<role>/state` (`roleStateHome`,
+`manifest.go`), under that scratch, and its shim makes Oh My Pi's profile directory under it,
+`omp/profiles/legion`, before Oh My Pi starts (`podsafety.EnsureStateHome`; Oh My Pi reads the
+variable only where that directory already exists, falling back to the profile's config root
+otherwise). The role containers share the pod's network namespace, the workspace path and the Oh My
+Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named from the lock
+path under its state root — with one state root that name would be the same in every container, the
+first role's lock would block every other role's broker, and their `browser.open` would fail
+(`Shared browser daemon unavailable`) while `broker.sock` sat on the first container's own
+filesystem. The two init containers, each of which runs alone, keep the plain
+`/home/legion/.local/state` and the image's own cache and data homes.
 
 Every container carries a reservation, a cpu and memory limit with a request no greater than it,
 and an ephemeral-storage limit over a smaller request: each role container its role's
@@ -1753,6 +1763,36 @@ expires, so a new token lands at least 15 minutes before the old one lapses, and
 old token valid until its own expiry. `gh config set`, `gh alias set` and `gh auth login` cannot
 write the read-only directory, and `gh auth status` reports the account as `x-access-token`. A
 `task` subagent inherits the container's environment, so its `gh` acts as the same App.
+
+Every role container is told a scratch directory of its own on the issue's volume,
+`/legion/scratch/<role>` (`roleScratch`, `manifest.go`), and every value that says where it writes
+what it is not told where to put names a path under that directory:
+`XDG_CACHE_HOME=/legion/scratch/<role>/cache`, `XDG_DATA_HOME=/legion/scratch/<role>/data`,
+`XDG_STATE_HOME=/legion/scratch/<role>/state` (the state home above),
+`TMPDIR=/legion/scratch/<role>/tmp`, `GOCACHE=/legion/scratch/<role>/go/build`,
+`GOMODCACHE=/legion/scratch/<role>/go/mod` and
+`BUN_INSTALL_CACHE_DIR=/legion/scratch/<role>/bun/install/cache` (`roleEnvironment`,
+`manifest.go`). `XDG_CONFIG_HOME` alone is unchanged, the pod's shared in-memory volume holding the
+jj configuration `workspace-init` writes, and the two init containers keep every value they had.
+Every one of those paths is under the issue volume's own whole-volume mount at `/legion`: the
+scratch adds no volume and no mount, and no directory of it is a `sub_path` mount of its own. No
+two roles share a directory, each scratch being named for its role, and the role's shim makes six
+of them — all but the state home, which `podsafety.EnsureStateHome` makes — before Oh My Pi starts
+(`podsafety.EnsureScratch`), since a role told a temporary directory nothing created cannot run.
+What puts them off the container's own filesystem is the ephemeral-storage bound: on GKE Autopilot
+a role container is admitted with about a gigabyte (Warden refuses a pod whose containers' summed
+ephemeral-storage requests pass 10Gi and clamps each container's limit to its request, so the 1Gi
+default request is the whole bound; [Issue sizing](#issue-sizing-one-reservation-per-pod)), while
+ordinary work measurably needs more: this repository's Go build cache 297 MB, its Go module cache
+192 MB, a Playwright Chromium about 400 MB, a Postgres with a data directory about 300 MB, and a
+cold bun install cache 1.4 GB. A container past its ephemeral-storage limit has its whole pod
+evicted by the kubelet, and all six roles of an issue run in one pod, so one role's overrun takes
+every role of that issue down with it — which is what those caches did on GKE Autopilot. The
+volume is the issue's alone and outlives the pod, so a later pod of the issue reuses what an
+earlier one downloaded and built. The role's `$HOME` stays on the container's filesystem: the
+image's own content is there (`~/.omp`, its profile's plugins, natives and agent directory) and
+every pod must keep reading it, so a recipe that writes somewhere else under the home directory is
+still bounded by that gigabyte.
 
 Every role container is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
 DNS label), `UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs
@@ -2056,7 +2096,7 @@ operator's context: the daemon's identity creates no pod and has no exec
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY> --field-selector=status.phase=Running
 kubectl -n legion exec -it <pod> -c architect -- sh
-export XDG_STATE_HOME=/home/legion/.local/state/architect   # the role's state home (below)
+export XDG_STATE_HOME=/legion/scratch/architect/state   # the role's state home (below)
 jj bookmark list --all-remotes legion/<KEY> -R /legion/repos/github.com/<owner>/<repo>
 ```
 
@@ -2064,7 +2104,7 @@ The shell runs as the issue's agents do, user 1000 under gVisor, but it carries 
 environment, not the agent's: a role container's spec holds only what the kubelet resolves, which
 is `POD_UID` from the downward API, and every other variable the agent is told — the operator's
 `runtime.kubernetes.pod.env` included, and among them
-`XDG_STATE_HOME=/home/legion/.local/state/<role>`, the role's state home — arrives in its
+`XDG_STATE_HOME=/legion/scratch/<role>/state`, the role's state home — arrives in its
 launcher's start command (`launchEnvironment`, `manifest.go`). The `export` above sets that one, so
 an `omp` started in the shell roots its state where the role's agent does rather than under the
 profile's config root; for the agent's whole environment, read `/proc/<agent pid>/environ`, the
@@ -2295,8 +2335,10 @@ waited and the scheduler's last reason, open until `capabilities.decided.pool-ca
 reason; a boot whose probe pod scheduled at its first attempt reads it `present`.
 
 **The node-disk bound.** Pods of unrelated trees share a node, and what a role writes outside every
-volume — its root filesystem: `$HOME`, Oh My Pi's state home with its Chromium profiles and logs,
-the Go and Bun caches a build fills — is the node's disk, the node's allocatable ephemeral storage
+volume — its root filesystem: `$HOME`, with the image's own content under it, and whatever a recipe
+writes elsewhere under the home directory (the role's temporary directory, its cache, data and
+state homes and its Go and bun caches are on the issue's volume, under its own scratch) — is the
+node's disk, the node's allocatable ephemeral storage
 (its root volume; read it with `kubectl get node <n> -o
 jsonpath='{.status.allocatable.ephemeral-storage}'`). That disk must hold the sum of the pods'
 actual disk use, which Σ of their containers' `ephemeral_storage` limits bounds above: a six-role
@@ -2972,10 +3014,12 @@ issue's pod (every role container of it alike) and the image probe's.
   ServiceAccount; unset, pods run as the namespace's `default` ServiceAccount. A name or path that
   collides with Legion's own is refused at load, naming both: a variable the runtime, the worker
   image's `ENV` or every launch sets, a volume name Legion uses, or a mount at, under or above a path
-  Legion mounts, the image owns, or a tool runs from, or the agents' state home
-  (`/home/legion/.local/state`, under which every role's agent keeps its Oh My Pi state in a
-  directory of its own: the role's shim makes Oh My Pi's profile directory there before Oh My Pi
-  starts, so a mount there would have every role refuse to start at launch rather than here).
+  Legion mounts, the image owns, or a tool runs from, or the init containers' state home
+  (`/home/legion/.local/state`, where `workspace-init` keeps the XDG state it provisions the issue
+  under: no role's agent keeps its Oh My Pi state there any more — every role's state home is under
+  its own scratch on the issue's volume, which the `/legion` mount fence already covers — but a
+  mount there would still land on what that init container writes, so it is refused here rather
+  than left to fail in a pod).
   `legion start --check-config` runs the same check.
   [`deploy/kubernetes/operator-route/`](../deploy/kubernetes/operator-route/README.md) is an
   example of one, the one the Go live harnesses run on: a `models.yml` and a settings overlay from a
@@ -3453,7 +3497,7 @@ providers Secret, so it reaches models by the route every worker does. Its one c
 its own launcher token and starts and stops the controller's `legion worker-shim` and Oh My Pi, on
 the pod baseline (`--pod-safety`: the turn-scoping overlay first in `PI_CONFIG_FILES`, the two
 session-placing variables, [Settings order](#operator-configuration), and Oh My Pi's profile
-directory made under its state home, `/home/legion/.local/state/controller`), on the daemon's
+directory made under its state home, `/legion/scratch/controller/state`), on the daemon's
 command, as an issue pod's role containers do theirs, so a relaunch in a healthy pod is a new
 generation of that child rather than a new pod. Its role Secret,
 `legion-<project>-controller-controller-boot`, holds the launcher's token and its gh bundle (each

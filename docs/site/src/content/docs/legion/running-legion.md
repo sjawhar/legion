@@ -104,8 +104,10 @@ on the same repositories.
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
 - **One reservation per pod, no affinity set by Legion.** Every container of a Legion pod carries a
   cpu and memory limit with a request no greater than it, and bounds its ephemeral storage — the
-  node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go and Bun caches a
-  build fills — with a per-role limit over a smaller request. A role's reservation is
+  node's disk its root filesystem writes to: `$HOME`, with the image's own content under it, and
+  whatever a recipe writes elsewhere under the home directory, the role's temporary directory,
+  cache, data and state homes and its Go and bun caches being on the issue's volume instead — with
+  a per-role limit over a smaller request. A role's reservation is
   `runtime.kubernetes.resources.<role>` (`cpu` and `memory` the limits, `cpu_request` and
   `memory_request` what the scheduler reserves of them, `ephemeral_storage` the disk limit,
   `ephemeral_storage_request` what the scheduler reserves of it, each optional, each request at most

@@ -27,10 +27,11 @@ related_issues:
   first role's broker holds it, and every other role's `browser.open` times out while its
   `broker.sock` sits unreachable on the first container's filesystem.
 - Isolate by changing what the name is derived from, not by separating filesystems: each role's
-  agent is told a state home of its own, `XDG_STATE_HOME=/home/legion/.local/state/<role>`
-  (`roleStateHome`, `packages/daemon/internal/runtime/sandbox/manifest.go`), carried in the
-  launcher's start command rather than the pod template, so the pod spec and its goldens do not
-  change per container.
+  agent is told a state home of its own, which was `XDG_STATE_HOME=/home/legion/.local/state/<role>`
+  here and is `/legion/scratch/<role>/state` since the per-role scratch moved onto the issue's
+  volume (`roleStateHome`, `packages/daemon/internal/runtime/sandbox/manifest.go`); either way it is
+  carried in the launcher's start command rather than the pod template, so the pod spec and its
+  goldens do not change per container.
 - Oh My Pi honours `XDG_STATE_HOME` only where `$XDG_STATE_HOME/omp/profiles/<profile>` (or
   `$XDG_STATE_HOME/omp` with no profile) already exists when it starts; otherwise it roots its
   state under the profile's config root as if the variable were unset. Make that directory before
