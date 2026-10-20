@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -613,10 +614,7 @@ func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	scratched := []string{
-		"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
-		"GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR",
-	}
+	scratched := append(slices.Clone(podsafety.ScratchVariables), "XDG_STATE_HOME")
 	told := map[string]claim.Role{}
 	for _, role := range launcherRoles {
 		main := workerOf(t, r, roleSpec(t, role))
@@ -641,6 +639,34 @@ func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Every scratch directory the runtime names is one the shim makes. The shim reads its list from
+// podsafety.ScratchVariables and the runtime renders roleEnvironment, so without this the two
+// could drift silently: a role would be told a temporary directory nothing ever created, and
+// mktemp and every library equivalent would fail in its first turn, which is the failure
+// EnsureScratch exists to prevent. XDG_STATE_HOME is the one scratch value the shim makes
+// elsewhere (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), so it
+// is the only name the two lists are allowed to differ by.
+func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envOf(workerOf(t, r, workerSpec(t)))
+	var named []string
+	for name, value := range env {
+		if strings.HasPrefix(value, scratchRoot+"/") {
+			named = append(named, name)
+		}
+	}
+	want := append(slices.Clone(podsafety.ScratchVariables), "XDG_STATE_HOME")
+	slices.Sort(named)
+	slices.Sort(want)
+	if !slices.Equal(named, want) {
+		t.Errorf("the runtime names %v under the scratch; the shim makes %v and EnsureStateHome the state home",
+			named, podsafety.ScratchVariables)
 	}
 }
 

@@ -676,14 +676,15 @@ const (
 	xdgStateHome  = podHome + "/.local/state"
 )
 
-// xdgEnvironment is the four XDG base directories with stateHome as the state home: what the
-// setup containers are told (initEnvironment), on the image's HOME.
-func xdgEnvironment(stateHome string) []corev1.EnvVar {
+// xdgEnvironment is the four XDG base directories on the image's HOME: what the setup containers
+// are told (initEnvironment). A role container is told none of them but the config home; its
+// cache, data and state homes are under its own scratch (roleEnvironment).
+func xdgEnvironment() []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
 		{Name: "XDG_CACHE_HOME", Value: xdgCacheHome},
 		{Name: "XDG_DATA_HOME", Value: xdgDataHome},
-		{Name: "XDG_STATE_HOME", Value: stateHome},
+		{Name: "XDG_STATE_HOME", Value: xdgStateHome},
 	}
 }
 
@@ -797,7 +798,7 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
 	}
-	return append(env, xdgEnvironment(xdgStateHome)...)
+	return append(env, xdgEnvironment()...)
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget plus workspace.CloneTimeout, the

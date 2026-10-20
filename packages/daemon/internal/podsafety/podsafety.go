@@ -12,21 +12,20 @@
 // as files on the issue's volume, where a resume reads them, unless the runtime keeps them in a
 // database (runtime.kubernetes.session_store postgres), where it starts every generation with
 // OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The
-// state-home directory: the one Oh My Pi's state root resolves to under the role's
-// XDG_STATE_HOME (EnsureStateHome), made before Oh My
-// Pi starts, since Oh My Pi reads the variable only where that directory exists. And the scratch
-// directories: each directory the runtime tells a role to write what it writes without being told
-// where — its temporary directory, its cache and data homes, its Go build and module caches and
-// bun's install cache (EnsureScratch) — made before Oh My Pi starts, since a role told a temporary
-// directory nothing created cannot run. Apply, the overlay and the baseline together, runs only in
-// a pod, for a worker's shim (`legion worker-shim --pod-safety`) and for the image probe (`legion
-// probe-image --pod-safety`), which certifies the baseline a worker's Oh My Pi starts on. The
-// directories are the shim's alone: every role the shim starts is told a state home of its own
-// (sandbox.roleStateHome), which in an issue pod keeps a role's browser broker lock apart from its
-// siblings', and a scratch directory of its own (sandbox.roleScratch) on the issue's volume, while
-// the probe pod runs one container, on the image's own directories, and is told neither. A pane
-// gets the overlay alone, which runtime/tmux writes and names itself (writeTurnScopeOverlay,
-// panePairs).
+// state-home directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
+// (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where
+// that directory exists. And the scratch directories: each directory the runtime tells a role to
+// write what it writes without being told where — its temporary directory, its cache and data
+// homes, its Go build and module caches and bun's install cache (EnsureScratch) — made before Oh
+// My Pi starts, since a role told a temporary directory nothing created cannot run. Apply, the
+// overlay and the baseline together, runs only in a pod, for a worker's shim (`legion worker-shim
+// --pod-safety`) and for the image probe (`legion probe-image --pod-safety`), which certifies the
+// baseline a worker's Oh My Pi starts on. The directories are the shim's alone: every role the
+// shim starts is told a state home of its own (sandbox.roleStateHome), which in an issue pod keeps
+// a role's browser broker lock apart from its siblings', and a scratch directory of its own
+// (sandbox.roleScratch) on the issue's volume, while the probe pod runs one container, on the
+// image's own directories, and is told neither. A pane gets the overlay alone, which runtime/tmux
+// writes and names itself (writeTurnScopeOverlay, panePairs).
 package podsafety
 
 import (
@@ -175,12 +174,15 @@ func EnsureStateHome(environ []string) error {
 	return nil
 }
 
-// scratchVariables are the variables EnsureScratch makes the directory of, in the order it makes
+// ScratchVariables are the variables EnsureScratch makes the directory of, in the order it makes
 // them: what sandbox.roleEnvironment tells a role container to write under its own scratch, less
-// XDG_STATE_HOME, which is EnsureStateHome's.
-var scratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR"}
+// XDG_STATE_HOME, which is EnsureStateHome's. The runtime is held to this list rather than to a
+// copy of it (sandbox.TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes), so a directory the
+// runtime starts naming that the shim would never make is a test failure, not a role whose
+// temporary directory does not exist.
+var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR"}
 
-// EnsureScratch makes every directory environ names in scratchVariables — TMPDIR, XDG_CACHE_HOME,
+// EnsureScratch makes every directory environ names in ScratchVariables — TMPDIR, XDG_CACHE_HOME,
 // XDG_DATA_HOME, GOCACHE, GOMODCACHE and BUN_INSTALL_CACHE_DIR — with every parent, before Oh My
 // Pi starts. A name environ leaves unset or empty, or sets to a relative path, makes nothing: the
 // runtime always sets absolute ones (sandbox.roleEnvironment, under the role's own scratch on the
@@ -207,7 +209,7 @@ var scratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GO
 // it to use, read from the same environment the agent starts on, so the names cannot drift.
 func EnsureScratch(environ []string) error {
 	env := lookup(environ)
-	for _, name := range scratchVariables {
+	for _, name := range ScratchVariables {
 		dir := env[name]
 		if dir == "" || !filepath.IsAbs(dir) {
 			continue
