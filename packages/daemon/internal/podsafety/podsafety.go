@@ -205,11 +205,13 @@ var ScratchVariables = []string{"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "GO
 //
 // The shim is what makes them, not the kubelet: a subPath mount per directory would have the
 // kubelet create each one, but it would also contradict the rule that these paths sit on the issue
-// volume's own mount (sandbox.TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume), add
-// forty-two mount entries to an issue pod, and rest on an unproven ownership behaviour — what mode
-// a kubelet gives a nested sub-path directory it creates on a fresh volume. The shim runs as the
-// pod's own user, which can write the volume, and makes exactly the directories the runtime told
-// it to use, read from the same environment the agent starts on, so the names cannot drift.
+// volume's own mount (sandbox.TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume), ask
+// the kubelet for thirty-two directories — the five per-role ones in each of the issue pod's six
+// role containers, plus the one pair its roles share — and rest on an unproven ownership
+// behaviour: what mode a kubelet gives a nested sub-path directory it creates on a fresh volume.
+// The shim runs as the pod's own user, which can write the volume, and makes exactly the
+// directories the runtime told it to use, read from the same environment the agent starts on, so
+// the names cannot drift.
 func EnsureScratch(environ []string) error {
 	env := lookup(environ)
 	for _, name := range ScratchVariables {

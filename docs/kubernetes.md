@@ -1194,17 +1194,18 @@ being told where to put it. Five of those directories are the role's own, under
 `/legion/scratch/<role>` — its temporary directory, its cache, data and state homes and bun's
 install cache, whose cold fill for this repository is 1.4 GB, with a Playwright Chromium under
 the state home about 400 MB — and one pair is shared by the issue's roles, the Go build and
-module caches at `/legion/go/build` and `/legion/go/mod`, 297 MB and 192 MB for this repository
-(below). An operator's arithmetic is therefore five directories per role the issue runs plus one
-Go pair for the issue, not seven directories per role. The controller's pod owns a volume of the
-same size, holding its sessions alone. Nothing prunes `/legion/scratch`: it grows for the life of
-the issue, across every pod of it, and this change leaves `issue_volume`'s default where it was,
-`20Gi` (`defaultIssueVolume`, `packages/daemon/internal/config/kubernetes.go`). Size it knowing
-that moving these writes onto the volume removes the alarm they used to ring: an
-ephemeral-storage overrun was a kubelet eviction with a pod event naming the container, where
-ENOSPC on the PVC is no event at all and surfaces as unexplained failures in jj, in the session
-transcripts, in `workspace-init` and in the CodeGraph build — and nothing in this repository
-reads a PVC's usage.
+module caches at `/legion/go/build` and `/legion/go/mod`, 751 MB and 375 MB for this repository,
+the measurement [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) records below: a cold
+`go build ./...` of `packages/daemon` alone, no tests run. An operator's arithmetic is therefore
+five directories per role the issue runs plus one Go pair for the issue, not seven directories
+per role. The controller's pod owns a volume of the same size, holding its sessions alone.
+Nothing prunes `/legion/scratch`: it grows for the life of the issue, across every pod of it, and
+this change leaves `issue_volume`'s default where it was, `20Gi` (`defaultIssueVolume`,
+`packages/daemon/internal/config/kubernetes.go`). Size it knowing that moving these writes onto
+the volume removes the alarm they used to ring: an ephemeral-storage overrun was a kubelet
+eviction with a pod event naming the container, where ENOSPC on the PVC is no event at all and
+surfaces as unexplained failures in jj, in the session transcripts, in `workspace-init` and in
+the CodeGraph build — and nothing in this repository reads a PVC's usage.
 
 Ephemeral storage is what a role container writes outside every volume: its root filesystem, the
 node's disk — the role's `$HOME`, with the image's own content under it, and whatever a recipe
@@ -1799,13 +1800,20 @@ module cache is a module zip or `go.mod` the go command has verified against a k
 `go build -modcacherw` leaves writable. Six copies of identical content would be about 5.5 GB of
 a 20 GiB volume. It was proven live in an issue pod: two `go build ./...` at once against one
 empty shared pair both exited 0 in 227 s, filling 751 MB of build cache and 375 MB of module
-cache, and the cache that race left rebuilt and tested clean. Neither bun's install cache nor the
-state home joins them: bun hardlinks out of its install cache into whatever it installs for, so
-one cache shared between two roles' checkouts is the cross-checkout corruption
-`--backend=copyfile` and the cache per role exist to bound (LEGION-198), and one state home
-would block every role's browser broker but the first (above). `XDG_CONFIG_HOME` alone is
-unchanged, the pod's shared in-memory volume holding the jj configuration `workspace-init`
-writes, and `workspace-init` keeps every value it had.
+cache, and the cache that race left rebuilt and tested clean. What those figures measure, here
+and in the sizing above, is one build: a cold `cd packages/daemon && go build ./...` into an
+empty pair — `packages/daemon` alone, one of the two modules `go.work` names, with nothing of
+`packages/envoy` built and no test run. A second, separate run of it measured 752 MB and 375 MB
+in 114 s, exit 0. Neither bun's install cache nor the state home
+joins them: bun hardlinks out of its install cache into whatever it installs for, and the
+issue's roles share one checkout (`workspace.Location`,
+`packages/daemon/internal/workspace/provision.go`, names the repository and the issue, never a
+role), so a file edited in place inside `node_modules` is already in the packages every role
+runs from, whatever we do about caches; what a cache per role confines is afterwards — only that
+role's later installs would put the changed copy back (LEGION-198, where bun's hardlinking was
+first met). One state home would block every role's browser broker but the first (above).
+`XDG_CONFIG_HOME` alone is unchanged, the pod's shared in-memory volume holding the jj
+configuration `workspace-init` writes, and `workspace-init` keeps every value it had.
 Every one of those paths is under the issue volume's own whole-volume mount at `/legion`: the
 scratch adds no volume and no mount, and no directory of it is a `sub_path` mount of its own. No
 two roles share a scratch, each being named for its role, and the role's shim makes six
@@ -1816,16 +1824,16 @@ What puts them off the container's own filesystem is the ephemeral-storage bound
 a role container is admitted with about a gigabyte (Warden refuses a pod whose containers' summed
 ephemeral-storage requests pass 10Gi and clamps each container's limit to its request, so the 1Gi
 default request is the whole bound; [Issue sizing](#issue-sizing-one-reservation-per-pod)), while
-ordinary work measurably needs more: this repository's Go build cache 297 MB, its Go module cache
-192 MB, a Playwright Chromium about 400 MB, a Postgres with a data directory about 300 MB, and a
-cold bun install cache 1.4 GB. A container past its ephemeral-storage limit has its whole pod
-evicted by the kubelet, and all six roles of an issue run in one pod, so one role's overrun takes
-every role of that issue down with it — which is what those caches did on GKE Autopilot. The
-volume is the issue's alone and outlives the pod, so a later pod of the issue reuses what an
-earlier one downloaded and built. The role's `$HOME` stays on the container's filesystem: the
-image's own content is there (`~/.omp`, its profile's plugins, natives and agent directory) and
-every pod must keep reading it, so a recipe that writes somewhere else under the home directory is
-still bounded by that gigabyte.
+ordinary work measurably needs more: this repository's Go build cache 751 MB and its Go module
+cache 375 MB (the measurement above), a Playwright Chromium about 400 MB, a Postgres with a data
+directory about 300 MB, and a cold bun install cache 1.4 GB. A container past its
+ephemeral-storage limit has its whole pod evicted by the kubelet, and all six roles of an issue
+run in one pod, so one role's overrun takes every role of that issue down with it — which is
+what those caches did on GKE Autopilot. The volume is the issue's alone and outlives the pod, so
+a later pod of the issue reuses what an earlier one downloaded and built. The role's `$HOME`
+stays on the container's filesystem: the image's own content is there (`~/.omp`, its profile's
+plugins, natives and agent directory) and every pod must keep reading it, so a recipe that
+writes somewhere else under the home directory is still bounded by that gigabyte.
 
 Every role container is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
 DNS label), `UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs

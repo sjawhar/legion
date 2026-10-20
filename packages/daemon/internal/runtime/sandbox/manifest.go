@@ -698,7 +698,10 @@ const scratchRoot = TreeRoot + "/scratch"
 
 // roleScratch is the scratch directory role's container is given, `/legion/scratch/<role>`: the
 // issue volume's own, not the gigabyte of ephemeral storage the container is admitted with, and
-// one per role, since the role containers of an issue pod share nothing but the pod.
+// one per role because these names must not collide between the roles of an issue running at the
+// same time — not because a role container is isolated from its siblings, which it is not. They
+// share the pod, the issue's volume whole, the one workspace every role works in, the sessions
+// directory, uv's Pythons and cache and now the two Go caches (roleEnvironment below).
 func roleScratch(role claim.Role) string {
 	return scratchRoot + "/" + string(role)
 }
@@ -785,12 +788,14 @@ const (
 	// -modcacherw` leaves writable. They are the issue's rather than the tree's because each issue
 	// has a volume of its own; the six roles of an issue pod with a pair each would be six copies
 	// of identical content, about 5.5 GB of a 20 GiB volume spent on nothing. Neither bun's install
-	// cache nor the state home joins them: bun hardlinks out of its install cache into whatever it
-	// installs for, so one cache shared between two roles' checkouts is the cross-checkout
-	// corruption `--backend=copyfile` and the cache per role exist to bound (LEGION-198), and Oh
-	// My Pi's browser broker takes its lock as an abstract unix socket named from a path under the
-	// state home, one name across every container of the pod, so one state home would block every
-	// role's broker but the first (roleStateHome).
+	// cache nor the state home joins them. Bun hardlinks out of its install cache into whatever it
+	// installs for (LEGION-198, where that hardlinking was first met), and the issue's roles share
+	// one checkout — workspace.Location names the repository and the issue, never a role — so a
+	// file edited in place inside node_modules is already in the packages every role runs from,
+	// whatever we do about caches; what a cache per role confines is afterwards, only that role's
+	// later installs putting the changed copy back. Oh My Pi's browser broker takes its lock as an
+	// abstract unix socket named from a path under the state home, one name across every container
+	// of the pod, so one state home would block every role's broker but the first (roleStateHome).
 	goBuildCache = TreeRoot + "/go/build"
 	goModCache   = TreeRoot + "/go/mod"
 )

@@ -37,9 +37,13 @@ import (
 // Secret projection in place when the Secret changes, so the refresher's Secret update is what the
 // next gh runs with. CacheRoot is where a repository cache's pod mounts its own volume. Each role
 // container also has a scratch directory of its own on the issue's volume, `/legion/scratch/<role>`
-// under scratchRoot (roleScratch): its temporary directory, its cache, data and state homes, the
-// two Go caches and bun's install cache (roleEnvironment), so the gigabyte of ephemeral storage
-// the container is admitted with no longer bounds any of them.
+// under scratchRoot (roleScratch): its temporary directory, its cache, data and state homes and
+// bun's install cache (roleEnvironment), five directories no two roles are told the same one of.
+// The go command's two caches are not among them: they are the issue's, one pair every role of it
+// is told, `/legion/go/build` and `/legion/go/mod` (goBuildCache, goModCache) under `/legion/go`,
+// a top-level directory of the volume beside the workspaces, the repositories, SessionsSubPath,
+// feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The gigabyte of ephemeral storage the
+// container is admitted with bounds none of them.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
