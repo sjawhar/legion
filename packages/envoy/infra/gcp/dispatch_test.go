@@ -333,6 +333,156 @@ func TestDispatchDeploymentRollsSeveralReplicas(t *testing.T) {
 	require.EqualValues(t, 1, rollingUpdate["maxSurge"])
 }
 
+// deploymentPodTemplate returns one workload's pod template, with every output and secret
+// wrapper off, the way the apiserver would see it.
+func deploymentPodTemplate(t *testing.T, m *pulumitest.Mocks, deployment string) map[string]any {
+	t.Helper()
+	template := m.Named(t, "kubernetes:apps/v1:Deployment", deployment).Inputs["spec"].ObjectValue()["template"]
+	return normalizedProperty(template).(map[string]any)
+}
+
+// podContainer returns the pod template's single container named name.
+func podContainer(t *testing.T, template map[string]any, name string) map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, item := range template["spec"].(map[string]any)["containers"].([]any) {
+		container := item.(map[string]any)
+		if container["name"] == name {
+			found = append(found, container)
+		}
+	}
+	require.Len(t, found, 1, "one container named %s", name)
+	return found[0]
+}
+
+// containerEnv indexes a container's environment by name, as the kubelet does: a plain variable
+// maps to its value, and one from a Secret to its secretKeyRef.
+func containerEnv(t *testing.T, container map[string]any) map[string]any {
+	t.Helper()
+	env := map[string]any{}
+	for _, item := range container["env"].([]any) {
+		entry := item.(map[string]any)
+		name := entry["name"].(string)
+		require.NotContains(t, env, name, "the environment names %s once", name)
+		if value, ok := entry["value"]; ok {
+			env[name] = value
+			continue
+		}
+		env[name] = entry["valueFrom"].(map[string]any)["secretKeyRef"]
+	}
+	return env
+}
+
+// A Deployment's name and its selector are immutable in place, and the consumer patches the app's
+// Deployment by name: either one moving turns the consumer's preview into a replacement, which
+// takes the app down, rather than an update.
+func TestDispatchAppDeploymentKeepsItsNameAndSelector(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
+	require.Equal(t, "example-dispatch", deployment.Name)
+	inputs := deployment.Inputs.Mappable()
+	require.Equal(t, "example-dispatch", inputs["metadata"].(map[string]any)["name"])
+	spec := inputs["spec"].(map[string]any)
+	require.Equal(t, map[string]any{"app": "example-dispatch"},
+		spec["selector"].(map[string]any)["matchLabels"])
+	require.Equal(t, map[string]any{"app": "example-dispatch"},
+		deploymentPodTemplate(t, m, "example-dispatch")["metadata"].(map[string]any)["labels"],
+		"the pods the selector matches are the pods this Deployment creates")
+}
+
+// One tailnet node holds the hostname and the single-use auth key's state, so the front door is
+// recreated at one replica whatever the app's count; and a front-door pod wearing the app's label
+// would be sent user traffic by Service example-dispatch.
+func TestDispatchFrontDoorStaysSingleWhileTheAppScales(t *testing.T) {
+	args := dispatchArgs()
+	args.Replicas = pulumi.IntRef(3)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").Inputs.Mappable()["spec"].(map[string]any)
+	require.EqualValues(t, 1, spec["replicas"])
+	strategy := spec["strategy"].(map[string]any)
+	require.Equal(t, "Recreate", strategy["type"])
+	require.NotContains(t, strategy, "rollingUpdate", "Kubernetes refuses a rollingUpdate block on a Recreate Deployment")
+
+	template := deploymentPodTemplate(t, m, "example-dispatch-tailnet")
+	labels := template["metadata"].(map[string]any)["labels"].(map[string]any)
+	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"}, labels)
+	require.NotEqual(t, "example-dispatch", labels["app"], "Service example-dispatch selects app=example-dispatch")
+	pod := template["spec"].(map[string]any)
+	require.Equal(t, "example-dispatch", pod["serviceAccountName"], "the state Secret's Role is bound to this account")
+	require.Len(t, pod["containers"].([]any), 1)
+	env := containerEnv(t, podContainer(t, template, "tailscale"))
+	require.Equal(t, "example-dispatch-tailscale-state", env["TS_KUBE_SECRET"])
+}
+
+// The app's image reaching the front door's Deployment would roll the tailnet node, and with it
+// the hostname every reader reaches Dispatch at, on every release of the app. Registering the same
+// inputs twice is the only form a mock engine can state "the front door stays up" in.
+func TestDispatchFrontDoorDoesNotRollOnTheAppsImage(t *testing.T) {
+	first, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+	args := dispatchArgs()
+	args.EnvoyImage = "example.invalid/envoy@sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	require.NotEqual(t, dispatchEnvoyImage, args.EnvoyImage)
+	second, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		first.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").Inputs,
+		second.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-tailnet").Inputs,
+		"the front door's Deployment carries nothing of the app's image")
+	require.NotEqual(t,
+		deploymentPodTemplate(t, first, "example-dispatch"),
+		deploymentPodTemplate(t, second, "example-dispatch"),
+		"the app's own pods carry the new image")
+}
+
+// envoy-dispatch exits 1 when it cannot reach NATS through the proxy, and its /healthz answers 503
+// until it connects, so an app pod started before the front door and its Service exist never goes
+// ready and the rollout waits it out.
+func TestDispatchAppWaitsForTheFrontDoor(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	deps := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch").RPC.GetDependencies()
+	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:apps/v1:Deployment::example-dispatch-tailnet",
+		"the app is created after the pod running the SOCKS5 proxy")
+	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$kubernetes:core/v1:Service::example-dispatch-tailnet",
+		"the app dials the proxy at its Service, not at the pod")
+}
+
+// Two listeners with one machine id never both bind that id's exclusive durable, and a listener
+// bound to 0.0.0.0 refuses to start without a bearer. The app reaches the listener and the proxy
+// over the network now, each running in a pod of its own.
+func TestDispatchListenerStaysSingleAndAuthenticated(t *testing.T) {
+	args := dispatchArgs()
+	args.Replicas = pulumi.IntRef(3)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	spec := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch-listener").Inputs.Mappable()["spec"].(map[string]any)
+	require.EqualValues(t, 1, spec["replicas"])
+	strategy := spec["strategy"].(map[string]any)
+	require.Equal(t, "Recreate", strategy["type"])
+	require.NotContains(t, strategy, "rollingUpdate")
+
+	const socks5Proxy = "example-dispatch-tailnet.dispatch.svc.cluster.local:1055"
+	listenerToken := map[string]any{"name": "example-dispatch-listener", "key": "ENVOY_API_TOKEN"}
+	listener := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch-listener"), "envoy-listener"))
+	require.Equal(t, "example-dispatch", listener["ENVOY_MACHINE_ID"])
+	require.Equal(t, "0.0.0.0", listener["ENVOY_LISTEN_HOST"])
+	require.Equal(t, listenerToken, listener["ENVOY_API_TOKEN"])
+	require.Equal(t, socks5Proxy, listener["ENVOY_NATS_SOCKS5_PROXY"])
+
+	app := containerEnv(t, podContainer(t, deploymentPodTemplate(t, m, "example-dispatch"), "envoy-dispatch"))
+	require.Equal(t, "http://example-dispatch-listener.dispatch.svc.cluster.local:9020", app["ENVOY_URL"])
+	require.Equal(t, listenerToken, app["ENVOY_TOKEN"])
+	require.Equal(t, socks5Proxy, app["ENVOY_NATS_SOCKS5_PROXY"])
+}
+
 func TestDispatchServiceExposesPort8766(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -350,6 +500,32 @@ func TestDispatchServiceExposesPort8766(t *testing.T) {
 	require.EqualValues(t, 8766, port["targetPort"])
 }
 
+// policyIngressPods returns the app labels one NetworkPolicy's single ingress rule admits at port,
+// failing when the policy covers other pods than its own workload, admits another port, admits a
+// namespace, or carries an empty from, which admits every pod in the cluster.
+func policyIngressPods(t *testing.T, m *pulumitest.Mocks, name string, port int) []string {
+	t.Helper()
+	spec := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", name).Inputs.Mappable()["spec"].(map[string]any)
+	require.Equal(t, map[string]any{"app": name}, spec["podSelector"].(map[string]any)["matchLabels"])
+	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
+	ingress := spec["ingress"].([]any)
+	require.Len(t, ingress, 1)
+	rule := ingress[0].(map[string]any)
+	ports := rule["ports"].([]any)
+	require.Len(t, ports, 1)
+	require.EqualValues(t, port, ports[0].(map[string]any)["port"])
+	from := rule["from"].([]any)
+	require.NotEmpty(t, from)
+	apps := make([]string, 0, len(from))
+	for _, item := range from {
+		peer := item.(map[string]any)
+		require.NotContains(t, peer, "namespaceSelector")
+		require.NotContains(t, peer, "ipBlock")
+		apps = append(apps, peer["podSelector"].(map[string]any)["matchLabels"].(map[string]any)["app"].(string))
+	}
+	return apps
+}
+
 // With no namespace named, the app's policy carries exactly one rule: the front door's. Serve runs
 // in a pod of this namespace, which no namespace selector covers, so without that rule it reaches
 // the app at no port at all; a rule with an empty from would admit every pod in the cluster.
@@ -357,20 +533,7 @@ func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	policy := m.Named(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy", "example-dispatch")
-	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
-	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
-	ingress := spec["ingress"].([]any)
-	require.Len(t, ingress, 1)
-	rule := ingress[0].(map[string]any)
-	from := rule["from"].([]any)
-	require.Len(t, from, 1)
-	require.Equal(t, map[string]any{"app": "example-dispatch-tailnet"},
-		from[0].(map[string]any)["podSelector"].(map[string]any)["matchLabels"])
-	require.NotContains(t, from[0], "namespaceSelector")
-	ports := rule["ports"].([]any)
-	require.Len(t, ports, 1)
-	require.EqualValues(t, 8766, ports[0].(map[string]any)["port"])
+	require.Equal(t, []string{"example-dispatch-tailnet"}, policyIngressPods(t, m, "example-dispatch", 8766))
 }
 
 func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
@@ -391,6 +554,18 @@ func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
 		namespaces = append(namespaces, labels["kubernetes.io/metadata.name"].(string))
 	}
 	require.ElementsMatch(t, []string{"envoy", "legion"}, namespaces)
+}
+
+// Whatever reaches the proxy at 1055 gets tailnet egress as this node, so only the two workloads
+// that dial the hub through it may; and only the app calls the listener's API at 9020.
+func TestDispatchPoliciesFenceTheProxyAndTheListener(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	require.ElementsMatch(t, []string{"example-dispatch", "example-dispatch-listener"},
+		policyIngressPods(t, m, "example-dispatch-tailnet", 1055))
+	require.Equal(t, []string{"example-dispatch"},
+		policyIngressPods(t, m, "example-dispatch-listener", 9020))
 }
 
 func TestDispatchRenderingsMatchGoldens(t *testing.T) {
