@@ -1299,7 +1299,9 @@ runtime:
 ```
 
 `acme-skills` is the `name` the repository's marketplace file gives; `omp plugin marketplace add`
-refuses a name already added, and `omp plugin install` an installed plugin without `--force`.
+refuses a name already added, and `omp plugin install` an installed plugin without `--force`. On a
+container's first start the `update` finds no such marketplace, so the role's log shows one
+`Failed to update marketplace … not found` line before the `add` succeeds; that line is expected.
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
