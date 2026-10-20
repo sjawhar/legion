@@ -665,9 +665,15 @@ requests the spec's approval when the design gate policy arms the gate, and regi
 then waits. Apart from that, do not act until a human Dispatch message targeted at your own session
 gives the next exact proof operation; it arrives in your session as a message to you. A message you
 only find by reading the issue (its events, a search) was sent to another session, even on your
-issue, and any other notice is not an instruction: neither is yours to act on. Follow your
-instruction precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside
-the issue's smoke branch.
+issue, and any other notice is not an instruction: neither is yours to act on. One task waits for
+no message: a production check's (its first line `Production check of <key>: …`, handed to the
+implementer once the merge closed its issue), since a closed issue takes no Dispatch write, so none
+can reach it. Act on that task as it is written: this proof has no production and no deploy role,
+so the look leaves `Production: pending deploy of <merge commit>` on the pull request's body (on the
+last look, writes on the pull request that the check did not run because production did not carry
+the merge within the bound) and reports verdict pending with the legion tool's handoff_complete,
+committing nothing. Follow each instruction precisely, use the Go-daemon Legion tools and handoffs,
+and do not create work outside the issue's smoke branch.
 EOF
 start_daemon
 read_app_logins
@@ -985,16 +991,14 @@ primary_issue() {
   first_look_handed() { claim_states_are "$root_issue" "ready working idle" suspended || check_look_reported "$root_issue" 1; }
   until_true 300 "the close to leave the implementer live at its first look, the five other claims of $root_issue suspended" first_look_handed
   first_look_claims=$(issue_claim_states "$root_issue" | paste -sd ',' -)
-  # The first look. The task the daemon handed the implementer stands on its own, and it may report
-  # before the proof's instruction reaches it: its report is observed, not its instruction. The
-  # smoke repository is neither the deploy repository nor a Legion production, so the look's verdict
-  # is pending: the check stays open with its first look reported, and the daemon suspends the
-  # implementer's claim, session kept, until the next wake.
-  if ! check_look_reported "$root_issue" 1; then
-    wait_for_worker "$root_issue" implementer
-    send_agent "$root_issue" implementer "Stage 3 proof production check: $repo is neither the deploy repository nor a Legion production, so no production carries the merge. Write \`Production: pending deploy of $merge_when_clean_commit\` on pull request #$pr_number's body and report verdict pending with the legion tool's handoff_complete; commit nothing."
-  fi
-  # A look took up to 10 minutes from the proof's instruction to its report in acceptance runs.
+  # The first look. The task the daemon handed the implementer is the whole instruction: the proof
+  # sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
+  # ISSUE_CLOSED), and the fixture's instructions say a check task waits for no message. The smoke
+  # repository is neither the deploy repository nor a Legion production, so the look's verdict is
+  # pending: the check stays open with its first look reported, and the daemon suspends the
+  # implementer's claim, session kept, until the next wake. Its report is the observation, read from
+  # the daemon's state below.
+  # A look took up to 10 minutes from its task to its report in acceptance runs.
   until_true 600 "the implementer's pending report on the first look of $root_issue's production check" check_look_reported "$root_issue" 1
   until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $root_issue" claim_states_are "$root_issue" suspended suspended
   [ -n "$(issue_worker_session "$root_issue" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
@@ -1020,10 +1024,9 @@ primary_issue() {
   # session dropped (issue_close), and the state omits the check.
   until_true 900 "the bound to wake the last look of $root_issue's production check" last_look_started "$root_issue"
   state_file check-look-2
-  if ! check_closed "$root_issue"; then
-    wait_for_worker "$root_issue" implementer
-    send_agent "$root_issue" implementer "Stage 3 proof production check, last look: this is the bound's look, and production still does not carry the merge. Write on pull request #$pr_number that the check did not run because production did not carry the merge within the bound, and report verdict pending with the legion tool's handoff_complete; commit nothing."
-  fi
+  # The daemon's task names the last look and its rule (write on the pull request that the check
+  # did not run within the bound, report pending), and the proof sends the closed issue nothing: the
+  # close of the check is the observation.
   until_true 600 "the last look's pending report to close $root_issue's production check" check_closed "$root_issue"
   check_look_logged "$root_issue" 2 bound ||
     fail "the daemon log records no look 2 of $root_issue's production check woken by the bound as the last look: $(jq -R -c 'fromjson? | select(.msg == "workflow: production check look started")' "$evidence/logs/daemon.log" | tail -2 | tr '\n' ' ')"

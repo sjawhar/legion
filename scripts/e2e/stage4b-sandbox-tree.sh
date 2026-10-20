@@ -3122,10 +3122,15 @@ timeout set to 600 seconds) before it replies WAITING: the proof holds a tree by
 implementer's launches while its task is outstanding, an end that lands after the task's turn is
 over charges nothing, and the end takes up to a minute to land on a loaded host, so that turn must
 last long enough to be ended inside. A production check's task (its first line `Production check of
-<key>: …`, handed to the implementer once the merge closed its issue) is no phase's task line: run no
-`sleep 300` on it, reply WAITING at once and wait for the targeted message, which says what the
-look writes and reports. Follow that instruction precisely, use the Go-daemon Legion tools and
-handoffs, and do not create work outside the issue's smoke branch.
+<key>: …`, handed to the implementer once the merge closed its issue) is no phase's task line and
+waits for no targeted message: a closed issue takes no Dispatch write, so none can reach it. Run no
+`sleep 300` on it; act on the task as it is written. This proof has no production and no deploy
+role: no production carries the merge, so the look leaves `Production: pending deploy of <merge
+commit>` on the pull request's body (on the last look, writes on the pull request that the check
+did not run because production did not carry the merge within the bound) and reports verdict
+pending with the legion tool's handoff_complete, committing nothing. Follow each instruction
+precisely, use the Go-daemon Legion tools and handoffs, and do not create work outside the issue's
+smoke branch.
 
 ## Scope of this proof
 
@@ -5830,15 +5835,13 @@ state_file check-opened
 first_look_handed() { claim_states_are "$tree1" "ready working idle" suspended || check_look_reported "$tree1" 1; }
 until_true 300 "the close to leave the implementer live at its first look, the five other claims of $tree1 suspended" first_look_handed
 first_look_claims=$(issue_claim_states "$tree1" | paste -sd ',' -)
-# The first look. The task the daemon handed the implementer stands on its own, and it may report
-# before the proof's instruction reaches it: its report is observed, not its instruction. The smoke
-# repository is neither the deploy repository nor a Legion production, so the look's verdict is
+# The first look. The task the daemon handed the implementer is the whole instruction: the proof
+# sends it nothing, since the issue is closed and a closed issue takes no Dispatch write (409
+# ISSUE_CLOSED), and the fixture's instructions say a check task waits for no targeted message. The
+# smoke repository is neither the deploy repository nor a Legion production, so the look's verdict is
 # pending: the check stays open with its first look reported, and the daemon suspends the
-# implementer's claim, session kept, and the issue's Sandbox with its volume, so the pod goes.
-if ! check_look_reported "$tree1" 1; then
-  on_tree "$tree1" wait_for_worker "$tree1" implementer
-  send_agent "$tree1" implementer "Stage 4b proof production check: $repo is neither the deploy repository nor a Legion production, so no production carries the merge. Write \`Production: pending deploy of $merge_when_clean_commit\` on pull request #$pr_number's body and report verdict pending with the legion tool's handoff_complete; commit nothing."
-fi
+# implementer's claim, session kept, and the issue's Sandbox with its volume, so the pod goes. Its
+# report is the observation, read from the daemon's state below.
 # The smoke main's cleanup is the fixture's teardown, not the workflow under test. It stays inside
 # this checkpoint, so a STAGE4B_UNTIL=done run still cleans the smoke main, and smoke_main_cleaning
 # tells the EXIT trap's verdict that a failure here is the cleanup's. It runs while the implementer
@@ -5848,7 +5851,7 @@ clean_smoke_main
 release_smoke_main
 smoke_main_cleaning=
 timeout_hook=limit_pending_blocked # clean_smoke_main leaves the hook empty
-# A look took up to 10 minutes from the proof's instruction to its report in acceptance runs.
+# A look took up to 10 minutes from its task to its report in acceptance runs.
 on_tree "$tree1" until_true 600 "the implementer's pending report on the first look of $tree1's production check" check_look_reported "$tree1" 1
 # root_parked: the root's Sandbox is Suspended and its pod gone, the pending report's suspension of
 # the issue (kubectl get pods -l legion.dev/issue=<tree 1>: nothing); root_running: it is Running
@@ -6059,13 +6062,12 @@ begin production-check-bound
 until_true 900 "the bound to wake the last look of $tree1's production check" last_look_started "$tree1"
 state_file check-look-2
 # The pod comes back for the look: 1 to 3 minutes in acceptance runs, placed on the pool like any.
-# An implementer that reported the last look before this read has had its pod taken again.
+# An implementer that reported the last look before this read has had its pod taken again. The
+# daemon's task names the last look and its rule (write on the pull request that the check did not
+# run within the bound, report pending), and the proof sends the closed issue nothing: the close of
+# the check is the observation.
 last_look_pod_back() { root_running || check_closed "$tree1"; }
 on_tree "$tree1" until_true 900 "the bound's look to set the root's Sandbox $root_pod Running and bring its pod back" last_look_pod_back
-if ! check_closed "$tree1"; then
-  on_tree "$tree1" wait_for_worker "$tree1" implementer
-  send_agent "$tree1" implementer "Stage 4b proof production check, last look: this is the bound's look, and production still does not carry the merge. Write on pull request #$pr_number that the check did not run because production did not carry the merge within the bound, and report verdict pending with the legion tool's handoff_complete; commit nothing."
-fi
 until_true 600 "the last look's pending report to close $tree1's production check" check_closed "$tree1"
 check_look_logged "$tree1" 2 bound ||
   fail "the daemon log records no look 2 of $tree1's production check woken by the bound as the last look: $(log_lines "workflow: production check look started" | tail -2 | tr '\n' ' ')"
