@@ -218,8 +218,9 @@ export function asksForPrintMode(argv: readonly string[]): boolean {
  * are dropped; every `--channels` entry comes before every development one, since Claude Code
  * matches the first entry naming the server. Development channels load only in an interactive
  * session, so they are dropped when `interactive` is false. A command line split on whitespace
- * (`ps`, not `exact`) cannot tell a `-p` option from a word of a prompt, so its print mode is never
- * read: dropping a loaded channel there would refuse messages the session takes.
+ * (`ps`, not `exact`) cannot tell an option from a word of a prompt, so none of that reading
+ * applies to it: its print mode is never read, `--` ends nothing and no value is skipped, since
+ * each could drop a loaded channel and refuse messages the session takes.
  */
 export function claudeChannelEntries(
   argv: readonly string[],
@@ -231,12 +232,12 @@ export function claudeChannelEntries(
   const development: ChannelEntry[] = []
   for (let index = 1; index < argv.length; index++) {
     const argument = argv[index] ?? ""
-    if (argument === "--") break
+    if (exact && argument === "--") break
     const equals = argument.indexOf("=")
     const flag = equals === -1 ? argument : argument.slice(0, equals)
     const dev = CHANNEL_FLAGS[flag]
     if (dev === undefined) {
-      index = lastValueIndex(argv, index)
+      if (exact) index = lastValueIndex(argv, index)
       continue
     }
     const values: string[] = []
@@ -562,13 +563,20 @@ interface ChannelSettings {
   readonly behavior: string | undefined
 }
 
-/** A settings file's channel settings, or undefined when the file is missing, is not a JSON
- *  object, or (with `nonEmpty`) is an empty one. */
-function readChannelSettings(file: string, nonEmpty = false): ChannelSettings | undefined {
+/** Keys that say how sources compose, which make no settings file a source on their own. */
+const COMPOSITION_KEYS: ReadonlySet<string> = new Set([
+  "managedSourcesBehavior",
+  "wslInheritsWindowsSettings",
+])
+
+/** A settings file's channel settings, or undefined when the file is missing or is not a JSON
+ *  object, and (with `asSource`) when it holds nothing but `COMPOSITION_KEYS`, as Claude Code does
+ *  not count such a file as a source. */
+function readChannelSettings(file: string, asSource = false): ChannelSettings | undefined {
   try {
     const value: unknown = JSON.parse(readFileSync(file, "utf8"))
     if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined
-    if (nonEmpty && Object.keys(value).length === 0) return undefined
+    if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key))) return undefined
     const record = value as Record<string, unknown>
     const behavior = record["managedSourcesBehavior"]
     return {

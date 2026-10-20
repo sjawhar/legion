@@ -2133,6 +2133,46 @@ test("Restore draft keeps a mode the sender did not pick unpicked, so it still f
   }
 });
 
+test("a restored broadcast shows the mode it re-sends, even after the selection's own mode changed", async () => {
+  const [planner, reviewer] = agents;
+  const page = renderAgents({ listedAgents: [planner, reviewer] });
+  page.createBroadcast.mockImplementationOnce(async () => {
+    throw new Error("Envoy listener unreachable");
+  });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const composer = () => within(region).getByRole("region", { name: "Broadcast" });
+    const mode = () =>
+      within(composer()).getByRole<HTMLSelectElement>("combobox", { name: "Delivery mode" });
+    fireEvent.click(
+      within(region).getByRole("checkbox", { name: "Select Reviewer for broadcast" })
+    );
+    fireEvent.change(within(composer()).getByRole("textbox", { name: "Broadcast message" }), {
+      target: { value: "Report status." },
+    });
+    expect(mode().value).toBe("aside");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
+
+    // The Reviewer now takes BTW too, so the selection's own mode would be BTW.
+    page.listAgents.mockResolvedValue([planner, { ...reviewer, capabilities: ["aside", "btw"] }]);
+    await page.queryClient.refetchQueries({ queryKey: ["agents"] });
+    const sends = await screen.findByRole("region", { name: "Sends" });
+    await within(sends).findByText("Could not send to 1 agent: Envoy listener unreachable");
+    fireEvent.click(within(sends).getByRole("button", { name: "Restore draft" }));
+
+    // Held word for word, the request shows its own mode and goes in it.
+    expect(mode().value).toBe("aside");
+    fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
+    await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
+    expect(posted(page, 1)).toEqual(posted(page, 0));
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("a selected agent that went away does not change what Restore draft re-sends, and the composer says so", async () => {
   const [planner, reviewer] = agents;
   const listening = { ...reviewer, capabilities: ["aside", "btw"] };

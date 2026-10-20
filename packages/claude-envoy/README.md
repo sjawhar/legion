@@ -77,7 +77,8 @@ events and sends them to the current Claude Code session as supported
   the session as taking no messages, and the server says why on stderr and in its MCP
   instructions. `ENVOY_CHANNEL_LOADED=1` or `0` overrides the check, for an allowlist an MDM
   profile delivers. A command line it cannot read, or no `claude` among the server's ancestors,
-  counts as loaded, and so does a one-word command line from a Claude Code that runs on Node,
+  counts as loaded (a Claude Code run under another program name inside another `claude`
+  session's shell reads as the outer one), and so does a one-word command line from a Claude Code that runs on Node,
   whose `process.title = "claude"` overwrites the arguments. A Legion pane whose deliveries go to
   the bridge's inbox needs no channel, so the check does not apply there.
 
@@ -275,10 +276,11 @@ claude --channels plugin:claude-envoy@legion-plugins
 
 For a plugin outside the allowlist (a development marketplace, a bare `server:` entry) use
 `--dangerously-load-development-channels <entry>`; it bypasses the allowlist only, so
-`channelsEnabled` still applies. Do not combine it with a `--channels` entry that names the same
-plugin from another marketplace: Claude Code then skips the channel (`Channel notifications
-skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy plugin is from
-…`).
+`channelsEnabled` still applies. Do not combine it with any `--channels` entry that names the
+same plugin: Claude Code matches the `--channels` entry first, so that entry then needs the
+allowlist and the installed plugin's marketplace, and otherwise Claude Code skips the channel
+(`Channel notifications skipped: you asked for plugin:…@legion-plugins but the installed
+claude-envoy plugin is from …`).
 
 The plugin reads one envoy.json: `$CLAUDE_CONFIG_DIR/envoy.json` when `CLAUDE_CONFIG_DIR` is set,
 else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,

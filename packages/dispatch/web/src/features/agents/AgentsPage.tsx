@@ -1157,7 +1157,9 @@ export function AgentsPage(): ReactNode {
   const defaultDelivery = broadcastDelivery(
     agents.flatMap((agent) => (selected.has(agent.session_id) ? [agent.capabilities] : []))
   );
-  const delivery = composition.delivery ?? defaultDelivery;
+  // A restored request is re-sent word for word until an edit drops it, so its own mode is the one
+  // the page shows and sends while it is held.
+  const delivery = composition.restored?.delivery ?? composition.delivery ?? defaultDelivery;
   const composing = draft.trim() !== "" || selected.size > 0;
   const queue = useBroadcastQueue(composing);
   const restoreRefusal = composing

@@ -47076,13 +47076,14 @@ function claudeChannelEntries(argv, exact = true, stdoutIsTerminal = undefined) 
   const development = [];
   for (let index = 1;index < argv.length; index++) {
     const argument = argv[index] ?? "";
-    if (argument === "--")
+    if (exact && argument === "--")
       break;
     const equals = argument.indexOf("=");
     const flag = equals === -1 ? argument : argument.slice(0, equals);
     const dev = CHANNEL_FLAGS[flag];
     if (dev === undefined) {
-      index = lastValueIndex(argv, index);
+      if (exact)
+        index = lastValueIndex(argv, index);
       continue;
     }
     const values = [];
@@ -47296,12 +47297,16 @@ function managedSettingsDirectory() {
       return "/etc/claude-code";
   }
 }
-function readChannelSettings(file2, nonEmpty2 = false) {
+var COMPOSITION_KEYS = new Set([
+  "managedSourcesBehavior",
+  "wslInheritsWindowsSettings"
+]);
+function readChannelSettings(file2, asSource = false) {
   try {
     const value = JSON.parse(readFileSync4(file2, "utf8"));
     if (typeof value !== "object" || value === null || Array.isArray(value))
       return;
-    if (nonEmpty2 && Object.keys(value).length === 0)
+    if (asSource && Object.keys(value).every((key) => COMPOSITION_KEYS.has(key)))
       return;
     const record3 = value;
     const behavior = record3["managedSourcesBehavior"];

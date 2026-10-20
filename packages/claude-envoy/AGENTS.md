@@ -108,8 +108,9 @@ Dispatch asks stay on Dispatch.
   output nor plugin data.
 - Deployment is `--channels plugin:claude-envoy@legion-plugins` under managed settings
   (`channelsEnabled`, `allowedChannelPlugins`); `--dangerously-load-development-channels` is for
-  entries outside the allowlist and cannot be combined with a `--channels` entry naming the same
-  plugin from another marketplace. `claude -p` has no interactive plan approval, multiple-choice,
+  entries outside the allowlist and cannot be combined with any `--channels` entry naming the same
+  plugin: Claude Code matches the `--channels` entry first, which then needs the allowlist and its
+  own marketplace. `claude -p` has no interactive plan approval, multiple-choice,
   or consent surfaces; workers need pre-approved configuration.
 - Rebuild `dist/` (`bun run build`, on the Bun in `.bun-version`) in the same commit as any source
   change, including a change to `@legion/contracts` or `@legion/envoy-client`; `check-dist` in CI

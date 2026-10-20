@@ -69,6 +69,28 @@ test("a development channel is dropped when the session's stdout is not a termin
   expect(claudeChannelEntries(argv, true, undefined)).toHaveLength(1)
 })
 
+test("a command line split on whitespace skips no value and is not ended by --", () => {
+  // From `ps`: a `--` or an option-looking word may belong to a prompt, so a later flag still counts.
+  expect(
+    claudeChannelEntries(
+      [
+        "claude",
+        "run",
+        "the",
+        "tests",
+        "--",
+        "verbose",
+        "--dangerously-load-development-channels",
+        "plugin:claude-envoy@legion-plugins",
+      ],
+      false,
+    ),
+  ).toHaveLength(1)
+  expect(
+    claudeChannelEntries(["claude", "--model", "--channels=plugin:claude-envoy@x"], false),
+  ).toHaveLength(1)
+})
+
 test("--channels entries come first, and a flag after -- is a positional argument", () => {
   expect(
     claudeChannelEntries([
@@ -281,6 +303,17 @@ test("the highest managed settings source present is the allowlist alone", async
     await writeFile(
       join(config, "remote-settings.json"),
       JSON.stringify({ model: "y", managedSourcesBehavior: "merge" }),
+    )
+    expect(channelAllowlist(directories)).toEqual(ORG_LIST)
+    // A remote file holding only composition keys is no source of its own.
+    await writeFile(
+      join(config, "remote-settings.json"),
+      JSON.stringify({ managedSourcesBehavior: "first-wins" }),
+    )
+    expect(channelAllowlist(directories)).toEqual(ORG_LIST)
+    await writeFile(
+      join(config, "remote-settings.json"),
+      JSON.stringify({ wslInheritsWindowsSettings: false }),
     )
     expect(channelAllowlist(directories)).toEqual(ORG_LIST)
   } finally {
