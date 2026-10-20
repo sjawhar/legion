@@ -7,6 +7,7 @@ package sandbox
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"slices"
 	"strconv"
@@ -21,83 +22,94 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
 
-// setup-ran: the shared runtime's setup command records its cwd, uid, parent pid and private
-// repository credential result before the root stub agent writes its own marker. The two records
-// share the issue-volume marker: their exact order is the setup-before-agent evidence, without
-// treating the shim's hello (which precedes child spawn) as an agent start.
+// setup-ran: the root's first setup record witnesses the same checks `awaitRunning` applies to
+// every successful role launch in this run.
 func (r *liveRig) checkSetupRan() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
+	return r.checkSetupRecord(root)
+}
 
-	out, err := r.exec(root, "cat", "--", root.marker)
+// checkSetupRecord proves c's current setup ran before its current stub agent. awaitRunning calls
+// it after every successful launch or resume, so the proof covers every role container the rig
+// starts, including each separately provisioned issue pod, instead of only the root architect.
+func (r *liveRig) checkSetupRecord(c *liveClaim) error {
+	out, err := r.exec(c, "cat", "--", c.marker)
 	if err != nil {
 		return err
 	}
 	setupLine, setupAt, agentAt := "", -1, -1
-	agentLine := string(root.role) + ":" + root.loc.Incarnation
+	agentLine := string(c.role) + ":" + c.loc.Incarnation
 	for at, line := range strings.Split(out, "\n") {
 		if line == agentLine {
 			agentAt = at
 		}
-		if strings.HasPrefix(line, "setup:"+string(root.role)+":"+root.loc.Incarnation+" ") {
+		if strings.HasPrefix(line, "setup:"+string(c.role)+":"+c.loc.Incarnation+" ") {
 			setupLine, setupAt = line, at
 		}
 	}
 	if setupAt < 0 {
-		return fmt.Errorf("%s has no setup record for %s: %q", root.marker, root.loc.Incarnation, out)
+		return fmt.Errorf("%s has no setup record for %s: %q", c.marker, c.loc.Incarnation, out)
 	}
 	if agentAt < 0 {
-		return fmt.Errorf("%s has no agent record for %s after setup: %q", root.marker, root.loc.Incarnation, out)
+		return fmt.Errorf("%s has no agent record for %s after setup: %q", c.marker, c.loc.Incarnation, out)
 	}
 	if setupAt >= agentAt {
-		return fmt.Errorf("the setup record is line %d and the agent record is line %d in %s, want setup before agent: %q", setupAt, agentAt, root.marker, out)
+		return fmt.Errorf("the setup record is line %d and the agent record is line %d in %s, want setup before agent: %q", setupAt, agentAt, c.marker, out)
 	}
 	setup, err := parseSetupMarker(setupLine)
 	if err != nil {
 		return err
 	}
-	if setup.role != string(root.role) || setup.incarnation != root.loc.Incarnation {
-		return fmt.Errorf("setup record %#v, want role %s at %s", setup, root.role, root.loc.Incarnation)
+	if setup.role != string(c.role) || setup.incarnation != c.loc.Incarnation {
+		return fmt.Errorf("setup record %#v, want role %s at %s", setup, c.role, c.loc.Incarnation)
 	}
 	if setup.gitFrom != "/tmp" || setup.git != "ok" {
 		return fmt.Errorf("setup record lists the private repository from %q with git=%q, want /tmp and ok", setup.gitFrom, setup.git)
 	}
+	helper, err := base64.StdEncoding.DecodeString(setup.helperBase64)
+	if err != nil {
+		return fmt.Errorf("decode setup helper %q: %w", setup.helperBase64, err)
+	}
+	if setup.helperScope != "command" || setup.helperCount != "1" || string(helper) != "!legion git-credential" {
+		return fmt.Errorf("setup saw %s command-scope GitHub helper %q, want its one !legion git-credential helper", setup.helperCount, helper)
+	}
 
-	pid, err := r.agentPid(root)
+	pid, err := r.agentPid(c)
 	if err != nil {
 		return err
 	}
 	if setup.ppid != pid {
 		return fmt.Errorf("setup record parent pid %s, want the agent pid %s: setup must finish before that wrapper execs into the agent", setup.ppid, pid)
 	}
-	cwd, err := r.exec(root, "readlink", "/proc/"+pid+"/cwd")
+	cwd, err := r.exec(c, "readlink", "/proc/"+pid+"/cwd")
 	if err != nil {
 		return err
 	}
 	if setup.cwd != cwd {
 		return fmt.Errorf("setup recorded cwd %q, want the agent's starting cwd %q", setup.cwd, cwd)
 	}
-	uid, err := r.exec(root, "sh", "-c", `sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status"`, "uid", pid)
+	uid, err := r.exec(c, "sh", "-c", `sed -n 's/^Uid:[[:space:]]*\([0-9]*\).*/\1/p' "/proc/$1/status"`, "uid", pid)
 	if err != nil {
 		return err
 	}
-	pod, err := r.getPod(SandboxName(root.token))
+	pod, err := r.getPod(SandboxName(c.token))
 	if err != nil {
 		return err
 	}
-	wantUID, workingDir, err := roleContainerSettings(pod, root.role)
+	wantUID, workingDir, err := roleContainerSettings(pod, c.role)
 	if err != nil {
 		return err
 	}
 	if setup.uid != wantUID || uid != wantUID {
-		return fmt.Errorf("setup uid %q and agent uid %q, want pod %s RunAsUser %q", setup.uid, uid, root.role, wantUID)
+		return fmt.Errorf("setup uid %q and agent uid %q, want pod %s RunAsUser %q", setup.uid, uid, c.role, wantUID)
 	}
 	if workingDir != cwd {
-		return fmt.Errorf("the %s container WorkingDir is %q, want the agent cwd %q", root.role, workingDir, cwd)
+		return fmt.Errorf("the %s container WorkingDir is %q, want the agent cwd %q", c.role, workingDir, cwd)
 	}
-	note("operator", "setup marker before agent marker: cwd %s; uid %s; git ls-remote from %s succeeded; setup parent pid %s became the agent", setup.cwd, setup.uid, setup.gitFrom, setup.ppid)
+	note("operator", "%s setup marker before its agent marker: cwd %s; uid %s; git ls-remote from %s succeeded; setup parent pid %s became the agent", c.name, setup.cwd, setup.uid, setup.gitFrom, setup.ppid)
 	return nil
 }
 

@@ -1271,10 +1271,11 @@ func (r *liveRig) resumeWithPlugins(c *liveClaim, file string, plugins *runtime.
 }
 
 // awaitRunning waits for the claim's current pod to run with its Sandbox Ready, then for its
-// shim's hello at the current generation, then for the stub agent's own marker line — the hello
-// only proves the shim dialed in before spawning its child (shim.go:204/317); nothing else orders
-// the child's first write against whatever a caller does next (a stop, a marker read). A pod that
-// runs and never says hello within one boot interval is a network-path failure, named as one.
+// shim's hello at the current generation, then for the stub agent's own marker line and setup
+// record. The hello only proves the shim dialed in before spawning its child (shim.go:204/317);
+// checkSetupRecord holds the setup line before the agent line and its cwd, uid and parent pid for
+// every successful role launch. A pod that runs and never says hello within one boot interval is a
+// network-path failure, named as one.
 func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, error) {
 	name := SandboxName(c.token)
 	var pod *corev1.Pod
@@ -1316,6 +1317,9 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 		}
 		return slices.Contains(lines, wrote), nil
 	}); err != nil {
+		return registration{}, err
+	}
+	if err := r.checkSetupRecord(c); err != nil {
 		return registration{}, err
 	}
 	return reg, nil

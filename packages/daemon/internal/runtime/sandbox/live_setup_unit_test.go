@@ -11,14 +11,15 @@ import (
 )
 
 func TestParseSetupMarker(t *testing.T) {
-	line := "setup:architect:pod-1/3 cwd=/legion/workspaces/sjawhar/legion-smoke/s4a-1 uid=1000 ppid=41 git_from=/tmp git=ok"
+	line := "setup:architect:pod-1/3 cwd=/legion/workspaces/sjawhar/legion-smoke/s4a-1 uid=1000 ppid=41 git_from=/tmp helper_scope=command helper_b64=IWxlZ2lvbiBnaXQtY3JlZGVudGlhbA== helper_count=1 git=ok"
 	got, err := parseSetupMarker(line)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := (setupMarker{
 		role: "architect", incarnation: "pod-1/3", cwd: "/legion/workspaces/sjawhar/legion-smoke/s4a-1",
-		uid: "1000", ppid: "41", gitFrom: "/tmp", git: "ok",
+		uid: "1000", ppid: "41", gitFrom: "/tmp", helperScope: "command",
+		helperBase64: "IWxlZ2lvbiBnaXQtY3JlZGVudGlhbA==", helperCount: "1", git: "ok",
 	}); got != want {
 		t.Errorf("parseSetupMarker(%q) = %#v, want %#v", line, got, want)
 	}
@@ -59,8 +60,19 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir, bin := t.TempDir(), t.TempDir()
-	marker, agentPID, gitCWD := filepath.Join(dir, "marker"), filepath.Join(dir, "agent-pid"), filepath.Join(dir, "git-cwd")
-	git := "#!/bin/sh\nprintf '%s\\n' \"$PWD\" >\"$LIVE_SETUP_GIT_CWD\"\nprintf '0123456789012345678901234567890123456789\\tHEAD\\n'\n"
+	marker, agentPID, gitCWD, gitEnv := filepath.Join(dir, "marker"), filepath.Join(dir, "agent-pid"), filepath.Join(dir, "git-cwd"), filepath.Join(dir, "git-env")
+	git := `#!/bin/sh
+if [ "$1" = config ]; then
+  home=nonempty
+  [ -z "$(ls -A "$HOME")" ] && home=empty
+  printf '%s|%s|%s|%s|%s|%s|%s\n' "${GIT_ASKPASS-unset}" "${SSH_ASKPASS-unset}" "${GH_TOKEN-unset}" "${GITHUB_TOKEN-unset}" "$GIT_CONFIG_NOSYSTEM" "$GIT_CONFIG_COUNT" "$home" >"$LIVE_SETUP_GIT_ENV"
+  printf 'command\tcredential.https://github.com.helper\t\n'
+  printf 'command\tcredential.https://github.com.helper\t!legion git-credential\n'
+  exit 0
+fi
+printf '%s\n' "$PWD" >"$LIVE_SETUP_GIT_CWD"
+printf '0123456789012345678901234567890123456789\tHEAD\n'
+`
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(git), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -69,6 +81,12 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 	t.Setenv("POD_UID", "pod-1")
 	t.Setenv("LEGION_GENERATION", "3")
 	t.Setenv("LIVE_SETUP_GIT_CWD", gitCWD)
+	t.Setenv("GIT_ASKPASS", "must-be-unset")
+	t.Setenv("SSH_ASKPASS", "must-be-unset")
+	t.Setenv("GH_TOKEN", "must-be-unset")
+	t.Setenv("GITHUB_TOKEN", "must-be-unset")
+	t.Setenv("GIT_CONFIG_COUNT", "3")
+	t.Setenv("LIVE_SETUP_GIT_ENV", gitEnv)
 	agent := []string{"/bin/sh", "-c", `printf '%s\n' "$$" >"$1"; printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER"`, "agent", agentPID}
 	if got := runStart(t, dir, bin, "", nil, liveSetup(repo), agent); got.exit != 0 {
 		t.Fatalf("the wrapper exited %d: %s", got.exit, got.stderr)
@@ -97,8 +115,14 @@ func TestLiveSetupRunsBeforeTheAgent(t *testing.T) {
 	if setup.gitFrom != "/tmp" || setup.git != "ok" {
 		t.Errorf("setup git record = from %q, result %q; want /tmp and ok", setup.gitFrom, setup.git)
 	}
+	if setup.helperScope != "command" || setup.helperBase64 != "IWxlZ2lvbiBnaXQtY3JlZGVudGlhbA==" || setup.helperCount != "1" {
+		t.Errorf("setup helper record = scope %q, helper %q, count %q; want command, !legion git-credential and one helper", setup.helperScope, setup.helperBase64, setup.helperCount)
+	}
 	if got, err := os.ReadFile(gitCWD); err != nil || strings.TrimSpace(string(got)) != "/tmp" {
 		t.Errorf("git cwd = %q, %v; want /tmp", got, err)
+	}
+	if got, err := os.ReadFile(gitEnv); err != nil || strings.TrimSpace(string(got)) != "unset|unset|unset|unset|1|3|empty" {
+		t.Errorf("git environment = %q, %v; want the neutralized askpass/token environment and empty temporary HOME", got, err)
 	}
 	if lines[1] != "architect:pod-1/3" {
 		t.Errorf("agent marker = %q, want architect:pod-1/3", lines[1])
