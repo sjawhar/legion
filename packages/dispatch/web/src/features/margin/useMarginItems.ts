@@ -7,6 +7,7 @@ import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Actor, Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
 import type { ComposerOwner } from "../conversation/composer-model";
+import { rootOf } from "../conversation/conversation-model";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { type ConversationPinKind, pinnedConversations, pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
@@ -144,22 +145,6 @@ export function anchoredThreadComments(
   }
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   return comments.filter((comment) => rootOf(byId, comment).anchor?.artifact_id === artifactId);
-}
-
-/** The comment at the top of `comment`'s reply chain: the first with no `reply_to`, or the last
- *  one present when a parent is missing. A cyclic chain stops at the first repeated comment. */
-function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Comment {
-  const visited = new Set<string>();
-  let root = comment;
-  while (root.reply_to !== null && !visited.has(root.id)) {
-    visited.add(root.id);
-    const parent = byId.get(root.reply_to);
-    if (parent === undefined) {
-      break;
-    }
-    root = parent;
-  }
-  return root;
 }
 
 function commentThreads(comments: Comment[]): Thread[] {

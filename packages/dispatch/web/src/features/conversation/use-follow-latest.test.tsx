@@ -54,7 +54,7 @@ function Harness({
   itemSeqs: number[];
   ownSendCount: number;
 }): ReactNode {
-  useFollowLatest({ enabled: true, itemSeqs, ownSendCount });
+  useFollowLatest({ enabled: true, latestItemSeq: itemSeqs.at(0), ownSendCount });
   return (
     <div>
       <form aria-label="Comment composer" />

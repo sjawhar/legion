@@ -307,14 +307,7 @@ function changedReferencesTruncated(event: Event): boolean {
 // refreshes the same rows a message citing it does.
 function changedReferenceKeys(event: Event): (readonly unknown[])[] {
   if (changedReferencesTruncated(event)) {
-    return [
-      ["issue"],
-      ["asks"],
-      ["issue-asks"],
-      ["ask-thread"],
-      ["artifact"],
-      inboxQuery().queryKey,
-    ];
+    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], inboxQuery().queryKey];
   }
   const keys: (readonly unknown[])[] = [];
   for (const target of changedReferences(event)) {
@@ -327,7 +320,7 @@ function changedReferenceKeys(event: Event): (readonly unknown[])[] {
     // Infinity): without this key a citation added after the answer never moves its control.
     keys.push(["ask-thread", target.id]);
     if (target.issue_key !== undefined && target.issue_key !== null) {
-      keys.push(["asks", target.issue_key], ["issue-asks", target.issue_key]);
+      keys.push(["asks", target.issue_key]);
     } else if (target.artifact_id !== undefined && target.artifact_id !== null) {
       keys.push(["artifact", target.artifact_id, "asks"]);
     }
@@ -557,7 +550,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     if (id !== undefined) {
       keys.push(["artifact", id]);
     }
-    keys.push(["comments", event.issue_key], ["issue-comments", event.issue_key]);
+    keys.push(["comments", event.issue_key]);
     return keys;
   }
 
@@ -565,8 +558,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     keys.push(
       ["artifacts", event.issue_key],
       ["artifact", event.payload.artifact_id],
-      ["asks", event.issue_key],
-      ["issue-asks", event.issue_key]
+      ["asks", event.issue_key]
     );
     if (event.payload.ask_id !== null) {
       keys.push(["ask-thread", event.payload.ask_id]);
@@ -582,7 +574,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "ask.handed_back" ||
     event.type === "ask.anchor_refreshed"
   ) {
-    keys.push(["asks", event.issue_key], ["issue-asks", event.issue_key]);
+    keys.push(["asks", event.issue_key]);
     // The sidebar's per-project open-ask counts come from GET /projects; an edit, a hand-back or
     // an anchor refresh changes neither whether the ask is open nor which issue owns it.
     if (
@@ -602,18 +594,18 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return keys;
   }
   if (event.type === "block.repaired" || event.type === "block.invalid") {
-    keys.push(["asks", event.issue_key], ["issue-asks", event.issue_key], projectsQuery().queryKey);
+    keys.push(["asks", event.issue_key], projectsQuery().queryKey);
     return keys;
   }
 
   if (isCommentLikeEvent(event)) {
     const askID = payloadString(event, "ask_id");
-    keys.push(["comments", event.issue_key], ["issue-comments", event.issue_key]);
+    keys.push(["comments", event.issue_key]);
     // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
     // block reads its turn from that list rather than from the Inbox. The Conversation's card
     // for that ask carries the reply itself.
     if (askID !== undefined) {
-      keys.push(["asks", event.issue_key], ["issue-asks", event.issue_key]);
+      keys.push(["asks", event.issue_key]);
     }
     appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);

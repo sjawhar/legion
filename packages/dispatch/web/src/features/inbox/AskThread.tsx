@@ -198,14 +198,15 @@ export function AskThread({
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
-  const [showAllReplies, setShowAllReplies] = useState(false);
+  const [showAllReplies, setShowAllReplies] = useState<boolean>();
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
   const recentReplies = replies.slice(-2).reverse();
   const newestReply = replies.at(-1);
   const older = replies.slice(0, -2);
-  // A link to a reply older than the two the card keeps visible opens the fold over them, so
-  // the reply it names is on screen rather than behind a control the reader must find.
-  const showAll = showAllReplies || older.some((comment) => comment.id === currentReplyId);
+  // A link to a reply older than the two the card keeps visible seeds the control open, so the
+  // reply it names is on screen rather than behind a control the reader must find. Seeding, not
+  // overriding: once the reader uses the control, their choice wins.
+  const showAll = showAllReplies ?? older.some((comment) => comment.id === currentReplyId);
   const olderReplies = showAll ? [...older].reverse() : [];
 
   return (

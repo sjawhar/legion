@@ -11,7 +11,7 @@ function localDate(key: string): Date {
   return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
 }
 
-export function dayLabel(date: string, today: string): string {
+function dayLabel(date: string, today: string): string {
   if (date === today) return "Today";
 
   const yesterday = localDate(today);
@@ -28,7 +28,7 @@ export function dayLabel(date: string, today: string): string {
 }
 
 /** Whether two actors are the same writer: one session id, or one human login. */
-export function sameActor(left: Actor, right: Actor): boolean {
+function sameActor(left: Actor, right: Actor): boolean {
   return left.kind === right.kind && left.id === right.id;
 }
 

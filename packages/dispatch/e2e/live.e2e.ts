@@ -471,10 +471,13 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 18 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 20 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
-  // margin's open-ask count, the stream connection, two active-sessions/Conversation
-  // event reads, the primary artifact's comments, the margin's own issue-asks list,
+  // margin's open-ask count, the stream connection, the active-sessions read,
+  // the primary artifact's comments and the margin's own list of the issue's asks -
+  // which are the two reads the Conversation's own list shares rather than fetching
+  // again - the issue's message threads, the two one-row event reads the unread mark
+  // needs (the first event past the watermark, and the issue's head),
   // Conversation's live-agent query, the one block-schema fetch every document
   // surface shares for the session, the header's lookup of the project's
   // architecture source (the `Components:` line offers its picker only when the
@@ -486,12 +489,14 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // the credential requests waiting on the viewer, which the Needs-you badge counts beside
   // the inbox on every page, and `me/replies?limit=1`, whose total the Replies badge counts on
   // every page (the sidebar's on desktop, the compact header's on phone).
+  // The Conversation pages no event log at all now that the history is the Activity tab's,
+  // and the Activity panel is unmounted until its tab is opened, so it adds nothing here.
   // The header's assignee picker reads who has signed in only once the reader
   // reaches for it, so it is not in this count. The phone project (iphone) does not
-  // fetch the sidebar while its drawer is closed, so it uses 16. Asserted exactly (not
+  // fetch the sidebar while its drawer is closed, so it uses 18. Asserted exactly (not
   // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 16 : 18);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 18 : 20);
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/settings/repo-projects"))
   ).toHaveLength(1);

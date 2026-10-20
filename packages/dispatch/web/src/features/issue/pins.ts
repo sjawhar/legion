@@ -35,6 +35,12 @@ export interface PinnedConversation {
   readonly id: string;
 }
 
+/** A conversation's own id, the one its card and its pin marker both spell: `<kind>:<id>`,
+ *  which `pinnedConversations` reads back apart. */
+export function conversationItemId(kind: ConversationPinKind, id: string): string {
+  return `${kind}:${id}`;
+}
+
 /** `conversationId` is a conversation's own id (`ask:<id>`, `comment:<id>`, `message:<id>`). */
 export function isPinnedConversation(dismissed: string[], conversationId: string): boolean {
   return dismissed.includes(pinnedItemMarker(conversationId));

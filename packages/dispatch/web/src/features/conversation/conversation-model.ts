@@ -1,5 +1,6 @@
 import type { Comment, CommentDelivery, IssueAskRow, Message, MessageRead } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
+import { conversationItemId } from "../issue/pins";
 import { rowAnsweredWithError } from "./delivery";
 
 /** Stored delivery rows include `pending`; `answeredWithError` is read off the row the same way
@@ -66,7 +67,7 @@ export function commentDeliveries(
 }
 
 /** Whether a comment thread is done with: resolved, or its suggestion accepted or rejected. */
-export function isClosedComment(comment: Comment): boolean {
+function isClosedComment(comment: Comment): boolean {
   return comment.resolved || (comment.suggestion !== null && comment.suggestion.accepted !== null);
 }
 
@@ -84,7 +85,7 @@ function isUnread(at: string, unreadFrom: string | undefined): boolean {
 
 /** The comment at the top of `comment`'s reply chain: the first with no `reply_to`, or the last
  *  one present when a parent is missing. A cyclic chain stops at the first repeated comment. */
-function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Comment {
+export function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Comment {
   const visited = new Set<string>();
   let root = comment;
   while (root.reply_to !== null && !visited.has(root.id)) {
@@ -110,7 +111,7 @@ function askConversation(ask: IssueAskRow, unreadFrom: string | undefined): Conv
     ask,
     at,
     closed: ask.state !== "open",
-    id: `ask:${ask.id}`,
+    id: conversationItemId("ask", ask.id),
     kind: "ask",
     unread: isUnread(at, unreadFrom),
   };
@@ -128,7 +129,7 @@ function commentConversations(
     if (comment.ask_id !== null) {
       continue;
     }
-    const root = comment.reply_to === null ? comment : rootOf(byId, comment);
+    const root = rootOf(byId, comment);
     if (root.reply_to !== null || root.ask_id !== null) {
       continue;
     }
@@ -150,7 +151,7 @@ function commentConversations(
     return {
       at,
       closed: isClosedComment(root),
-      id: `comment:${root.id}`,
+      id: conversationItemId("comment", root.id),
       kind: "comment" as const,
       replies,
       root,
@@ -173,7 +174,7 @@ function messageConversation(read: MessageRead, unreadFrom: string | undefined):
   const base = {
     at,
     closed: false,
-    id: `message:${read.message.id}`,
+    id: conversationItemId("message", read.message.id),
     replies,
     root: read.message,
     unread: isUnread(at, unreadFrom),
@@ -236,24 +237,24 @@ export function focusConversation(
     return undefined;
   }
   if (asks.some((ask) => ask.id === itemId)) {
-    return { id: `ask:${itemId}` };
+    return { id: conversationItemId("ask", itemId) };
   }
   const comment = comments.find((row) => row.id === itemId);
   if (comment !== undefined) {
     if (comment.ask_id !== null) {
-      return { id: `ask:${comment.ask_id}`, replyId: comment.id };
+      return { id: conversationItemId("ask", comment.ask_id), replyId: comment.id };
     }
     const root = rootOf(new Map(comments.map((row) => [row.id, row])), comment);
     return root.id === comment.id
-      ? { id: `comment:${root.id}` }
-      : { id: `comment:${root.id}`, replyId: comment.id };
+      ? { id: conversationItemId("comment", root.id) }
+      : { id: conversationItemId("comment", root.id), replyId: comment.id };
   }
   for (const { message, replies } of messages) {
     if (message.id === itemId) {
-      return { id: `message:${message.id}` };
+      return { id: conversationItemId("message", message.id) };
     }
     if (replies.some((reply) => reply.id === itemId)) {
-      return { id: `message:${message.id}`, replyId: itemId };
+      return { id: conversationItemId("message", message.id), replyId: itemId };
     }
   }
   return undefined;

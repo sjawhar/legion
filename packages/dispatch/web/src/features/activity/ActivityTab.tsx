@@ -1,5 +1,5 @@
 import { replaceEqualDeep, useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 
 import { api } from "../../api/client";
 import { type EventPages, mergeEventPages } from "../../api/sse";
@@ -62,19 +62,27 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
       ),
   });
   const issueState = stateForIssue(state, issueKey);
-  const events = log.data?.pages.flat() ?? [];
+  const events = useMemo(() => log.data?.pages.flat() ?? [], [log.data]);
   // A claim line names a session, so it reads the registry like every other author line; nothing
   // is fetched for a history with no claim in it.
   const { titles } = useAgents(
     visible &&
       events.some((event) => event.type === "issue.claimed" || event.type === "issue.released")
   );
-  const items = buildActivityItems({
-    events,
-    lastReadSeq: issueState.last_read_seq,
-    titles,
-    today: dateKey(new Date().toISOString()),
-  });
+  // The day the reader is in, recomputed every render so a midnight rollover moves the `Today`
+  // label; the model itself is rebuilt only when one of its inputs changes, since building it
+  // copies, sorts, describes and re-walks the whole history.
+  const today = dateKey(new Date().toISOString());
+  const items = useMemo(
+    () =>
+      buildActivityItems({
+        events,
+        lastReadSeq: issueState.last_read_seq,
+        titles,
+        today,
+      }),
+    [events, issueState.last_read_seq, titles, today]
+  );
 
   const togglePin = (eventId: number) => {
     let operation: PinStateOperation | undefined;
@@ -143,6 +151,7 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
             );
           }
 
+          const author = resolveAuthor(item.author, titles).label;
           const pinned = isPinnedEvent(issueState.dismissed, item.event.id);
           return (
             <li
@@ -156,11 +165,8 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
                   be a whole sentence - and only the description wraps, with a floor so it
                   wraps as prose rather than one word per line. */}
               <span className="flex max-w-full min-w-0 shrink-0 items-baseline gap-x-2 whitespace-nowrap">
-                <span
-                  className="min-w-0 truncate font-medium"
-                  title={resolveAuthor(item.author, titles).label}
-                >
-                  {resolveAuthor(item.author, titles).label}
+                <span className="min-w-0 truncate font-medium" title={author}>
+                  {author}
                 </span>
                 <span aria-hidden="true">·</span>
                 <Timestamp at={item.at} />

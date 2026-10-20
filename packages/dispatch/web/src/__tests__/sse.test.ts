@@ -708,11 +708,10 @@ function keySet(keys: readonly (readonly unknown[])[]): string[] {
 }
 
 /** The Conversation builds its list from the issue's own asks, comments and messages
- *  (`features/conversation/ConversationTab.tsx`), under keys of its own, so each of those
- *  lists refreshes exactly when the list it mirrors does - never on its own schedule. */
+ *  (`features/conversation/ConversationTab.tsx`). Its asks and its comments are the reads the
+ *  margin already holds, under the keys it owns, so only the message list is a key of the
+ *  Conversation's own - and it refreshes exactly when the Agents-page list it mirrors does. */
 const CONVERSATION_LISTS: Record<string, string> = {
-  asks: "issue-asks",
-  comments: "issue-comments",
   messages: "issue-messages",
 };
 

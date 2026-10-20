@@ -37,7 +37,7 @@ import {
 } from "../../theme/classes";
 import { deliveryAttempts } from "../agents/attempts";
 import { AskCard } from "../inbox/AskCard";
-import { isPinnedConversation, stateForIssue } from "../issue/pins";
+import { conversationItemId, isPinnedConversation, stateForIssue } from "../issue/pins";
 import {
   applyPinStateOperation,
   issueStateTransport,
@@ -214,6 +214,7 @@ function ConversationReply({
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
   });
   const author = resolveAuthor(reply.author, titles);
+  const capabilities = capabilitiesForTarget(root.root.target, agents);
   const lastAttempt = reply.deliveries.at(-1);
   const targetName = targetNameOf(reply.deliveries, root.root.target, agents);
   const answer = root.replies.find(
@@ -238,12 +239,9 @@ function ConversationReply({
               retry: isClosed
                 ? undefined
                 : {
-                    canAside:
-                      capabilitiesForTarget(root.root.target, agents)?.includes("aside") !== false,
-                    canBtw:
-                      capabilitiesForTarget(root.root.target, agents)?.includes("btw") !== false,
-                    canSteer:
-                      capabilitiesForTarget(root.root.target, agents)?.includes("steer") !== false,
+                    canAside: capabilities?.includes("aside") !== false,
+                    canBtw: capabilities?.includes("btw") !== false,
+                    canSteer: capabilities?.includes("steer") !== false,
                     onRetry: retry.mutate,
                     retrying: retry.isPending,
                   },
@@ -262,7 +260,7 @@ function ConversationReply({
             : buildIssuePath({ id: reply.in_reply_to, key: issueKey, kind: "message" }),
       }}
       replyDisabled={replyDisabled}
-      turnID={`message:${reply.id}`}
+      turnID={conversationItemId("message", reply.id)}
     />
   );
 }
@@ -577,7 +575,7 @@ function CommentTurn({
       setSavingCommentEditId(id);
       try {
         const comment = await api.editComment(id, { body });
-        await queryClient.invalidateQueries({ queryKey: ["issue-comments", issueKey] });
+        await queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
         return comment;
       } finally {
         setSavingCommentEditId(undefined);
@@ -599,7 +597,7 @@ function CommentTurn({
     mutationFn: (delivery: CommentDeliveryAttempt) =>
       api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery),
     onSettled: () => retryGuard.release(),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-comments", issueKey] }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] }),
   });
   const thread: CommentThread = {
     anchor: item.root.anchor,
@@ -818,12 +816,15 @@ export function ConversationTab({
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
   // The three reads the list is built from, each the issue's whole set: a conversation is listed
   // however old it is, which no window of the event log could promise.
+  // The asks and the comments are the reads the margin already holds for this issue, under the
+  // keys it owns (`features/margin/useAnsweredAsks.ts`, `features/margin/useMarginItems.ts`):
+  // the same requests, shared rather than fetched and stored a second time.
   const asks = useQuery({
-    queryKey: ["issue-asks", issueKey],
+    queryKey: ["asks", issueKey],
     queryFn: () => api.listIssueAsks(issueKey, "all"),
   });
   const comments = useQuery({
-    queryKey: ["issue-comments", issueKey],
+    queryKey: ["comments", issueKey],
     queryFn: () => api.listComments(issueKey),
   });
   const messages = useQuery({
@@ -928,7 +929,7 @@ export function ConversationTab({
     // reply the reader was writing as they were, and a thread whose own reply is out stays open,
     // which closing would unmount.
     onSuccess: ({ id, kind }) => {
-      void queryClient.invalidateQueries({ queryKey: ["issue-comments", issueKey] });
+      void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
       if (kind === "reopen") return;
       if (queryClient.isMutating({ mutationKey: threadReplySendKey(sendKey, id) }) > 0) return;
       setThreadOpen(id, false);
@@ -949,10 +950,11 @@ export function ConversationTab({
   };
   const phoneReplyTargetsThread =
     phoneThread !== undefined && phone.replyTo?.id === phoneThread.root.id;
-  // `useFollowLatest` counts arrivals by a number per row that rises with the row's recency; the
-  // list is ordered by activity, so that number is the activity's own millisecond.
-  const itemSeqs = useMemo(() => shown.map((conversation) => Date.parse(conversation.at)), [shown]);
-  const follow = useFollowLatest({ enabled: visible, itemSeqs, ownSendCount });
+  // `useFollowLatest` follows the newest card by a number that rises with its recency; the list
+  // is ordered by activity, so that number is the activity's own millisecond.
+  const newestShown = shown.at(0);
+  const latestItemSeq = newestShown === undefined ? undefined : Date.parse(newestShown.at);
+  const follow = useFollowLatest({ enabled: visible, latestItemSeq, ownSendCount });
   const { agents, titles } = useAgents(visible);
   const hasFailedOps = failedOps?.issueKey === issueKey;
   const scrolledToFocus = useRef<string | undefined>(undefined);

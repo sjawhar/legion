@@ -893,7 +893,7 @@ test("under Open, a comment resolved while its thread is open stays until the th
 
     stub.lists.comments = [{ ...root, resolved: true }];
     await act(async () => {
-      await queryClient.invalidateQueries({ queryKey: ["issue-comments", "CORE-1"] });
+      await queryClient.invalidateQueries({ queryKey: ["comments", "CORE-1"] });
     });
     expect(screen.getByText("Root comment")).toBeTruthy();
     expect(screen.getByRole<HTMLTextAreaElement>("textbox", { name: "Reply" })).toBe(field);
