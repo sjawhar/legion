@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -825,12 +826,41 @@ func TestRunBootRepairRevokesAStaleSecretBeforeItMintsAGrant(t *testing.T) {
 	}
 }
 
+// reconcileHold is the fake runtime whose boot orphan reconciliations — the ones at grace 0 —
+// refuse, as a Sandbox listing that times out does, until the test releases it, and then refuse
+// once more. A boot attempt reads the daemon's claims before it calls the runtime, so an attempt
+// already in flight when the release lands carries a claim list read before it; refusing that one
+// makes the attempt that succeeds the first whose read follows the release. The sweep's own
+// reconciliation, at the orphan grace, is the fake's.
+type reconcileHold struct {
+	*fake.Runtime
+	released atomic.Bool
+	passed   atomic.Bool
+}
+
+func (r *reconcileHold) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
+	if err := r.Runtime.ReconcileOrphans(ctx, known, grace); err != nil || grace != 0 {
+		return err
+	}
+	if r.released.Load() && r.passed.Swap(true) {
+		return nil
+	}
+	return errors.New("sandboxes list timed out")
+}
+
+// release lets the boot reconciliation after the next one succeed.
+func (r *reconcileHold) release() { r.released.Store(true) }
+
 // A boot reconciliation retried after boot reads the claims as they are at the retry, never as
-// the boot read them. Under the sandbox runtime the sweep deletes every Sandbox no known claim
-// owns, with no grace at boot, so a retry told the boot's snapshot would delete the Sandbox — and
-// with it the issue's volume — of a claim launched and suspended since. The attempt that succeeds
-// must know that claim; whether it saw the claim before or after the suspension committed is
-// scheduling, and either keeps its Sandbox.
+// the boot read them. Its known set decides which recorded processes the runtime adopts into its
+// watch and, under tmux, which restored panes it keeps; under the sandbox runtime an issue Sandbox
+// is kept by its tree's lifecycle whatever known says, and the controller's Sandbox by known or by
+// the store's claim read under the pod's turn. The attempt that releases the unfinished launch must
+// know the claim admitted since boot.
+//
+// The runtime holds every boot attempt back until this test releases it, and one attempt after
+// that, so the attempt that succeeds is the first one whose claims are read after the suspension
+// committed: a retry that answered from the boot's snapshot would still miss the claim.
 func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
@@ -840,8 +870,7 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
 	})
 	writePrompt(t, cfg, unfinished)
-	rt := fake.NewRuntime()
-	rt.FailReconcileOrphans(errors.New("sandboxes list timed out"))
+	rt := &reconcileHold{Runtime: fake.NewRuntime()}
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
@@ -850,14 +879,14 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
 	suspended := d.spawn(worker)
-	readyClaim(t, d, rt, suspended)
+	readyClaim(t, d, rt.Runtime, suspended)
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(suspended)+"/suspend", nil, true); status != http.StatusOK {
 		t.Fatalf("suspend = %d; body %s", status, body)
 	}
 	if c := d.claim(suspended); c.State != string(supervise.StateSuspended) || c.Locator != nil {
 		t.Fatalf("the claim launched after boot is %s with locator %+v, want suspended with none", c.State, c.Locator)
 	}
-	rt.FailReconcileOrphans(nil)
+	rt.release()
 
 	testwait.Eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
 	// The attempt that succeeded is the last boot reconciliation (grace 0; the sweep's is two
