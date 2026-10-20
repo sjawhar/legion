@@ -1996,8 +1996,10 @@ test("a document ask links its project and document page", async () => {
   ]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // A document has no assignee, so the Inbox lists its question under the Unassigned filter
+  // rather than in the reader's own default list.
   const view = render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={["/?assignee=unassigned"]}>
       <QueryClientProvider client={queryClient}>
         <Inbox />
       </QueryClientProvider>
