@@ -1383,11 +1383,13 @@ test("clearing the filter lists every question, and Assign to me takes one under
     expect((await patch).postDataJSON()).toEqual({ assignee: "alice" });
     await expect.poll(() => getIssue(nobodys.key)).toMatchObject({ assignee: "alice" });
 
-    // The row is hers now, so it leaves the list of what nobody holds - once the reader's hand
-    // is off it, since a row under focus or the pointer is held where they last saw it.
-    await page.mouse.move(0, 0);
-    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // The row is hers now, so it leaves the list of what nobody holds. A row the reader's hand
+    // is still on is held where they last saw it (`heldRow`), and a tap leaves a touch device's
+    // hand on it, so the list is read again rather than waiting for a release this test is not
+    // about.
+    await page.reload();
     await expect(rowOf(nobodysAsk.id)).toHaveCount(0);
+    await expect(page.locator("[data-inbox-row]")).toHaveCount(1);
     await page.goto("/");
     await expect(rowOf(nobodysAsk.id)).toHaveAttribute("data-inbox-section", "human");
     await expect(page.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
