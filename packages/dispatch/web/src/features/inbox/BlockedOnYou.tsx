@@ -51,9 +51,13 @@ export function waitingOnYou(asks: readonly InboxRow[], viewer: string | undefin
  *  the same thing whatever the list on screen is filtered to, and another kind of waiting item
  *  is added here once. An ask is counted only once the login resolves - a number taken over the
  *  whole inbox while the shell loads would not be the reader's - which `waitingOnYou` already
- *  does; a credential request is not scoped to a reader at all (anyone signed in may decide
- *  one), so it counts from the moment it is listed, as it did before the asks became the
- *  reader's own. A time `compareTimestamps`
+ *  does; a credential request needs no login of the SPA's to scope it, because the list is
+ *  already the caller's own: the browser may ask only `?approver=me` and Dispatch resolves it
+ *  from the auth token, refusing any other value with `APPROVER_ME_ONLY`
+ *  (`resolveApproverMe`, `packages/envoy/internal/dispatch/api/credential_requests.go`). So a
+ *  request counts from the moment it is listed, as it did before the asks became the reader's
+ *  own - a guard here would have suppressed requests that are the reader's by construction. A
+ *  time `compareTimestamps`
  *  refuses still counts but is never the oldest: the broker's `requested_at` reaches here
  *  verbatim, and the badges render in the app shell, outside every page's error boundary, so a
  *  throw here would take down every page. */
