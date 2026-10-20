@@ -820,11 +820,11 @@ func (r *reconcileHold) ReconcileOrphans(ctx context.Context, known []runtime.Kn
 func (r *reconcileHold) release() { r.released.Store(true) }
 
 // A boot reconciliation retried after boot reads the claims as they are at the retry, never as
-// the boot read them: its known set is what each runtime keeps of what it did not launch itself —
-// the project controller's Sandbox under the sandbox runtime, the pane a restored claim's locator
-// names under tmux — and a boot reconciliation sweeps with no grace at all. The attempt that
-// releases the unfinished launch must therefore know the claim admitted since boot, whose own
-// Sandbox holds its issue's volume.
+// the boot read them. Its known set decides which recorded processes the runtime adopts into its
+// watch and, under tmux, which restored panes it keeps; under the sandbox runtime an issue Sandbox
+// is kept by its tree's lifecycle whatever known says, and the controller's Sandbox by known or by
+// the store's claim read under the pod's turn. The attempt that releases the unfinished launch must
+// know the claim admitted since boot.
 //
 // The runtime holds every boot attempt back until this test releases it, and one attempt after
 // that, so the attempt that succeeds is the first one whose claims are read after the suspension
