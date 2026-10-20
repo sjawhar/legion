@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-42",
+  "completed": "2026-10-20T14:05:00Z",
+  "implementerProof": {
+    "verdict": "rejected",
+    "how": "Drove the same surface independently rather than re-running CI: Debian's postgresql-17 plus pgvector unpacked rootless into /legion/pgrig (this pod has no psql, docker or root), the real Go server started through packages/dispatch/e2e/run-server.sh on it, the production SPA built from this head with `bun run build:web`, the fake Envoy and fake broker listeners up, and a real Chromium driving the pages. Eight of the nine proof entries reproduced criterion by criterion (see `proof`). Entry 6 did not: it records that `Waiting on agent` opens `/?agent=planner-session&assignee=everyone` 'with exactly the two rows it counted', and that list holds every open ask of that session - 5 rows in my run for a pill of 2. The run it cites says the same: e2e/agents.e2e.ts:290-300 asserts the human-turn row 'First' is visible there beside the two counted."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "An Agents card's second number counts what waits on that session in its own right, and each pill's number equals the number of rows its link opens (implement.json proof entry 6; PR body bullet 'its pill opens the list it counted').",
+      "evidence": "At head 981f0966625bd5ad5dafe04a2779318bb727dfa7 on the real dashboard, the Planner card read `Needs you 2` and `Waiting on agent 2`. Following `Needs you 2` (`/?agent=planner-session&section=needs-you`) opened exactly 2 rows. Following `Waiting on agent 2` (`/?agent=planner-session&assignee=everyone`) opened 5 rows: 3 with `data-inbox-section=\"human\"`, 2 with `\"agent\"`, and one more folded under `Later (1)`. Cause read in the source: `AskCountPill` passes `section=\"needs-you\"` for the first pill and no section for the second (web/src/features/agents/AgentsPage.tsx:729-750), and `InboxRoute.section` has only the one value (web/src/features/refs/routes.ts:52-55, 810), so the second pill cannot narrow to the band it counted. The claim is also in the PR body and in the code comment at AgentsPage.tsx:744-746 ('the link clears the filter and the list holds exactly what the pill counted'), while e2e/agents.e2e.ts:290-300 pins the opposite behaviour by asserting the extra human-turn row is visible. No red test accompanies this finding on purpose: pinning parity would choose one of two fixes the architect owns - give the agents band its own `section` value and narrow the second pill's link (which also rewrites the assertions at agents.e2e.ts:293-300), or keep the behaviour, which the spec permits since it only requires the second number be counted in its own right, and correct the handoff entry, the PR body bullet and that comment. Reported to the architect with both options."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "Opening the Inbox lists only questions on issues assigned to the reader, every visit, with no switch and no Unassigned band on the page.",
+      "surface": "The Dispatch dashboard itself - the real Go server (packages/dispatch/e2e/run-server.sh) on Postgres 17 with pgvector unpacked rootless into /legion/pgrig, the production SPA built from this head, and a real Chromium.",
+      "command": "bash /legion/pgrig/setup-pg.sh; DATABASE_URL=postgres://postgres@127.0.0.1:5433/dispatch_e2e bash packages/dispatch/e2e/run-server.sh; bash /legion/pgrig/reseed.sh; then drove http://127.0.0.1:8777/ signed in as alice (dev sign-in), reloaded it, opened /?assignee=everyone and returned to the bare /.",
+      "observed": "Alice, who holds two of the project's four issues, sees exactly her two rows under `Waiting on you` and `Waiting on agents`, the trigger reading `Assignee · you`, no Mine/Everyone control anywhere on the page (`switchPresent: false`) and no Unassigned band; a reload opens the same way, and after `/?assignee=everyone` (six rows) the bare `/` is her two rows again. A reader holding nothing (carol) opens `/` to no rows, `Nothing needs you`, and no count beside Inbox.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "`/?assignee=everyone` in the same browser listed all six open questions, Bob's and the unowned ones included - so the empty-handed default is who the reader is, not a page that lists nothing."
+    },
+    {
+      "criterion": "The filter takes several people at once and an Unassigned choice, and a text box narrows the options to every person who has signed in.",
+      "surface": "The same dashboard, the popover driven by pointer and keyboard.",
+      "command": "Clicked `Filter by assignee`, typed `bo` in `Search people`, then `zzz`, cleared it, then ticked `Unassigned` and `bob`.",
+      "observed": "The popover opens with `Search people` focused and lists `Unassigned`, `alice` (marked `you`), `bob`, `carol` - the same people the issue page's `Assignee of CORE-1` control offers once reached for, and the same four `GET /api/v1/users` returns. `bo` leaves one option, `bob`. Ticking `Unassigned` then `bob` leaves the trigger reading `Assignee · 3` and lists all six questions.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "A search for `zzz` listed no option, showed the control's own `No matching person.` line, and left the list exactly as it was (two rows, the reader's own)."
+    },
+    {
+      "criterion": "Clearing the filter leaves every question in the list, and the default list re-opened holds only the reader's.",
+      "surface": "The same dashboard.",
+      "command": "Opened `/?assignee=everyone`, then the bare `/`.",
+      "observed": "`everyone` listed all six open questions - the project document's and the unowned issue's included - with the trigger reading `Assignee · everyone` and the band heading changing from `Waiting on you` to `Waiting on a person`; the bare `/` immediately after held the reader's two rows.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "`/?assignee=carol`, a person who holds nothing, listed no rows and said `Nothing matches this filter` - so `everyone` widens rather than the list having grown."
+    },
+    {
+      "criterion": "The filter is in the address and a link carries it; an address naming somebody unknown lists nothing and refuses nothing.",
+      "surface": "The same dashboard, with a second signed-in reader opening the address the first produced.",
+      "command": "Each pick read off the address bar; then signed in as bob and opened `/?assignee=alice&assignee=unassigned&assignee=bob`; then `/?assignee=nobody@example.invalid` with the network log captured.",
+      "observed": "Every pick appends one value: `/?assignee=alice&assignee=unassigned`, then `…&assignee=bob`. Bob, opening that address, sees the same six rows, the document question among them, with his own `Needs you 1` beside Inbox. Old and malformed addresses degrade rather than break: `/?view=mine`, `/?view=everyone`, `?assignee=` and `?assignee=ALICE` all open the reader's own list, `?assignee=alice&assignee=alice` lists it once, and `?assignee=everyone&assignee=bob` reads as bob.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "`/?assignee=nobody@example.invalid`: no rows, `Nothing matches this filter`, the trigger still naming the value (`Assignee · nobody@example.invalid`), and the request log shows only `GET /api/v1/inbox -> 200` - nothing refused, the split is client-side."
+    },
+    {
+      "criterion": "Every count of work waiting on the reader means the same thing and does not move with the filter; assigning one more issue to the reader moves them together.",
+      "surface": "The same dashboard: the rail badge, the Inbox banner, the project page's pill and the Agents card read in one run.",
+      "command": "Read `Needs you N`, `Blocked on you: N items`, `/projects/CORE/issues`'s pill and the Planner card under `/`, `/?assignee=everyone` and `/?assignee=unassigned`, then pressed `Assign CORE-4 to me` and `Assign CORE-5 to me`, then snoozed CORE-1's question for `Next week`.",
+      "observed": "With one of the reader's questions waiting on a person, every surface read 1; widening to `everyone` (six rows) left the badge and banner at 1. Each `Assign … to me` moved the badge, the banner and the Agents card's first number together (1→2→3), and the project pill read `Blocked on you · 2` while the project held six questions. Snoozing one of the reader's questions moved the row into a folded `Later (1)` and dropped badge and banner together, 3→2.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "Bob's own question, open and waiting on a person in the same project, is in none of Alice's numbers at any filter setting, and his browser shows his own `Needs you 1` on the very address that gives her 2."
+    },
+    {
+      "criterion": "\"Assign to me\" takes a question wherever the list shows it, and a question on a document never offers it.",
+      "surface": "The same dashboard, with the write observed on the wire and the issue re-read from the API.",
+      "command": "Under `/?assignee=unassigned`, pressed `Assign CORE-4 to me`; later `Assign CORE-5 to me` with its PATCH faked 500 by a route, then its `Retry`; then pressed `Assign CORE-6 to me` twice in one tick.",
+      "observed": "The press sent `PATCH /api/v1/issues/CORE-4` with 200, the API then reported the issue as alice's, the row left the Unassigned list, and `/` showed it under `Waiting on you`. The project document's row carries no Assign control at all (the only `Assign … to me` labels on the page named issues). A refused write keeps its row in the list the filter would otherwise drop, showing the server's reason (`assign refused by the tester`) and a `Retry` that then succeeded (`PATCH … 200`, assignee `alice`). A double press sent two PATCHes, both 200, and left the issue assigned once with no error shown.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "A question another person took out of band while the Unassigned list was open (`PATCH /api/v1/issues/CORE-7` as bob) disappeared from that live list within seconds, its Assign control with it - the control is never offered for an issue somebody already holds."
+    },
+    {
+      "criterion": "Escape inside the filter's popover closes the popover and nothing else (the page's \"clear the selection\" is withheld while it is open).",
+      "surface": "The same dashboard's keyboard.",
+      "command": "Marked one row's checkbox, opened the popover, pressed Escape, then pressed Escape again.",
+      "observed": "With one row marked, the first Escape closed the popover, left the mark standing and returned focus to the `Filter by assignee` trigger.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "The second Escape, with the popover shut, cleared the mark - so the first press was withheld rather than simply ineffective."
+    },
+    {
+      "criterion": "The compact-width Inbox drawer, the only Inbox on a phone, opens on the reader and keeps its own filter without navigating the page under it.",
+      "surface": "The same dashboard at a 390x844 phone viewport with touch.",
+      "command": "On `/projects/CORE/issues`, pressed `Open inbox, needs you 3`, read the drawer, then ticked `Unassigned` in the drawer's own filter.",
+      "observed": "The drawer opens with `Assignee · you`, the reader's four rows and no Mine/Everyone control; ticking `Unassigned` makes it `Assignee · 2`, adds the document question and changes the band heading, while the address under it stays `/projects/CORE/issues`.",
+      "headSha": "981f0966625bd5ad5dafe04a2779318bb727dfa7",
+      "negativeControl": "The page's own address never changed through the drawer's picks, so the drawer's filter is its own rather than the page's."
+    },
+    {
+      "criterion": "Static lanes (lint, types, unit, integration and the Playwright suite) are green at the head under test.",
+      "surface": "GitHub Actions on the pull request's code head, read rather than re-run.",
+      "command": "gh api repos/sjawhar/legion/commits/1a84b5ddf70d0cac36339a90ab3882c9d08da92e/check-runs",
+      "observed": "lint, typecheck, test, build, changes, contracts, pi-shared, pi-envoy, pi-legion, claude-envoy, envoy-plugin, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, dispatch, dispatch-memory and pr-title all `success`; the handoff head 981f0966 carries the `skip-checks: true` trailer and so reports none, as the handoff-only push rule intends.",
+      "headSha": "1a84b5ddf70d0cac36339a90ab3882c9d08da92e",
+      "negativeControl": "No CI lane was re-run as evidence for any criterion above; every behavioural claim here comes from the dashboard driven in this pod."
+    }
+  ],
+  "environment": "The issue pod carries no psql, no Postgres, no docker and no root (uid 1000), which is why the implementer recorded CI's `dispatch` job rather than a local run. A real stack is reachable here anyway, and this is the whole recipe, kept outside the workspace so no tracked file moves (scripts at /legion/pgrig/*.sh, nothing under $LEGION_WORKSPACE). 1. Postgres with pgvector, rootless: download five Debian trixie .debs from https://deb.debian.org/debian/pool/main - postgresql-17_17.11-0+deb13u1_amd64.deb and postgresql-client-17 and libpq5 of the same version (p/postgresql-17/), postgresql-17-pgvector_0.8.0-1_amd64.deb (p/pgvector/) and libicu76_76.1-4+b1_amd64.deb (i/icu/, the server binary links it and the image has no ICU) - and unpack each with `dpkg-deb -x <file> /legion/pgrig/root`; the extension lands at root/usr/lib/postgresql/17/lib/vector.so, which Postgres finds because it resolves pkglibdir relative to its own binary. 2. `PATH=/legion/pgrig/root/usr/lib/postgresql/17/bin:$PATH LD_LIBRARY_PATH=/legion/pgrig/root/usr/lib/x86_64-linux-gnu:/legion/pgrig/root/usr/lib/postgresql/17/lib`, then `initdb -D /legion/pgrig/data -U postgres --locale=C --encoding=UTF8` and `pg_ctl -D /legion/pgrig/data -l /legion/pgrig/pg.log -o '-k /legion/pgrig/sock -h 127.0.0.1 -p 5433' -w start`, then `createdb`-equivalent `psql … -c 'create database dispatch_e2e'` and `create extension if not exists vector` in it (the server's own migration 0072 needs that extension and refuses the boot without it). 3. The server: `cd $LEGION_WORKSPACE && DATABASE_URL='postgres://postgres@127.0.0.1:5433/dispatch_e2e?sslmode=disable' DISPATCH_E2E_PORT=8777 bash packages/dispatch/e2e/run-server.sh` - the script is the whole fixture environment (dev sign-in, insecure cookie, test hooks, agent token `e2e-token`, web/dist) and it drops every inherited DISPATCH_*/ENVOY_*/NATS_* variable itself, so a Legion pane's own credentials never reach it; it builds `packages/envoy/dispatch-e2e` first (about four minutes cold). Start `bun e2e/fake-envoy.ts` (port 9021) for the Agents page's session registry and `bun e2e/fake-broker.ts` (port 9024) for credential requests - without the broker every `/api/v1/credential-requests` read is a 503 and the Inbox withholds its empty-state line, which reads as a missing `Nothing matches this filter` until you notice why. 4. The SPA: `cd packages/dispatch && bun run build:web` (vite, about 80 s), which the server serves from web/dist, so the page under test is the production bundle. This pod's installed `proof-sdk-upstream` git dependency is missing its `src/` tree and the build fails on it; `git clone https://github.com/sjawhar/proof-sdk /tmp/proof-sdk && git -C /tmp/proof-sdk checkout dc6a852b2ab45463dc9d3d17762235450c8ff0d6` and copying its `src/` into packages/proof-editor/node_modules/proof-sdk-upstream repairs it (node_modules only; the same gap is why this pod's unit suite fails its Markdown tests while CI passes). 5. Seeding: import e2e/api.ts and e2e/agents.ts straight from a script outside the repository and call createProject/createIssue/patchIssue/createAsk/createArtifactAsk/createComment plus setLiveSessions, each sign-in being a `GET /auth/_dev/signin?login=<name>` (which is also what creates the person). Do not call e2e/seed.ts's resetDatabase unless every harness listener is up - it resets the fake Envoy, GitHub and broker too; truncating every public table except the migration ledger with psql is enough between runs. A question on a project document is `createArtifactAsk(artifact.id, …)`, not an issue ask with an artifact anchor, which the issue route refuses with 404. 6. The browser: the harness's own Chromium through the `browser` tool - `browser.open({url:'http://127.0.0.1:8777/auth/_dev/signin?login=alice'})` to take the cookie, then drive the pages; Playwright's own browsers are not installed and need system libraries this image lacks. One browser means one cookie jar, so switch reader by visiting the dev sign-in route again rather than by opening a second tab. `tab.goto` can time out waiting for `load` on this SPA while the page is in fact rendered: use `{wait_until:'domcontentloaded'}` and settle with a short sleep before reading the DOM. 7. Reading the page: rows are `[data-testid^=ask-]`, their band is `[data-inbox-section]`, the filter is `button[aria-label=\"Filter by assignee\"]` over a `[role=listbox][aria-label=\"Assignee options\"]`, and `tab.route(pattern, {method, status, body})` is how a refusal is forced (a faked 500 on `PATCH /api/v1/issues/<KEY>` is what proved the Assign-to-me refusal path)."
+}
