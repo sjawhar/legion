@@ -2,58 +2,67 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T21:40:00Z",
+  "completed": "2026-10-20T23:05:00Z",
   "proof": [
     {
-      "criterion": "The install lock's wait is bounded, so a stalled holder costs one bump its launch rather than making every role of the pod wait past the registration deadline.",
-      "surface": "The rendered install script itself, run against a cache directory a holder process holds the lock on, in this issue's pod; the bound rendered as `-w 1` for the measurement so the run is quick, and the pre-fix shape (no `-w`) run beside it as the control.",
-      "command": "setsid /usr/bin/flock -- cache sh -c 'sleep 12' & then: sh install-w1.sh /bin/echo AGENT-EXECED   and   timeout 5 sh install-nowait.sh /bin/echo AGENT-EXECED",
-      "observed": "Bounded: exit=1 after 2.03 s — two waits of the bound — with `legion plugins: installing @sjawhar/pi-legion@10.14.0 and @sjawhar/pi-envoy@10.12.0 failed` on stderr and the agent argv never exec'd. Unbounded (today's shape without the flag): still blocked when `timeout 5` killed it, exit=124 at 5.01 s, no output. The mechanism was confirmed before the bound was chosen, the way the reviewer found the defect: a bare `flock` waiter on a held directory under `timeout 3` exits 124 at 3.01 s where `flock -w 2` exits 1 at 2.00 s, so flock excludes on a directory and really did wait forever.",
-      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
-      "negativeControl": "The unbounded run is the control: same rendered script, same holder, same cache, one flag apart — it hangs where the bounded one fails loudly."
+      "criterion": "The install lock's wait holds its relation to the registration deadline at every configuration an operator can set, not only at the defaults.",
+      "surface": "TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline in packages/daemon/internal/runtime/sandbox: four configurations — the daemon's own defaults read through config.LoadForValidation, a halved boot timeout, fewer intervals, and a deadline small enough that the floor bites — each asserting the wait positive, never more than its third of that deadline, and (where the deadline leaves room) two waits plus a second of install still inside it.",
+      "command": "go test -count=1 -run TestTheInstallLockWaitIsABoundInProportion ./internal/runtime/sandbox/",
+      "observed": "Green as it stands. Mutated to the raw third with no floor: `the wait at boot 800ms x 3 intervals is 0s, want a positive bound: a non-positive wait renders -w 0, which is -n, and restores the cold-entry race`. Mutated to a half instead of a third: `the wait at boot 2m0s x 3 intervals is 180s, more than its third of the 6m0s deadline`, with the halved-timeout and fewer-intervals cases failing beside it. Both restored, `ok … 0.021s`, and the file's checksum back to f491869a34cf9b7e.",
+      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
+      "negativeControl": "The test this replaces is the control: it asserted one constant against one deadline read from the defaults, so it would have passed the divisor mutation outright and could never see an operator's setting at all."
     },
     {
-      "criterion": "Two rendered installs of one pod actually serialise on the shared bun cache, rather than the script merely containing the word flock.",
-      "surface": "`TestTwoRenderedInstallsSerialiseOnTheSharedBunCache` in packages/daemon/internal/runtime/sandbox: two rendered scripts, one role state home each, one shared BUN_INSTALL_CACHE_DIR, run concurrently with a stand-in bun — substituted at the script's absolute bun path by the same strings.Replace bunInstallArgs already used, so no production signature widened — that logs `start <id>`, holds 300 ms, logs `end <id>`.",
-      "command": "go test -count=1 -run TestTwoRenderedInstallsSerialiseOnTheSharedBunCache ./internal/runtime/sandbox/ ; go test -count=10 -run TestTwoRenderedInstallsSerialiseOnTheSharedBunCache ./internal/runtime/sandbox/",
-      "observed": "PASS in 1.19 s; ten runs `ok github.com/sjawhar/legion/daemon/internal/runtime/sandbox 11.912s` with no flake. With installLockWaitSeconds mutated to 0 the test fails — `the locked run's log: the log is not two completed installs: [\"start a\" \"end a\"]` — and TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline fails with `installLockWaitSeconds = 0, want a positive bound`, while every substring assertion over the script still passes; restored, both green. With `-w` removed entirely the test still passes, which is right: an unbounded lock still serialises, and the bound is the other test's job.",
-      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
-      "negativeControl": "Built into the test and run every time: the identical harness with the rendered flock prefix stripped must interleave, and a control that fails to interleave in five attempts is a t.Fatal saying the locked run passed vacuously — so a harness that never exercised concurrency can never look green."
+      "criterion": "The derived wait renders the same bound at the defaults, so the change makes the value unconditional rather than different.",
+      "surface": "The rendered install script, printed by a throwaway test that calls installScript with the golden options' BootTimeout and RegistrationIntervals.",
+      "command": "a throwaway test in internal/runtime/sandbox printing the rendered flock line, deleted after the run",
+      "observed": "`boot 2m0s x 3 intervals ->    /usr/bin/flock -w 120 -- \"$cache\" /usr/local/bin/bun add --backend=copyfile --exact '@sjawhar/pi-legion@9.7.0' '@sjawhar/pi-envoy@9.6.1'` — the same -w 120 the constant held. The throwaway was removed.",
+      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
+      "negativeControl": "TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript builds its expected `-w <n>` from installLockWait over the options it configured, so a derivation that rendered anything else for those options fails it."
     },
     {
-      "criterion": "The lock's binary is declared where the image's other tools are, so an image without it fails the build rather than every installing launch.",
-      "surface": "The `toolchain` capability row `legion probe-image` asserts (packages/daemon/internal/capabilities), exercised through its own suite with the stub PATH the capability tests build.",
-      "command": "go test -count=1 ./internal/capabilities/... , then the same with \"flock\" removed from capabilitiestest's stub binaries, then restored",
-      "observed": "Green as it stands (`ok … 23.507s`). With the stub removed: `capability toolchain is missing: flock is not on PATH` from deployment_test.go:45 and image_test.go:104 and :159. Restored: green again. The apt line now names `util-linux` with the reason beside it, and the Dockerfile's toolchain check runs `flock --version`.",
-      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
-      "negativeControl": "The stub removal above is the control; before this round the same removal changed nothing, since no list looked for flock."
+      "criterion": "What a plugin install actually costs, so the next person sizing a timeout, a deadline or a retry budget against it reads a measurement instead of guessing.",
+      "surface": "`bun add --backend=copyfile --exact @sjawhar/pi-legion@10.14.0 @sjawhar/pi-envoy@10.12.0` in an issue pod of this cluster, into a fresh generation directory, with BUN_INSTALL_CACHE_DIR empty and then warm.",
+      "command": "BUN_INSTALL_CACHE_DIR=<empty dir> /usr/local/bin/bun add --backend=copyfile --exact @sjawhar/pi-legion@10.14.0 @sjawhar/pi-envoy@10.12.0, timed, then repeated in a second directory against the cache it filled",
+      "observed": "cold exit=0 in 505 ms, leaving 3.4 MiB of cache and 3.3 MiB installed; warm exit=0 in 32 ms. So the remaining third of the deadline at the defaults, 120 s, covers the install it must cover by two orders of magnitude: the install side does not constrain this bound, the deadline side does. The order of magnitude is the claim — a pod on a cold node pulling from npm is slower.",
+      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
+      "negativeControl": "The warm run is the control for the cold one — same command, same pod, same pair, the cache the only difference — which is also what shows the cold fill, not the install out of it, is both the cost and the race."
+    },
+    {
+      "criterion": "A derived wait that rounds down would restore the race silently, so the floor is a fence rather than tidiness.",
+      "surface": "/usr/bin/flock against a directory a holder process holds, in this pod.",
+      "command": "setsid flock -- cache sh -c 'sleep 10' & then flock -w 0 -- cache /bin/true ; flock -n -- cache /bin/true ; flock -w 1 -- cache /bin/true ; flock -w 3 -- cache /bin/true",
+      "observed": "-w 0: exit=1 after 0.00 s. -n: exit=1 after 0.00 s — byte for byte the same behaviour. -w 1: exit=1 after 1.00 s. -w 3: exit=1 after 3.00 s. So a wait that rounds to zero is no wait at all, and the floor is what stands between a small boot timeout and the unserialised cold fill arriving by arithmetic with every test still green.",
+      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
+      "negativeControl": "The bounded waits are the control for the zero ones: the same binary against the same held lock waits exactly as long as it is told, so the zero case is the flag's meaning rather than a broken rig."
     },
     {
       "criterion": "The lock rather than the retry is what removes the cold-fill failures — the question this implementer's own before/after could not answer.",
-      "surface": "The tester's own control, recorded in .legion/INFRA-31/test.json round nine and cited here by name rather than re-derived: the rendered script with flock removed and the retry kept, run six-way cold in the tester's container.",
-      "command": "the tester's rendered six-way cold run with the flock prefix stripped and `legion_install || legion_install` left in place",
-      "observed": "2 of 6 failed both attempts on its first cold run, and the second run passed only with `ENOENT: failed copying files from cache to destination` in two roles' logs, succeeding on the retry. So the retry alone masks the race sometimes and not always; with the lock in place the tester's four post-fix cold runs were 6 of 6 exit 0 with ENOENT absent from every log.",
-      "headSha": "9f809c186bfd34e65340e104cc2bc494a1a482db",
+      "surface": "The tester's control, recorded in .legion/INFRA-31/test.json and cited by name rather than re-derived: the rendered script with flock removed and the retry kept, run six-way cold in the tester's container.",
+      "command": "the tester's six-way cold run with the flock prefix stripped and `legion_install || legion_install` left in place",
+      "observed": "2 of 6 failed both attempts on its first cold run, and its second passed only with `ENOENT: failed copying files from cache to destination` in two roles' logs, succeeding on the retry. With the lock in place the tester's post-fix cold runs were 6 of 6 exit 0 with ENOENT absent from every log.",
+      "headSha": "958bda1496195a30e1f595825ee3fb48a536291b",
       "negativeControl": "The tester's pre-fix cold runs (4 of 6 and 2 of 6 failing, no failing role reaching its exec) are the control for the post-fix runs; the flock-removed, retry-kept run is the control that separates the lock from the retry."
     }
   ],
   "filesChanged": [
-    "packages/daemon/internal/runtime/sandbox/plugins.go — `/usr/bin/flock -w installLockWaitSeconds`, a named constant whose comment carries the arithmetic against the registration deadline (worker_boot_timeout_seconds x worker_boot_registration_deadline_intervals) with the script's two attempts counted; the bound stated before the advisory/per-inode sentence; the `${BUN_INSTALL_CACHE_DIR:-<genDir>}` default removed so `set -u` aborts if the runtime ever stops setting it, with the `mkdir -p` kept; and the race's rate restated as the rule plus the measured spread (3, 4, 2 and 3 of six) rather than another experiment's 5 of 6.",
-    "packages/daemon/internal/runtime/sandbox/plugins_test.go — the pins follow the new rendered text; `requireFlock` skips where /usr/bin/flock is absent instead of failing with a message that blames the install; `bunInstallArgs` pins BUN_INSTALL_CACHE_DIR under t.TempDir(), so an in-pod run no longer locks the cache the pod's other roles use and CI exercises the same branch; `TestTwoRenderedInstallsSerialiseOnTheSharedBunCache` with its lockless control; `TestTheInstallLockWaitIsABoundTwoOfWhichFitTheRegistrationDeadline` reading the deadline from the daemon's own defaults.",
-    "packages/daemon/internal/capabilities/{image.go,capabilities.go,image_test.go,capabilitiestest/capabilitiestest.go} — flock joins the toolchain row's checked list, its Summary, the stub binaries and the pinned detail.",
-    "packages/daemon/docker/worker.Dockerfile — util-linux on the runtime apt line with the reason it must not be tidied away, `flock --version` in the toolchain check, and the three enumerating comments and the notices header's package list moved with them.",
-    "docs/kubernetes.md — the bun paragraph now says the wait is bounded, what the bound is sized against and what a timeout does, with the scoped chalk/lodash measurement left exactly as it was; the two operator-facing toolchain lists, the Dockerfile-step list and the `docker run` end-to-end check name flock."
+    "packages/daemon/internal/runtime/sandbox/plugins.go — installLockWaitSeconds (a constant correct only at the defaults) replaced by installLockWait(boot, intervals): a third of runtime.RegistrationDeadline(boot, intervals, 0), taken through that function rather than by re-multiplying, floored at one second; installScript and installArgv take the wait.",
+    "packages/daemon/internal/runtime/sandbox/types.go, sandbox.go — Options.RegistrationIntervals beside BootTimeout, refused when not positive, carried onto the runtime.",
+    "packages/daemon/internal/daemon/kubernetes.go — the field set from cfg.WorkerBootRegistrationDeadlineIntervals, beside BootTimeout.",
+    "packages/daemon/internal/runtime/sandbox/launcher.go — the one call site passes installLockWait(r.bootTimeout, r.registrationIntervals).",
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — the single-constant assertion replaced by the property over four configurations; the rendered-text pin builds its `-w <n>` from the same derivation over the options the spec configured.",
+    "rig_test.go, live_test.go and four internal/daemon tests — the new Options field, since configure now refuses it unset.",
+    "docs/kubernetes.md — the bound's sentence finishes its conditional: a third of the two settings' product, why a proportion rather than a number, and the one-second floor with its reason."
   ],
   "trickyParts": [
-    "The bound is one number serving two opposing constraints, which is why the constant's comment shows the arithmetic rather than asserting a value: two timed-out waits (the script installs twice) must fit inside the 360 s registration deadline with room for the install and the agent's start, and the bound must still cover the legitimate case where the last of six roles queues behind five serialised installs. 120 s satisfies both: 2 x 120 = 240 < 360, and 120 s allows those five installs 24 s each.",
-    "`installScript` calls bun by absolute path, so a stub cannot be put on PATH. The way past it was already in the file: bunInstallArgs substitutes the stub for `/usr/local/bin/bun` with strings.Replace on the rendered text. That keeps the rendered script — the lock included — as the thing under test and widens no production signature, which the alternatives (parameterising the bun path, or testing a hand-built lock construct) would have done.",
-    "A serialisation assertion can pass vacuously when the second process merely starts after the first finishes, so the test runs its own lockless control in the same invocation and fails if that control never interleaves."
+    "Reachability was one field short rather than zero: BootTimeout was already on sandbox.Options from cfg.WorkerBootTimeout, but the intervals reached only supervise.Timeouts, so the derivation needed RegistrationIntervals plumbed to the runtime that renders the script.",
+    "Deriving through runtime.RegistrationDeadline rather than re-multiplying means the wait follows the deadline if that ever stops being a plain product — the same discipline as naming a setting rather than a number, applied to a computation.",
+    "The floor dominates below a deadline of about three seconds, where two waits cannot fit. That is deliberate and stated in the test rather than excluded from it: being serialised and then retired by the deadline is no worse than racing, since an unserialised cold fill fails the launch anyway.",
+    "The wait is a parameter of the render because an operator's configuration determines it, which is what production shape is for — deliberately unlike a test's convenience, which this branch refused as a reason to widen a signature when the serialisation test instead substitutes its stub into the rendered text."
   ],
-  "deviations": [
-    "The reviewer filed the behavioural serialisation test as fast-follow; the architect asked for it in this round and it is here, with its control. Nothing else was taken from the fast-follow list."
-  ],
+  "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "`flock` with no `-w` waits without limit, which converts a per-role failure into a pod-wide one as soon as several roles share a lock: the amplification is a property of the lock, not of bun, and it was found by measuring the mechanism (a holder-and-waiter rig) rather than by reading the diff."
+    "A text assertion built from the value it pins cannot see that value change: the substring assertion over the rendered script constructed its expected `-w <n>` from the same constant it was pinning, so a mutation to zero left it green while the behavioural test and the bound's own test failed. Adding more such assertions would not have closed it."
   ]
 }
