@@ -21,8 +21,8 @@ var gitLockReports = []*regexp.Regexp{
 // leaves its lock, and every later write of what it locks fails on it. In a pod no process removes
 // it while the pod runs, since another role's git, in a container whose processes this one cannot
 // see, may hold it; replacing the issue's pod does (`workspace-init provision`,
-// cmd/legion/workspace_init.go). Under tmux nothing removes it. pi-legion's staleGitLockNote
-// (packages/pi-legion/src/git-lock.ts) words the same note for its own jj calls. Empty when
+// cmd/legion/workspace_init.go). Under tmux nothing removes it. The Legion tools' staleGitLockNote
+// (packages/pi-shared/src/git-lock.ts) words the same note for its own jj calls. Empty when
 // output names no lock, or each one it names is already gone.
 func staleGitLockNote(output string, now time.Time) string {
 	var locks, notes []string

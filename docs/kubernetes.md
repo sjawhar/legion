@@ -1305,7 +1305,9 @@ container's first start the `update` finds no such marketplace, so the role's lo
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
-`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. Every
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. It refuses a
+`worker_backends` entry that puts a role on `claude` too, since the worker image carries no Claude
+Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). Every
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
 worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
@@ -2295,11 +2297,15 @@ volume to detach from the old one, which shows as transient `FailedAttachVolume`
 events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
-from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) and `/proc/meminfo`'s
-`MemTotal` is about Σ memory limits of the pod's containers, and an active role may use the pod's
-whole reservation while its siblings idle. The reservation is the pod's working set, not one
-container's; each container's own request and limit are what the API shows, and its requests are
-what the scheduler counts.
+from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) — except on GKE Autopilot,
+confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md): there `nproc` reflects
+gVisor's own host-vCPU presentation instead, a known gap
+([kubernetes/kubernetes#91665](https://github.com/kubernetes/kubernetes/issues/91665)), and the
+pod's own cgroup cpu quota (`cpu.cfs_quota_us`/`cpu.cfs_period_us`) is what actually tracks Σ cpu
+limits there — and `/proc/meminfo`'s `MemTotal` is about Σ memory limits of the pod's containers,
+and an active role may use the pod's whole reservation while its siblings idle. The reservation is
+the pod's working set, not one container's; each container's own request and limit are what the
+API shows, and its requests are what the scheduler counts.
 
 **The bound.** Concurrently running issue pods are bounded by what the pool's `limits.cpu` and
 `limits.memory` leave for pods of the per-pod sum of requests: at the defaults, two pods fit a floor
@@ -2357,6 +2363,20 @@ ephemeral storage is about 629 GiB of it; with CPU and memory placing about two 
 their limits sum to about 160Gi of those 629 GiB, so the bound has room before any request is
 raised. An operator with a known root volume raises `ephemeral_storage_request` toward the role's
 expected use so the scheduler reserves disk and places no pod a full node could not hold.
+
+**GKE Autopilot's bound is per pod, not per node.** The node-disk framing above is AWS/self-managed
+EKS's: ephemeral storage there is the shared node's own root volume, and raising
+`ephemeral_storage_request` toward a role's real use is an operator's own call, bounded only by
+what the node has. GKE Autopilot has no such headroom: Warden, its admission webhook, refuses a
+pod outright once its containers' *summed ephemeral-storage requests* pass 10Gi — a hard ceiling
+*per pod*, confirmed live by [Stage 4a's live proof](../scripts/e2e/README.md) raising every role's
+request to its configured limit (the defaults above: 80Gi summed, two init containers' 10Gi each
+beside them) and having the webhook refuse to schedule the pod at all
+(`autogke-pod-limit-constraints`). Because Legion runs every role of one issue as containers of a
+single pod, that 10Gi is a budget shared across all six roles together: no `legion.yaml`
+`ephemeral_storage_request` can raise more than a small fraction of them past today's 1Gi-request
+default on GKE Autopilot without hitting it — unlike the per-node bound above, this is not
+something an operator's own configuration can size around.
 
 ### Volume retention
 
@@ -2761,7 +2781,7 @@ group). It needs:
 - `sandboxes`: create, get, list, watch, patch, delete; `sandboxes/status`: get;
 - `secrets`: create, delete, update, get, but never list;
 - `pods`: get, list, watch, which the incarnation fence's pod informer reads; `pods/log`: get;
-- `services`: get, list, watch, which the Service informer reads, so a launch hands an issue pod
+- `services`: list, watch, which the Service informer reads, so a launch hands an issue pod
   its repository cache's address only once the Service of that name is the cache's own
   ([The repository cache](#the-repository-cache)); without them the daemon refuses at boot,
   naming the refused list;
@@ -3542,8 +3562,8 @@ directory there, `LEGION_GH_PATH=/usr/local/bin/gh`, `GH_TOKEN=""`, `GITHUB_TOKE
 and the git credential entries every role container is told
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
-prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, with the
-project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
+prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, the
+project's repositories sentence, the project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
 instructions. Both its containers, the init container and the launcher, carry the
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
 the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike unless the file sets a
@@ -3556,15 +3576,17 @@ pool cannot place leaves the probe, and the boot, unaffected
 
 The Sandbox is the claim's alone, where an issue's is its tree's. A release of the claim (a switch
 back, or `legion claims stop`) deletes it, and its role Secret and volume with it. The orphan sweep
-keeps it while the daemon knows the claim, running or suspended, so a suspended controller's
-session survives, and deletes it once the claim is retired. Either delete runs under the pod's
-launch turn and only at the version of the Sandbox it was decided on: a controller relaunched into
-the Sandbox since has written it, so the delete is refused, the daemon logs `sandbox runtime: kept a
-sandbox written since its delete was decided; the orphan sweep decides it again` naming it, and the
-next sweep decides again on the claims known then. The controller Sandbox a daemon made before the
-controller ran in a launcher pod (`role=controller`, one `worker` container), and the one a daemon
-of the tree-volume layout made (a claim template named `tree`), are refused at boot like every
-Sandbox of a layout before this one, each named: remove it before enabling issue pods
+keeps it while the controller's claim is not retired, running or suspended, so a suspended
+controller's session survives, and deletes it once the claim is retired. The sweep reads the claim
+from the store again under the pod's launch turn, so a controller launched after the sweep read the
+daemon's claims keeps its Sandbox. Either delete runs under the pod's launch turn and only at the
+version of the Sandbox it was decided on: a controller relaunched into the Sandbox since has written
+it, so the delete is refused, the daemon logs `sandbox runtime: kept a sandbox written since its
+delete was decided; the orphan sweep decides it again` naming it, and the next sweep decides again.
+The controller Sandbox a daemon made before the controller ran in a launcher pod (`role=controller`,
+one `worker` container), and the one a daemon of the tree-volume layout made (a claim template named
+`tree`), are refused at boot like every Sandbox of a layout before this one, each named: remove it
+before enabling issue pods
 ([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees), step 3).
 
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
@@ -3676,9 +3698,15 @@ keeping nothing until the daemon has answered, the command:
    file, a `nats_nkey_seed_file` that is blank, unreadable, readable by its group or others, or
    holds no nkey user seed, a missing or blank instructions file, and an Oh My Pi invocation that
    does not resolve;
-2. probes that Oh My Pi as the controller will run it, with `omp models`, which starts no session, and
-   refuses a pi-legion it does not load, or one speaking another daemon API contract, loaded without
-   pi-envoy or with a pi-envoy at another plugin interface version, or loaded beside the pre-split package;
+2. reads the project's repositories from the daemon's unauthenticated `GET /legion/v1/state`
+   (`repositories`), since the controller's addressing names them, and refuses a daemon that does
+   not answer, a body with no `repositories` object, and a mapped entry that is not `owner/name`;
+   an empty mapping, or one whose every repository the daemon leaves out, launches the controller
+   all the same, its addressing saying `The daemon maps no repository to this project now` with each
+   repository left out and why. Then it probes that Oh My Pi as the controller will run it, with
+   `omp models`, which starts no session, and refuses a pi-legion it does not load, or one speaking
+   another daemon API contract, loaded without pi-envoy or with a pi-envoy at another plugin
+   interface version, or loaded beside the pre-split package;
 3. asks `POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` and
    the contract step 2 held the plugin to (`{"pluginContract": <N>}`). The daemon compares the token
    in constant time, then refuses a contract that is not its own with 409, naming both, before it
@@ -3715,8 +3743,9 @@ keeping nothing until the daemon has answered, the command:
    wrapper, and refuses to start with neither (`gh is not on PATH`) or when that first `gh` is a
    script, a `gh` wrapper of the operator's machine that would answer in place of the review App;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
-   `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
-   and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
+   `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line,
+   the project's repositories sentence and the deployment instructions, no `--resume`, no
+   `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion
    extension sends it as the session's first turn right after its role claim succeeds and before

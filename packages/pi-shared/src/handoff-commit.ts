@@ -126,14 +126,14 @@ export async function findHandoffCommit(input: HandoffCommitInput): Promise<stri
       `${file} is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff`
     );
   }
-  const user = env.JJ_USER;
+  const user = env["JJ_USER"];
   if (user !== undefined && user !== "") {
     const author = await jj(
       ["log", "-r", carrying, "--no-graph", "-T", 'author.name() ++ "\\n" ++ author.email()'],
       workspace
     );
     const [name = "", email = ""] = author.split("\n", 2);
-    if (name !== user || email !== (env.JJ_EMAIL ?? "")) {
+    if (name !== user || email !== (env["JJ_EMAIL"] ?? "")) {
       throw new Error(
         `${file} is carried by commit ${carrying}, authored by ${name} <${email}>, not this pane's ${user}: run jj new, then write and commit this phase's handoff again`
       );

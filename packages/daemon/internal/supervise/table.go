@@ -92,6 +92,10 @@ const (
 	// TimerSuspend is the held suspension's timer (holdSuspension): the stop timeout of its wait for
 	// the agent's turn, and the retry of a stop that failed.
 	TimerSuspend TimerKind = "suspend"
+	// TimerRelaunch is the retry of a relaunch left waiting with no process (relaunchLater): one whose
+	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
+	// launching with no process until it fires.
+	TimerRelaunch TimerKind = "relaunch"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -273,7 +277,7 @@ func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
-// by its kind, because the five waits mean five different things.
+// by its kind, because the six waits mean six different things.
 type eventKind string
 
 const (
@@ -290,6 +294,7 @@ const (
 	onTurnTimer     eventKind = timerPrefix + eventKind(TimerTurn)
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
+	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -480,12 +485,12 @@ func fillTable(t *builder) {
 	t.ignore(onAcked, noSend, gone...)
 
 	t.row(onRefused, "the prompt was refused (charged) or lost (not charged): re-queue it", refused,
-		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle, StateWorking)
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
 	t.ignore(onRefused, noSend, unready...)
 	t.ignore(onRefused, noSend, gone...)
 
 	t.row(onLateRefusal, "the agent refused an acknowledged prompt", lateRefused,
-		[]ClaimState{StateLaunching, StateFailed}, StateReady, StateIdle, StateWorking)
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateReady, StateIdle, StateWorking)
 	t.row(onLateRefusal, "a prompt was refused while no process can be prompted: the mark it set goes",
 		refusedUnprompted, nil, slices.Concat(unready, gone)...)
 
@@ -511,7 +516,7 @@ func fillTable(t *builder) {
 	t.ignore(onDeadline, "the agent is ready, so the boot watch is over", StateReady, StateWorking, StateIdle)
 	t.ignore(onDeadline, "no boot is being watched", processless...)
 
-	t.row(onTurnTimer, "an acknowledged prompt started no turn", noTurn, []ClaimState{StateLaunching, StateFailed}, prompted...)
+	t.row(onTurnTimer, "an acknowledged prompt started no turn", noTurn, []ClaimState{StateLaunching, StateFailed, StateSuspended}, prompted...)
 	t.ignore(onTurnTimer, "the turn started", StateWorking)
 	t.ignore(onTurnTimer, noSend, unready...)
 	t.ignore(onTurnTimer, noSend, gone...)
@@ -522,6 +527,11 @@ func fillTable(t *builder) {
 	t.row(onSuspendTimer, "the held suspension's deadline stops the turn, or its stop is tried again", suspendAtTimeout,
 		[]ClaimState{StateSuspended}, StateWorking, StateIdle, StateReady, StateLaunching, StateShimConnected, StateRegistered)
 	t.ignore(onSuspendTimer, "no suspension is held", StateQueued, StateLaunchUncertain, StateSuspended, StateRetired, StateFailed)
+
+	t.row(onRelaunchTimer, "the waiting relaunch is tried again, or a suspension held meanwhile ends it", relaunchAgain,
+		[]ClaimState{StateFailed, StateSuspended}, StateLaunching)
+	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
+		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
 
 	// The issue's volume, found lost by another claim of the issue.
 	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,
@@ -937,9 +947,11 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 
 // registrationDeadline is a process that has had its boot intervals and whose agent never became
 // ready — it never registered, or registered and never said it was ready. Without a held
-// suspension, it is retired, counted and relaunched. An operator suspension retained through a
-// rule-resuming launch instead completes here: no ready will arrive to run it, and relaunching
-// would drop the operator's hold.
+// suspension, it is retired, counted and relaunched. A relaunch the tree lifecycle refuses is
+// checked before the retirement, so the process is kept and the deadline tried again at the probe
+// interval, as one whose stop fails is. An operator suspension retained through a rule-resuming
+// launch instead completes here: no ready will arrive to run it, and relaunching would drop the
+// operator's hold.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	if m.held != nil && m.held.By == SuspendedByOperator {
 		return m.suspendHeld(ctx)
@@ -949,6 +961,10 @@ func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 		never = "registered and never said it was ready"
 	}
 	return m.probe(ctx, func(ctx context.Context) error {
+		if err := m.checkLaunch(ctx); err != nil {
+			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
+			return fmt.Errorf("retire %s, whose agent %s: %w", m.claim.Token, never, err)
+		}
 		incarnation := m.claim.Locator.Incarnation
 		if err := m.suspendProcess(ctx); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")

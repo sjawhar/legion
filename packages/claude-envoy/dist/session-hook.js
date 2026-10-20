@@ -14519,6 +14519,17 @@ function dispatchDocumentSubject(project, slug, type) {
 function agentSubject(session) {
   return `${AGENT_TOPIC_PREFIX}${session}`;
 }
+
+// ../contracts/src/legion-roles.ts
+var LEGION_ROLES = [
+  "architect",
+  "planner",
+  "implementer",
+  "tester",
+  "reviewer",
+  "merger"
+];
+var DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
 // ../contracts/src/repo.ts
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
@@ -14845,6 +14856,12 @@ function parseCommand(argv, io) {
   for (let index = 0;index < rest.length; index++) {
     const token = rest[index];
     if (!token.startsWith("--")) {
+      if (ISSUE_KEY.test(token) && surface.flags.has("--issue") && !setBy.has("issue")) {
+        const corrected = [command, ...rest.slice(0, index), "--issue", token];
+        corrected.push(...rest.slice(index + 1));
+        problems.push(`unexpected argument ${token}: use --issue <KEY>, as in: dispatch ${corrected.map(quoteWord).join(" ")}`);
+        continue;
+      }
       problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
       continue;
     }
@@ -14948,6 +14965,7 @@ function appendedItem(kind, flag, value, number4) {
   const parsed = number4(flag, value);
   return parsed === undefined ? undefined : { value: parsed };
 }
+var ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 function quoteWord(value) {
   return BARE_WORD.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
 }
@@ -16621,6 +16639,18 @@ function dispatchRefFromUrl(value, serverUrl) {
 }
 var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
+function innerRefProblem(tool, ref, refText) {
+  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message")
+    return;
+  if (tool === "dispatch_read" || tool === "dispatch_ask")
+    return;
+  const owner = refOwnerName(ref);
+  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
+  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
+  const item = ref.kind === "ask" ? "an ask" : `a ${ref.kind}`;
+  return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
+}
 var toolSchemas = new Map;
 function toolSchema(tool) {
   const cached2 = toolSchemas.get(tool);
@@ -16656,6 +16686,10 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
     ref = parseDispatchRef(refText);
     if (ref === null) {
       problems.push(tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem);
+    } else {
+      const inner = innerRefProblem(tool, ref, refText);
+      if (inner !== undefined)
+        problems.push(inner);
     }
   }
   const issueArgument = args.issue;

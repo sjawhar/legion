@@ -28,6 +28,28 @@ Extends docs/solutions/daemon/launch-hold-serve-state-spawn-nothing-until-proven
   survives a refused attempt: a `relaunching` line that lies, a mark that routes the next
   registration to the charged branch, a task re-prompted to a process that never went away. Skip
   the gate only on the arm that launches nothing (a held suspension, which `endHeld` suspends).
+- A retirement that stops a live process to relaunch it (the registration deadline, a prompt
+  retirement before the last) gates before its stop too, so a refusal keeps the process and the
+  claim keeps a locator every live row can act on. A check that fails during the stop's grace meets
+  the relaunch's own gate with the process already gone (`relaunchRefused`), and the two failures
+  differ. Only `treelifecycle.ErrCleanupReserved` suspends the claim for the daemon, for the tree's
+  close to retire. Any other error is a store that did not answer and ends nothing: a daemon
+  suspension ends the claim's phase (`settle` retires its task), so the claim instead waits
+  `launching` with no process, its task kept, and `TimerRelaunch` tries the same relaunch again at
+  the probe interval (`relaunchLater`;
+  `TestARetirementWhoseRelaunchTheStoreDoesNotCheckKeepsItsTaskAndRelaunchesAtTheProbeInterval`).
+  A launch whose own `launching` write fails after `letGo` has the same shape and waits the same
+  way (`TestARetirementWhoseRelaunchTheStoreDoesNotWriteKeepsItsTaskAndRelaunchesAtTheProbeInterval`):
+  any step that has let the process go and then fails must leave a timer that relaunches, or nothing
+  does before a restart. `letGo` drops the waiting relaunch with its timer.
+- `launching` with no locator is the only live state that records no process, and the fence keeps
+  it so: a hello is dropped and a registration refused there, since neither came from a process
+  the claim records (`TestAHelloOrRegistrationAtALaunchThatRecordsNoProcessPromotesNothing`). A
+  row an earlier daemon wrote live with no locator is repaired at boot: `restore` puts every such
+  claim back to `launch_uncertain`, clears the capability, stale suspension source and enrollment
+  that required its recorded process, revokes that enrollment, and relaunches it
+  (`TestALiveClaimStoredWithNoProcessIsRestoredAsAnUnfinishedLaunchAndRelaunched`;
+  `TestRunBootRepairRevokesAStaleSecretBeforeItMintsAGrant`).
 - A trigger posted once at boot needs a periodic re-post, or a refusal (a tree cleanup reserved,
   a moved epoch, a transient store error) strands the claim in the state the trigger meant to
   leave: ride `reconcileOrphans`, the one periodic pass that already reads every claim, and let

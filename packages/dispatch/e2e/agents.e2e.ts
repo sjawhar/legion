@@ -1062,7 +1062,9 @@ async function expectNoticeWithinBudget(
   }
 }
 
-/** The Agents page at 390x664 with every session selected, and the notice slot's parts. */
+/** The Agents page at 390x664 with every session selected and BTW picked, and the notice slot's
+ *  parts. BTW is picked because these specs measure its exclusions: left unpicked, a selection
+ *  holding an Aside-only session goes as an Aside and excludes nobody. */
 async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   const agents = page.getByRole("region", { name: "Agents" });
   const composer = page.getByRole("region", { name: "Broadcast" });
@@ -1071,6 +1073,7 @@ async function openNoticeFixture(page: Page, sessions: FakeSession[]) {
   await page.goto("/agents");
   await agents.getByRole("checkbox", { name: "Select all matching agents" }).click();
   await expect(composer).toBeVisible();
+  await composer.getByRole("combobox", { name: "Delivery mode" }).selectOption("btw");
   return {
     agents,
     composer,
@@ -1089,8 +1092,8 @@ test("with half the recipients unable to take the mode, the compact composer kee
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    // Planners 21 to 40 advertise `aside` only, so the default BTW mode excludes them. Every
-    // earlier budget fixture excluded nobody, so the Excluded line never rendered there.
+    // Planners 21 to 40 advertise `aside` only, so the fixture's BTW excludes them. Every earlier
+    // budget fixture excluded nobody, so the Excluded line never rendered there.
     const fixture = await openNoticeFixture(page, planners(40, 20));
     await expect(
       fixture.composer.getByRole("heading", { name: "Broadcast to 20 of 40 selected" })

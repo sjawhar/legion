@@ -54,6 +54,12 @@ github_apps:
   review:
     app_id: "100002"
     private_key_command: cat ./review-app.pem
+# worker_backends:                     # runtime: tmux only: a phase worker's role (planner, implementer,
+#   implementer: claude                # tester, reviewer, merger) on omp, the default, or claude: Claude Code
+#                                      # in its pane under `legion claude-bridge`, which needs LEGION_CLAUDE_PLUGIN_DIR
+#                                      # (and LEGION_CLAUDE_PATH, LEGION_BUN_PATH, else PATH) in the daemon's
+#                                      # environment. Under runtime: kubernetes, as in this file, the loader
+#                                      # refuses claude: the worker image carries no Claude Code.
 
 runtime:
   kubernetes:

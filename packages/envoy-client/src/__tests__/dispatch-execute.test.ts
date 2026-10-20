@@ -517,6 +517,61 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  test("refuses an ask, comment or message link where ref names the owner, naming what acts on it", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+    const problemsOf = (tool: string, args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool,
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      }).then(
+        () => {
+          throw new Error(`${tool} was not refused`);
+        },
+        (error: unknown) => {
+          if (!(error instanceof ToolInputError)) throw error;
+          return error.problems;
+        }
+      );
+    const askID = "aaaaaaaa-0000-4000-8000-000000000042";
+    const ask = `dispatch://DSP-42/ask/${askID}`;
+    const commentID = "cccccccc-0000-4000-8000-000000000042";
+    const comment = `dispatch://DSP-42/comment/${commentID}`;
+    const message = "dispatch://DSP-42/message/eeeeeeee-0000-4000-8000-000000000042";
+    const documentAsk = `dispatch://CORE/artifact/runbook-md/ask/${askID}`;
+
+    // Each of these used to act on the owner alone: the comment landed outside the ask's thread.
+    expect(await problemsOf("dispatch_comment", { ref: ask, body: "Shipped." })).toEqual([
+      `ref ${ask} names an ask on DSP-42; dispatch comment would act on DSP-42 and drop the ask: reply under it with reply_to_ask ${askID} and issue DSP-42`,
+    ]);
+    expect(await problemsOf("dispatch_comment", { ref: comment, body: "Agreed." })).toEqual([
+      `ref ${comment} names a comment on DSP-42; dispatch comment would act on DSP-42 and drop the comment: reply in its thread with reply_to ${commentID} and issue DSP-42`,
+    ]);
+    expect(await problemsOf("dispatch_comment", { ref: message, body: "Seen." })).toEqual([
+      `ref ${message} names a message on DSP-42; dispatch comment would act on DSP-42 and drop the message: read it with dispatch read, or name DSP-42 with issue DSP-42`,
+    ]);
+    expect(await problemsOf("dispatch_doc_read", { ref: documentAsk })).toEqual([
+      `ref ${documentAsk} names an ask on CORE/runbook-md; dispatch doc-read would act on CORE/runbook-md and drop the ask: read it with dispatch read, or name CORE/runbook-md with project CORE and artifact runbook-md`,
+    ]);
+    // suggest and doc-edit act on a document, so an issue-owned link's hint names one.
+    expect(
+      await problemsOf("dispatch_suggest", {
+        ref: ask,
+        quote: "old line",
+        replace_with: "new line",
+      })
+    ).toEqual([
+      `ref ${ask} names an ask on DSP-42; dispatch suggest would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42 and artifact <the document's slug>`,
+    ]);
+  });
+
   test("names every bad option element and the unknown field in one refusal", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");

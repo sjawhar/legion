@@ -8,8 +8,12 @@ import type {
   ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
-import type { ChannelNotification, ChannelNotifier } from "../src/envoy-channel-server"
-import { startChannelSession } from "../src/envoy-channel-server"
+import {
+  CHANNEL_CAPABILITIES,
+  type ChannelNotification,
+  type ChannelNotifier,
+  startChannelSession,
+} from "../src/envoy-channel-server"
 import { roleStateFile, SessionIdentity } from "../src/session-identity"
 
 class IdleNats implements ChannelForwarderConnection {
@@ -80,6 +84,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
+    capabilities: CHANNEL_CAPABILITIES,
     client,
     heartbeatMs: 25,
     configFile: { path: join(stateDirectory, "envoy.json"), error: null },
@@ -92,6 +97,55 @@ test("reasserts a restored role after a successful registration heartbeat loses 
       { sessionID: "ses_current", role: "reviewer", soft: true, previousSessionID: "ses_current" },
       { sessionID: "ses_current", role: "reviewer", soft: true },
     ])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("runs the regain hook once a heartbeat's soft claim takes the held role back, and not while the listener still names this session", async () => {
+  const stateDirectory = join(tmpdir(), `claude-envoy-regain-${crypto.randomUUID()}`)
+  let holder = "ses_current"
+  const regains: string[] = []
+  const regained = Promise.withResolvers<void>()
+  const client: Pick<
+    EnvoyClient,
+    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
+  > = {
+    subscribe: async () => interest(),
+    getInterest: async () => interest(),
+    unsubscribe: async () => undefined,
+    unregisterSession: async () => undefined,
+    setRole: async () => {
+      holder = "ses_current"
+      return { claimed: true, interest: interest() }
+    },
+    getRole: async () => {
+      // Healthy ticks see this session; the listener then loses the claim once.
+      const answer = { role: "legion-claim", holder, last_seen: 1 }
+      if (holder === "ses_current" && regains.length === 0) holder = "ses_lost"
+      return answer
+    },
+  }
+  const session = await startChannelSession({
+    identity: new SessionIdentity("ses_current", "/tmp"),
+    connection: new IdleNats(),
+    notifier,
+    capabilities: CHANNEL_CAPABILITIES,
+    client,
+    heartbeatMs: 25,
+    configFile: { path: join(stateDirectory, "envoy.json"), error: null },
+    stateDirectory,
+  })
+  session.onRoleRegained(async (role, reason) => {
+    regains.push(`${role} ${reason}`)
+    regained.resolve()
+  })
+
+  try {
+    await session.rememberRole("legion-claim")
+    await regained.promise
+    expect(regains).toEqual(["legion-claim reclaimed"])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

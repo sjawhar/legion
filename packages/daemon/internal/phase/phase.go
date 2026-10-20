@@ -30,7 +30,7 @@ var All = []Phase{
 // with one its role writes and commits: the planner's, the implementer's implementing rounds, the
 // tester's, and the reviewer's, each under the word its role's prompt spells
 // (internal/prompts/roles/*.md), which the `legion` tool's `handoff_complete` finds the carrying
-// commit of (packages/pi-legion/src/handoff-commit.ts). Retro, the production check, and the
+// commit of (packages/pi-shared/src/handoff-commit.ts). Retro, the production check, and the
 // merger's READY write none, and report the commit they stand on.
 func HandoffFile(p Phase) (string, bool) {
 	switch p {

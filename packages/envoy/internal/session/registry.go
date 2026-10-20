@@ -231,6 +231,12 @@ func (r *SessionRegistry) StopWatch() {
 	r.watcher.Stop()
 }
 
+// EndWatch ends the cache's watchers at shutdown, within ctx, while the connection still carries
+// requests (kvwatch.Watcher.End).
+func (r *SessionRegistry) EndWatch(ctx context.Context) {
+	r.watcher.End(ctx)
+}
+
 // WaitForCacheReady blocks until the watcher has delivered every existing session, or until ctx
 // is done. Callers bound ctx; on error the caller logs and proceeds (fail open): Put write-through
 // keeps local sessions visible and /healthz exposes an unavailable registry.

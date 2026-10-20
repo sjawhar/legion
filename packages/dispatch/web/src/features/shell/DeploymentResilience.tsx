@@ -29,6 +29,7 @@ interface NavigateEvent extends Event {
 
 interface Navigation {
   addEventListener(type: "navigate", listener: (event: NavigateEvent) => void): void;
+  removeEventListener(type: "navigate", listener: (event: NavigateEvent) => void): void;
 }
 
 declare global {
@@ -102,10 +103,10 @@ function markPageLeaving(): void {
 // (Dispatch's Download version links) fires `navigate` to another document too, with
 // `downloadRequest` set, and then downloads the file and leaves the page where it is. Firefox
 // (Playwright's build, at least) then fires a second `navigate` for the same click, to the same
-// URL with no `downloadRequest`, so the next navigation to another document after a download is
-// skipped when it goes to the download's URL. Any other navigation to another document leaves the
-// page. iOS Safari fires `navigate` from 26.2, for a link followed or a form submitted but not for
-// an address the reader types.
+// URL with no `downloadRequest`, so that immediate navigation is skipped. Once the page is
+// plainly still in use, the next navigation to that URL leaves like any other. iOS Safari fires
+// `navigate` from 26.2, for a link followed or a form submitted but not for an address the reader
+// types.
 let lastDownloadUrl: string | undefined;
 
 function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
@@ -125,11 +126,12 @@ function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
 
 function markPageStaying(): void {
   leavingPage = false;
+  lastDownloadUrl = undefined;
 }
 
 function markPageStayingWhenVisible(): void {
   if (document.visibilityState === "visible") {
-    leavingPage = false;
+    markPageStaying();
   }
 }
 
@@ -157,15 +159,27 @@ function reloadForChunkFailure(): void {
 // prevented stylesheet failure loads the module without its styles. So the handler never
 // prevents it: the importer always sees the failure itself, and the page also reloads at most
 // once per session, never while it is being left.
-export function installChunkFailureRecovery(): void {
+export function installChunkFailureRecovery(): () => void {
+  const navigation = window.navigation;
   window.addEventListener("beforeunload", markPageLeaving);
-  window.navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
+  navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
   window.addEventListener("pageshow", markPageStaying);
   // Captured on the window, so a handler that stops a press from propagating cannot hide it.
   window.addEventListener("pointerdown", markPageStaying, { capture: true });
   window.addEventListener("keydown", markPageStaying, { capture: true });
   document.addEventListener("visibilitychange", markPageStayingWhenVisible);
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
+
+  return () => {
+    window.removeEventListener("beforeunload", markPageLeaving);
+    navigation?.removeEventListener("navigate", markPageLeavingForAnotherDocument);
+    window.removeEventListener("pageshow", markPageStaying);
+    window.removeEventListener("pointerdown", markPageStaying, { capture: true });
+    window.removeEventListener("keydown", markPageStaying, { capture: true });
+    document.removeEventListener("visibilitychange", markPageStayingWhenVisible);
+    window.removeEventListener("vite:preloadError", reloadForChunkFailure);
+    markPageStaying();
+  };
 }
 
 // The other half of the offline-chunk policy above: the editor, Yjs, and Hocuspocus are

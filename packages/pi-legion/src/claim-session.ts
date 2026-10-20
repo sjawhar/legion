@@ -1,23 +1,13 @@
-import type { LegionRole } from "@legion/contracts";
 import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
-import { messageFor } from "@legion/envoy-client/errors";
+import type { LegionDaemonClient } from "@legion/pi-shared/daemon-client";
+import { bootLegionClaim } from "@legion/pi-shared/legion-claim-core";
+import type { ClaimCapability } from "@legion/pi-shared/legion-phase-ops";
 import type { SessionContext } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../package.json";
 import { requiredEnvironment, requiredSecret } from "./classify";
-import { LegionDaemonApiError, type LegionDaemonClient, type ReadyInput } from "./daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";
-
-/** The claim a session registered: its own id, the daemon's answer for tree, issue and role, and
- * the secret every credentialed request carries. */
-export interface ClaimCapability {
-  readonly sessionID: string;
-  readonly tree: string;
-  readonly issue: string;
-  readonly role: LegionRole;
-  readonly secret: string;
-}
 
 export interface ClaimSession {
   /** Boots the claim behind a root architect's or a phase worker's pane (`legion.ts` calls it for
@@ -29,75 +19,18 @@ export interface ClaimSession {
   readonly capability: (sessionID: string) => ClaimCapability | undefined;
 }
 
-// Bounds retries of the transient `claims/ready` request.
-const READY_RETRY_ATTEMPTS = 3;
-const READY_RETRY_DELAY_MS = 1_000;
-
-function isNetworkOrTimeoutError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (error.name === "NetworkError" || error.name === "TimeoutError") return true;
-
-  const code = "code" in error && typeof error.code === "string" ? error.code : undefined;
-  return (
-    code === "ConnectionRefused" ||
-    code === "ConnectionTimeout" ||
-    code === "EAI_AGAIN" ||
-    code === "ECONNREFUSED" ||
-    code === "ECONNRESET" ||
-    code === "EHOSTUNREACH" ||
-    code === "ENETUNREACH" ||
-    code === "ENOTFOUND" ||
-    code === "ETIMEDOUT" ||
-    (error instanceof TypeError &&
-      (error.message === "Failed to fetch" || error.message === "fetch failed"))
-  );
-}
-
-/** A 4xx registration failure cannot succeed on retry. It exits, while a 5xx or a request that
- * never reached the daemon propagates and leaves the pane for the registration deadline. */
-function exitOnRegistrationRefusal(error: unknown, exitProcess: (code: number) => never): never {
-  if (error instanceof LegionDaemonApiError) {
-    console.error(
-      `[legion] claims/register registration failed (${error.status}): ${error.detail}`
-    );
-    if (error.status >= 400 && error.status < 500) exitProcess(1);
-  }
-  throw error;
-}
-
-/** Retries only a ready request that can pass on its own: a 5xx or a network failure. */
-async function callReadyWithRetry(label: string, call: () => Promise<void>): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await call();
-      return;
-    } catch (error) {
-      const retryable =
-        error instanceof LegionDaemonApiError
-          ? error.status >= 500 && error.status < 600
-          : isNetworkOrTimeoutError(error);
-      if (!retryable) throw error;
-      if (attempt === READY_RETRY_ATTEMPTS) {
-        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
-        throw error;
-      }
-      console.error(
-        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
-      );
-      const retryDelay = Promise.withResolvers<void>();
-      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
-      await retryDelay.promise;
-    }
-  }
-}
-
 /**
- * Owns a root architect's or a phase worker's claim through `/legion/v1/claims/*`: the boot, and
- * the capability it registered. A Legion pane boots as its own Oh My Pi process and holds exactly
- * one claim for its whole lifetime, so the capability is plain closure state, set before
- * `claims/ready`: the daemon's task can arrive the moment ready answers, and the phase-stall hook
- * reads the capability when it does. The ready carries the session's capability report, measured
- * from the registration's answer on, so the daemon's `legion state` shows what this session can do.
+ * Owns a root architect's or a phase worker's claim: the boot, through the claim boot every
+ * harness shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`), and the capability it
+ * registered. A Legion pane boots as its own Oh My Pi process and holds exactly one claim for its
+ * whole lifetime, so the capability is plain closure state, set before `claims/ready`: the
+ * daemon's task can arrive the moment ready answers, and the phase-stall hook reads the capability
+ * when it does. The ready carries the session's capability report, measured from the
+ * registration's answer on, so the daemon's `legion state` shows what this session can do.
+ *
+ * The transcript is recorded as the bootstrapped session before the registration; the jj
+ * attribution (`exportJjSessionAttribution`) runs once it answered, before the capability is set.
+ * A 4xx registration refusal, and any failure after a registration, exit the process.
  */
 export function createClaimSession(deps: {
   readonly daemon: () => LegionDaemonClient;
@@ -124,72 +57,37 @@ export function createClaimSession(deps: {
   ): Promise<void> => {
     const { sessionFile, agentId } = await deps.persistedTranscript(context);
     recordBootstrappedSession(sessionFile);
-
-    const claim = await daemon
-      .register({
+    await bootLegionClaim({
+      daemon,
+      registration: {
         bootToken,
         sessionId: sessionID,
         ompSessionFile: sessionFile,
         agentId,
         pluginContract: pkg.legion.daemonApiVersion,
-      })
-      .catch((error) => exitOnRegistrationRefusal(error, deps.exitProcess));
-    // The six live capability rows (src/capability-report.ts), measured while the jj attribution
-    // and the Envoy role claim run, and sent with the first claims/ready and with every re-ready
-    // after a regain, so the daemon renders what this session measured. The measurer answers a
-    // failing check as a failing row and never throws by design; a rejection it still produces
-    // costs the report, never the session.
-    const measuring = Promise.resolve()
-      .then(() =>
-        deps.measureCapabilities(context, { issue: claim.issue, promptAgents: claim.promptAgents })
-      )
-      .catch((error: unknown) => {
-        console.error(
-          `[legion] capability measurement failed; ready carries no report: ${messageFor(error)}`
-        );
-        return undefined;
-      });
-
-    try {
-      const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
-      await exportJjSessionAttribution(sessionFile, stateDir);
-      capability = {
-        sessionID,
-        tree: claim.tree,
-        issue: claim.issue,
-        role: claim.role,
-        secret: claim.secret,
-      };
+      },
+      measure: (claim) =>
+        deps.measureCapabilities(context, {
+          issue: claim.issue,
+          promptAgents: claim.promptAgents,
+        }),
+      afterRegister: () =>
+        exportJjSessionAttribution(
+          sessionFile,
+          requiredEnvironment(process.env, "LEGION_STATE_DIR")
+        ),
+      setCapability: (registered) => {
+        capability = registered;
+      },
       // The claim's role topic is where the daemon sends every notice for an architect (the
       // notice executor, packages/daemon/internal/daemon/outbox.go): no issue topic carries one,
       // so no claim subscribes to one.
-      await claimEnvoyRole(sessionID, claim.claimToken, context);
-      const capabilities = await measuring;
-      const ready: ReadyInput = {
-        claimToken: claim.claimToken,
-        sessionId: sessionID,
-        secret: claim.secret,
-        generation: claim.generation,
-        ...(capabilities === undefined ? {} : { capabilities }),
-      };
-      await callReadyWithRetry("claims/ready", () => daemon.ready(ready));
-      onEnvoyRoleRegained(async (role, reason) => {
-        if (role !== claim.claimToken) return;
-        try {
-          await callReadyWithRetry("claims/ready after role regain", () => daemon.ready(ready));
-          console.error(`[legion] re-ran claims/ready after role ${role} was ${reason}`);
-        } catch (error) {
-          console.error(
-            `[legion] claims/ready after role ${role} was ${reason} failed; the daemon's queued task stays undelivered until the next regain or boot: ${messageFor(error)}`
-          );
-        }
-      });
-    } catch (error) {
-      console.error(
-        `[legion] claim boot failed after claims/register registered ${claim.claimToken}; exiting so the daemon launches it again: ${messageFor(error)}`
-      );
-      deps.exitProcess(1);
-    }
+      claimRole: (role) => claimEnvoyRole(sessionID, role, context),
+      onRoleRegained: onEnvoyRoleRegained,
+      log: (line) => console.error(`[legion] ${line}`),
+      stopping: "exiting so the daemon launches it again",
+      stop: () => deps.exitProcess(1),
+    });
   };
 
   const bootstrap = async (context: SessionContext): Promise<void> => {

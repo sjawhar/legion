@@ -17,7 +17,9 @@ section can use the words without stopping to explain them.
   under the repository's rules.
 - **Agents** are [Oh My Pi](https://github.com/sjawhar/oh-my-pi) sessions. Under the Kubernetes
   runtime every agent the daemon starts runs in a pod of its own, from one published worker image,
-  and talks to the daemon over a connection the pod dials back.
+  and talks to the daemon over a connection the pod dials back. Under the tmux runtime a phase
+  worker's role may run on Claude Code instead (`worker_backends` in `legion.yaml`); it does the same
+  work through the same `legion` tool and keeps its conversation the same way.
 - **[Dispatch](/legion/dispatch/)** is where people and agents meet: the issue, its spec, the
   questions an agent asks you, the approvals, the messages and the status everyone reads. Legion
   never reads or writes a GitHub issue.
@@ -33,6 +35,17 @@ section can use the words without stopping to explain them.
   branch: GitHub can refuse that push on a large repository. An issue's workspace with no branch to
   start from starts at that default branch too. A pull request or push names its repository, and
   counts for an issue only in the issue's own.
+
+## Several repositories
+
+One Legion deployment can work issues across several GitHub repositories, under several owners,
+with exactly one repository per issue — never two. A change that spans repositories is a parent
+issue with one child per repository, each child's own `--repo` fixed when the daemon records it.
+Every pane and pod holds a write token, minted from the role's GitHub App, for its own issue's
+owner alone, and a read-only token for every other owner the project maps (`legion gh`, the `gh`
+wrapper every pane and pod runs, picks the directory by the owner the command names); `git` reaches
+the same bundle through a credential helper keyed the same way, so a push to another owner's
+repository is refused there, not merely discouraged.
 
 ## The controller
 

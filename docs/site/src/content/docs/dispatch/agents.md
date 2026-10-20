@@ -63,9 +63,17 @@ How a message reaches the agent depends on its mode:
 | **Aside** | Picks it up at its next step. |
 | **BTW** | Answers it in a side turn, without adding it to its main conversation, and the answer is posted back as its reply. |
 
-A message is a Send unless you start it with `/aside ` or `/btw `. Each session takes only the
-modes it advertises. A Claude Code session, for example, takes Aside but not Send. If you write in a
-mode the session does not take, the message box warns you and suggests a prefix it does take.
+A message is a Send unless you start it with `/aside ` or `/btw `, or the session does not take
+Send. Each session takes only the modes it advertises. A Claude Code session, for example, takes
+Aside but not Send, so a message you write to it without a prefix goes as an Aside, and the message
+box says "Sending as Aside". If you write in a mode the session does not take, the message box warns
+you and suggests a prefix it does take.
+
+A session that advertises no mode takes no message: its card says **Takes no messages**, and a
+message sent to it is recorded as a failed attempt. A Claude Code session advertises none when it
+was started without its Envoy channel (`claude --channels plugin:claude-envoy@legion-plugins`, or
+`--dangerously-load-development-channels` with the same entry where the channel is not
+allowlisted); Claude Code would not show it the message.
 
 On an Oh My Pi session, your Send or Aside arrives as your own message in its conversation, and the
 agent answers there. A Send or Aside that starts with `/` runs as the session's terminal would run
@@ -87,10 +95,15 @@ A broadcast sends one message to many agents.
    the folded groups.
 2. A broadcast box appears at the bottom of the page. Its heading counts the recipients, for
    example `Broadcast to 3 of 4 selected`, and each selected agent is a chip you can remove.
-3. Pick the mode, type the message, and choose **Send to N**.
+3. Type the message, pick the mode if you want another, and choose **Send to N**.
 
-An agent that does not take the mode you picked is left out, and its chip says why. Dispatch never
-switches it to another mode. One broadcast reaches at most 100 agents.
+Until you pick a mode, a broadcast goes as a BTW, or as an Aside when every agent you selected that
+takes any mode takes Aside and one of them does not take BTW (a Claude Code session, for example).
+The box then says "Sending as Aside" and names that agent. Select a Claude Code session together
+with an agent that takes only BTW, and the broadcast stays a BTW and leaves the Claude Code session
+out. An agent that does not take the mode the broadcast goes in is left out, and its chip says why;
+once you pick a mode, Dispatch never switches it to another. One broadcast reaches at most 100
+agents.
 
 Your selection is what you ticked, not what the filters show. Narrowing the filters after you tick
 does not drop anyone; the count beside the checkbox says how many selected agents are outside the

@@ -79,6 +79,9 @@ dispatch comment --issue <KEY> --artifact spec --quote '<the passage>' --body '<
 It prints the comment's id; a `--reply-to-ask` reply also makes you one of the ask's followers
 (see [Following](skill://dispatch/references/asks.md)).
 `--ref` names the owner (an issue or project-document reference) in place of `--issue`/`--project`.
+An ask, comment or message link there is refused, since the comment would land outside it: reply
+under an ask with `--reply-to-ask`, in a comment's thread with `--reply-to`, and read a message
+with `dispatch read`.
 `--quote` requires `--artifact`; its anchor is pinned to the containing block while retaining the quote
 for display. Omit both for a floating issue comment. A reply (`--reply-to`/`--reply-to-ask`) takes no
 `--quote`; it belongs to its parent's anchor. Reply to any comment in a thread; the server keeps

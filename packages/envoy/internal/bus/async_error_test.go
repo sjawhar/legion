@@ -15,10 +15,10 @@ import (
 // not connected - connected, nats.go resets the consumer instead - and every consumer Envoy runs
 // with idle heartbeats is such a watcher. The report restates a disconnect the bus has already
 // logged, once per watcher: six ERROR lines in one NATS gap of a deployment pin rehearsal. It is a
-// WARN; so is "consumer not found" as a drain's delete reports it, the bare sentinel, whatever the
-// connection's state (drain_async_error_test.go drives the real drain). Every other async error
-// stays an ERROR (LEGION-278), "consumer not found" included when it is wrapped, as an ordered
-// consumer nats.go failed to recreate reports it.
+// WARN. Every other async error stays an ERROR (LEGION-278), "consumer not found" among them,
+// bare or wrapped: a shutdown ends each KV watcher and deletes its consumer itself, before the
+// connection's drain (kvwatch.Watcher.End), so a delete nats.go's drain reports belongs to a
+// watcher nothing ended, and an ordered consumer nats.go failed to recreate wraps the error.
 func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 	var records bytes.Buffer
 	previous := slog.Default()
@@ -42,7 +42,7 @@ func TestAConsumerNotActiveReportIsAWarning(t *testing.T) {
 		}
 		levels = append(levels, record.Subject+"="+record.Level)
 	}
-	if got, want := strings.Join(levels, " "), "_INBOX.watcher=WARN _INBOX.other=ERROR _INBOX.recreate=ERROR _INBOX.drained=WARN"; got != want {
+	if got, want := strings.Join(levels, " "), "_INBOX.watcher=WARN _INBOX.other=ERROR _INBOX.recreate=ERROR _INBOX.drained=ERROR"; got != want {
 		t.Fatalf("async error levels = %s, want %s", got, want)
 	}
 }

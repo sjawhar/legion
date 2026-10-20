@@ -518,6 +518,91 @@ func TestTheOrphanSweepKeepsAKnownControllersSandboxAndDeletesAnUnknownOnes(t *t
 	}
 }
 
+// The daemon reads its claims before it sweeps, and a boot reconciliation it retries sweeps at a
+// grace of 0 while its keeper launches the controller, so a controller launched after that read is
+// missing from known, every write of its launch to the Sandbox done and the pod's launch turn given
+// back. The store holds the claim unretired from before that launch began (the supervisor writes it
+// launching first), and the sweep reads it again under the turn: the Sandbox, its volume and saved
+// session with it, stays. Once the claim is retired, the next sweep deletes it.
+func TestTheOrphanSweepKeepsTheSandboxOfAControllerLaunchedSinceItsClaimsWereRead(t *testing.T) {
+	g := newRig(t, nil)
+	g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))
+	var known []runtime.Known // read before the controller's launch
+	g.store.admit(controllerToken)
+	name := g.spawn(controllerSpec(t)).Sandbox.Name
+	launched := g.sandbox(name)
+	if launched == nil {
+		t.Fatal("the controller's launch made no Sandbox")
+	}
+	g.eventually("the runtime's store to hold the launched Sandbox as written", func() bool {
+		return storedVersion(g, name) == launched.ResourceVersion
+	})
+
+	if err := g.r.ReconcileOrphans(g.ctx, known, 0); err != nil {
+		t.Fatal(err)
+	}
+	if s := g.sandbox(name); s == nil || s.UID != launched.UID {
+		t.Fatalf("the Sandbox of a controller launched after the claims were read is %+v; want its launch's Sandbox %s kept, its volume and session with it", s, launched.UID)
+	}
+
+	g.store.retire(controllerToken)
+	if err := g.r.ReconcileOrphans(g.ctx, known, 0); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("the retired controller's Sandbox to be deleted", func() bool { return g.sandbox(name) == nil })
+}
+
+// The sweep's read of the controller's claim before the pod's launch turn is only its fast path, as
+// the issue path's first TreeLive is: a claim stored unretired while the sweep waits for the turn —
+// the keeper's retry of a retired controller, written launching before its launch begins — is read
+// again under the turn, and the Sandbox stays though nothing has written it since the listing.
+func TestTheOrphanSweepReadsTheControllersClaimAgainUnderThePodsLaunchTurn(t *testing.T) {
+	store := &answeringStore{fakeStore: newFakeStore(), answered: make(chan struct{})}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Store = store }))
+	g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))
+	name := g.spawn(controllerSpec(t)).Sandbox.Name
+	launched := g.sandbox(name)
+	if launched == nil {
+		t.Fatal("the controller's launch made no Sandbox")
+	}
+	g.eventually("the runtime's store to hold the launched Sandbox as written", func() bool {
+		return storedVersion(g, name) == launched.ResourceVersion
+	})
+	held, err := g.r.lockPod(g.ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swept := make(chan error, 1)
+	go func() { swept <- g.r.ReconcileOrphans(g.ctx, nil, 0) }()
+	select {
+	case <-store.answered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweep never read the controller's claim")
+	}
+	store.admit(controllerToken)
+	held()
+	if err := <-swept; err != nil {
+		t.Fatal(err)
+	}
+	if s := g.sandbox(name); s == nil || s.UID != launched.UID {
+		t.Fatalf("the Sandbox of a controller claim stored while the sweep waited for its pod's turn is %+v; want %s kept", s, launched.UID)
+	}
+}
+
+// answeringStore is the rig's store whose first ClaimUnretired closes answered once that read has
+// its answer.
+type answeringStore struct {
+	*fakeStore
+	answered chan struct{}
+	once     sync.Once
+}
+
+func (s *answeringStore) ClaimUnretired(ctx context.Context, token claim.Token) (bool, error) {
+	unretired, err := s.fakeStore.ClaimUnretired(ctx, token)
+	s.once.Do(func() { close(s.answered) })
+	return unretired, err
+}
+
 // Releasing the controller deletes its Sandbox under the pod's launch turn, as every relaunch, issue
 // suspension and orphan delete of a pod runs under it: while a relaunch holds the turn, the release
 // waits, and the Sandbox is deleted once the turn is given back.

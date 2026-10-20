@@ -31,6 +31,9 @@ legion start --config legion.yaml --check-config
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. `Unknown key "projects.<KEY>.repo": the project's repositories are Dispatch's mapping …` is one: map the repositories in Dispatch and delete the key ([Upgrade](/legion/legion/running-legion/#upgrade)). |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
+| `worker_backends.<role> is claude, which runs only under runtime: tmux` | Only the tmux runtime runs a role on Claude Code; set the role back to `omp` (or remove it) under Kubernetes. |
+| `worker_backends.architect is claude (Claude Code), which runs only planner, implementer, tester, reviewer, merger: …` | Claude Code runs the phase workers alone; leave the architect on `omp`. |
+| `worker_backends runs a role on claude, and boot is missing …` | Under tmux, give the daemon's environment what the message names: `LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` (or `claude` and `bun` on `PATH`), and `LEGION_CLAUDE_PLUGIN_DIR`, the absolute path of a built `packages/claude-envoy`. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
 | `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay or could not read it at all (the probe's OK line marks that `model-fallback=unread`, the probe pod's log says why), and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, each deployment row carrying `source` (`configuration` or `boot`), and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
@@ -173,7 +176,7 @@ stamps.
 - **`unknown key "<key>" in the controller configuration; …`** The controller reads its own small
   file, not `legion.yaml`; compare with `deploy/kubernetes/daemon/controller.yaml.example`.
 - **The plugin refusal.** `legion controller start` probes your Oh My Pi before it asks the daemon
-  for anything, and refuses one that does not load Legion's plugin or loads one speaking another
+  for a controller credential, and refuses one that does not load Legion's plugin or loads one speaking another
   daemon contract. Install the plugin from the same image as the daemon.
 
 Whether the daemon sees a controller:
@@ -438,6 +441,43 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   defaults), often because the registration's answer never reached it. The daemon resumes the same
   session one generation later and counts a launch failure; after `launch_failure_limit` of them
   the claim fails.
+  While the tree's cleanup is reserved (the tree is closing), the retirement waits: the process is
+  kept, nothing is counted, and the deadline is tried again at the probe interval
+  (`probe_interval_seconds`, 30 seconds at the default). Each try logs **`supervise: timer`** at
+  Error with `timer=registration` and `error="retire <claim>, whose agent registered and never said
+  it was ready: launch claim <claim>: bind work of tree <tree>: tree cleanup is reserved"` (`whose
+  agent never registered` for an agent that never registered). A prompt retirement waits the same
+  way, its error `retire <claim> after <n> prompt failures: launch claim <claim>: bind work of tree
+  <tree>: tree cleanup is reserved`, on the Error line of the prompt failure that reached the limit:
+  `supervise: timer` with `timer=turn` for a prompt that started no turn, `supervise: prompt
+  outcome` for a prompt the agent refused, and `supervise: an event failed` with
+  `event=supervise.StreamLateRefusal` for a late refusal. Nothing to do: the lines stop once the
+  tree has closed.
+- **`supervise: the tree's cleanup is reserved and the retired process is stopped; suspending the
+  claim for the tree's close`** means the tree's cleanup was reserved while a retirement was
+  stopping the process. The claim is suspended by the daemon with no process, and the tree's close
+  retires it.
+- **`supervise: the lifecycle check of the retired process's relaunch failed; trying it again at
+  the probe interval`** means the daemon's Postgres did not answer the relaunch's lifecycle check
+  after a retirement stopped the process. The claim waits `launching` with no process and keeps
+  its task; the same relaunch is tried again every `probe_interval_seconds` until the store
+  answers, and the agent is handed its task once it is ready. A daemon restart meanwhile launches
+  the claim again as an unfinished launch. If the line keeps coming, look at the database.
+- **`supervise: the launch could not be written; trying it again at the probe interval`** means
+  the daemon's Postgres did not take a launch's write, after the launch had let the claim's process
+  go. The process is stopped and nothing is started; the claim waits `launching` with no process,
+  keeps its task, and the same launch is tried again every `probe_interval_seconds` until the write
+  lands. If the line keeps coming, look at the database.
+- **`supervise: restoring a launch the previous daemon did not finish as launch_uncertain; no
+  process is recorded for it`** at boot names a claim the store held live with no process, with the
+  state it was stored in (`stored=`): a launch the previous daemon began and never recorded. The
+  daemon relaunches its session once its orphan reconciliation has run. Nothing to do.
+- **`supervise: refused a registration: the launch at its generation records no process`** and
+  **`supervise: dropped a stale event`** with `event=StreamHello fence=process` mean a process
+  registered or said hello for a launch the claim records no process for: a launch the daemon's
+  stop cut short, or a retired process whose relaunch is waiting. The registration is refused with
+  409 and the claim stays `launching`; the next boot, or the relaunch, starts the claim's process.
+  Nothing to do.
 
 ## The work loops or stops
 
