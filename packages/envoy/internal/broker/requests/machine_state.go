@@ -155,7 +155,7 @@ type Machine struct {
 	ServiceAccounts map[string]string
 	// MintToken mints a Google access token for serviceAccount lasting lifetime, the value Values
 	// releases for a minted secret. nil when the broker has no BROKER_MINT_TARGETS, which then
-	// serves no minted secret; a release of one fails naming the missing minter.
+	// serves no minted secret; a release of one fails with an internal error the broker logs.
 	MintToken func(ctx context.Context, serviceAccount string, lifetime time.Duration) (string, error)
 	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
 	missRereads     *ratelimit.Keyed
@@ -380,7 +380,7 @@ func requireMintLifetime(set *policy.Set, names []string, lifetime *int) error {
 			continue
 		}
 		if lifetime == nil || time.Duration(*lifetime)*time.Second > MaxMintLifetime {
-			return fmt.Errorf("%w: %s is minted; sign lifetime_seconds of at most %d", ErrMintRequiresLifetime, name, int(MaxMintLifetime.Seconds()))
+			return fmt.Errorf("%w: %s is minted; ask for at most an hour (agent-secrets --ttl 1h)", ErrMintRequiresLifetime, name)
 		}
 	}
 	return nil

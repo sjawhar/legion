@@ -2,6 +2,7 @@
 package config
 
 import (
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"maps"
 	"os"
@@ -358,12 +359,13 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 	}
 
 	const sa = "agent-admin@example-project.iam.gserviceaccount.com"
+	const entry = "ADMIN_GCP_TOKEN=" + sa + "=sami@example.com"
 	e := gcp()
-	e["BROKER_MINT_TARGETS"] = " " + sa + "=sami@example.com\n"
-	if cfg, err = Load(env(e)); err != nil || cfg.MintTargets[sa] != "sami@example.com" || len(cfg.MintTargets) != 1 {
+	e["BROKER_MINT_TARGETS"] = " " + entry + "\n"
+	if cfg, err = Load(env(e)); err != nil || cfg.MintTargets["ADMIN_GCP_TOKEN"] != (policy.MintTarget{Account: sa, Owner: "sami@example.com"}) || len(cfg.MintTargets) != 1 {
 		t.Fatalf("Load(BROKER_MINT_TARGETS) = %v, %v", cfg.MintTargets, err)
 	}
-	for _, bad := range []string{sa, sa + "=Sami", "admin@example-project.iam.gserviceaccount.com=sami@example.com", sa + "=a@example.com " + sa + "=b@example.com"} {
+	for _, bad := range []string{sa + "=sami@example.com", "admin_gcp_token=" + sa + "=sami@example.com", "ADMIN_GCP_TOKEN=" + sa + "=Sami", "ADMIN_GCP_TOKEN=admin@example-project.iam.gserviceaccount.com=sami@example.com", entry + " " + entry} {
 		e := gcp()
 		e["BROKER_MINT_TARGETS"] = bad
 		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MINT_TARGETS") {
@@ -371,7 +373,7 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 		}
 	}
 	e = validEnv()
-	e["BROKER_MINT_TARGETS"] = sa + "=sami@example.com"
+	e["BROKER_MINT_TARGETS"] = entry
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), secrets.StoreGCP) {
 		t.Errorf("BROKER_MINT_TARGETS under the AWS store: err = %v, want a refusal naming %s", err, secrets.StoreGCP)
 	}

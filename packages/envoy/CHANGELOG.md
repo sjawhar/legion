@@ -6,10 +6,10 @@
 
 - The secrets broker serves a minted secret: a GCP secret with no version tagged
   `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
-  that account with the secret's owner and the secret is human-tier. Each release mints a Google
-  access token for the account, lasting the shorter of an hour and the grant's remaining life,
-  after reading the secret again; a request for one must sign `lifetime_seconds` of at most 3600
-  (`400 MINT_REQUIRES_LIFETIME`).
+  its name with that account and its owner and the secret is human-tier. Each release mints a
+  Google access token for the account, lasting the shorter of an hour and the grant's remaining
+  life, after rereading the secret (at most once per name per 30 seconds); a request for one must
+  ask for at most an hour (`400 MINT_REQUIRES_LIFETIME`).
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the

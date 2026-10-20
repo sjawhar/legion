@@ -114,6 +114,9 @@ func main() {
 	var credentials string
 	switch {
 	case fakeSecrets != "":
+		if len(cfg.MintTargets) > 0 {
+			fatal(fmt.Errorf("BROKER_MINT_TARGETS needs Secret Manager itself, not BROKER_FAKE_SECRETS_FILE, since only it mints"))
+		}
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
 		// The file's kms_key_id names the agent-secrets key as the selected store configures it.

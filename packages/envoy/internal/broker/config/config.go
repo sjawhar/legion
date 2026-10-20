@@ -110,13 +110,13 @@ type Config struct {
 	// authenticating once its entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts.
 	// Unset, no service logs in with a token.
 	ServiceLogins map[string]string
-	// BROKER_MINT_TARGETS: the service accounts a minted secret may name, whitespace-separated
-	// <service account email>=<owner email> entries. A minted secret is served only when its
-	// mint-service-account tag is listed here, its owner tag is the listed owner and its tier is
-	// human, so only that person approves a token for the account. Keyed by account. Needs
-	// BROKER_SECRETS_STORE gcp-secret-manager, the only store that mints. Unset, no minted secret
-	// is served.
-	MintTargets map[string]string
+	// BROKER_MINT_TARGETS: the minted secrets the broker serves, whitespace-separated
+	// <NAME>=<service account email>=<owner email> entries. A minted secret is served only when
+	// its name is listed here, its mint-service-account tag is the listed account, its owner tag
+	// the listed owner and its tier human, so only that person approves a token, under that name,
+	// for the account. Keyed by name. Needs BROKER_SECRETS_STORE gcp-secret-manager, the only
+	// store that mints. Unset, no minted secret is served.
+	MintTargets map[string]policy.MintTarget
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -414,17 +414,17 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
 	}
 	for _, text := range strings.Fields(getenv("BROKER_MINT_TARGETS")) {
-		account, owner, ok := strings.Cut(text, "=")
-		if !ok || !policy.ValidMintTarget(account) || !policy.ValidPersonOwner(owner) {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS entry %q is not <service account email>=<owner email>", text)
+		parts := strings.Split(text, "=")
+		if len(parts) != 3 || !policy.ValidName(parts[0]) || !policy.ValidMintTarget(parts[1]) || !policy.ValidPersonOwner(parts[2]) {
+			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS entry %q is not <NAME>=<service account email>=<owner email>", text)
 		}
-		if _, dup := cfg.MintTargets[account]; dup {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS names %s twice", account)
+		if _, dup := cfg.MintTargets[parts[0]]; dup {
+			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS names %s twice", parts[0])
 		}
 		if cfg.MintTargets == nil {
-			cfg.MintTargets = map[string]string{}
+			cfg.MintTargets = map[string]policy.MintTarget{}
 		}
-		cfg.MintTargets[account] = owner
+		cfg.MintTargets[parts[0]] = policy.MintTarget{Account: parts[1], Owner: parts[2]}
 	}
 	if len(cfg.MintTargets) > 0 && cfg.SecretsStore != secrets.StoreGCP {
 		return Config{}, fmt.Errorf("BROKER_MINT_TARGETS needs BROKER_SECRETS_STORE=%s, the only store that mints", secrets.StoreGCP)

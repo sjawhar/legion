@@ -101,8 +101,8 @@ func TestValuesMintsForAGcpTokenSource(t *testing.T) {
 	}
 }
 
-// TestValuesWithoutMinterFails pins a minted secret's release under a store with no minter: it
-// fails naming the store rather than releasing nothing.
+// TestValuesWithoutMinterFails pins a minted secret's release with no minter wired: it fails, with
+// an error naming the missing minter, rather than releasing nothing.
 func TestValuesWithoutMinterFails(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	withMintedSecret(t, m)

@@ -46,8 +46,9 @@ func TestMintKindServedWithoutValue(t *testing.T) {
 }
 
 // TestMintKindMalformedTargetRefused pins the refusals of a minted secret: a tag that names no
-// service account, an account BROKER_MINT_TARGETS does not list, another owner than the listed
-// one, and the agent tier, each refused; the name and tag reasons still come first.
+// service account; a name BROKER_MINT_TARGETS does not list; under the listed name, another
+// account, another owner, a shared owner, the agent tier, or a stored value; and no setting at
+// all. The name and tag reasons still come first.
 func TestMintKindMalformedTargetRefused(t *testing.T) {
 	logged := policytest.CaptureLog(t)
 	untiered := minted("UNTIERED", policytest.MintOwner, policy.TierHuman, mintTarget)
@@ -55,36 +56,42 @@ func TestMintKindMalformedTargetRefused(t *testing.T) {
 	store := secrets.NewLocal(
 		minted("NOT_AN_EMAIL", policytest.MintOwner, policy.TierHuman, "not-an-email"),
 		minted("A_PERSON", policytest.MintOwner, policy.TierHuman, "sami@example.com"),
-		minted("UNLISTED", policytest.MintOwner, policy.TierHuman, "other-admin@example-project.iam.gserviceaccount.com"),
-		minted("OTHER_OWNER", other, policy.TierHuman, mintTarget),
-		minted("SHARED_OWNER", policy.OwnerShared, policy.TierHuman, mintTarget),
-		minted("AGENT_TIER", policytest.MintOwner, policy.TierAgent, mintTarget),
+		minted("BUILD_CACHE_KEY", policytest.MintOwner, policy.TierHuman, mintTarget),
 		untiered,
 	)
 	set, err := policytest.Loader(store).Load(context.Background())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(set.Secrets) != 0 {
-		t.Fatalf("served %+v, want nothing", set.Secrets)
+	if err != nil || len(set.Secrets) != 0 {
+		t.Fatalf("Load = %+v, %v; want nothing served", set, err)
 	}
 	for _, line := range []string{
 		refusedLine("NOT_AN_EMAIL", policy.ReasonMintTargetMalformed),
 		refusedLine("A_PERSON", policy.ReasonMintTargetMalformed),
-		refusedLine("UNLISTED", policy.ReasonMintTargetNotListed),
-		refusedLine("OTHER_OWNER", policy.ReasonMintTargetNotListed),
-		refusedLine("SHARED_OWNER", policy.ReasonMintTargetNotListed),
-		refusedLine("AGENT_TIER", policy.ReasonMintTargetNotListed),
+		refusedLine("BUILD_CACHE_KEY", policy.ReasonMintTargetNotListed),
 		refusedLine("UNTIERED", policy.ReasonTierTagMissing),
 	} {
 		if !strings.Contains(logged.String(), line) {
 			t.Errorf("log %q lacks %q", logged.String(), line)
 		}
 	}
-	// With no BROKER_MINT_TARGETS, no minted secret is served at all.
-	loader := policytest.Loader(store)
+	withValue := minted(policytest.MintName, policytest.MintOwner, policy.TierHuman, mintTarget)
+	withValue.Value = "stored"
+	for reason, s := range map[string]secrets.LocalSecret{
+		"another account": minted(policytest.MintName, policytest.MintOwner, policy.TierHuman, "other-admin@example-project.iam.gserviceaccount.com"),
+		"another owner":   minted(policytest.MintName, other, policy.TierHuman, mintTarget),
+		"a shared owner":  minted(policytest.MintName, policy.OwnerShared, policy.TierHuman, mintTarget),
+		"the agent tier":  minted(policytest.MintName, policytest.MintOwner, policy.TierAgent, mintTarget),
+		"a stored value":  withValue,
+	} {
+		one := secrets.NewLocal(s)
+		if set, err := policytest.Loader(one).Load(context.Background()); err != nil || len(set.Secrets) != 0 {
+			t.Errorf("Load of the listed name with %s = %+v, %v; want nothing served", reason, set, err)
+		}
+	}
+	if !strings.Contains(logged.String(), refusedLine(policytest.MintName, policy.ReasonMintedHasValue)) {
+		t.Errorf("log lacks the minted-has-value refusal")
+	}
+	loader := policytest.Loader(secrets.NewLocal(minted(policytest.MintName, policytest.MintOwner, policy.TierHuman, mintTarget)))
 	loader.MintTargets = nil
-	store.Put(minted("ADMIN_GCP_TOKEN", policytest.MintOwner, policy.TierHuman, mintTarget))
 	if set, err := loader.Load(context.Background()); err != nil || len(set.Secrets) != 0 {
 		t.Fatalf("Load with no mint targets = %+v, %v; want nothing served", set, err)
 	}
