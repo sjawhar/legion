@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-42",
+  "completed": "2026-10-20T14:36:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/AGENTS.md:1811",
+      "description": "The deletion is incomplete in the one agent-instruction file the change missed. The sentence still says the SPA \"partitions it client-side into **Mine** (rows whose `issue.assignee` equals the lowercased `/auth/whoami` login, plus an **Unassigned** band with an `Assign to me` PATCH on issue rows) and **Everyone**, defaulting to Mine and remembering the choice per person (`inbox.view`); a `?view=mine|everyone` URL wins over the remembered choice.\" Every clause of that tail is now false: `parseInboxSearch` parses no `view` (routes.ts:803-830, and routes.test.ts:451 pins `?view=mine` as ignored), `inbox.view` is gone from `UserPreference` (userPreference.ts), `INBOX_SECTIONS` holds no `unassigned` band (sections.ts:13), and `Assign to me` is now a property of the row rather than of a band (Inbox.tsx:227). packages/dispatch/AGENTS.md:269,273 and seven docs-site/skill files were rewritten correctly; this one was missed. It is an auto-loaded context file, so the next agent that extends the Inbox reads the removed contract as current."
+    },
+    {
+      "severity": "important",
+      "file": "docs/site/src/content/docs/dispatch/inbox-and-asks.md:83-86",
+      "description": "The change's own user documentation contradicts itself and the code on the project pill. The new paragraph says \"**Needs you**, the banner, and a project's **Blocked on you** pill mean one thing wherever they appear: ... plus the credential requests waiting on you\", while docs/site/src/content/docs/dispatch/issues-and-projects.md:29 — written by this same diff — says \"It counts no credential request: a request belongs to no project.\" The code agrees with the second: ProjectPage.tsx:186-191 passes `asks`, `className`, `variant` and `viewer` only, and BlockedOnYou.tsx defaults `credentialRequests = []`. This is the settled spec departure (plan.json specDepartures[0]) carried into one documentation page and not the other. The PR body's third `Change` bullet repeats the wrong version."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agents/AgentsPage.tsx:1169-1174",
+      "description": "The comment's premise and the PR body bullet are false for an agent-turn snoozed row. `tallyBySession(inbox.data ?? [], (ask) => ask.waiting_on === \"agent\")` applies no snooze test, and nothing stops a reader snoozing an agent-turn row: `SnoozeControl` renders on every row with no band condition (Inbox.tsx:236-241) and `sectionOf` sends any snoozed row to Later \"whatever its turn\" (sections.ts:83-91). So such a row is counted by the pill and sits folded inside `Later`, while the body bullet says \"a snoozed question or another person's is in neither number\". Counting it is defensible — a snooze is the reader's deferral, not a change of whose move it is — so the fix is the claim, or the predicate, not both."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/inbox/BlockedOnYou.tsx:62",
+      "description": "The new `if (viewer === undefined) return { count: 0, oldest: undefined };` guard in `needsYou` is wider than the rule it protects. `waitingOnYou` already returns [] for an unknown viewer (BlockedOnYou.tsx:43), so the outer guard only adds the suppression of `credentialRequests`, which are not viewer-scoped (the doc comment at :47-48 says the reader may decide one \"as its approver or as anyone signed in\"). Effect, new in this diff — main's `needsYou` takes no viewer and has no guard — is that the rail badge and the banner hide pending credential requests while `/auth/whoami` is in flight."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/inbox/BulkSnoozeBar.tsx:50",
+      "description": "Two comments still navigate by the deleted control: BulkSnoozeBar.tsx:50 \"A fieldset, like the view switch: the group's name comes from its legend\" (the view switch was the only other fieldset and this diff removed it), and packages/dispatch/e2e/keyboard-inbox.e2e.ts:622 \"The `?agent=` chip narrows the list the same way the view switch does\"."
+    }
+  ],
+  "ci": {
+    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "475972ee461f3678c9e4fa2cd5729e94b6f1a6e9",
+    "observed": "all four required checks completed/success at the CI head; compare 475972ee...f9f80bc6 lists only .legion/INFRA-42/test.json, so the code under review is the CI head's",
+    "readAt": "2026-10-20T14:20:00Z"
+  },
+  "thermonuclear": {
+    "head": "f9f80bc619e2f3a27fb7fd80bcbe396a210fa111",
+    "deepReview": "0 critical, 0 important, 4 minor; core rewrite verified sound (URL parse/round-trip, filter predicate, band assignment, live-write row retention, count/pill parity, no stranded caller or seed)",
+    "codeQuality": "1 important (the stale packages/envoy/AGENTS.md contract), 6 minor; no file crosses 1000 lines; the change deletes more branching than it adds"
+  },
+  "threads": {
+    "opened": 3,
+    "botThreadsAdjudicated": 0,
+    "note": "No review and no review thread existed on #2086 before this round (gh api graphql reviewThreads: 0, reviews: 0)."
+  }
+}
