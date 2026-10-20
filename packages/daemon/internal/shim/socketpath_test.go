@@ -42,8 +42,10 @@ func roleTempDir(t *testing.T) string {
 // `bind: invalid argument` before the test does anything. Measured on 2026-10-20 in this issue's
 // own pod: `TMPDIR=/legion/scratch/implementer/tmp go test ./internal/shim/` failed 16 times that
 // way, where `/tmp` passes. cmd/legion answers the same break with a socket directory rooted at
-// /tmp (socketDir, worker_shim_test.go); this package's socketPath does not. The subtest carries
-// the name of the longest test that listens here, since what overflows is the test's own name.
+// /tmp (socketDir, worker_shim_test.go), and this package's socketPath now does the same
+// (os.MkdirTemp("/tmp", "legion-shim"), shim_test.go); this subtest is what keeps that from being
+// reverted. The subtest carries the name of the longest test that listens here, since what
+// overflows is the test's own name.
 func TestASocketPathBindsWhereTMPDIRIsARoleContainersScratch(t *testing.T) {
 	t.Setenv("TMPDIR", roleTempDir(t))
 	t.Run("AdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon", func(t *testing.T) {

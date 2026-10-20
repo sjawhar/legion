@@ -597,20 +597,25 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 	return testSpec(t, token, role, testTree)
 }
 
-// The five directories a role's tools write to without being told where and which no other role
-// may reach are under that role's own scratch on the issue's volume: its temporary directory, its
-// cache, data and state homes, and bun's install cache. The rule this replaces was the opposite
+// The five directories a role's tools write to without being told where are under that role's own
+// scratch on the issue's volume, no two roles told the same one: its temporary directory, its
+// cache, data and state homes, and bun's install cache. A name per role rules out a collision
+// between the roles running at once, not reach: the role containers share the volume whole and
+// each can read and write what the others write. The rule this replaces was the opposite
 // one: bun's install cache sat on the container's own filesystem, private to the pod, because bun
 // hardlinks that cache's files into every worktree's node_modules and one shared cache corrupted
 // every checkout on a box at once (LEGION-198). The cache is 1.4 GB for this repository, more than
 // the gigabyte of ephemeral storage a role container is admitted with, so keeping it there is the
 // eviction this change exists to stop — and with the workspace on the volume and the cache off it,
-// the hardlink crossed devices anyway. What bounds the sharing now is a cache per role, no two
-// roles holding one directory, plus the one install Legion renders itself copying rather than
-// linking (plugins.go). Each directory is held by the issue volume's own mount, exactly as uv's
-// are (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
-// directories. The two Go caches are not on this list: they are the issue's, shared by its roles
-// (TestTheIssuesRolesAreToldOneGoBuildAndModuleCache).
+// the hardlink crossed devices anyway. The roles of an issue share one checkout
+// (workspace.Location names the repository and the issue, never a role), so a cache per role
+// isolates no node_modules from anything — a file edited in place there is already in the
+// packages every role runs from. What a cache per role bounds is afterwards: only that role's
+// later installs put the changed copy back, beside the one install Legion renders itself copying
+// rather than linking (plugins.go). Each directory is held by the issue volume's own mount,
+// exactly as uv's are (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the
+// workspace nor uv's directories. The two Go caches are not on this list: they are the issue's,
+// shared by its roles (TestTheIssuesRolesAreToldOneGoBuildAndModuleCache).
 func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -652,9 +657,11 @@ func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 // go command has verified against a known hash (`go help module-auth`) in a directory it then
 // makes read-only, which only `go build -modcacherw` leaves writable. Six roles with a pair each
 // would be six copies of identical content, about 5.5 GB of a 20 GiB volume. Bun's install cache
-// does not join them, because bun hardlinks out of that cache into whatever it installs for, so
-// one cache shared between two roles' checkouts is the corruption the per-role split bounds
-// (LEGION-198); the state home does not, because Oh My Pi's browser broker takes its lock as an
+// does not join them, because bun hardlinks out of that cache into whatever it installs for and
+// the issue's roles share one checkout (workspace.Location names no role), so what a cache per
+// role bounds is which installs can put a hardlinked file back — that role's later ones alone,
+// the edited copy being in the shared node_modules already (LEGION-198, where bun's hardlinking
+// was first met); the state home does not, because Oh My Pi's browser broker takes its lock as an
 // abstract unix socket named from a path under it, one name across every container of the pod
 // (roleStateHome). The pair is on the issue volume's own mount, outside every role's scratch and
 // outside the workspace and uv's directories, exactly as uv's cache is
@@ -700,9 +707,9 @@ func TestTheIssuesRolesAreToldOneGoBuildAndModuleCache(t *testing.T) {
 // So each name on the shim's list, plus XDG_STATE_HOME, which the shim makes elsewhere
 // (podsafety.EnsureStateHome, which makes Oh My Pi's profile directory under it), is set to an
 // absolute path on the issue's volume — the role's own scratch for five of them, the issue's Go
-// caches for the other two — and, the other way, no variable the runtime sets to a path under the
-// per-role scratch is missing from that list, so a new per-role directory cannot appear that
-// nothing makes.
+// caches for the other two — and, the other way, every variable the runtime sets to a path on that
+// volume is on that list, bar the three it names for a reason of their own, so neither a new
+// per-role directory nor a new one shared by the issue's roles can appear that nothing makes.
 func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -715,11 +722,20 @@ func TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes(t *testing.T) {
 			t.Errorf("the shim makes %s, which the runtime sets to %q; want an absolute path under %s", name, dir, TreeRoot)
 		}
 	}
+	// The runtime names these three on the issue's volume for a reason of their own and does not
+	// ask the shim to make them: LEGION_WORKSPACE is the issue's checkout, which workspace-init
+	// provisions before any role container starts, and UV_PYTHON_INSTALL_DIR and UV_CACHE_DIR are
+	// uv's own, which uv makes and the tree's pods share by design
+	// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume). Every other path the runtime names there is
+	// a directory it tells the role to write in, so a fourth exemption has to be argued for rather
+	// than slipped in.
+	theirOwn := []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"}
 	for name, value := range env {
-		if strings.HasPrefix(value, scratchRoot+"/") && !slices.Contains(made, name) {
-			t.Errorf("the runtime tells the role %s=%q on its scratch; the shim makes %v and EnsureStateHome the state home, so nothing would make it",
-				name, value, podsafety.ScratchVariables)
+		if !strings.HasPrefix(value, TreeRoot+"/") || slices.Contains(made, name) || slices.Contains(theirOwn, name) {
+			continue
 		}
+		t.Errorf("the runtime tells the role %s=%q on the issue's volume; the shim makes %v and EnsureStateHome the state home, so nothing would make it",
+			name, value, podsafety.ScratchVariables)
 	}
 }
 
