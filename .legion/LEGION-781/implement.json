@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-20T05:29:02Z",
+  "completed": "2026-10-20T05:43:42Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "14cf83289f745dd39ca0d141c1cbdfac015423fd",
+  "head": "a578760e40a5d84046e6a3045c9e095e0244c5a5",
   "proof": [
+    {
+      "criterion": "The forward merge of main (61552da1; #2024 Stage 2/3/4a on a devbox with no gateway, #2068, #2075, #2076, the broker's Google token kind, three releases) keeps the branch whole: AGENTS.md's Stage 2 and 3 command lines carry #2024's LEGION_E2E_MODEL_ROUTE prefixes and tails around this branch's Stage 3 wording, round 9's four deletions and two instructions sentences stand on the merged scripts, and every suite the pod can run is green; GitHub reports the pull request mergeable and builds the merged head's image",
+      "surface": "the merged working copy (jj new legion/LEGION-781 main@origin, one conflict resolved by hand), the e2e scripts under bash -n and the lib suite, the TypeScript suites of the packages main changed, the Go builds, and GitHub's mergeability and workflow starts at the pushed head",
+      "command": "jj new legion/LEGION-781 main@origin; jj resolve --list; grep -c 'proof production check' scripts/e2e/stage3-devbox-workflow.sh scripts/e2e/stage4b-sandbox-tree.sh; bash -n scripts/e2e/*.sh scripts/e2e/lib/*.sh; bun test scripts/e2e/lib; (cd packages/claude-envoy && bun run check-dist && bun test); (cd packages/pi-legion && bun test src/tools.test.ts src/skills-guard.test.ts); (cd packages/envoy && go build ./...); (cd packages/daemon && go build ./...); bunx biome check .; .github/scripts/check-private-names.sh; gh api repos/sjawhar/legion/pulls/2059; gh api actions/runs?head_sha=a578760e",
+      "observed": "One conflict, AGENTS.md: resolved as line 76 = main's Stage 2 line (this branch never edited it) and line 77 = main's `LEGION_E2E_MODEL_ROUTE=gateway` prefix + this branch's Stage 3 wording (the architect's acceptance, the close, the implementer's production check after it) + main's tail (the key-file route, STAGE3_PRODUCTION_ENVOY_URL); the merge's AGENTS.md differs from main's only in this branch's own lines. grep 'proof production check' 0 in both scripts, the Stage 4b sentence at :3126 and Stage 3's at :706 present. bash -n clean on every e2e script and lib. bun test scripts/e2e/lib 504 pass (main's #2024 added 10), only nats-stream's 2 Docker cases failing. claude-envoy check-dist clean, suite 147 pass / 1 fail = envoy-channel-registry.test.ts's heartbeat timing case, 3/3 pass alone, the package byte-identical to main's. pi-legion tools + skills-guard 20 pass. go build clean for daemon and envoy. biome: main's own 1 warning + 2 infos. private-names clean. GitHub at a578760e: mergeable true; Tests 39376273836, Worker Image 39376273864, Legion Envoy and Contracts 39376273866, Docs 39376273863 started, PR Title 39376273837 success. Fingerprint de21e4e9... -> 9b2978ec... (changed by the two AGENTS.md lines alone), posted at #2059 issuecomment-6284283399",
+      "headSha": "a578760e40a5d84046e6a3045c9e095e0244c5a5",
+      "negativeControl": "Before the merge GitHub reported mergeable false/dirty at afd71e27 and git merge-tree with main conflicted in AGENTS.md; no pull_request workflow started for 14cf8328 in the 25 minutes it was the head. After: mergeable true and all five workflows started within a minute of the push"
+    },
     {
       "criterion": "Done-when 5 (the proof's own step): Stage 4b and Stage 3 send the implementer of a just-closed issue nothing at a look of its production check - a closed issue takes no Dispatch write (409 ISSUE_CLOSED) - and the look acts on the daemon's task as written, the fixtures' instructions stating the production rule (no production, no deploy role: Production: pending deploy of <merge commit>, the last look writing that the check did not run within the bound, verdict pending, no commit); the following check_look_reported / check_closed waits are the observation",
       "surface": "the two proof scripts and the README, read as text and under bash -n; the lib suite's pins on the instructions heredoc (stage4b-hold.test.ts:216,228); the tester's Stage 4b artifact at 22817ba1 for the failure and the try-2 artifact for the WAITING reply",
@@ -92,7 +100,8 @@
     "skills/legion-controller/SKILL.md: the merged bullet re-wrapped under the 500-line guard (round 8)",
     "scripts/e2e/stage4b-sandbox-tree.sh: the instructions heredoc's check-task sentence states the production rule and waits for no targeted message; the two post-close send_agent blocks (look 1, the bound's last look) and their wait_for_worker deleted; comments at the first and last look (round 9)",
     "scripts/e2e/stage3-devbox-workflow.sh: the same two blocks deleted; the instructions heredoc gains the check-task rule; comments (round 9)",
-    "scripts/e2e/README.md: the Stage 3 narrative and the Stage 4b done and production-check-bound rows no longer say the implementer is told its look (round 9)"
+    "scripts/e2e/README.md: the Stage 3 narrative and the Stage 4b done and production-check-bound rows no longer say the implementer is told its look (round 9)",
+    "AGENTS.md: the Stage 2 and 3 command lines carry #2024's LEGION_E2E_MODEL_ROUTE prefixes and tails around this branch's Stage 3 wording (round 10, the merge's one conflict)"
   ],
   "trickyParts": [
     "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
@@ -124,13 +133,12 @@
     "Round 9 went one step past 'delete the if-block': the fixtures' instructions had to change too, since Stage 4b's heredoc told the implementer to reply WAITING and wait for the targeted message on a check task (the try-2 WAITING reply at 23:05:32Z is the evidence) and Stage 3's told every agent to act on nothing but a targeted message; with the sends gone and the sentences unchanged every look would wait out :5852's 600 s. Agreed with the architect before the task arrived."
   ],
   "openQuestions": [
-    "The Go race lane (go test -race ./internal/daemon/ ./internal/record/) cannot run in the pod (no gcc for cgo); Tests run 39346167688's race step is its proof at 22817ba1",
-    "No pull_request CI run started for 14cf8328: main moved again (61552da1, #2024 and seven more) and GitHub reports mergeable false/dirty; a local git merge-tree conflicts in AGENTS.md alone (the Stage 2 and 3 command lines #2024 prefixed with LEGION_E2E_MODEL_ROUTE=gateway), everything else auto-merging, #2024 touching scripts/e2e/lib, stage2, stage3 and stage4a. A forward merge would rebuild the worker image (main's b8139a2b touches packages/envoy and dd2a55b6 packages/claude-envoy/package.json, both in worker-image.yaml's paths), so whether to merge before or after the stage rerun at the 22817ba1 image is the architect's call"
+    "The Go race lane (go test -race ./internal/daemon/ ./internal/record/) cannot run in the pod (no gcc for cgo); Tests run 39346167688's race step is its proof at 22817ba1"
   ],
   "discoveredComplexity": [
     "A Go constant is never empty, so the spec's 'both empty outside a release build' is realised as the revision guard (plan departure 3)",
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 9
+  "round": 10
 }
