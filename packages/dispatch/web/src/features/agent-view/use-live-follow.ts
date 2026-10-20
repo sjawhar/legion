@@ -56,6 +56,18 @@ function rememberTurn(element: HTMLElement): RememberedTurn | null {
   return null;
 }
 
+function renderedIds(element: HTMLElement): readonly string[] {
+  return [...element.querySelectorAll<HTMLElement>(TURN_SELECTOR)].map(
+    (turn) => turn.getAttribute(TURN_ID_ATTRIBUTE) ?? ""
+  );
+}
+
+/** Whether the turns on screen are exactly these ids, in this order. */
+function showsIds(element: HTMLElement, ids: readonly string[]): boolean {
+  const shown = renderedIds(element);
+  return shown.length === ids.length && shown.every((id, index) => id === ids[index]);
+}
+
 export function useLiveFollow({
   contentIds,
   ownSendCount,
@@ -85,6 +97,17 @@ export function useLiveFollow({
   const previousSends = useRef(ownSendCount);
   const previousReplays = useRef(replayCount);
   const previousSession = useRef(sessionId);
+  // The `scrollHeight` the hook left behind when it last put the reader back after a rebuild.
+  // The browser answers that same rebuild a frame later, by subtracting the height it dropped
+  // above the reader (scroll anchoring), and by then the settle has recorded the new height, so
+  // there is no shrink left for the arriving event to see. The height identifies that one event;
+  // any other scroll, and any later one, is the reader's.
+  const settleHeight = useRef<number | null>(null);
+  // A rebuild waiting for its turns to reach the DOM, with the ids that were on screen when it
+  // arrived: the watcher below settles it as soon as they differ.
+  const pendingRebuild = useRef(false);
+  const armedIds = useRef<readonly string[]>([]);
+  const rebuildWatcher = useRef<MutationObserver | null>(null);
   // The scroll listener, the resize observer and the `jumpToEnd` the caller holds all outlive the
   // render that made them, and `contentIds` is a fresh array on every render: they read the
   // transcript through this ref instead of a closure, so none of them is torn down and rebuilt
@@ -123,28 +146,97 @@ export function useLiveFollow({
    * What the viewport's current geometry says about following, recording it for the next reading.
    * A fall in `scrollTop` is the one signal that the reader took over: growth never lowers it, so
    * nothing but a reader moves it down - except a shrink (a fold collapsing, a shorter rebuild),
-   * which clamps it with no reader action and must leave following alone. Deliberately not
-   * assistant-ui's rule, which also demands `scrollHeight` be *unchanged* and so misses the
-   * reader who scrolls back while a turn is streaming, this view's whole complaint.
+   * which clamps it, and the scroll anchoring that answers a rebuild the hook has just settled,
+   * which subtracts the height the rebuild dropped above the reader (measured in Chromium on
+   * this view: a jump to the end of a rebuilt transcript came back as `scrollTop` 0). Neither is
+   * the reader, so neither stops following, and whatever they did to the position a following
+   * viewport takes back. Deliberately not assistant-ui's rule, which also demands `scrollHeight`
+   * be *unchanged* and so misses the reader who scrolls back while a turn is streaming, this
+   * view's whole complaint.
    */
   const observe = useCallback(
     (element: HTMLElement): boolean => {
       const fell = lastScrollTop.current - element.scrollTop > END_TOLERANCE_PX;
       const shrank = element.scrollHeight < lastScrollHeight.current;
+      const settling = settleHeight.current === element.scrollHeight;
+      settleHeight.current = null;
+      const excused = shrank || settling;
       record(element);
       if (atLiveEnd(element)) {
         follow();
         return true;
       }
-      if (following.current && fell && !shrank) {
+      if (following.current && fell && !excused) {
         following.current = false;
         remembered.current = rememberTurn(element);
         setAtEnd(false);
+        return false;
+      }
+      if (following.current) {
+        // Still following and off the end: nothing the reader did put it there, so take the end
+        // back rather than leave the newest text below the fold until the next arrival.
+        element.scrollTop = element.scrollHeight;
+        record(element);
       }
       return following.current;
     },
     [follow, record]
   );
+
+  /**
+   * Put the reader back after a rebuild: the turn they were reading where it was, or the live end
+   * when it is gone (and the live end whatever the ids say while following, where there is no
+   * remembered turn to hold). Runs in the commit the turns themselves changed in, which is not
+   * always the one that carried the new ids.
+   */
+  const settleRebuild = useCallback(
+    (element: HTMLElement) => {
+      const place = remembered.current;
+      // Not a `[data-message-id="…"]` selector: the key is the session's to choose, and nothing
+      // promises it is a valid CSS string.
+      const turn = [...element.querySelectorAll<HTMLElement>(TURN_SELECTOR)].find(
+        (candidate) => candidate.getAttribute(TURN_ID_ATTRIBUTE) === place?.id
+      );
+      if (place === null || turn === undefined) {
+        jumpToEnd();
+      } else {
+        // The turn survived: put it back where the reader had it, the compensation
+        // `features/shell/ViewportAnchor.tsx` performs for the issue list.
+        const wanted = element.getBoundingClientRect().top + place.top;
+        element.scrollTop += turn.getBoundingClientRect().top - wanted;
+        record(element);
+        setNewCount(ids.current.filter((id) => !seen.current.has(id)).length);
+      }
+      settleHeight.current = element.scrollHeight;
+    },
+    [jumpToEnd, record]
+  );
+
+  // The turns are not always this hook's to await: assistant-ui applies a rebuilt transcript in a
+  // passive effect, one commit after the render that carried the new ids
+  // (`useExternalStoreRuntime`), and that commit need not render this hook at all. A rebuild
+  // whose turns have not landed yet waits here for them - measured in Chromium, compensating
+  // against the DOM still on screen moves the reader by nothing and leaves their place to the
+  // browser. The watcher runs only between a rebuild and its turns, never while one streams.
+  useEffect(() => {
+    const element = viewport.current;
+    if (element === null) {
+      return;
+    }
+    const watcher = new MutationObserver(() => {
+      if (!pendingRebuild.current || showsIds(element, armedIds.current)) {
+        return;
+      }
+      pendingRebuild.current = false;
+      watcher.disconnect();
+      settleRebuild(element);
+    });
+    rebuildWatcher.current = watcher;
+    return () => {
+      watcher.disconnect();
+      rebuildWatcher.current = null;
+    };
+  }, [settleRebuild, viewport]);
 
   useEffect(() => {
     const element = viewport.current;
@@ -203,35 +295,36 @@ export function useLiveFollow({
       jumpToEnd();
       return;
     }
-    if (observe(element)) {
-      jumpToEnd();
-      return;
-    }
+    const follows = observe(element);
     if (rebuilt) {
       // A rebuild answers the replay newest-first inside a budget, so it routinely drops the
       // oldest turns - exactly the ones a reader reading history sits on. It is the one event
-      // that may take the reader's place away, and only when that place is gone: the remembered
-      // turn is rendered from `contentIds`, so its element is there precisely while its id is.
-      const place = remembered.current;
-      // Not a `[data-message-id="…"]` selector: the key is the session's to choose, and nothing
-      // promises it is a valid CSS string.
-      const turn = [...element.querySelectorAll<HTMLElement>(TURN_SELECTOR)].find(
-        (candidate) => candidate.getAttribute(TURN_ID_ATTRIBUTE) === place?.id
-      );
-      if (place === null || turn === undefined) {
-        jumpToEnd();
+      // that may take the reader's place away, and only when that place is gone.
+      if (showsIds(element, contentIds)) {
+        settleRebuild(element);
         return;
       }
-      // The turn survived: put it back where the reader had it, the compensation
-      // `features/shell/ViewportAnchor.tsx` performs for the issue list.
-      const wanted = element.getBoundingClientRect().top + place.top;
-      element.scrollTop += turn.getBoundingClientRect().top - wanted;
-      record(element);
+      pendingRebuild.current = true;
+      armedIds.current = renderedIds(element);
+      rebuildWatcher.current?.observe(element, { childList: true, subtree: true });
+    }
+    if (follows) {
+      jumpToEnd();
+      return;
     }
     // Every change of the list, not only a change of its last id: a turn updated under one id
     // counts once, and an id that left the list is simply absent.
     setNewCount(contentIds.filter((id) => !seen.current.has(id)).length);
-  }, [contentIds, jumpToEnd, observe, ownSendCount, record, replayCount, sessionId, viewport]);
+  }, [
+    contentIds,
+    jumpToEnd,
+    observe,
+    ownSendCount,
+    replayCount,
+    sessionId,
+    settleRebuild,
+    viewport,
+  ]);
 
   return { atEnd, jumpToEnd, newCount };
 }

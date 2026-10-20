@@ -103,3 +103,11 @@ func (m *Memory) Publish(sessionID string, frame Frame) {
 		deliver(frame)
 	}
 }
+
+// Drop ends every viewer's stream for sessionID, as a connection lost on the way to the browser
+// does. The relay's viewer reads a nil frame as the relay ending its stream
+// (api/agent_stream.go), which a session's own frame never is: a browser rebuilds its transcript
+// only from a reconnect's replay, so this is how the e2e suite gets a second one.
+func (m *Memory) Drop(sessionID string) {
+	m.Publish(sessionID, nil)
+}

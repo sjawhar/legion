@@ -27,6 +27,9 @@ interface Props {
   contentIds: string[];
   ownSendCount: number;
   replayCount: number;
+  /** The turns the DOM actually holds, where they lag the ids the way assistant-ui's runtime
+   *  does; `null` renders `contentIds` itself. */
+  renderedIds: string[] | null;
   sessionId: string;
 }
 
@@ -116,6 +119,7 @@ function Harness({
   control,
   geometry,
   ownSendCount,
+  renderedIds,
   replayCount,
   sessionId,
 }: Props & {
@@ -139,7 +143,7 @@ function Harness({
     <div data-testid={VIEWPORT_TESTID} ref={attach}>
       {/* The content wrapper, whose height is the transcript's: the hook observes it too. */}
       <div>
-        {contentIds.map((id) => (
+        {(renderedIds ?? contentIds).map((id) => (
           <div data-message-id={id} key={id} />
         ))}
       </div>
@@ -161,6 +165,8 @@ interface LiveFollowHarness {
   readonly stop: () => void;
   /** A render with changed props, as the view's own data would make. */
   readonly update: (next: Partial<Props>) => void;
+  /** The commit that brings a rebuild's turns to the DOM, and the watcher's answer to it. */
+  readonly updateRendered: (ids: string[]) => Promise<void>;
 }
 
 function startHarness(contentIds: string[]): LiveFollowHarness {
@@ -168,7 +174,13 @@ function startHarness(contentIds: string[]): LiveFollowHarness {
   const control: { current: LiveFollowControl | null } = { current: null };
   const restoreRects = installRects();
   const sizes = installResizeObserver();
-  let props: Props = { contentIds, ownSendCount: 0, replayCount: 0, sessionId: "session-1" };
+  let props: Props = {
+    contentIds,
+    ownSendCount: 0,
+    renderedIds: null,
+    replayCount: 0,
+    sessionId: "session-1",
+  };
   const view = render(<Harness {...props} control={control} geometry={geometry} />);
   const element = view.getByTestId(VIEWPORT_TESTID);
   const read = () => {
@@ -207,6 +219,16 @@ function startHarness(contentIds: string[]): LiveFollowHarness {
       props = { ...props, ...next };
       act(() => {
         view.rerender(<Harness {...props} control={control} geometry={geometry} />);
+      });
+    },
+    updateRendered: async (renderedIds) => {
+      props = { ...props, renderedIds };
+      const delivered = Promise.withResolvers<void>();
+      await act(async () => {
+        view.rerender(<Harness {...props} control={control} geometry={geometry} />);
+        // The watcher answers the turns changing a task later, as a browser's does.
+        setTimeout(delivered.resolve, 0);
+        await delivered.promise;
       });
     },
   };
@@ -267,10 +289,11 @@ test("a shrink that pulls scrollTop down does not stop following", () => {
   try {
     // A fold collapses: 200 px of content goes, and because most of it was above the reader the
     // browser lowers `scrollTop` by more than the clamp alone would. No reader acted, so
-    // following must survive it - and the resize that follows settles back at the live end.
+    // following must survive it, and a viewport that still follows takes the live end back.
     live.scroll({ extraHeight: -200, scrollTop: 0 });
 
     expect(live.atEnd()).toBe(true);
+    expect(live.position()).toBe(100);
 
     live.resize();
 
@@ -404,6 +427,49 @@ test("a rebuild that dropped the remembered turn goes to the live end", () => {
   }
 });
 
+test("the scroll anchoring that follows a shorter rebuild does not take the live end away", () => {
+  const live = startHarness([...SIX]);
+
+  try {
+    live.scroll({ scrollTop: 150 });
+
+    // The reconnect's replay drops the turns the reader was on and comes back shorter, so the
+    // hook jumps to the live end - and Chromium's scroll anchoring then subtracts the height
+    // those dropped turns had, in the same frame, reaching the listener as a fall with the
+    // shrink already recorded (measured on this view: `scrollTop` 757 came back as 0).
+    live.update({ contentIds: ["d", "e", "f", "g"], replayCount: 1 });
+    expect(live.position()).toBe(100);
+
+    live.scroll({ scrollTop: 0 });
+
+    expect(live.position()).toBe(100);
+    expect(live.atEnd()).toBe(true);
+    expect(live.count()).toBe(0);
+  } finally {
+    live.stop();
+  }
+});
+
+test("a reader's scroll back after a shrink the hook did not cause still stops following", () => {
+  const live = startHarness([...SIX]);
+
+  try {
+    // The viewport widens, which makes the transcript shorter, and the clamp that follows is no
+    // reader: the hook keeps following and stays at the live end.
+    live.scroll({ extraHeight: -200, scrollTop: 100 });
+    expect(live.atEnd()).toBe(true);
+
+    // The reader then scrolls back deliberately. The excuse the shrink earned belongs to that
+    // event alone, never to this one.
+    live.scroll({ scrollTop: 0 });
+
+    expect(live.atEnd()).toBe(false);
+    expect(live.position()).toBe(0);
+  } finally {
+    live.stop();
+  }
+});
+
 test("a rebuild while following stays at the live end", () => {
   const live = startHarness([...SIX]);
 
@@ -411,6 +477,58 @@ test("a rebuild while following stays at the live end", () => {
     live.update({ contentIds: ["c", "d", "e", "f", "g", "h", "i", "j"], replayCount: 1 });
 
     expect(live.position()).toBe(500);
+    expect(live.atEnd()).toBe(true);
+    expect(live.count()).toBe(0);
+  } finally {
+    live.stop();
+  }
+});
+
+test("a rebuild whose turns reach the DOM a commit later still holds the remembered turn", async () => {
+  const live = startHarness([...SIX]);
+
+  try {
+    live.scroll({ scrollTop: 150 });
+
+    // assistant-ui applies a rebuilt transcript in a passive effect (`useExternalStoreRuntime`),
+    // so this render carries the new ids while the DOM still holds the old turns: compensating
+    // against what is on screen would move the reader by nothing and leave their place to the
+    // browser. The rebuild waits.
+    live.update({
+      contentIds: ["b", "c", "d", "e", "f", "g"],
+      renderedIds: [...SIX],
+      replayCount: 1,
+    });
+
+    expect(live.position()).toBe(150);
+    expect(live.atEnd()).toBe(false);
+
+    await live.updateRendered(["b", "c", "d", "e", "f", "g"]);
+
+    expect(live.position()).toBe(50);
+    expect(live.atEnd()).toBe(false);
+    expect(live.count()).toBe(1);
+  } finally {
+    live.stop();
+  }
+});
+
+test("a rebuild whose turns reach the DOM a commit later still finds the reader's turn gone", async () => {
+  const live = startHarness([...SIX]);
+
+  try {
+    live.scroll({ scrollTop: 150 });
+
+    // The replay's budget dropped `b`, but the DOM still shows it: judging the rebuild here
+    // would find the reader's turn alive and keep a place that is about to vanish.
+    live.update({ contentIds: ["d", "e", "f", "g", "h"], renderedIds: [...SIX], replayCount: 1 });
+
+    expect(live.position()).toBe(150);
+    expect(live.atEnd()).toBe(false);
+
+    await live.updateRendered(["d", "e", "f", "g", "h"]);
+
+    expect(live.position()).toBe(200);
     expect(live.atEnd()).toBe(true);
     expect(live.count()).toBe(0);
   } finally {

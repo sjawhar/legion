@@ -6,6 +6,7 @@ import {
   createAgentMessage,
   createIssue,
   createProject,
+  dropAgentStreamViewers,
   publishAgentStreamFrame,
   replyToMessageDelivery,
   setAgentStreamResponder,
@@ -159,6 +160,15 @@ function longReplayWith(sessionID: string, extra: readonly object[]): object {
   return { frames: [...frames, ...extra], session_id: sessionID, v: 1 };
 }
 
+/** The replay a session answers a reconnect with once its newest-first budget no longer reaches
+ *  the whole transcript: `longReplay`'s forty turns from `from` on, with the older ones gone and
+ *  `extra` behind them. The frames keep their own `at`, so the turns that survive are read where
+ *  they always were. */
+function rebuiltReplay(sessionID: string, from: number, extra: readonly object[] = []): object {
+  const { frames } = longReplay(sessionID) as { frames: object[] };
+  return { frames: [...frames.slice(from), ...extra], session_id: sessionID, v: 1 };
+}
+
 /** The phone layout runs on Chromium (the `iphone` project) and on WebKit (`webkit-iphone`). */
 const PHONE_PROJECTS = ["iphone", "webkit-iphone"];
 
@@ -296,6 +306,16 @@ async function expectNewestTurnAboveComposer(page: Page): Promise<void> {
       return layout.newestBottom <= layout.composerTop && layout.newestBottom > layout.threadTop;
     })
     .toBe(true);
+}
+
+/** A rebuild of the whole transcript, the way a reader meets one. The live stream carries no
+ *  cursor, so the only thing that rebuilds it is a reconnect: the relay drops this session's
+ *  viewers the way a lost connection does, and the browser asks the session for its replay
+ *  again. `publishAgentStreamFrame` sets what the NEXT connection is answered with rather than
+ *  pushing into the open one, so `next` is in place before the stream is dropped. */
+async function rebuildThroughReconnect(sessionID: string, next: object): Promise<void> {
+  await publishAgentStreamFrame(sessionID, next, "replay");
+  await dropAgentStreamViewers(sessionID);
 }
 
 /** iOS Safari's keyboard: the composer takes focus and only the visual viewport shrinks, to
@@ -1134,6 +1154,95 @@ test("a transcript shorter than the viewport shows no Jump to latest, and the co
     const list = page.getByRole("listbox", { name: "Slash commands" });
     await list.getByRole("option", { name: /^\/compact/ }).click();
     await expect(input).toHaveValue("/compact ");
+  } finally {
+    await context.close();
+  }
+});
+
+// The live stream carries no cursor, so a reconnect rebuilds the whole transcript from the
+// session's replay, and the session answers newest-first inside a budget: the rebuild routinely
+// drops the oldest turns, the ones a reader reading history is sitting on. What the reader keeps
+// is the turn they were reading, where it was on their screen - holding the scroll offset would
+// hold a number that means another turn entirely once the turns above it are gone.
+test("a rebuilt transcript keeps a scrolled-back reader on the turn they were reading", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the desktop layout runs on the desktop project");
+  const kept: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-00000000a007" };
+  await setLiveSessions([planner, kept]);
+  await publishAgentStreamFrame(kept.session_id, longReplay(kept.session_id), "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const jump = page.getByTestId("jump-to-latest");
+  try {
+    await page.goto(`/agents/${kept.session_id}/live`);
+    await expect(page.getByText("Turn 39:")).toBeVisible();
+
+    // The reader goes back to Turn 12 and reads from there. The control appearing is the hook
+    // having taken the scroll: from here it is their place that is remembered, not the offset.
+    await page
+      .getByText("Turn 12:")
+      .evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await expect(jump).toHaveText("Jump to latest");
+    const before = await topmostTurn(page);
+    const reach = (await liveViewLayout(page)).threadScrollHeight;
+
+    // The connection drops and the reconnect is answered with a shorter history: the session's
+    // budget no longer reaches Turn 0 through Turn 7, and two turns it wrote while this viewer
+    // was away are behind the forty.
+    await rebuildThroughReconnect(
+      kept.session_id,
+      rebuiltReplay(kept.session_id, 8, [
+        liveTurn(1, 41, "Written while they were away.", false),
+        liveTurn(2, 42, "And the one after it.", false),
+      ])
+    );
+    await expect(page.getByText("Written while they were away.")).toBeVisible();
+
+    // It really is a shorter transcript: the eight oldest turns are not in the page at all, so
+    // the reader's old offset now lands eight turns further down the conversation.
+    await expect(page.getByText("Turn 7:")).toHaveCount(0);
+    expect((await liveViewLayout(page)).threadScrollHeight).toBeLessThan(reach);
+
+    // The reader is left on the turn they were reading, at the pixel it sat at, still scrolled
+    // back. The count is what the rebuilt list says: two turns it carries that they have not
+    // seen, and nothing for the dropped ones, which they had seen and which are simply absent.
+    const after = await topmostTurn(page);
+    expect(after.id).toBe(before.id);
+    expect(Math.abs(after.top - before.top)).toBeLessThanOrEqual(1);
+    await expect(jump).toHaveText("Jump to latest · 2 new");
+  } finally {
+    await context.close();
+  }
+});
+
+// The same rebuild, with the reader's own turn gone from it: there is nowhere to put them back,
+// and the offset they were at belongs to text they never asked for. They land at the newest text
+// instead, following again, with nothing left to catch up on.
+test("a rebuilt transcript that dropped the reader's turn lands them at the newest text", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the desktop layout runs on the desktop project");
+  const dropped: FakeSession = { ...planner, session_id: "01a0e0c1-0000-7000-8000-00000000a008" };
+  await setLiveSessions([planner, dropped]);
+  await publishAgentStreamFrame(dropped.session_id, longReplay(dropped.session_id), "replay");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${dropped.session_id}/live`);
+    await expect(page.getByText("Turn 39:")).toBeVisible();
+    await page
+      .getByText("Turn 12:")
+      .evaluate((element) => element.scrollIntoView({ block: "start" }));
+    await expect(page.getByTestId("jump-to-latest")).toHaveText("Jump to latest");
+
+    // This reconnect is answered with an entirely later window - Turn 20 on - which still
+    // scrolls, so landing at its end is a place the view had to go to, not the only place there
+    // was.
+    await rebuildThroughReconnect(dropped.session_id, rebuiltReplay(dropped.session_id, 20));
+    await expect(page.getByText("Turn 12:")).toHaveCount(0);
+    await expectNewestTurnAboveComposer(page);
+    await expect(page.getByTestId("jump-to-latest")).toHaveCount(0);
   } finally {
     await context.close();
   }
