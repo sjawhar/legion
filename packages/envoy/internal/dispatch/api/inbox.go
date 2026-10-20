@@ -40,8 +40,8 @@ type inboxAsk struct {
 	// SnoozedUntil is the caller's own snooze on this row, null when they have not snoozed it.
 	// It is surfaced, never filtered: the row stays in everyone's inbox including its snoozer's,
 	// who folds it away while this moment is still ahead and sees it again once it passes.
-	SnoozedUntil *string        `json:"snoozed_until"`
-	Thread       askThread      `json:"thread"`
+	SnoozedUntil *string   `json:"snoozed_until"`
+	Thread       askThread `json:"thread"`
 }
 
 // inboxAssigneeFilter turns ?assignee= into the SQL mode and email the inbox query binds:
