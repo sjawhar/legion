@@ -57,7 +57,7 @@ const (
 	// not human. Only the listed owner approves a token, under the listed name, for the account.
 	ReasonMintTargetNotListed = "mint-target-not-listed"
 	// ReasonMintedHasValue: a secret carrying mint-service-account also has a current value, which
-	// a release would never read. A minted secret holds no version.
+	// a release would never read. A minted secret holds no enabled version.
 	ReasonMintedHasValue = "minted-has-value"
 )
 

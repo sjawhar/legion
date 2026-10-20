@@ -3,7 +3,9 @@ package policy_test
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
@@ -94,5 +96,50 @@ func TestMintKindMalformedTargetRefused(t *testing.T) {
 	loader.MintTargets = nil
 	if set, err := loader.Load(context.Background()); err != nil || len(set.Secrets) != 0 {
 		t.Fatalf("Load with no mint targets = %+v, %v; want nothing served", set, err)
+	}
+}
+
+// TestStillMintedHoldsOneReadPerNamePerWindow pins the release reread's hold: fifty releases at
+// once, and more within the window, cost one store read; once the window passes, a deleted secret
+// reads as gone and a retagged one as another source.
+func TestStillMintedHoldsOneReadPerNamePerWindow(t *testing.T) {
+	store := secrets.NewLocal(minted(policytest.MintName, policytest.MintOwner, policy.TierHuman, mintTarget))
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
+	loader := policytest.Loader(store)
+	loader.Store = policytest.StoreThrough(store, count)
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	clock := time.Date(2026, 10, 20, 0, 0, 0, 0, time.UTC)
+	policy.SetNow(cur, func() time.Time { mu.Lock(); defer mu.Unlock(); return clock })
+	advance := func(d time.Duration) { mu.Lock(); clock = clock.Add(d); mu.Unlock() }
+	base := count.Calls.Load()
+	source := policy.MintSourcePrefix + mintTarget
+	var wg sync.WaitGroup
+	for range 50 {
+		wg.Go(func() {
+			if ok, err := cur.StillMinted(context.Background(), policytest.MintName, source); !ok || err != nil {
+				t.Errorf("StillMinted = %v, %v; want served", ok, err)
+			}
+		})
+	}
+	wg.Wait()
+	advance(29 * time.Second)
+	if ok, _ := cur.StillMinted(context.Background(), policytest.MintName, source); !ok || count.Calls.Load()-base != 1 {
+		t.Fatalf("51 releases within the window made %d store reads, served %v; want 1 and served", count.Calls.Load()-base, ok)
+	}
+	gone := minted(policytest.MintName, policytest.MintOwner, policy.TierHuman, mintTarget)
+	gone.DeletedAt = new(time.Now())
+	store.Put(gone)
+	advance(2 * time.Second)
+	if ok, err := cur.StillMinted(context.Background(), policytest.MintName, source); ok || err != nil || count.Calls.Load()-base != 2 {
+		t.Fatalf("after a delete and the window = %v, %v after %d reads; want refused after 2", ok, err, count.Calls.Load()-base)
+	}
+	store.Put(minted(policytest.MintName, policytest.MintOwner, policy.TierHuman, "other-admin@example-project.iam.gserviceaccount.com"))
+	advance(31 * time.Second)
+	if ok, _ := cur.StillMinted(context.Background(), policytest.MintName, source); ok {
+		t.Fatal("a retagged secret still reads as this grant's minted secret")
 	}
 }

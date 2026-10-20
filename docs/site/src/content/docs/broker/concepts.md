@@ -242,7 +242,7 @@ reason of at most 400 characters. The broker evaluates every name
 - Names that need approval must all need the same approver, else the request is refused
   `MIXED_APPROVERS`; request them separately.
 - A **minted** secret carries a `mint-service-account` tag naming a Google service account
-  (`<name>@<project>.iam.gserviceaccount.com`) and holds no version: each release mints a fresh
+  (`<name>@<project>.iam.gserviceaccount.com`) and holds no enabled version: each release mints a fresh
   access token for that account, lasting the shorter of an hour and what is left of the grant. The
   broker serves one only when `BROKER_MINT_TARGETS` lists its name with that account and the
   secret's owner, and the secret is human-tier, so only that owner approves a token, under a name

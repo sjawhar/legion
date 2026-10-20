@@ -30,10 +30,12 @@ type Current struct {
 	// has passed.
 	recent map[string]time.Time
 	now    func() time.Time
-	// minted holds StillMinted's verdict for each name for MintedRecheck, so a session releasing
-	// a minted grant in a loop costs at most one store read per name in that window.
-	mintedMu sync.Mutex
-	minted   map[string]mintedVerdict
+	// minted holds StillMinted's verdict for each name for MintedRecheck, and mintedLook the one
+	// read in flight for a name, so releases of a minted grant, at once or in a loop, cost at most
+	// one store read (two Secret Manager metadata calls) per name in that window.
+	mintedMu   sync.Mutex
+	minted     map[string]mintedVerdict
+	mintedLook map[string]chan struct{}
 }
 
 // NewCurrent loads the policy once, failing when that load fails, and then reloads it every
@@ -42,7 +44,7 @@ type Current struct {
 // ctx is live logs LoadFailedMessage; one that fails once ctx has ended, the broker shutting down,
 // is no failed load and logs nothing, since the deployment's alarm counts that line.
 func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Current, error) {
-	c := &Current{loader: loader, mu: make(chan struct{}, 1), recent: map[string]time.Time{}, now: time.Now, minted: map[string]mintedVerdict{}}
+	c := &Current{loader: loader, mu: make(chan struct{}, 1), recent: map[string]time.Time{}, now: time.Now, minted: map[string]mintedVerdict{}, mintedLook: map[string]chan struct{}{}}
 	if err := c.Refresh(ctx); err != nil {
 		return nil, err
 	}
@@ -187,24 +189,41 @@ type mintedVerdict struct {
 // stops a deleted or retagged one minting before the next reload. A failed store call is an error
 // and is not held.
 func (c *Current) StillMinted(ctx context.Context, name, source string) (bool, error) {
-	now := c.now()
-	c.mintedMu.Lock()
-	v, ok := c.minted[name]
-	c.mintedMu.Unlock()
-	if !ok || now.Sub(v.at) >= MintedRecheck {
+	for {
+		now := c.now()
+		c.mintedMu.Lock()
+		if v, ok := c.minted[name]; ok && now.Sub(v.at) < MintedRecheck {
+			c.mintedMu.Unlock()
+			return v.source == source, nil
+		}
+		if wait, busy := c.mintedLook[name]; busy {
+			c.mintedMu.Unlock()
+			select {
+			case <-wait:
+				continue
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+		done := make(chan struct{})
+		c.mintedLook[name] = done
+		c.mintedMu.Unlock()
 		lk, err := c.loader.LoadOne(ctx, name)
+		c.mintedMu.Lock()
+		delete(c.mintedLook, name)
+		close(done)
 		if err != nil {
+			c.mintedMu.Unlock()
 			return false, err
 		}
-		v = mintedVerdict{at: now}
+		v := mintedVerdict{at: now}
 		if lk.Served {
 			v.source = lk.Secret.Source
 		}
-		c.mintedMu.Lock()
 		c.minted[name] = v
 		c.mintedMu.Unlock()
+		return v.source == source, nil
 	}
-	return v.source == source, nil
 }
 
 // merge sets name in secrets as lk found it: the served secret, or no entry.

@@ -123,7 +123,8 @@ func TestValuesWithoutMinterFails(t *testing.T) {
 }
 
 // TestValuesStopsMintingOnceTheSecretIsGone pins the release's own reread: a live grant of a
-// minted secret mints nothing once the secret is deleted or retagged, before any policy reload.
+// minted secret mints nothing once the secret is retagged, before any policy reload (the policy
+// package's hold test covers a delete).
 func TestValuesStopsMintingOnceTheSecretIsGone(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	calls := withMintedSecret(t, m)
