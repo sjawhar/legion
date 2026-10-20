@@ -1838,6 +1838,15 @@ first met). The state home is the one that stays the role's, and for a mechanism
 caution: Oh My Pi names its browser broker's lock from the state root, the name is an abstract
 unix socket, and an abstract socket name is one name across every container of a pod, so one
 state home would block every role's browser broker but the first (above).
+
+Sharing the cache home gives the issue's roles one Playwright browser registry, since
+playwright-core resolves it to `$XDG_CACHE_HOME/ms-playwright`, and `Registry.install()` takes an
+exclusive lock on that directory with about ten minutes of back-off, so a second role installing
+at the same time waits rather than races. Two things follow and are worth knowing before meeting
+them: an install still waiting when the back-off is spent fails with a lock error, and
+`playwright install --force`, which removes a current installation before writing the new one, can
+remove a browser tree another role of the issue is running from.
+
 `XDG_CONFIG_HOME` alone is unchanged, the pod's shared in-memory volume holding the jj
 configuration `workspace-init` writes, and `workspace-init` keeps every value it had.
 Every one of those paths is under the issue volume's own whole-volume mount at `/legion`: the
