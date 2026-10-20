@@ -25,7 +25,12 @@ func testPlugins() *runtime.PluginInstall {
 // `--backend=copyfile`, which keeps bun from hardlinking the installed plugin files out of the
 // role's bun install cache: the cache and the generation directory share the issue's volume, and a
 // hardlinked install is one inode with the cache's copy, so an in-place edit of either corrupts
-// the other for the life of that volume.
+// the other for the life of that volume. It takes /usr/bin/flock on that cache directory, after a
+// `mkdir -p` of it so the lock's inode exists before anything fills the cache, and runs twice
+// before the failure branch: filling a cold cache entry is not concurrency-safe, an installing
+// launch renders this script for every role of a kept pod and a plugin bump makes the pair cold
+// for all of them at once, so without the lock a bump fails five of six launches, and without the
+// retry an agent's own `bun install` racing the same cold entry fails one.
 func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -52,6 +57,9 @@ func TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript(t *testing.T) {
 	for _, want := range []string{
 		spec.Plugins.PiLegion, spec.Plugins.PiEnvoy, genDir, "/g*",
 		"--backend=copyfile", "exec \"$@\"", "} 1>&2", "set -eu",
+		"cache=${BUN_INSTALL_CACHE_DIR:-", "mkdir -p -- \"$cache\"",
+		"/usr/bin/flock -- \"$cache\" /usr/local/bin/bun add",
+		"legion_install || legion_install",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("install script does not name %q:\n%s", want, script)

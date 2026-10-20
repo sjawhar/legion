@@ -1847,6 +1847,27 @@ them: an install still waiting when the back-off is spent fails with a lock erro
 `playwright install --force`, which removes a current installation before writing the new one, can
 remove a browser tree another role of the issue is running from.
 
+Sharing `BUN_INSTALL_CACHE_DIR` gives them one bun install cache, which no lock of bun's own
+guards: filling a cold entry of it from several roles at once races. Six concurrent
+`bun add --backend=copyfile --exact chalk@5.3.0 lodash@4.17.21` into six separate directories
+against one empty cache left one exit 0 and five exit 1 with
+`ENOENT: failed copying files from cache to destination`, measured twice in this issue's own
+container on bun 1.3.14, where the same six against the cache they had just filled all exited 0 —
+the race is the cold fill of an entry, not the install out of it, and `--backend=copyfile` governs
+only how files leave the cache. The install Legion renders for an installing launch takes
+`/usr/bin/flock` on the cache directory, after a `mkdir -p` of it so the lock's inode exists before
+anything fills the cache, and retries the install once (`installScript`,
+`packages/daemon/internal/runtime/sandbox/plugins.go`), so a plugin-version bump, which makes the
+pair cold for every role of a kept pod at once, does not fail their launches; `flock` is advisory
+and per-inode, which holds exactly where this needs it — the six containers of one pod share a
+kernel and that inode on the issue's volume — and nowhere wider, so two pods would not be covered.
+Two agents of one issue running `bun install` at once against a cold shared cache can fail the
+same way, nothing Legion renders wraps those, and the failure is a failed install with a clear
+error rather than a corrupted one — bun stops, it does not half-write the workspace — so a second
+run succeeds against the cache the first filled. That is why an agent's own install is a
+documented consequence and the install Legion renders was a blocker: nothing is there to retry
+that one.
+
 `XDG_CONFIG_HOME` alone is unchanged, the pod's shared in-memory volume holding the jj
 configuration `workspace-init` writes, and `workspace-init` keeps every value it had.
 Every one of those paths is under the issue volume's own whole-volume mount at `/legion`: the

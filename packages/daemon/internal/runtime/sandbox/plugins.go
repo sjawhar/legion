@@ -99,6 +99,32 @@ if (got !== want) {
 // The directory, the two specs and the contract are each shell-quoted into the script
 // (shellprefix.Literal): they travel as literal text the daemon renders, never as something the
 // shell expands.
+//
+// The install is serialised on the cache directory and retried once, each for its own reason.
+// Filling a cold entry of a bun install cache is not concurrency-safe: six concurrent
+// `bun add --backend=copyfile --exact` into six separate directories against one empty
+// BUN_INSTALL_CACHE_DIR leave one exit 0 and five exit 1 with
+// `ENOENT: failed copying files from cache to destination`, where the same six against the cache
+// they just filled all exit 0 — the race is the cold entry fill, not the install out of it, and
+// `--backend=copyfile` governs only how files leave the cache. This script is exposed to that
+// race because the issue's roles share one install cache (roleEnvironment, manifest.go) and an
+// installing launch renders it for every role of a kept pod whose recorded contract differs from
+// the daemon's, so a plugin-version bump makes the pair cold for all six at once; a failed
+// `bun add` here takes the failure branch and the role's agent never execs.
+//   - The lock, /usr/bin/flock on the cache directory, covers the installs Legion itself renders,
+//     which is the case that reaches production. Its scope is exactly that and no wider: flock is
+//     advisory and per-inode, which holds for the containers of one pod, sharing a kernel and an
+//     inode on the issue's volume, and not across pods, where two pods of two issues have two
+//     volumes and two inodes anyway. The directory is made (mkdir -p) before the lock is taken, so
+//     the lock's inode exists before anything fills the cache — EnsureScratch makes the cache root,
+//     but this script cannot assume the generation's turn order. The cache directory is read as
+//     ${BUN_INSTALL_CACHE_DIR:-<generation directory>}: the runtime always sets that variable for a
+//     role container (roleEnvironment, manifest.go, and runtimeOwned refuses anyone else setting
+//     it), and the default keeps the script, which runs under `set -eu`, from aborting if it is
+//     somehow unset — with no shared cache there is nothing cross-role to serialise, so locking the
+//     role's own generation directory is the honest fallback.
+//   - The retry covers what no lock of ours can reach: an agent's own `bun install` filling the
+//     same cold entry at the same moment. One retry, then the failure branch.
 func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
 	root, genDir := pluginsRoot(stateHome), pluginGenDir(stateHome, generation)
 	legionSpec := bunSpec("@sjawhar/pi-legion", plugins.PiLegion)
@@ -108,7 +134,12 @@ func installScript(stateHome string, generation uint64, plugins *runtime.PluginI
 {
   rm -rf -- %s/g*
   mkdir -p -- %s && cd -- %s
-  /usr/local/bin/bun add --backend=copyfile --exact %s %s \
+  cache=${BUN_INSTALL_CACHE_DIR:-%s}
+  mkdir -p -- "$cache"
+  legion_install() {
+    /usr/bin/flock -- "$cache" /usr/local/bin/bun add --backend=copyfile --exact %s %s
+  }
+  legion_install || legion_install \
     || { echo %s; exit 1; }
   node -e %s %s/node_modules/@sjawhar/pi-legion/package.json %d
 } 1>&2
@@ -116,6 +147,7 @@ exec "$@"
 `,
 		shellprefix.Literal(root),
 		shellprefix.Literal(genDir), shellprefix.Literal(genDir),
+		shellprefix.Literal(genDir),
 		shellprefix.Literal(legionSpec), shellprefix.Literal(envoySpec),
 		shellprefix.Literal(failMsg),
 		shellprefix.Literal(pluginCheckScript),
