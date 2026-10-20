@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-20T05:43:42Z",
+  "completed": "2026-10-20T10:19:32Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "a578760e40a5d84046e6a3045c9e095e0244c5a5",
+  "head": "59e0337c7b62d1905e489d48829251a6e7107921",
   "proof": [
+    {
+      "criterion": "Done-when 5 (the proof's node-release accounting): Stage 4b's node-release waits only for tree 1's pods to leave a node - the run's repository cache pod (legion.dev/cache=true) and a pod of another tree of the run (a carried child's own tree, launched at tree 1's linger expiry, which falls inside the wait now that production-check-bound runs first) keep a node as another project's pod does, each named in the note - and its reads of tree 1's Sandboxes and volumes do not assume the linger is still running after the waits",
+      "surface": "the script's node_pods_judged and node_released, extracted by name and run under bash over the a578760e artifact's node listing and a stub kubectl on PATH (scripts/e2e/lib/node-released.test.ts); the script under bash -n; the lib suite; the artifact's transcript, pod watch and daemon log for the failure and the timing; the close and carried-child checkpoints read against that timing",
+      "command": "bun test scripts/e2e/lib/node-released.test.ts; bun test scripts/e2e/lib; bash -n scripts/e2e/stage4b-sandbox-tree.sh; bunx biome check scripts/e2e/; .github/scripts/check-private-names.sh; gh api repos/sjawhar/legion/compare/a578760e...59e0337c --jq '[.files[].filename]'",
+      "observed": "Artifact stage4b-2059-a578760e-tgz: 45 checkpoints passed (done, mid-turn-carry, production-check-bound among them); LEGSMOKE-852 closed 09:02:26Z, linger until 09:32:26Z; production-check-bound passed ~09:21; node-release's first node released after 664 s (~09:32), the third (ip-10-1-11-161) timed out at 1500 s holding legsmoke's cache pod (legion.dev/cache=true, no tree label, created 06:02:06Z), the carried child's new pod legion-legsmoke-legsmoke-860 (uid b62154a8, legion.dev/tree=LEGSMOKE-860, created 09:32:29Z, three seconds after the expiry) and another project's pod; the old jq's length == 0 over every live run pod could never hold there. Now: node_pods_judged over that listing -> holding [], others [cache, carried child, other project] (the DaemonSet pod with no project label uncounted); tree 1's Pending pod and an untreed run pod -> holding; Succeeded/Failed -> nothing; node_released over the stub kubectl: gone -> released, that node -> released naming the three keepers, tree 1's pod present -> waiting, nothing on it -> waiting (4 pass). The checkpoint reads tree1_until from the daemon's linger line (as mid-turn-carry does), asserts the three Sandboxes Suspended and PVCs Bound before the waits, and after them only while at least 60 s of the linger is left, else notes that the close and carried-child judge that state; close's comment no longer assumes the expiry is ahead. Read against the artifact's timing, close (tree_gone, already true after the expiry) and carried-child (the hand-over log line, Dispatch's events, the carried claim's tree, the kept volume uid, the resume task, the catch-up) each read state or log after the fact, so neither depends on when the expiry falls. bun test scripts/e2e/lib 508 pass (only nats-stream's 2 Docker cases fail in the pod); bash -n clean; biome clean; private-names clean (the other project's key in the fixture is the placeholder acme); the compare a578760e...59e0337c lists only scripts/e2e/README.md, scripts/e2e/lib/node-released.test.ts, scripts/e2e/stage4b-sandbox-tree.sh and .legion, so the a578760e image (sha256:37d7461a) stands for the rerun",
+      "headSha": "59e0337c7b62d1905e489d48829251a6e7107921",
+      "negativeControl": "The artifact's own failure: node ip-10-1-11-161 'still exists' at the 1500 s timeout with the cache and carried-child pods listed under the run's project label (transcript.log, the node-release report); the new test's waiting cases show the predicate still refuses a node while a pod of tree 1 or an untreed run pod is on it, and one nothing keeps until the pool takes it"
+    },
     {
       "criterion": "The forward merge of main (61552da1; #2024 Stage 2/3/4a on a devbox with no gateway, #2068, #2075, #2076, the broker's Google token kind, three releases) keeps the branch whole: AGENTS.md's Stage 2 and 3 command lines carry #2024's LEGION_E2E_MODEL_ROUTE prefixes and tails around this branch's Stage 3 wording, round 9's four deletions and two instructions sentences stand on the merged scripts, and every suite the pod can run is green; GitHub reports the pull request mergeable and builds the merged head's image",
       "surface": "the merged working copy (jj new legion/LEGION-781 main@origin, one conflict resolved by hand), the e2e scripts under bash -n and the lib suite, the TypeScript suites of the packages main changed, the Go builds, and GitHub's mergeability and workflow starts at the pushed head",
@@ -98,10 +106,11 @@
     "packages/claude-envoy/{package.json,tests/legion-tool.test.ts,CHANGELOG.md,dist/envoy-channel.js,legion/skills/**}: contract 33, pins, rebuilt bundle and skills snapshot (round 8)",
     "packages/pi-shared/src/handoff-commit{,.test}.ts: the branch's production_check removal carried to the moved module (round 8)",
     "skills/legion-controller/SKILL.md: the merged bullet re-wrapped under the 500-line guard (round 8)",
-    "scripts/e2e/stage4b-sandbox-tree.sh: the instructions heredoc's check-task sentence states the production rule and waits for no targeted message; the two post-close send_agent blocks (look 1, the bound's last look) and their wait_for_worker deleted; comments at the first and last look (round 9)",
     "scripts/e2e/stage3-devbox-workflow.sh: the same two blocks deleted; the instructions heredoc gains the check-task rule; comments (round 9)",
-    "scripts/e2e/README.md: the Stage 3 narrative and the Stage 4b done and production-check-bound rows no longer say the implementer is told its look (round 9)",
-    "AGENTS.md: the Stage 2 and 3 command lines carry #2024's LEGION_E2E_MODEL_ROUTE prefixes and tails around this branch's Stage 3 wording (round 10, the merge's one conflict)"
+    "AGENTS.md: the Stage 2 and 3 command lines carry #2024's LEGION_E2E_MODEL_ROUTE prefixes and tails around this branch's Stage 3 wording (round 10, the merge's one conflict)",
+    "scripts/e2e/stage4b-sandbox-tree.sh: node-release reads tree 1's linger from the daemon's line, asserts its Sandboxes and volumes before the node waits and after only while the linger still runs; node_pods_judged judges a node's pods (tree 1's and untreed run pods hold, the cache, other trees and other projects keep); node_released and report_node_release name tree and cache labels; close's comment (round 11)",
+    "scripts/e2e/lib/node-released.test.ts: node_pods_judged over the a578760e node's listing and node_released over a stub kubectl (round 11)",
+    "scripts/e2e/README.md: the node-release row (round 11; the Stage 3 narrative and the done/production-check-bound rows from round 9)"
   ],
   "trickyParts": [
     "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
@@ -140,5 +149,5 @@
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 10
+  "round": 11
 }
