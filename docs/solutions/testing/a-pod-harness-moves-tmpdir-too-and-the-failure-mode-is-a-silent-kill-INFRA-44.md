@@ -135,9 +135,13 @@ role container actually mounts.
   `du -x -a -d1 -k /` prints `0` for `/tmp`, and `du -sx -k /home` stays `13516` with 200 MiB under
   `~/.cache`. So use `du -sh ~/.cache`, or `du -sh` on any directory, without `-x`, to find what a
   directory holds — it reported `212M` with that probe in place — and `df -k --output=used /` to
-  measure the whole container filesystem against the limit; `du -x` and `df -x` are the ones to
-  avoid here. Verified twice, in two different role containers of this pod, and it is how the
-  4.4 GiB of Go caches quoted above was found.
+  measure the whole container filesystem against the limit; `du -x` is the one to avoid here. The
+  `df` caveat is a different one: `df` answers for the filesystem that holds the path it is given,
+  so a path under a volume measures that volume and says nothing about the 1 GiB
+  container-filesystem budget — `df -k --output=target,used /legion` names `/legion`, the issue
+  volume — while a path the container filesystem itself holds names `/`, the budgeted one:
+  `df -k --output=target,used /home/legion/.cache` and `df -k --output=used /` report the same
+  filesystem and the same figure. Verified twice, in two different role containers of this pod.
 
 The limit of all of it: nobody inside a role container can read the kubelet's own per-container
 accounting, because the cluster refuses `nodes/proxy`.
