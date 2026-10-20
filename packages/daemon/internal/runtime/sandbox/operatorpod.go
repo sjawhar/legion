@@ -80,12 +80,13 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // launch sets would reach the agent's container twice, and one that places Oh My Pi's sessions
 // would move them off the store Legion resumes them from; a volume name would be in the pod twice;
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
-// runs from hides it or is hidden by it; and a mount at, under, or above the agents' state home
-// (xdgStateHome), under which every role's agent has a state home of its own (roleStateHome), would
-// have every role's shim refuse to start naming the directory it could not make — the shim makes
-// Oh My Pi's profile directory under the role's state home before Oh My Pi starts
-// (podsafety.EnsureStateHome), which a read-only or foreign mount there refuses — at launch rather
-// than here, at `--check-config`. A provider key must name a variable nothing else in the pod sets,
+// runs from hides it or is hidden by it; and a mount at, under, or above xdgStateHome
+// (/home/legion/.local/state), which is the two setup containers' state home: no role's agent
+// keeps its Oh My Pi state there any more — every role's state home is its own, under its scratch
+// on the issue's volume (roleStateHome), which legionMountPaths() already fences through TreeRoot
+// — but an operator's mount there would still put its volume where workspace-init keeps the XDG
+// state it provisions the issue under, so it is refused here, at `--check-config`, rather than
+// left to fail in a pod. A provider key must name a variable nothing else in the pod sets,
 // since the shim refuses one its own environment names and would replace one Oh My Pi's
 // environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod
 // sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the session

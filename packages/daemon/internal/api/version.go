@@ -244,4 +244,18 @@ package api
 // state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
 // its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
 // `retainedUntil`, which a plugin at 31 reads with a strict schema that knows neither.
-const DaemonAPIVersion = 32
+//
+// 33: sjawhar/legion INFRA-31 -- every role container of a pod, a workflow role's and the
+// controller's, is told a scratch directory of its own on the issue's volume,
+// `/legion/scratch/<role>`, and the values `mainEnvironment` sets name its directories: the three
+// XDG homes it moves off the image's home directory (`XDG_CACHE_HOME`, `XDG_DATA_HOME` and
+// `XDG_STATE_HOME`, whose `/home/legion/.local/state/<role>` entry 18 declared), and the four new
+// names `TMPDIR`, `GOCACHE`, `GOMODCACHE` and `BUN_INSTALL_CACHE_DIR`. `XDG_CONFIG_HOME` is
+// unchanged, the pod's shared in-memory volume the setup container writes the agents' jj
+// configuration in, and the `workspace-init` containers keep every value they had. A role's
+// scratch is on the volume rather than the gigabyte of ephemeral storage its container is admitted
+// with, which the tools' caches overran: GKE Autopilot evicted the pod. The pane and pod
+// environment is the surface this contract names, and four of these names are the runtime's alone
+// (`runtimeOwned`), which a spec or an operator's pod env is now refused for setting, so the boot
+// gate and `legion probe-image` hold the daemon and the plugin to the same list.
+const DaemonAPIVersion = 33

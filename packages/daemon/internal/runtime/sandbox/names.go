@@ -35,7 +35,11 @@ import (
 // GH_CONFIG_DIR, and which its gh (the image's `legion gh`) and the clone's `legion git-credential`
 // helper read the token of the owner a command names from. The kubelet rewrites a whole-volume
 // Secret projection in place when the Secret changes, so the refresher's Secret update is what the
-// next gh runs with. CacheRoot is where a repository cache's pod mounts its own volume.
+// next gh runs with. CacheRoot is where a repository cache's pod mounts its own volume. Each role
+// container also has a scratch directory of its own on the issue's volume, `/legion/scratch/<role>`
+// under scratchRoot (roleScratch): its temporary directory, its cache, data and state homes, the
+// two Go caches and bun's install cache (roleEnvironment), so the gigabyte of ephemeral storage
+// the container is admitted with no longer bounds any of them.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"

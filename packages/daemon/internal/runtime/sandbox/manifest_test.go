@@ -495,8 +495,12 @@ func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
-// nothing an agent wrote reaches workspace-init's jj. The state home is not among the names the two
-// must agree on: each role's agent is told one of its own (TestEachRolesAgentIsToldAStateHomeOfItsOwn).
+// nothing an agent wrote reaches workspace-init's jj. The config home is the one home the two
+// agree on: a role container's cache, data and state homes are its own scratch's on the issue's
+// volume (TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume,
+// TestEachRolesAgentIsToldAStateHomeOfItsOwn), while the setup containers keep the image's home
+// directory ones, so nothing of a role's scratch reaches a container that holds the provisioning
+// token or provisions the issue's clone.
 func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -504,12 +508,28 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 	pod := podOf(t, r, workerSpec(t))
 	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t))
-	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
-		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
-			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
+	configHome := envOf(main)["XDG_CONFIG_HOME"]
+	if configHome == "" || configHome != envOf(init)["XDG_CONFIG_HOME"] {
+		t.Errorf("XDG_CONFIG_HOME: init %q, main %q; the two containers must agree",
+			envOf(init)["XDG_CONFIG_HOME"], configHome)
+	}
+	for name, want := range map[string]string{
+		"XDG_CACHE_HOME": podHome + "/.cache",
+		"XDG_DATA_HOME":  podHome + "/.local/share",
+		"XDG_STATE_HOME": podHome + "/.local/state",
+	} {
+		if got := envOf(init)[name]; got != want {
+			t.Errorf("%s is told %s=%q, want the image's home directory's %q", initContainer, name, got, want)
 		}
 	}
-	configHome := envOf(main)["XDG_CONFIG_HOME"]
+	for _, setup := range pod.InitContainers {
+		for _, v := range setup.Env {
+			if v.Value == scratchRoot || strings.HasPrefix(v.Value, scratchRoot+"/") {
+				t.Errorf("%s is told %s=%q, under the roles' scratch; a setup container keeps nothing there",
+					setup.Name, v.Name, v.Value)
+			}
+		}
+	}
 	volumeAt := func(c corev1.Container) string {
 		for _, mount := range c.VolumeMounts {
 			if mount.MountPath == configHome {
@@ -533,10 +553,12 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 // the Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named
 // from the lock path under its state root: one state root would make it one name in every
 // container, the first role's lock blocking every other role's broker. So each role's agent is
-// told a XDG_STATE_HOME of its own, `/home/legion/.local/state/<role>`, differing from every other
-// role's, and the controller's agent one by the same rule; workspace-init, which runs alone, keeps
-// the plain state home. The value is a path on the container's own filesystem, mounted from no
-// volume, so Chromium's profiles and Oh My Pi's logs are not charged to the pod's memory.
+// told a XDG_STATE_HOME of its own, the `state` directory of its own scratch
+// (`/legion/scratch/<role>/state`), differing from every other role's, and the controller's agent
+// one by the same rule; workspace-init, which runs alone, keeps the plain home-directory state
+// home. The value is on the issue's volume, deliberately: Oh My Pi's logs, Chromium's profiles and
+// the installed plugin generation are charged to neither the pod's memory nor the gigabyte of
+// ephemeral storage the container is admitted with, and they outlive the pod.
 func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -544,28 +566,15 @@ func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	}
 	told := map[string]claim.Role{}
 	for _, role := range launcherRoles {
-		spec := controllerSpec(t)
-		if role != claim.RoleController {
-			token, err := claim.NewToken("legion", testTree, role)
-			if err != nil {
-				t.Fatal(err)
-			}
-			spec = testSpec(t, token, role, testTree)
-		}
-		worker := workerOf(t, r, spec)
+		worker := workerOf(t, r, roleSpec(t, role))
 		got := envOf(worker)["XDG_STATE_HOME"]
-		if want := xdgStateHome + "/" + string(role); got != want {
+		if want := TreeRoot + "/scratch/" + string(role) + "/state"; got != want {
 			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, want %q", role, got, want)
 		}
 		if other, taken := told[got]; taken {
 			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, %s's too", role, got, other)
 		}
 		told[got] = role
-		for _, mount := range worker.VolumeMounts {
-			if overlaps(mount.MountPath, got) {
-				t.Errorf("%s's XDG_STATE_HOME %s overlaps volume %q's mount %q; it must be on the container's own filesystem", role, got, mount.Name, mount.MountPath)
-			}
-		}
 	}
 	init := containerNamed(t, podOf(t, r, workerSpec(t)), initContainer)
 	if got := envOf(init)["XDG_STATE_HOME"]; got != xdgStateHome {
@@ -573,33 +582,64 @@ func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
 	}
 }
 
-// bun (measured: bun 1.3.14, LEGION-198) resolves its install cache at
-// $XDG_CACHE_HOME/.bun/install/cache when neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is set —
-// neither is ever set here — and hardlinks that cache's files into every worktree's node_modules,
-// which is how one shared cache corrupted every checkout on a box at once (LEGION-198's spec). A
-// pod's XDG_CACHE_HOME is mounted from no volume of this pod's — not the tree volume, the boot
-// volume, the state volume, nor the in-memory config volume, at, above, or beneath it — so it
-// lives on the pod's own ephemeral container filesystem alone: private to this one pod, never
-// shared with the operator or another pod's, and gone with the pod. `overlaps` (operatorpod.go),
-// the package's own at/under/above predicate for exactly this question, catches a volume mounted
-// beneath the cache home (e.g. a tree-shared warm-cache volume at
-// $XDG_CACHE_HOME/.bun/install/cache) that a bare prefix-or-equal check would miss. No code
-// change is needed to keep the cache private; this test locks the absence of any overlapping
-// mount so a future volume addition cannot reintroduce sharing.
-func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
+// roleSpec is the spawn spec of role in the test tree's root issue: the controller's own, or a
+// workflow role's claim of that issue.
+func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
+	t.Helper()
+	if role == claim.RoleController {
+		return controllerSpec(t)
+	}
+	token, err := claim.NewToken("legion", testTree, role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return testSpec(t, token, role, testTree)
+}
+
+// Every directory a role's tools write to without being told where is under that role's own
+// scratch on the issue's volume. The rule this replaces was the opposite one: bun's install cache
+// sat on the container's own filesystem, private to the pod, because bun hardlinks that cache's
+// files into every worktree's node_modules and one shared cache corrupted every checkout on a box
+// at once (LEGION-198). The cache is 1.4 GB for this repository, more than the gigabyte of
+// ephemeral storage a role container is admitted with, so keeping it there is the eviction this
+// change exists to stop — and with the workspace on the volume and the cache off it, the hardlink
+// crossed devices anyway. What bounds the sharing now is a cache per role, no two roles holding
+// one directory, plus the one install Legion renders itself copying rather than linking
+// (plugins.go). Each directory is held by the issue volume's own mount, exactly as uv's are
+// (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), and overlaps neither the workspace nor uv's
+// directories.
+func TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := workerOf(t, r, workerSpec(t))
-	cacheHome := envOf(main)["XDG_CACHE_HOME"]
-	if cacheHome == "" {
-		t.Fatal("the main container carries no XDG_CACHE_HOME")
+	scratched := []string{
+		"TMPDIR", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+		"GOCACHE", "GOMODCACHE", "BUN_INSTALL_CACHE_DIR",
 	}
-	for _, mount := range main.VolumeMounts {
-		if overlaps(mount.MountPath, cacheHome) {
-			t.Fatalf("XDG_CACHE_HOME %s overlaps volume %q's mount %q; bun's cache would then persist or share across pods",
-				cacheHome, mount.Name, mount.MountPath)
+	told := map[string]claim.Role{}
+	for _, role := range launcherRoles {
+		main := workerOf(t, r, roleSpec(t, role))
+		env := envOf(main)
+		scratch := TreeRoot + "/scratch/" + string(role)
+		for _, name := range scratched {
+			dir := env[name]
+			if !strings.HasPrefix(dir, scratch+"/") {
+				t.Errorf("%s is told %s=%q, want a directory under its own scratch %s", role, name, dir, scratch)
+				continue
+			}
+			if mount := mountHolding(main, dir); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
+				t.Errorf("%s: %s %q is on mount %+v, want the issue volume's own mount at %s", role, name, dir, mount, TreeRoot)
+			}
+			if other, taken := told[dir]; taken {
+				t.Errorf("%s is told %s=%q, which %s is told too; one directory would be two roles'", role, name, dir, other)
+			}
+			told[dir] = role
+			for _, theirs := range []string{"LEGION_WORKSPACE", "UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
+				if path := env[theirs]; path != "" && overlaps(dir, path) {
+					t.Errorf("%s: %s %q overlaps %s %q", role, name, dir, theirs, path)
+				}
+			}
 		}
 	}
 }
