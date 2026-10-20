@@ -29,6 +29,7 @@ interface NavigateEvent extends Event {
 
 interface Navigation {
   addEventListener(type: "navigate", listener: (event: NavigateEvent) => void): void;
+  removeEventListener(type: "navigate", listener: (event: NavigateEvent) => void): void;
 }
 
 declare global {
@@ -158,15 +159,27 @@ function reloadForChunkFailure(): void {
 // prevented stylesheet failure loads the module without its styles. So the handler never
 // prevents it: the importer always sees the failure itself, and the page also reloads at most
 // once per session, never while it is being left.
-export function installChunkFailureRecovery(): void {
+export function installChunkFailureRecovery(): () => void {
+  const navigation = window.navigation;
   window.addEventListener("beforeunload", markPageLeaving);
-  window.navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
+  navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
   window.addEventListener("pageshow", markPageStaying);
   // Captured on the window, so a handler that stops a press from propagating cannot hide it.
   window.addEventListener("pointerdown", markPageStaying, { capture: true });
   window.addEventListener("keydown", markPageStaying, { capture: true });
   document.addEventListener("visibilitychange", markPageStayingWhenVisible);
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
+
+  return () => {
+    window.removeEventListener("beforeunload", markPageLeaving);
+    navigation?.removeEventListener("navigate", markPageLeavingForAnotherDocument);
+    window.removeEventListener("pageshow", markPageStaying);
+    window.removeEventListener("pointerdown", markPageStaying, { capture: true });
+    window.removeEventListener("keydown", markPageStaying, { capture: true });
+    document.removeEventListener("visibilitychange", markPageStayingWhenVisible);
+    window.removeEventListener("vite:preloadError", reloadForChunkFailure);
+    markPageStaying();
+  };
 }
 
 // The other half of the offline-chunk policy above: the editor, Yjs, and Hocuspocus are

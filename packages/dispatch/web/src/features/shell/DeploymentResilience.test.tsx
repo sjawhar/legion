@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import * as markdownEngine from "../refs/markdown-engine";
@@ -33,6 +33,17 @@ function navigateEvent(
   });
 }
 
+const recoveryUninstalls = new Set<() => void>();
+
+function installChunkFailureRecoveryForTest(): void {
+  recoveryUninstalls.add(installChunkFailureRecovery());
+}
+
+afterEach(() => {
+  for (const uninstall of recoveryUninstalls) uninstall();
+  recoveryUninstalls.clear();
+});
+
 test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
   const warm = spyOn(markdownEngine, "warmMarkdownRenderer").mockResolvedValue(undefined);
   const view = render(<DeploymentResilience />);
@@ -47,7 +58,7 @@ test("warms the block schema and headless Markdown renderer once after the first
 
 test("a Vite preload error reloads once per session and always reaches its importer", async () => {
   window.sessionStorage.clear();
-  installChunkFailureRecovery();
+  installChunkFailureRecoveryForTest();
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
   const view = render(<DeploymentResilience />);
   const first = new Event("vite:preloadError", { cancelable: true });
@@ -70,7 +81,7 @@ test("a Vite preload error reloads once per session and always reaches its impor
 
 test("a chunk that fails while the page is being left does not reload over the navigation", () => {
   window.sessionStorage.clear();
-  installChunkFailureRecovery();
+  installChunkFailureRecoveryForTest();
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
   const whileLeaving = new Event("vite:preloadError", { cancelable: true });
   const afterReturning = new Event("vite:preloadError", { cancelable: true });
@@ -108,7 +119,7 @@ test("a navigation to another document marks the page as left where the browser 
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
 
   try {
-    installChunkFailureRecovery();
+    installChunkFailureRecoveryForTest();
     navigate(false);
     failChunk();
     expect(reload).not.toHaveBeenCalled();
@@ -137,7 +148,7 @@ test("a link answered with a download does not mark the page as left", () => {
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
 
   try {
-    installChunkFailureRecovery();
+    installChunkFailureRecoveryForTest();
     navigation.dispatchEvent(navigateEvent(false, ""));
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
@@ -158,7 +169,7 @@ test("a page shown after a download marks a later navigation to that URL as leav
   const url = "http://localhost/api/v1/artifacts/spec/versions/1";
 
   try {
-    installChunkFailureRecovery();
+    installChunkFailureRecoveryForTest();
     navigation.dispatchEvent(navigateEvent(false, "", url));
     // This is no longer Firefox's second event from the download click: the page stayed in use.
     window.dispatchEvent(new Event("pageshow"));
@@ -195,7 +206,7 @@ test("the second navigate Firefox fires for one Download click does not mark the
   };
 
   try {
-    installChunkFailureRecovery();
+    installChunkFailureRecoveryForTest();
     expect({
       repeated: reloadsAfter(
         () => navigate("", file),
@@ -218,7 +229,7 @@ test("the second navigate Firefox fires for one Download click does not mark the
 
 test("a page still in use after a navigation began reloads for its next chunk failure", () => {
   window.sessionStorage.clear();
-  installChunkFailureRecovery();
+  installChunkFailureRecoveryForTest();
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
   const failChunk = () =>
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
@@ -267,7 +278,7 @@ test("a page still in use after a navigation began reloads for its next chunk fa
 
 test("a chunk that fails while the browser is offline is not a stale deployment: no reload, the importer sees the error", () => {
   window.sessionStorage.clear();
-  installChunkFailureRecovery();
+  installChunkFailureRecoveryForTest();
   const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
   const onLine = Object.getOwnPropertyDescriptor(Navigator.prototype, "onLine");
   Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
