@@ -516,7 +516,7 @@ export function Inbox({
   // is in flight (the card shows Answering…, or the error if the server refuses it); once the
   // server has recorded it the row is not held - their click was the end of that interaction -
   // and it leaves with the refetch the success triggers. Assign to me is likewise not a hold:
-  // the row moving into Mine at once is the feedback for that click.
+  // the row becoming the reader's at once is the feedback for that click.
   const viewport = useRef<ViewportAnchor>(null);
   const anchor = viewport.current?.interacted() ?? null;
   const presented = useRef<readonly PlacedRow[]>([]);
