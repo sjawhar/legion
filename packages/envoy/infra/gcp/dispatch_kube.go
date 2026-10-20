@@ -155,11 +155,19 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return values
 	}).(corev1.EnvVarArrayOutput)
 
+	strategy := &appsv1.DeploymentStrategyArgs{Type: pulumi.String(s.strategy.strategyType)}
+	if rolling := s.strategy.rollingUpdate; rolling != nil {
+		strategy.RollingUpdate = &appsv1.RollingUpdateDeploymentArgs{
+			MaxUnavailable: pulumi.Int(rolling.maxUnavailable),
+			MaxSurge:       pulumi.Int(rolling.maxSurge),
+		}
+	}
+
 	deployment, err := appsv1.NewDeployment(ctx, s.hostname, &appsv1.DeploymentArgs{
 		Metadata: metadata(s.hostname),
 		Spec: appsv1.DeploymentSpecArgs{
-			Replicas: pulumi.Int(1),
-			Strategy: &appsv1.DeploymentStrategyArgs{Type: pulumi.String("Recreate")},
+			Replicas: pulumi.Int(s.replicas),
+			Strategy: strategy,
 			Selector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
 			Template: corev1.PodTemplateSpecArgs{
 				Metadata: &metav1.ObjectMetaArgs{Labels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},

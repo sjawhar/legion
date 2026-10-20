@@ -72,7 +72,22 @@ func TestDispatchSettingsApplyDefaults(t *testing.T) {
 	require.Equal(t, "db-custom-1-3840", settings.DatabaseTier)
 	require.True(t, settings.DeletionProtection)
 	require.Equal(t, "dispatch", settings.Namespace)
+	require.Equal(t, 1, settings.Replicas)
+	require.Equal(t, "Recreate", settings.StrategyType)
+	require.Nil(t, settings.RollingUpdate, "one replica is recreated, never rolled")
 	require.Equal(t, `{"TCP":{"443":{"HTTPS":true}},"Web":{"example-dispatch.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`, settings.ServeConfig)
+}
+
+// Above one replica the operator has accepted two overlapping envoy-dispatch processes, so the
+// Deployment rolls a new pod up before taking an old one down.
+func TestDispatchSeveralReplicasRollWithoutGoingUnavailable(t *testing.T) {
+	args := dispatchArgs()
+	args.Replicas = pulumi.IntRef(3)
+	settings, err := gcp.ResolveDispatch(args)
+	require.NoError(t, err)
+	require.Equal(t, 3, settings.Replicas)
+	require.Equal(t, "RollingUpdate", settings.StrategyType)
+	require.Equal(t, &gcp.DispatchRollingUpdate{MaxUnavailable: 0, MaxSurge: 1}, settings.RollingUpdate)
 }
 
 func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
@@ -99,6 +114,7 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
+		{name: "fewer than one replica", edit: func(a *gcp.DispatchArgs) { a.Replicas = pulumi.IntRef(0) }, err: []string{"replicas", "at least 1"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -272,6 +288,34 @@ func TestDispatchRegistersKubernetesResources(t *testing.T) {
 		}
 	}
 	require.Positive(t, kubernetesResources)
+}
+
+// One replica is the default, and its Deployment carries no rollingUpdate at all: Kubernetes
+// refuses a rollingUpdate block on a Recreate Deployment.
+func TestDispatchDeploymentRecreatesOneReplicaByDefault(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	spec := m.One(t, "kubernetes:apps/v1:Deployment").Inputs.Mappable()["spec"].(map[string]any)
+	require.EqualValues(t, 1, spec["replicas"])
+	strategy := spec["strategy"].(map[string]any)
+	require.Equal(t, "Recreate", strategy["type"])
+	require.NotContains(t, strategy, "rollingUpdate")
+}
+
+func TestDispatchDeploymentRollsSeveralReplicas(t *testing.T) {
+	args := dispatchArgs()
+	args.Replicas = pulumi.IntRef(3)
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	spec := m.One(t, "kubernetes:apps/v1:Deployment").Inputs.Mappable()["spec"].(map[string]any)
+	require.EqualValues(t, 3, spec["replicas"])
+	strategy := spec["strategy"].(map[string]any)
+	require.Equal(t, "RollingUpdate", strategy["type"])
+	rollingUpdate := strategy["rollingUpdate"].(map[string]any)
+	require.EqualValues(t, 0, rollingUpdate["maxUnavailable"])
+	require.EqualValues(t, 1, rollingUpdate["maxSurge"])
 }
 
 func TestDispatchServiceExposesPort8766(t *testing.T) {
