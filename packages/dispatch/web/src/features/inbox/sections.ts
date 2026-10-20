@@ -35,10 +35,13 @@ export function isUnassigned(row: InboxRow): boolean {
   return (row.issue?.assignee ?? null) === null;
 }
 
-/** The `?assignee=` value standing for rows nobody holds, shared by the filter control and
- *  `inAssigneeFilter` so the two cannot drift. The route carries it as a plain value:
- *  `features/refs/routes.ts` neither imports this constant nor special-cases the word. */
+/** The two words the `?assignee=` vocabulary reserves beside a person's login: `unassigned`,
+ *  which `inAssigneeFilter` below reads as "nobody holds this row", and `everyone`, which the
+ *  route reads as the cleared filter and no selection ever holds (`parseInboxSearch` turns it
+ *  into the empty selection). Both live here so the route, the filter control and the list's
+ *  own rule cannot drift, and so the control can keep either word out of the people it offers. */
 export const UNASSIGNED_FILTER_VALUE = "unassigned";
+export const EVERYONE_FILTER_VALUE = "everyone";
 
 /**
  * Whether a row survives the assignee filter, the one place that decides what a filtered list

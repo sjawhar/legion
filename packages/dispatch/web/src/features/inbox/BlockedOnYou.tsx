@@ -49,8 +49,11 @@ export function waitingOnYou(asks: readonly InboxRow[], viewer: string | undefin
  *  counted, with when the oldest of them began waiting (undefined when nothing does). The
  *  badges and the banner read this one rule, so every count of work waiting on the reader means
  *  the same thing whatever the list on screen is filtered to, and another kind of waiting item
- *  is added here once. Nothing is counted until the login resolves: a number taken over the
- *  whole inbox while the shell loads would not be the reader's. A time `compareTimestamps`
+ *  is added here once. An ask is counted only once the login resolves - a number taken over the
+ *  whole inbox while the shell loads would not be the reader's - which `waitingOnYou` already
+ *  does; a credential request is not scoped to a reader at all (anyone signed in may decide
+ *  one), so it counts from the moment it is listed, as it did before the asks became the
+ *  reader's own. A time `compareTimestamps`
  *  refuses still counts but is never the oldest: the broker's `requested_at` reaches here
  *  verbatim, and the badges render in the app shell, outside every page's error boundary, so a
  *  throw here would take down every page. */
@@ -59,7 +62,6 @@ function needsYou(
   credentialRequests: readonly CredentialPendingRow[],
   viewer: string | undefined
 ): { count: number; oldest: string | undefined } {
-  if (viewer === undefined) return { count: 0, oldest: undefined };
   const since = [
     ...waitingOnYou(asks, viewer).map((ask) => ask.created_at),
     ...credentialRequests.map((request) => request.requested_at),

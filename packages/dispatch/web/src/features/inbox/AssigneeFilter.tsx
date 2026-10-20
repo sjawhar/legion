@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 
 import { usersQuery } from "../../api/queries";
 import { MultiSelect } from "../../components/MultiSelect";
-import { isOwnList, UNASSIGNED_FILTER_VALUE } from "./sections";
+import { EVERYONE_FILTER_VALUE, isOwnList, UNASSIGNED_FILTER_VALUE } from "./sections";
 
 function triggerText(selected: readonly string[], viewer: string): string {
   if (selected.length === 0) return "Assignee · everyone";
@@ -39,11 +39,14 @@ export function AssigneeFilter({
   const [wanted, setWanted] = useState(false);
   const people = useQuery({ ...usersQuery(), enabled: wanted });
 
+  // A login equal to either reserved word would be a row that means the filter rather than the
+  // person, so neither is offered among the people.
+  const reserved: readonly string[] = [UNASSIGNED_FILTER_VALUE, EVERYONE_FILTER_VALUE];
   const listed = [
     UNASSIGNED_FILTER_VALUE,
     ...(people.data ?? [])
       .map((person) => person.login)
-      .filter((login) => login !== UNASSIGNED_FILTER_VALUE),
+      .filter((login) => !reserved.includes(login)),
   ];
   // A selected value the list does not hold - a person who has not signed in, or anyone at all
   // while the request is out or refused - is still a row, so a filter read from the address

@@ -619,8 +619,9 @@ test.describe("inbox selection", () => {
     }
   });
 
-  // The `?agent=` chip narrows the list the same way the view switch does, and the Inbox stays
-  // mounted across it: the chip's clear link and the browser's own Back are client-side moves.
+  // The `?agent=` chip narrows the list the same way the assignee filter does, and the Inbox
+  // stays mounted across it: the chip's clear link and the browser's own Back are client-side
+  // moves.
   test("a mark made outside the agent filter does not count inside it", async ({ browser }) => {
     await createProject({ key: "CORE", name: "Core" });
     const issue = await createIssue({ project: "CORE", title: "Two agents, one issue" });

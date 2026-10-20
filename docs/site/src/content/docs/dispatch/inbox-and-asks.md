@@ -82,8 +82,9 @@ rather than **Waiting on you**, since those asks wait on whoever holds them.
 
 **Needs you**, the banner, and a project's **Blocked on you** pill mean one thing wherever they
 appear: the open asks whose turn is a person's, on issues assigned to you, that you have not
-snoozed, plus the credential requests waiting on you. None of them follows the filter, so a
-widened filter lists more asks than the number beside the Inbox.
+snoozed. **Needs you** and the banner add the credential requests waiting on you; a project's
+pill counts no credential request, because a request belongs to no project. None of them follows
+the filter, so a widened filter lists more asks than the number beside the Inbox.
 
 The Agents page links each agent's asks too. Its **Needs you** pill opens the Inbox filtered to
 that agent's asks waiting on you, under an `Asks from <agent> waiting on you · clear` chip. Choose

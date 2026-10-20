@@ -313,12 +313,12 @@ test("Agents collapses every card by default and expands each one independently"
 });
 
 test("Agents counts a card's two numbers in their own right: the reader's own, and the session's", async () => {
-  // Planner: both of its open asks wait on the reader, on their own issue. Builder: five open
-  // asks - two the reader's, one on Bob's issue, one the reader snoozed, and one whose next
-  // move is Builder's. Reviewer: nothing open.
+  // Planner: both of its open asks wait on the reader, on their own issue. Builder: six open
+  // asks - two the reader's, one on Bob's issue, one of the reader's they snoozed, and two whose
+  // next move is Builder's, one of them snoozed too. Reviewer: nothing open.
   const builder: Agent = {
     ...agents[0],
-    open_asks: 5,
+    open_asks: 6,
     session_id: "builder-session",
     title: "Builder",
   };
@@ -342,6 +342,11 @@ test("Agents counts a card's two numbers in their own right: the reader's own, a
         snoozed_until: new Date(now + 3 * 60 * 60 * 1000).toISOString(),
       }),
       builderAsk({ id: "builder-agents", waiting_on: "agent" }),
+      builderAsk({
+        id: "builder-agents-snoozed",
+        snoozed_until: new Date(now + 3 * 60 * 60 * 1000).toISOString(),
+        waiting_on: "agent",
+      }),
     ],
     listedAgents: [...agents, builder],
   });
@@ -354,14 +359,15 @@ test("Agents counts a card's two numbers in their own right: the reader's own, a
     expect(within(planner).queryByText(/^Waiting on agent/)).toBeNull();
     expect(within(planner).queryByText(/^Open asks/)).toBeNull();
 
-    // Bob's question is in neither number, and so is the snoozed one - a snooze is the reader
-    // deferring a question that waits on a person, never a move handed back to the agent, which
-    // is what subtracting from `open_asks` used to make it.
+    // Bob's question is in neither number, and neither is the reader's own that they snoozed -
+    // which is what subtracting from `open_asks` used to charge to the agent. A snooze is the
+    // reader deferring a question, not a change of whose move it is, so the snoozed agent-turn
+    // question IS this session's second number, reached by opening `Later` in the list it links.
     const builderCard = card(region, "Builder");
     expect(
       (await within(builderCard).findByRole("link", { name: "Needs you 2" })).getAttribute("href")
     ).toBe("/?agent=builder-session&section=needs-you");
-    const waiting = within(builderCard).getByRole("link", { name: "Waiting on agent 1" });
+    const waiting = within(builderCard).getByRole("link", { name: "Waiting on agent 2" });
     // The filter cleared, so the list it opens holds the question it counted whoever holds it.
     expect(waiting.getAttribute("href")).toBe("/?agent=builder-session&assignee=everyone");
     expect(waiting.getAttribute("title")).toContain("Builder");

@@ -1165,9 +1165,11 @@ export function AgentsPage(): ReactNode {
     [inbox.data, viewer]
   );
   // The second card number, counted in its own right rather than as what is left of `open_asks`:
-  // questions whose next move is the session's, on anybody's issue. A snooze is the reader
-  // deferring a question that waits on a person, so it never makes one the agent's move - and
-  // the subtraction this replaces counted every snoozed and every other person's question here.
+  // questions whose next move is the session's, on anybody's issue, snoozes ignored. A snooze is
+  // the reader deferring a question, not a change of whose move it is, so a snoozed agent-turn
+  // question is counted here and the list this pill opens holds it folded under `Later`. What
+  // the subtraction this replaces got wrong is the other direction: it charged this session with
+  // every question of the reader's they had snoozed, and with every other person's.
   const waitingOnAgentBySession = useMemo(
     () => tallyBySession(inbox.data ?? [], (ask) => ask.waiting_on === "agent"),
     [inbox.data]

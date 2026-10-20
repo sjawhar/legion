@@ -63,8 +63,9 @@ test("a request whose time cannot be read still counts, and the banner's age com
 });
 
 // One meaning for every count of what waits on the reader: whose turn it is AND whose issue it
-// is, whatever the list on screen is filtered to.
-test("the banner counts the reader's own questions, and none before the login resolves", () => {
+// is, whatever the list on screen is filtered to. A credential request is nobody's issue and
+// anyone signed in may decide one, so it is counted whether or not the login has resolved.
+test("the banner counts the reader's own questions, and no question before the login resolves", () => {
   const asks = [
     ask("ask-mine"),
     ask("ask-bob", { issue: { assignee: "bob", key: "CORE-2", title: "Bob's" } }),
@@ -85,7 +86,8 @@ test("the banner counts the reader's own questions, and none before the login re
     </MemoryRouter>
   );
   try {
-    expect(screen.queryByRole("link")).toBeNull();
+    // No question is the reader's yet; the credential request waiting on them still counts.
+    expect(screen.getByRole("link").textContent).toContain("Blocked on you: 1 item");
   } finally {
     loading.unmount();
   }

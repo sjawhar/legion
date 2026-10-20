@@ -8,6 +8,7 @@ import { matchPath } from "react-router-dom";
 
 import type { ArtifactOwner } from "../../api/client";
 import type { Artifact } from "../../api/types";
+import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
 import { shortSessionId } from "./actor";
 
 export type IssueRoute =
@@ -817,7 +818,7 @@ export function parseInboxSearch(search: string): InboxRoute {
   for (const raw of params.getAll("assignee")) {
     const value = raw.trim().toLowerCase();
     if (value === "") continue;
-    if (value === "everyone") {
+    if (value === EVERYONE_FILTER_VALUE) {
       everyone = true;
       continue;
     }
@@ -839,7 +840,7 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   }
   if (route.assignees !== undefined) {
     if (route.assignees.length === 0) {
-      query.append("assignee", "everyone");
+      query.append("assignee", EVERYONE_FILTER_VALUE);
     }
     for (const assignee of route.assignees) {
       query.append("assignee", assignee);
