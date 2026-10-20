@@ -93,6 +93,11 @@ export function useLiveFollow({
   const lastScrollTop = useRef(0);
   const lastScrollHeight = useRef(0);
   const seen = useRef<ReadonlySet<string>>(new Set<string>());
+  // The transcript `seen` was built from, so `follow()` rebuilds the set only when the transcript
+  // itself is a new array: it is called from every scroll event at the live end and from the
+  // resize observer as a turn streams, and copying the whole transcript into a new set several
+  // times a frame buys nothing. `null` until the first build, which no transcript array equals.
+  const seenIds = useRef<readonly string[] | null>(null);
   const remembered = useRef<RememberedTurn | null>(null);
   const previousSends = useRef(ownSendCount);
   const previousReplays = useRef(replayCount);
@@ -127,9 +132,19 @@ export function useLiveFollow({
   const follow = useCallback(() => {
     following.current = true;
     remembered.current = null;
-    seen.current = new Set(ids.current);
+    if (seenIds.current !== ids.current) {
+      seen.current = new Set(ids.current);
+      seenIds.current = ids.current;
+    }
     setAtEnd(true);
     setNewCount(0);
+  }, []);
+
+  /** Turns that have arrived since the reader stopped following: those the transcript holds and
+   *  the reader has not seen. `ids.current` is this render's `contentIds` by the time either
+   *  caller runs, because the layout effect that assigns it is declared first. */
+  const countUnseen = useCallback(() => {
+    setNewCount(ids.current.filter((id) => !seen.current.has(id)).length);
   }, []);
 
   const jumpToEnd = useCallback(() => {
@@ -205,11 +220,11 @@ export function useLiveFollow({
         const wanted = element.getBoundingClientRect().top + place.top;
         element.scrollTop += turn.getBoundingClientRect().top - wanted;
         record(element);
-        setNewCount(ids.current.filter((id) => !seen.current.has(id)).length);
+        countUnseen();
       }
       settleHeight.current = element.scrollHeight;
     },
-    [jumpToEnd, record]
+    [countUnseen, jumpToEnd, record]
   );
 
   // The turns are not always this hook's to await: assistant-ui applies a rebuilt transcript in a
@@ -244,9 +259,11 @@ export function useLiveFollow({
       return;
     }
     const onScroll = () => {
-      if (!observe(element)) {
-        // Always current when a rebuild lands: the reader's place is re-read on every scroll they
-        // make away from the live end, not only on the scroll that stopped following.
+      // Always current when a rebuild lands: the reader's place is re-read on every scroll they
+      // make away from the live end, not only on the scroll that stopped following - which is
+      // the one scroll `observe` has already read it on itself.
+      const wasFollowing = following.current;
+      if (!observe(element) && !wasFollowing) {
         remembered.current = rememberTurn(element);
       }
     };
@@ -314,9 +331,10 @@ export function useLiveFollow({
     }
     // Every change of the list, not only a change of its last id: a turn updated under one id
     // counts once, and an id that left the list is simply absent.
-    setNewCount(contentIds.filter((id) => !seen.current.has(id)).length);
+    countUnseen();
   }, [
     contentIds,
+    countUnseen,
     jumpToEnd,
     observe,
     ownSendCount,

@@ -40,7 +40,7 @@ import {
 } from "../../theme/classes";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
-import { readDispatchMarks } from "./dispatch-marks";
+import { readDispatchMarks, turnKey } from "./dispatch-marks";
 import { useLiveFollow } from "./use-live-follow";
 import { useFrameCoalesced } from "./useFrameCoalesced";
 
@@ -116,15 +116,11 @@ const Reasoning: ReasoningMessagePartComponent = ({ text }) => (
 
 /**
  * The key this turn keeps across a rebuild of the transcript, which every rendered turn carries in
- * `data-message-id` so `useLiveFollow` can find the turn a reader was on. It is the `turn` mark
- * where a streamed turn took a stored Dispatch message over (AgentRuntimeThread sets it), and the
- * message's own id otherwise. One selector returning the string, for the `Object.is` reason
- * `AssistantMessage` documents below.
+ * `data-message-id` so `useLiveFollow` can find the turn a reader was on. One selector returning
+ * the string, for the `Object.is` reason `AssistantMessage` documents below.
  */
 function useTurnKey(): string {
-  return useAuiState(
-    (state) => readDispatchMarks(state.message.metadata.custom).turn ?? state.message.id
-  );
+  return useAuiState((state) => turnKey(state.message.metadata.custom, state.message.id));
 }
 
 function UserMessage(): ReactNode {

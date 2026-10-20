@@ -869,10 +869,10 @@ export function setAgentStreamResponder(
 export function publishAgentStreamFrame(
   sessionID: string,
   frame: object,
-  as: "frame" | "replay" = "frame",
+  as: "frame" | "replay" | "drop" = "frame",
   options: ApiOptions = {}
 ): Promise<{ ok: boolean }> {
-  const query = as === "replay" ? "?as=replay" : "";
+  const query = as === "frame" ? "" : `?as=${as}`;
   return request<{ ok: boolean }>(
     `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish${query}`,
     "POST",
@@ -884,15 +884,10 @@ export function publishAgentStreamFrame(
 /** Ends every open viewer stream for a session, as a connection lost on the way to the browser
  *  does. The live stream carries no cursor, so the browser's reconnect asks the session for its
  *  replay again and rebuilds its whole transcript from it: this is how a test gets a second
- *  replay into a page that is already open, which `publishAgentStreamFrame` alone cannot do. */
+ *  replay into a page that is already open, which a published frame alone cannot do. */
 export function dropAgentStreamViewers(
   sessionID: string,
   options: ApiOptions = {}
 ): Promise<{ ok: boolean }> {
-  return request<{ ok: boolean }>(
-    `/api/v1/agents/${encodeURIComponent(sessionID)}/stream/_test/publish?as=drop`,
-    "POST",
-    {},
-    options
-  );
+  return publishAgentStreamFrame(sessionID, {}, "drop", options);
 }

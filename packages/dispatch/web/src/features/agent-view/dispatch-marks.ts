@@ -31,3 +31,14 @@ export function readDispatchMarks(custom: Readonly<Record<string, unknown>>): Di
     turn: typeof custom.turn === "string" ? custom.turn : undefined,
   };
 }
+
+/**
+ * The key a turn keeps across a rebuild of the transcript: the `turn` mark where a streamed turn
+ * took a stored Dispatch message over, and the message's own id otherwise.
+ * `AgentRuntimeThread` computes it for `useLiveFollow`'s `contentIds`, and `AgentThread` renders
+ * it into every turn's `data-message-id`; the hook matches the two by string equality, so both
+ * sides spell the key here rather than each in its own expression.
+ */
+export function turnKey(custom: Readonly<Record<string, unknown>>, id: string | undefined): string {
+  return readDispatchMarks(custom).turn ?? id ?? "";
+}

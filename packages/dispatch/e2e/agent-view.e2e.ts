@@ -152,18 +152,12 @@ const FOLD_FRAMES = replay.frames.map((frame, index) =>
   "message" in frame ? { ...frame, message: { ...frame.message, at: 20_400 + index * 100 } } : frame
 );
 
-/** `longReplay`'s forty turns with `extra` frames behind them: one replay for a session that
- *  needs both a transcript that scrolls and something else it published. A `seq` is
- *  last-writer-wins per message, so `extra` only orders its own snapshots. */
-function longReplayWith(sessionID: string, extra: readonly object[]): object {
-  const { frames } = longReplay(sessionID) as { frames: object[] };
-  return { frames: [...frames, ...extra], session_id: sessionID, v: 1 };
-}
-
 /** The replay a session answers a reconnect with once its newest-first budget no longer reaches
- *  the whole transcript: `longReplay`'s forty turns from `from` on, with the older ones gone and
- *  `extra` behind them. The frames keep their own `at`, so the turns that survive are read where
- *  they always were. */
+ *  the whole transcript: `longReplay`'s forty turns from `from` on (0 keeps them all, for a
+ *  session that needs both a transcript that scrolls and something else it published), with the
+ *  older ones gone and `extra` frames behind them. The frames keep their own `at`, so the turns
+ *  that survive are read where they always were, and a `seq` is last-writer-wins per message, so
+ *  `extra` only orders its own snapshots. */
 function rebuiltReplay(sessionID: string, from: number, extra: readonly object[] = []): object {
   const { frames } = longReplay(sessionID) as { frames: object[] };
   return { frames: [...frames.slice(from), ...extra], session_id: sessionID, v: 1 };
@@ -867,7 +861,7 @@ test("a reader scrolled back into a live session's transcript keeps their place,
   await setLiveSessions([planner, reading]);
   await publishAgentStreamFrame(
     reading.session_id,
-    longReplayWith(reading.session_id, FOLD_FRAMES),
+    rebuiltReplay(reading.session_id, 0, FOLD_FRAMES),
     "replay"
   );
   const context = await asUser(browser, "alice");
@@ -1032,12 +1026,14 @@ test("opening a session, switching to another, and reloading each land the reade
   await setLiveSessions([planner, first, second]);
   await publishAgentStreamFrame(
     first.session_id,
-    longReplayWith(first.session_id, [liveTurn(1, 41, "The first session's last word.", false)]),
+    rebuiltReplay(first.session_id, 0, [liveTurn(1, 41, "The first session's last word.", false)]),
     "replay"
   );
   await publishAgentStreamFrame(
     second.session_id,
-    longReplayWith(second.session_id, [liveTurn(2, 41, "The second session's last word.", false)]),
+    rebuiltReplay(second.session_id, 0, [
+      liveTurn(2, 41, "The second session's last word.", false),
+    ]),
     "replay"
   );
   const context = await asUser(browser, "alice");
@@ -1120,7 +1116,7 @@ test("a transcript shorter than the viewport shows no Jump to latest, and the co
   await publishAgentStreamFrame(planner.session_id, replay, "replay");
   await publishAgentStreamFrame(
     commander.session_id,
-    longReplayWith(commander.session_id, [
+    rebuiltReplay(commander.session_id, 0, [
       {
         commands: [
           { description: "Compact the session's context", name: "compact", source: "builtin" },

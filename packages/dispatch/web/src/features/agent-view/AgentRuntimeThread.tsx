@@ -11,13 +11,19 @@ import { compareTimestamps } from "../../lib/timestamps";
 import { actorName, isViewer } from "../refs/actor";
 import { AgentThread } from "./AgentThread";
 import { type AgentConversation, dispatchTurns, isRunning, toThreadMessages } from "./conversation";
-import { dispatchMetadata, readDispatchMarks } from "./dispatch-marks";
+import { dispatchMetadata, turnKey } from "./dispatch-marks";
 
 /** Who wrote a stored message, when it was not the viewer: its author, and its issue if any. */
 function otherAuthor(message: Message, viewer: string | undefined): string | undefined {
   return isViewer(message.author, viewer)
     ? undefined
     : [actorName(message.author), message.issue_key].filter(Boolean).join(" · ");
+}
+
+/** The id a stored Dispatch message is rendered under, which a streamed turn that took that
+ *  message over carries as its `turn` mark: one key for both, spelt here alone. */
+function dispatchId(messageId: string): string {
+  return `dispatch:${messageId}`;
 }
 
 /**
@@ -88,7 +94,7 @@ export function AgentRuntimeThread({
         ...message,
         metadata: dispatchMetadata({
           author: otherAuthor(source, viewer),
-          turn: `dispatch:${source.id}`,
+          turn: dispatchId(source.id),
         }),
       };
     });
@@ -104,7 +110,7 @@ export function AgentRuntimeThread({
       .map((message) => {
         const content = [{ text: message.body, type: "text" as const }];
         const createdAt = new Date(message.created_at);
-        const id = `dispatch:${message.id}`;
+        const id = dispatchId(message.id);
         if (message.author.kind === "session" && message.author.id === sessionId) {
           return {
             content,
@@ -140,10 +146,7 @@ export function AgentRuntimeThread({
   // What `useLiveFollow` reads the transcript from, in render order; `AgentThread` renders the
   // same key into each turn's `data-message-id`, so the hook can find the turn a reader was on.
   const contentIds = useMemo(
-    () =>
-      messages.map(
-        (message) => readDispatchMarks(message.metadata?.custom ?? {}).turn ?? message.id ?? ""
-      ),
+    () => messages.map((message) => turnKey(message.metadata?.custom ?? {}, message.id)),
     [messages]
   );
 
