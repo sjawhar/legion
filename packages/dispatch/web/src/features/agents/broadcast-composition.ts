@@ -18,7 +18,9 @@ export function newSendKey(): string {
 
 /** The broadcast being composed on the Agents page. */
 export interface BroadcastComposition {
-  readonly delivery: MessageDeliveryMode;
+  /** The mode the sender picked, or null until they pick one: the page then sends in the mode
+   *  the selection takes (`broadcastDelivery`). */
+  readonly delivery: MessageDeliveryMode | null;
   readonly draft: string;
   /** A refused send's whole request, put back by Restore draft and dropped by the first edit. */
   readonly restored: CreateBroadcastInput | null;
@@ -51,7 +53,7 @@ type CompositionState = Omit<
  */
 export function useBroadcastComposition(): BroadcastComposition {
   const [state, setState] = useState<CompositionState>(() => ({
-    delivery: "btw",
+    delivery: null,
     draft: "",
     restored: null,
     selected: new Set(),
@@ -62,7 +64,7 @@ export function useBroadcastComposition(): BroadcastComposition {
     restore: (send) =>
       setState((current) => ({
         ...current,
-        delivery: send.input.delivery,
+        delivery: send.picked ? send.input.delivery : null,
         draft: send.input.body,
         restored: send.input,
         selected: new Set(send.selected),

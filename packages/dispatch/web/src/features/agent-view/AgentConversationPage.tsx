@@ -191,6 +191,12 @@ export function AgentConversationPage(): ReactNode {
           This Dispatch cannot reach the session's conversation.
         </p>
       ) : null}
+      {agent !== undefined && agent.capabilities.length === 0 ? (
+        <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-takes-no-messages">
+          This session advertises no delivery mode, so a message sent here records a failed attempt.
+          A Claude Code session takes messages only when it was started with its Envoy channel.
+        </p>
+      ) : null}
       {sendError === null ? null : (
         <p className={`mt-2 text-sm ${dangerText}`} data-testid="agent-send-error">
           Could not send: {sendError}

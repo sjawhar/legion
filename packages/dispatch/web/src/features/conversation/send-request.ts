@@ -46,12 +46,16 @@ export interface SentRequest {
     | undefined;
   readonly kind: ComposerKind;
   readonly owner: ComposerOwner;
+  /** The mode a message with no delivery command goes in when it answers no thread
+   *  (`plainDelivery`, from the addressed sessions' capabilities as Send found them). */
+  readonly plainDelivery: DeliveryCapability;
   readonly replyTo: ReplyTarget | null;
 }
 
-/** The command, at the start of a body, that sends it in a mode other than Send, the default one.
- *  `deliveryPlan` strips it from what goes out, and the composer names it where it tells the
- *  reader how to send in another mode or what a bare command still needs. */
+/** The command, at the start of a body, that sends it in a mode other than the plain one (Send,
+ *  unless the session refuses Send: `plainDelivery`). `deliveryPlan` strips it from what goes out,
+ *  and the composer names it where it tells the reader how to send in another mode or what a bare
+ *  command still needs. */
 export const DELIVERY_COMMANDS = { aside: "/aside", btw: "/btw" } as const satisfies Record<
   Exclude<DeliveryCapability, "steer">,
   string
@@ -146,6 +150,7 @@ export async function sendRequest({
   edit,
   kind,
   owner,
+  plainDelivery,
   replyTo,
 }: SentRequest): Promise<unknown> {
   const { body, mentions, replacement } = draft;
@@ -167,7 +172,7 @@ export async function sendRequest({
       : api.createArtifactAsk(owner.artifactId, input);
   }
   if (owner.kind === "session") {
-    const inheritedDelivery = replyTo?.thread?.delivery ?? "steer";
+    const inheritedDelivery = replyTo?.thread?.delivery ?? plainDelivery;
     const plan = deliveryPlan(body, inheritedDelivery);
     const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
     return api.createAgentMessage(owner.sessionId, {
@@ -189,7 +194,7 @@ export async function sendRequest({
   }
   const targets = survivingMentions(body, mentions).map((mention) => mention.target);
   const baseBody = kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body;
-  const plan = deliveryPlan(baseBody, targets.length === 0 ? undefined : "steer");
+  const plan = deliveryPlan(baseBody, targets.length === 0 ? undefined : plainDelivery);
   const comment: CreateCommentInput = {
     body: plan.body,
     ...(replyTo === null ? {} : { reply_to: replyTo.id }),
@@ -197,7 +202,7 @@ export async function sendRequest({
     ...(targets.length === 0
       ? {}
       : {
-          delivery: plan.delivery ?? "steer",
+          delivery: plan.delivery ?? plainDelivery,
           mentions: targets.map((target) => ({ target })),
         }),
   };

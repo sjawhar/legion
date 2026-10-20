@@ -4,6 +4,16 @@
 
 ### Fixed
 
+- A session whose deliveries are channel notifications Claude Code did not load registers with no
+  delivery mode instead of `aside` (a Legion pane, whose deliveries go to the bridge's inbox, is
+  unaffected). Claude Code drops a notification from a channel it did not load without telling the
+  server, so Dispatch used to record an Aside to such a session (one started without `--channels`,
+  or whose `--channels` entry is not allowlisted) as sent while the model never saw it; the listener
+  now refuses it and Dispatch records the attempt as failed. The server reads the `claude`
+  process's command line and the managed settings' `allowedChannelPlugins` (`src/claude-channel.ts`),
+  says why on stderr and in its MCP instructions, and takes `ENVOY_CHANNEL_LOADED=1` or `0` as an
+  override.
+
 - The `dispatch` command (`dist/dispatch.js`) waits for its stdout and stderr writes before it
   exits. Bun's `process.exit` dropped whatever a pipe had not yet taken, so a Bash tool lost the
   end of any output over the pipe's buffer (8 KB to 16 KB) with exit code 0.
