@@ -1873,11 +1873,17 @@ configuration gives — `worker_boot_timeout_seconds` times
 second, since a wait that rounded down to zero would render `-w 0`, which is `-n`: no wait at all,
 and the cold-fill race back. A proportion rather than a fixed number because it has to hold at
 whatever the operator sets: the script runs the install twice, so two waits take two thirds of the
-deadline and the remaining third is left for the install and the agent's start at every
-configuration, where a constant sized for the defaults would be two waits of 240 seconds against
+deadline and the remaining third is left for the install and the agent's start, where a constant
+sized for the defaults would be two waits of 240 seconds against
 the 180 second deadline of a halved boot timeout and could never fire before the deadline retired
-the role. The bound is also long enough for the last of six roles to queue behind five serialised
-installs of the pair. A wait that
+the role. That remainder holds at every configuration but the smallest, where the floor takes
+over: under a three-second deadline two floored waits of a second consume it, deliberately, since
+being serialised and then retired is no worse than racing — an unserialised cold fill fails the
+launch anyway. Above that floor the bound is also long enough for the last of six roles to queue
+behind five serialised
+installs of the pair, 24 seconds each at the defaults — the half of the bound a smaller divisor
+would break, which `TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline` holds
+against the installs rather than against the derivation. A wait that
 times out exits 1, so it takes the retry and then the script's named failure — that one bump's
 launch fails the way it did before the lock existed, rather than hanging. `flock` is advisory
 and per-inode, which holds exactly where this needs it — the six containers of one pod share a

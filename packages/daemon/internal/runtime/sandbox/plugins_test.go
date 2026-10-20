@@ -366,21 +366,37 @@ func TestTwoRenderedInstallsSerialiseOnTheSharedBunCache(t *testing.T) {
 	t.Fatalf("the lockless control never interleaved in %d attempts: the harness proves nothing, so the locked run above passed vacuously", controlAttempts)
 }
 
+// queuedInstalls and installBudget are what the wait must be big enough for, from the feature
+// rather than from the derivation: the last of a pod's six roles queues behind the five installs
+// before it, and a cold install of the plugin pair measured 505 milliseconds in an issue pod of
+// this cluster, so a second each is a generous budget. They are the lower bound the derivation
+// exists to leave room for, and nothing in installLockWait computes them.
+const (
+	queuedInstalls = 5
+	installBudget  = time.Second
+)
+
 // The install lock's wait is a bound in proportion to the registration deadline, at every
-// configuration an operator can set rather than only at the defaults: positive, so the lock
-// blocks rather than failing at once (`-w 0` is byte for byte `-n`, which would restore the race
-// the lock is for while every substring assertion over the script still passed); never more than
-// its third of that configuration's deadline; and, where the deadline leaves room, small enough
-// that the two waits the script can make — it runs the install twice — plus a second of install
-// still fit inside the deadline, so a stalled lock fails the launch by the script's own branch
-// rather than being retired. The defaults are read from the daemon's own defaults rather than
-// written here as numbers, so a change to either default is what fails.
+// configuration an operator can set rather than only at the defaults. Each case carries the wait
+// computed by hand from that configuration — the arithmetic is in the case's own comment — so the
+// expectation comes from somewhere other than the code under test: a derivation that returned a
+// constant, or divided by something else, fails here, where a clause reading installLockWait's
+// own output against installLockWait's own deadline could not see either (the pin built from the
+// value cannot see the value change, which is what this test inherited and no longer does).
+//
+// Three further clauses say what the number has to be rather than what it is, so a future
+// derivation that renders different values is still held: the wait is positive, since `-w 0` is
+// byte for byte `-n` and would restore the race the lock is for; it is never more than its third
+// of that configuration's deadline, so two waits and the install that follows them still fit; and
+// — where the deadline leaves room for it — it covers the queue the lock itself creates, five
+// serialised installs at installBudget each, which is the half of the bound the derivation is
+// for and the half that was missing while the wait could shrink to a second unseen.
 //
 // The tiny configuration is the honest case, not an excluded one: below a deadline of about three
-// seconds the one-second floor dominates and two waits cannot fit. That is deliberate — being
-// serialised and then retired by the deadline is no worse than racing, since an unserialised cold
-// fill fails the launch anyway — so the property drops only its last clause there, which is why
-// that clause is conditional on the deadline rather than on the configuration's name.
+// seconds the one-second floor dominates, two waits cannot fit and the queue cannot be covered.
+// That is deliberate — being serialised and then retired by the deadline is no worse than racing,
+// since an unserialised cold fill fails the launch anyway — so the property drops those clauses
+// there, conditional on the deadline rather than on the configuration's name.
 func TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legion.yaml")
 	body := "project: demo\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\n"
@@ -395,15 +411,27 @@ func TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline(t *test
 		name      string
 		boot      time.Duration
 		intervals int
+		want      int
 	}{
-		{"the daemon's defaults", cfg.WorkerBootTimeout, cfg.WorkerBootRegistrationDeadlineIntervals},
-		{"a halved boot timeout", cfg.WorkerBootTimeout / 2, cfg.WorkerBootRegistrationDeadlineIntervals},
-		{"fewer intervals", cfg.WorkerBootTimeout, 2},
-		{"a deadline small enough that the floor bites", 800 * time.Millisecond, 3},
+		// 120s x 3 = a 360s deadline, a third of which is 120s. The daemon's own defaults, read
+		// rather than written, so a change to either of them fails this case against the hand
+		// arithmetic above rather than moving with it.
+		{"the daemon's defaults", cfg.WorkerBootTimeout, cfg.WorkerBootRegistrationDeadlineIntervals, 120},
+		// 60s x 3 = 180s, a third of which is 60s: the tuned deployment a constant 120 broke.
+		{"a halved boot timeout", cfg.WorkerBootTimeout / 2, cfg.WorkerBootRegistrationDeadlineIntervals, 60},
+		// 120s x 2 = 240s, a third of which is 80s: the other setting moving on its own.
+		{"fewer intervals", cfg.WorkerBootTimeout, 2, 80},
+		// 800ms x 3 = 2.4s, a third of which is 800ms, which is no whole second at all: the floor
+		// renders 1 rather than the `-w 0` that would be `-n`.
+		{"a deadline small enough that the floor bites", 800 * time.Millisecond, 3, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			deadline := runtime.RegistrationDeadline(tc.boot, tc.intervals, 0)
 			wait := installLockWait(tc.boot, tc.intervals)
+			if wait != tc.want {
+				t.Errorf("the wait at boot %s x %d intervals is %ds, want %ds: the %s deadline's third, floored at a second",
+					tc.boot, tc.intervals, wait, tc.want, deadline)
+			}
 			if wait <= 0 {
 				t.Fatalf("the wait at boot %s x %d intervals is %ds, want a positive bound: a non-positive wait renders -w 0, which is -n, and restores the cold-entry race", tc.boot, tc.intervals, wait)
 			}
@@ -413,8 +441,12 @@ func TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline(t *test
 			if deadline < 3*time.Second {
 				return
 			}
-			if spent := time.Duration(2*wait)*time.Second + time.Second; spent > deadline {
+			if spent := time.Duration(2*wait)*time.Second + installBudget; spent > deadline {
 				t.Errorf("two waits of %ds and a second of install take %s, past the %s registration deadline, so a stalled lock is retired by the deadline rather than failing the launch by its own branch", wait, spent, deadline)
+			}
+			if queue := queuedInstalls * installBudget; deadline >= 3*queue && time.Duration(wait)*time.Second < queue {
+				t.Errorf("the wait at boot %s x %d intervals is %ds, less than the %s the queue this lock creates needs: the last of a pod's six roles waits for the %d installs before it, so a wait this short fails the launch the lock was added to save",
+					tc.boot, tc.intervals, wait, queue, queuedInstalls)
 			}
 		})
 	}

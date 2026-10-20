@@ -86,12 +86,22 @@ if (got !== want) {
 // It is a proportion rather than a number because the bound only does its work while it stays in
 // proportion to that deadline. The script runs the install twice, so two timed-out waits have to
 // fit inside the deadline with room left over for the install that then runs and for the agent to
-// start: a third each leaves a third of remainder at every configuration — 120 seconds at the
-// defaults, 60 at a halved worker_boot_timeout_seconds — so the margin shrinks with everything
-// else instead of being generous at one setting and impossible at another. A constant cannot do
-// that: 120 is right only at the defaults, and at a halved boot timeout it would mean two waits
-// of 240 seconds against a 180 second deadline, so the bound could never fire before the deadline
-// retired the role, which is the failure the bound exists to prevent.
+// start: a third each leaves a third of remainder — 120 seconds at the defaults, 60 at a halved
+// worker_boot_timeout_seconds — so the margin shrinks with everything else instead of being
+// generous at one setting and impossible at another. A constant cannot do that: 120 is right only
+// at the defaults, and at a halved boot timeout it would mean two waits of 240 seconds against a
+// 180 second deadline, so the bound could never fire before the deadline retired the role, which
+// is the failure the bound exists to prevent. The remainder holds at every configuration but the
+// smallest, where the floor below takes over: at a deadline under three seconds two floored waits
+// of a second consume it, which is deliberate, since being serialised and then retired is no
+// worse than racing — an unserialised cold fill fails the launch anyway.
+//
+// The other half of the bound is the queue the lock itself creates, and it is why the wait may
+// not shrink freely: the last of a pod's six roles waits for the five installs before it, which
+// the defaults' 120 seconds allows 24 seconds each. That lower bound is held by
+// TestTheInstallLockWaitIsABoundInProportionToTheRegistrationDeadline against the installs
+// themselves rather than against this derivation, so a divisor that made the wait too small to
+// cover the queue fails there rather than passing as a different proportion.
 //
 // The sum at the defaults is the sanity check: worker_boot_timeout_seconds (120) times
 // worker_boot_registration_deadline_intervals (3) is a 360 second deadline, two waits take two
@@ -115,7 +125,12 @@ if (got !== want) {
 // (the serialisation test substitutes its stub into the rendered text instead). The third is
 // taken through runtime.RegistrationDeadline, the one computation that owns the deadline, rather
 // than by re-multiplying boot by intervals here, so the wait follows the deadline if it ever
-// stops being a plain product.
+// stops being a plain product. Its grace term is zero, which looks like a dropped argument and is
+// not: the grace the supervisor passes is ProvisionBound, and only while the claim is still
+// launching (armRegistration, internal/supervise), where this script rides in the LauncherStart
+// argv sent after the hello, by which time the timer is re-armed at the base bound. Where the
+// larger pre-hello bound does still stand, a wait derived from the base one is merely
+// conservative.
 func installLockWait(boot time.Duration, intervals int) int {
 	return max(int(runtime.RegistrationDeadline(boot, intervals, 0)/3/time.Second), 1)
 }
