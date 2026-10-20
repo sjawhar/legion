@@ -5,6 +5,13 @@ import { holdFirstRequest } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
+interface NavigationEventTrace {
+  download?: unknown;
+  sameDocument?: unknown;
+  type: string;
+  url?: unknown;
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -106,7 +113,10 @@ test("a page chunk that fails again after the session's one reload shows the fai
 test("a chunk that fails after a Download link was followed reloads the page", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "the guard does not depend on the layout");
+  test.skip(
+    testInfo.project.name !== "chromium" && testInfo.project.name !== "firefox-download-navigation",
+    "the guard is checked in Chromium and Firefox"
+  );
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: "Downloadable spec.", title: "Files" });
   const context = await asUser(browser, "alice");
@@ -114,24 +124,36 @@ test("a chunk that fails after a Download link was followed reloads the page", a
   // The spec's document transport is still downloading when the reader opens the Artifacts tab
   // and follows a Download link; the chunk fails only after that.
   const transportCode = await holdFirstRequest(page, /\/assets\/yjs-[^/]+\.js$/u);
-  // Records what each `navigate` event says about where it goes.
   await page.addInitScript(() => {
-    const seen: { download: unknown; sameDocument: unknown }[] = [];
+    const seen: Array<{
+      download?: unknown;
+      sameDocument?: unknown;
+      type: string;
+      url?: unknown;
+    }> = [];
     Object.assign(window, { seenNavigations: seen });
     const navigation = "navigation" in window ? window.navigation : undefined;
-    if (!(navigation instanceof EventTarget)) {
-      return;
-    }
-    navigation.addEventListener("navigate", (event) => {
-      const destination = "destination" in event ? event.destination : undefined;
-      seen.push({
-        download: "downloadRequest" in event ? event.downloadRequest : undefined,
-        sameDocument:
-          typeof destination === "object" && destination !== null && "sameDocument" in destination
-            ? destination.sameDocument
-            : undefined,
+    if (navigation instanceof EventTarget) {
+      navigation.addEventListener("navigate", (event) => {
+        const destination = "destination" in event ? event.destination : undefined;
+        seen.push({
+          download: "downloadRequest" in event ? event.downloadRequest : undefined,
+          sameDocument:
+            typeof destination === "object" && destination !== null && "sameDocument" in destination
+              ? destination.sameDocument
+              : undefined,
+          type: "navigate",
+          url:
+            typeof destination === "object" && destination !== null && "url" in destination
+              ? destination.url
+              : undefined,
+        });
       });
-    });
+    }
+    window.addEventListener("pageshow", () => seen.push({ type: "pageshow" }));
+    document.addEventListener("visibilitychange", () =>
+      seen.push({ type: `visibilitychange:${document.visibilityState}` })
+    );
   });
   let loads = 0;
   page.on("load", () => {
@@ -147,9 +169,38 @@ test("a chunk that fails after a Download link was followed reloads the page", a
     await download;
     // The browser announced the download as a navigation to another document: the case the
     // guard has to tell apart from a page being left.
-    expect(
-      await page.evaluate(() => ("seenNavigations" in window ? window.seenNavigations : undefined))
-    ).toContainEqual({ download: expect.any(String), sameDocument: false });
+    const events = await page.evaluate<NavigationEventTrace[] | undefined>(() => {
+      const eventWindow = window as Window & { seenNavigations?: NavigationEventTrace[] };
+      return eventWindow.seenNavigations;
+    });
+    expect(events).toBeDefined();
+    const downloadNavigation = events?.findIndex(
+      (event) => event.type === "navigate" && event.download !== null && event.download !== undefined
+    );
+    expect(downloadNavigation).toBeGreaterThanOrEqual(0);
+    expect(events?.[downloadNavigation ?? -1]).toMatchObject({
+      download: expect.any(String),
+      sameDocument: false,
+      type: "navigate",
+    });
+    if (testInfo.project.name === "firefox-download-navigation") {
+      console.log(`firefox event order: ${JSON.stringify(events)}`);
+      const downloadEvent = events?.[downloadNavigation ?? -1];
+      const followOnNavigation = events?.findIndex(
+        (event, index) =>
+          index > (downloadNavigation ?? -1) &&
+          event.type === "navigate" &&
+          event.download === null &&
+          event.sameDocument === false &&
+          event.url === downloadEvent?.url
+      );
+      expect(followOnNavigation).toBeGreaterThan(downloadNavigation ?? -1);
+      expect(
+        events
+          ?.slice((downloadNavigation ?? -1) + 1, followOnNavigation)
+          .some((event) => event.type === "pageshow" || event.type === "visibilitychange:visible")
+      ).toBe(false);
+    }
     expect(loads).toBe(1);
 
     await held.abort();
