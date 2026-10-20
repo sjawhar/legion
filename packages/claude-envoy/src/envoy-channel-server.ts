@@ -13,6 +13,10 @@ import {
   postDeliveryReply,
   renderInbound,
 } from "@legion/envoy-client/delivery"
+import {
+  sessionDirectory as dispatchSessionDirectory,
+  writeSessionTitle,
+} from "@legion/envoy-client/dispatch-session-state"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
@@ -79,6 +83,7 @@ import {
   sessionHandoffFile,
   writePersistedRole,
 } from "./session-identity"
+import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INBOX_LIMIT = 50
@@ -206,6 +211,17 @@ export interface ChannelSessionOptions {
    * process's handoff file and rebinds to the id it names; unset under the QA override.
    */
   readonly handoffPid?: number
+  /**
+   * The title each registration sends for the current id (`sessionTitle`); omitted, the title is
+   * empty and Dispatch names the session by its id.
+   */
+  readonly title?: SessionTitle
+  /**
+   * Writes the title where the `dispatch` command reads it to stamp the session's Dispatch writes
+   * (`writeSessionTitle` into the session's Dispatch state directory), as pi-envoy does for an Oh
+   * My Pi session; omitted, nothing is written.
+   */
+  readonly stampTitle?: (sessionId: string, title: string) => void
 }
 
 // The shared tool contract builds schemas from each host's Zod API. Claude's
@@ -480,14 +496,42 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     }
   }
 
-  /** Advertise the current id and topics; runs only inside `serialized`. */
+  /** The title last stamped, so a heartbeat stamps nothing new. */
+  let stampedTitle: { readonly sessionID: string; readonly title: string } | undefined
+  /** Whether a failure to stamp the title has been reported since the last success. */
+  let stampFailureReported = false
+
+  /**
+   * Advertise the current id and topics; runs only inside `serialized`. The title is also stamped
+   * for the `dispatch` command (`options.stampTitle`) whenever it or the id changes.
+   */
   const register = async (): Promise<void> => {
+    const title = options.title?.(identity.id) ?? ""
+    if (
+      options.stampTitle !== undefined &&
+      title !== "" &&
+      (stampedTitle?.sessionID !== identity.id || stampedTitle.title !== title)
+    ) {
+      try {
+        options.stampTitle(identity.id, title)
+        stampedTitle = { sessionID: identity.id, title }
+        stampFailureReported = false
+      } catch (error) {
+        // Said once per failure run: every heartbeat retries it.
+        if (!stampFailureReported) {
+          stampFailureReported = true
+          process.stderr.write(
+            `envoy-channel: could not write the session title for the dispatch command (${messageFor(error)}); retrying every heartbeat, and the command names this session by its id\n`,
+          )
+        }
+      }
+    }
     await options.client.subscribe({
       sessionID: identity.id,
       directory: identity.directory,
       topics: forwarder.topics(),
       port: 0,
-      title: "",
+      title,
       capabilities: options.capabilities,
       driving: false,
       selfSubscribed: true,
@@ -951,16 +995,54 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
   // use, so a file that moved its server takes effect without a restart.
   const configFile = sessionConfigFile("claude", process.env)
-  const { envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
+  const { dispatch, envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
+  const overrideSessionId = process.env["ENVOY_SESSION_ID"]
+  // The title every registration sends, and the one the `dispatch` command stamps on this
+  // session's Dispatch writes. Registration stamps it; with Envoy or its inbound messages off,
+  // nothing registers, so those paths stamp it once themselves.
+  const title = sessionTitle(
+    {
+      ENVOY_SESSION_TITLE: process.env["ENVOY_SESSION_TITLE"],
+      TMUX: process.env["TMUX"],
+      TMUX_PANE: process.env["TMUX_PANE"],
+    },
+    directory,
+  )
+  const stampTitle = (sessionId: string, value: string): void => {
+    writeSessionTitle(dispatchSessionDirectory(process.env, sessionId), value)
+  }
+
+  // Only the `dispatch` command reads the stamp, so nothing is written while the session starts with
+  // Dispatch off, or under the QA override ENVOY_SESSION_ID, whose id that command never reads.
+  const stamping = dispatch.enabled && configuredValue(overrideSessionId) === undefined
+  /** Stamp the title for the session id `resolveId` names, once, where nothing will register it. */
+  const stampOnce = (resolveId: () => string): void => {
+    if (!stamping) return
+    try {
+      const sessionId = resolveId()
+      const own = title(sessionId)
+      if (own !== "") stampTitle(sessionId, own)
+    } catch (error) {
+      process.stderr.write(
+        `envoy-channel: could not write the session title for the dispatch command — ${messageFor(error)}; the dispatch command's writes carry no session title\n`,
+      )
+    }
+  }
   if (!envoy.enabled) {
+    // The `dispatch` command still runs with Envoy off, so it still gets the session's title.
+    stampOnce(() =>
+      claudeSessionId({
+        ENVOY_SESSION_ID: overrideSessionId,
+        CLAUDE_CODE_SESSION_ID: process.env["CLAUDE_CODE_SESSION_ID"],
+      }),
+    )
     const refusal = `Envoy is off for this session: ${envoy.error ?? envoy.notice}`
     if (pane !== undefined) stopPane(`a Legion pane needs Envoy for its task; ${refusal}`)
     await serveEnvoyOff(MCP_SERVER_INFO, refusal)
     return
   }
-  const overrideSessionId = process.env["ENVOY_SESSION_ID"]
   const identity = new SessionIdentity(
     claudeSessionId({
       ENVOY_SESSION_ID: overrideSessionId,
@@ -1035,6 +1117,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
           `a Legion pane's task reaches it over NATS, and inbound messages are off: ${inbound.off}`,
         )
       }
+      // No registration happens here, so the title is stamped directly.
+      stampOnce(() => identity.id)
       session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
     } else {
       connection = await connect({
@@ -1054,6 +1138,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
         heartbeatMs: envoy.heartbeatMs,
         configFile,
         stateDirectory,
+        title,
+        ...(stamping ? { stampTitle } : {}),
         // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
       })

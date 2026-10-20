@@ -16,6 +16,15 @@
 
 ### Added
 
+- A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
+  showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
+  characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is
+  off, else the session (for grouped sessions, the group), asked of the tmux server `TMUX` names
+  and used when that server's pid matches and the pane's process is one of the session's own
+  ancestors. Otherwise (outside tmux, a refused or missing answer, or a session named only by
+  digits in a window nobody named) it is the project directory's name. The `dispatch` command
+  stamps the same title on the session's Dispatch writes (with inbound messages or Envoy off, for
+  the id the session starts with; not when it starts with Dispatch off). It registered an empty title.
 - The MCP server lists `slack_post` beside the ten `envoy_*` tools (sjawhar/legion#1998), a reply
   in a Slack thread with the bot token the secrets broker grants (`LEGION_SLACK_BOT_TOKEN`).
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
