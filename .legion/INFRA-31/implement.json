@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-31",
+  "completed": "2026-10-20T09:40:00Z",
+  "proof": [
+    {
+      "criterion": "Every role container of an issue pod is told a temporary directory, a cache home, a data home, a state home, a Go build cache, a Go module cache and a bun install cache that are each under a directory of that role's own on the issue's disk, and no two roles of a pod are told the same directory. The controller gets the same on its own disk.",
+      "surface": "the daemon's own pod builder, rendered in this issue's live pod (a throwaway test in package sandbox, removed after the run, that renders an issue pod and the controller's pod and prints each role container's environment with the mount holding each path)",
+      "command": "cd packages/daemon && go test -count=1 -run TestZZScratchProof -v ./internal/runtime/sandbox/  (throwaway, removed); the permanent locks are `go test -count=1 -run 'Scratch|StateHome|ConfigHome|TestUvKeeps' ./internal/runtime/sandbox/`",
+      "observed": "All seven variables printed for each of architect, planner, implementer, tester, reviewer, merger and controller, each value /legion/scratch/<role>/{tmp,cache,data,state,go/build,go/mod,bun/install/cache}, every one held by `volume \"issue\" at /legion subPath=\"\"` — the issue volume's own whole-volume mount, no sub-path mount added — no two roles sharing a directory, XDG_CONFIG_HOME still the in-memory config volume at /home/legion/.config, and workspace-init still on /home/legion/.cache, /home/legion/.local/share and /home/legion/.local/state.",
+      "headSha": "ddb96cfd5b58ef80ad1310a00c7e0d6f32f4dede",
+      "negativeControl": "TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume fails the moment a value leaves the role's own scratch or two roles share one directory; TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes fails if the runtime names a scratch directory podsafety.ScratchVariables does not carry (confirmed by running it against an edited list before reverting)."
+    },
+    {
+      "criterion": "A role living in that environment actually writes everything onto the issue's disk, and nothing under its home directory holds a build cache, a module cache or a downloaded browser.",
+      "surface": "a real run in this issue's own pod: the shim's own podsafety.EnsureScratch over the rendered tester environment, then real work under it",
+      "command": "export the rendered tester values (TMPDIR=/legion/scratch/tester/tmp, XDG_CACHE_HOME=.../cache, XDG_DATA_HOME=.../data, GOCACHE=.../go/build, GOMODCACHE=.../go/mod, BUN_INSTALL_CACHE_DIR=.../bun/install/cache), run a throwaway binary calling podsafety.EnsureScratch(os.Environ()), then `mktemp -d`, `go build ./...` in packages/daemon, `bunx playwright install --dry-run chromium`, then `du -sh` each directory and `ls` the home-directory paths",
+      "observed": "EnsureScratch made the six directories (0700, owned by the pod's user) and made no state home, which is EnsureStateHome's; `mktemp -d` answered /legion/scratch/tester/tmp/tmp.gJHGNRX0z4; the cold `go build ./...` completed in 115 s, downloading the whole module graph; Playwright printed `Install location: /legion/scratch/tester/cache/ms-playwright/chromium-1248`; the result was 752 MB of Go build cache, 375 MB of module cache, 19 MB of temporary files, 1.2 GB in all on the issue's volume, while $HOME/.cache/go-build, $HOME/go and $HOME/.cache/ms-playwright were all still absent and $HOME/.cache still held 47 KB.",
+      "headSha": "ddb96cfd5b58ef80ad1310a00c7e0d6f32f4dede",
+      "negativeControl": "the same build with today's variables (GOCACHE unset, so `go env GOCACHE` answers /home/legion/.cache/go-build) for one small package alone put 30 MB on the container's own filesystem, removed at once — the planner's 1.4 GB bun figure is cited rather than reproduced, since that command killed the planner's container. Separately, EnsureScratch with TMPDIR under a regular file refused with `pod safety: make the directory TMPDIR names, …/blocked/tmp: mkdir …/blocked: not a directory`, exit 1, making nothing."
+    },
+    {
+      "criterion": "bun installs by copying files out of its cache rather than hardlinking them into the workspace, now that the two share one filesystem — as narrowed by the plan's one spec departure to the install Legion renders itself.",
+      "surface": "the install script the runtime renders for a stale-plugin relaunch",
+      "command": "cd packages/daemon && go test -count=1 -run 'Install' ./internal/runtime/sandbox/",
+      "observed": "TestAnInstallingLaunchWrapsTheAgentArgvInTheInstallScript passes with `--backend=copyfile` among the strings the rendered script must name; the rendered line is `/usr/local/bin/bun add --backend=copyfile --exact <pi-legion spec> <pi-envoy spec>`.",
+      "headSha": "ddb96cfd5b58ef80ad1310a00c7e0d6f32f4dede",
+      "negativeControl": "removing the flag from installScript fails that test by name before the change was committed; the planner's own measurement in this pod (bun 1.3.14) showed one link per file with the flag and one shared inode without it, and that a bunfig.toml setting is silently ignored."
+    },
+    {
+      "criterion": "Each role still gets a state home of its own, and the setup containers still share one configuration home held in memory.",
+      "surface": "the daemon's pod builder",
+      "command": "cd packages/daemon && go test -count=1 -run 'StateHome|ConfigHome' ./internal/runtime/sandbox/",
+      "observed": "TestEachRolesAgentIsToldAStateHomeOfItsOwn passes with every role's XDG_STATE_HOME its own /legion/scratch/<role>/state and workspace-init still on /home/legion/.local/state; TestBothContainersShareOneInMemoryXDGConfigHome passes with the config home the one home the two agree on, mounted from the same in-memory emptyDir in both, and with the setup containers holding the image's home-directory cache, data and state homes and nothing under /legion/scratch.",
+      "headSha": "ddb96cfd5b58ef80ad1310a00c7e0d6f32f4dede",
+      "negativeControl": "the per-role assertion fails if two roles are given one state home (the browser-broker-lock collision the rule exists for); the config-home assertion fails if a setup container is told any value under scratchRoot."
+    },
+    {
+      "criterion": "The daemon's default reservations are unchanged and no reservations block is added to the deployment's configuration.",
+      "surface": "the branch's own diff",
+      "command": "jj diff --git -r 'a0f205b7..@-' packages/daemon/internal/config/kubernetes.go | grep '^[+-][^+-]' ; jj diff --stat -r 'a0f205b7..@-' deploy/ ; grep -rn 'resources:' deploy/kubernetes/",
+      "observed": "Every one of the ten changed lines in config/kubernetes.go is a comment line (two doc comments that said the ephemeral-storage bound covers the Go and bun caches); defaultResources itself is untouched. `deploy/` is `0 files changed, 0 insertions(+), 0 deletions(-)`, and the two `resources:` occurrences under deploy/kubernetes/ are unchanged.",
+      "headSha": "ddb96cfd5b58ef80ad1310a00c7e0d6f32f4dede",
+      "negativeControl": "the same grep over the diff would print a non-comment line for any change to a default; the deployment repository's own file is a human's to confirm and is the architect's ask, not this check."
+    },
+    {
+      "criterion": "uv's download cache stays shared between the roles of a tree, as it is today, because uv is already made to copy out of it.",
+      "surface": "the daemon's pod builder",
+      "command": "cd packages/daemon && go test -count=1 -run TestUvKeeps ./internal/runtime/sandbox/",
+      "observed": "TestUvKeepsItsPythonsAndCacheOnTheIssueVolume passes unmodified — the test file's diff shows no change to it — and the scratch test additionally asserts that no scratch directory overlaps UV_PYTHON_INSTALL_DIR, UV_CACHE_DIR or LEGION_WORKSPACE.",
+      "headSha": "ddb96cfd5b58ef80ad1310a00c7e0d6f32f4dede",
+      "negativeControl": "the overlap assertion in TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume fails if the scratch root is ever placed at or under /legion/uv or the workspace."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/runtime/sandbox/manifest.go — scratchRoot, roleScratch, roleEnvironment, roleStateHome moved onto the scratch, four names added to runtimeOwned, xdgEnvironment's now-constant parameter dropped",
+    "packages/daemon/internal/runtime/sandbox/names.go — the pod-paths comment names the scratch root",
+    "packages/daemon/internal/runtime/sandbox/operatorpod.go — CheckPod's doc comment: /home/legion/.local/state is the setup containers' state home now; the fence row and its behaviour are unchanged",
+    "packages/daemon/internal/runtime/sandbox/plugins.go — the rendered `bun add` carries --backend=copyfile",
+    "packages/daemon/internal/runtime/sandbox/manifest_test.go — TestBunCacheHomeIsMountedFromNoVolume became TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume; the state-home and config-home tests rewritten; TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes added; roleSpec helper added",
+    "packages/daemon/internal/runtime/sandbox/controller_test.go — the controller's exact variable list gains the four names",
+    "packages/daemon/internal/runtime/sandbox/plugins_test.go — the install script must name --backend=copyfile",
+    "packages/daemon/internal/podsafety/podsafety.go — ScratchVariables and EnsureScratch, and the package comment",
+    "packages/daemon/internal/podsafety/podsafety_test.go — TestEnsureScratchMakesEveryDirectoryTheRoleIsToldToWriteUnder",
+    "packages/daemon/cmd/legion/worker_shim.go — the shim calls EnsureScratch under --pod-safety",
+    "packages/daemon/cmd/legion/worker_shim_test.go — socketDir, so the tests' unix socket fits sun_path wherever TMPDIR is",
+    "packages/daemon/internal/api/version.go — DaemonAPIVersion 32 → 33 with its entry",
+    "packages/contracts/fixtures/daemon-api/version.json, packages/pi-legion/package.json, packages/claude-envoy/package.json — the contract at 33",
+    "packages/daemon/internal/config/kubernetes.go — two doc comments (no default changed)",
+    "docs/kubernetes.md, docs/site/src/content/docs/legion/running-legion.md, two docs/solutions/legion/ learnings, scripts/e2e/README.md, packages/pi-legion/AGENTS.md, both CHANGELOGs — the documentation"
+  ],
+  "trickyParts": [
+    "A role container's plain environment never appears in the pod template, so the eight golden Sandbox manifests are byte-identical after this change and `-update` leaves them untouched: launcherContainers sets only the kubelet-resolved variables (POD_UID, the operator's secret refs), and every NAME=value pair travels in the launcher's start command (launchEnvironment). The tests that carry the proof are TestEachRoleIsToldAScratchDirectoryOfItsOwnOnTheIssueVolume, which reads workerOf's container plus the start command's environment, and TestTheRuntimeTellsTheShimEveryScratchDirectoryItMakes.",
+    "TMPDIR goes from /tmp (4 bytes) to /legion/scratch/<role>/tmp (26-31 bytes) and Linux's sun_path holds 107, so three cmd/legion tests that listen on filepath.Join(t.TempDir(), \"s\") failed with `bind: invalid argument` under the new value. Fixed in this pull request (socketDir); two further copies of the same helper elsewhere in the module carry the same latent limit and are the PR's one Fast-follow line.",
+    "podsafety.EnsureScratch deliberately does not make XDG_STATE_HOME: EnsureStateHome makes Oh My Pi's profile directory under it, and its refusal carries its own reason. The one list the two sides share is podsafety.ScratchVariables, locked to the runtime's rendering by a sandbox test, because a name added to roleEnvironment and not to that list would leave a role told a temporary directory nothing created.",
+    "The change validated itself under the failure it fixes: this implementer's pod was replaced twice (08:16Z and 08:18:53Z on 2026-10-20) during `go build ./...` with the Go caches on the container's filesystem, and the identical cold build then completed in 115 s with no replacement once those caches pointed at /legion/scratch. The planner lost its container the same way while measuring bun's 1.4 GB cache."
+  ],
+  "deviations": [
+    "The plan's task 5 says the eight golden Sandbox manifests are regenerated. They are not, and must not be, for the reason in trickyParts; `go test ./internal/runtime/sandbox/ -update` was run and left them byte-identical.",
+    "The plan's task 5 does not name packages/claude-envoy/package.json, which also declares legion.daemonApiVersion and is held to the fixture by packages/claude-envoy/tests/daemon-api-version.test.ts. It is moved to 33 with the other two, and both CHANGELOGs carry the entry.",
+    "Two further documentation surfaces the plan does not name were found by the grep its task 6 prescribes and corrected: docs/site/src/content/docs/legion/running-legion.md (the published page repeating the ephemeral-storage sentence) and docs/kubernetes.md's controller-pod paragraph (the controller is a role container too). The two docs/solutions/legion/ LEGION-632 learnings keep their account of what happened and say that the state home and the caches have moved since.",
+    "The plan's acceptance for the bun criterion names `bun add --exact --backend=copyfile is-odd@3.0.1` with `stat -c %h` as the live half. That command was not run here: the planner had already measured it in this pod (one link per file with the flag, one shared inode without) and running a bun install in this container is what killed the planner's own container. The rendered-script assertion is this phase's proof; the architect was told.",
+    "One fix outside the plan's six tasks: worker_shim_test.go's socketDir. It is a consequence of the change (sun_path against the new TMPDIR), not unrelated cleanup, and it is in its own commit."
+  ],
+  "openQuestions": [
+    "The deployment repository's own runtime.kubernetes.pod.env must set none of TMPDIR, GOCACHE, GOMODCACHE or BUN_INSTALL_CACHE_DIR, or the daemon refuses at boot once the new image is pinned. That is a person's confirmation and the architect's to ask for; nothing in this repository can read that file."
+  ],
+  "discoveredComplexity": [
+    "Nothing prunes /legion/scratch: a role's temporary files and caches now outlive the pod that wrote them and live until the issue closes. Six roles that all build come to roughly 14 GB against a 20 GiB issue volume, which the plan records and the issue's asks accept; issue_volume is the operator's lever.",
+    "A full issue volume now also stops a pod from starting, because the shim refuses when it cannot make a directory, where today a full volume leaves the roles running. Nothing in the daemon watches a volume's free space."
+  ]
+}
