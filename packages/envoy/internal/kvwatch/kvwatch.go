@@ -50,6 +50,14 @@ type Watcher struct {
 	// stream is when the bucket's stream the current watcher reads was created. A different time
 	// on the next watch means the bucket was deleted and created again.
 	stream time.Time
+
+	// watches counts the watches in flight, so End can wait for one that may still arm a watcher.
+	// A watch joins it under mu, and only while the watcher is not stopped.
+	watches sync.WaitGroup
+	// retired are the watchers Stop took out of service and those a watch armed after it, which
+	// End ends. ended is set once End has taken them.
+	retired []nats.KeyWatcher
+	ended   bool
 }
 
 // Option configures a Watcher.
@@ -205,16 +213,77 @@ func (w *Watcher) WaitReady(ctx context.Context) error {
 	}
 }
 
-// Stop retires the watcher for a shutdown, before the NATS drain ends it. Its end then belongs to
-// no live generation, so it records nothing and logs nothing, and every later Rewatch is a no-op:
-// a reconnect hook or a self-health rebuild still running at shutdown arms no new watcher and
-// reports no error. It makes no request of the server; the drain ends the watcher's subscription.
+// Stop retires the watcher for a shutdown, before the NATS drain. Its end then belongs to no live
+// generation, so it records nothing and logs nothing, and every later Rewatch is a no-op: a
+// reconnect hook or a self-health rebuild still running at shutdown arms no new watcher and
+// reports no error. It makes no request of the server, so it returns at once against one that does
+// not answer: the watcher it retires, and any a watch in flight arms after it, are kept for End.
 func (w *Watcher) Stop() {
 	w.mu.Lock()
 	w.stopped = true
+	if w.watcher != nil {
+		w.retired = append(w.retired, w.watcher)
+	}
 	w.watcher = nil
 	w.generation++
 	w.mu.Unlock()
+}
+
+// End stops the watcher (Stop) and ends every watcher it retired, while the connection still
+// carries requests: the listener runs it from the bus's drain hook (bus.Client.AddDrainHook),
+// before the connection's own drain. It waits, within ctx, for a watch still in flight to arm its
+// watcher, then stops each one, which unsubscribes it and deletes the ordered consumer nats.go
+// created for it, and waits for those deletes within ctx. Left to the connection's drain, that
+// delete races the drain and is refused as "connection draining" (bus.Client.AddDrainHook says
+// how). A consumer already gone (a NATS restart loses an ordered consumer outright, and a
+// disconnect past its inactive threshold lets the server delete it) is what the delete was for,
+// so it is logged at WARN; a watcher already ended with its connection is not logged at all. Any
+// other failure, and a delete still unanswered when ctx ends, is an ERROR. A watch that arms its
+// watcher after End has taken them stops that watcher itself.
+func (w *Watcher) End(ctx context.Context) {
+	w.Stop()
+	watched := make(chan struct{})
+	go func() {
+		w.watches.Wait()
+		close(watched)
+	}()
+	select {
+	case <-watched:
+	case <-ctx.Done():
+		w.logger().Error(w.name+" watcher end found a watch still starting",
+			slog.String("bucket", w.bucket), slog.String("error", ctx.Err().Error()))
+	}
+	w.mu.Lock()
+	retired := w.retired
+	w.retired = nil
+	w.ended = true
+	w.mu.Unlock()
+	results := make(chan error, len(retired))
+	for _, watcher := range retired {
+		go func() { results <- watcher.Stop() }()
+	}
+	for range retired {
+		select {
+		case err := <-results:
+			w.logEnd(err)
+		case <-ctx.Done():
+			w.logEnd(fmt.Errorf("delete its consumer: %w", ctx.Err()))
+		}
+	}
+}
+
+// logEnd logs how stopping one retired watcher ended (End).
+func (w *Watcher) logEnd(err error) {
+	switch {
+	case err == nil, errors.Is(err, nats.ErrConnectionClosed), errors.Is(err, nats.ErrBadSubscription):
+		// Stopped, or already ended with its connection or its subscription.
+	case errors.Is(err, nats.ErrConsumerNotFound):
+		w.logger().Warn(w.name+" watcher's consumer was already gone at its end",
+			slog.String("bucket", w.bucket), slog.String("error", err.Error()))
+	default:
+		w.logger().Error(w.name+" watcher end failed",
+			slog.String("bucket", w.bucket), slog.String("error", err.Error()))
+	}
 }
 
 // watch arms a watcher on kv and replaces the current one, moving the handle to kv. The replaced
@@ -226,17 +295,20 @@ func (w *Watcher) Stop() {
 // reads its stream before it arms its watcher and takes the locks, so it can arrive after a
 // newer watch has switched to a recreated bucket: a watch whose stream is older than a running,
 // healthy watcher's is discarded, and that watcher stays. After Stop it arms nothing and only
-// moves the handle.
+// moves the handle; a watcher it armed while Stop ran is kept for End.
 func (w *Watcher) watch(kv bus.KeyValue) error {
 	w.mu.Lock()
 	stopped := w.stopped
 	if stopped {
 		w.kv = kv
+	} else {
+		w.watches.Add(1)
 	}
 	w.mu.Unlock()
 	if stopped {
 		return nil
 	}
+	defer w.watches.Done()
 	// The warm-up's cost as the caller waiting on readiness sees it: the stream read and the
 	// watcher's create request are part of it, not just the entries that follow.
 	started := time.Now()
@@ -252,13 +324,22 @@ func (w *Watcher) watch(kv bus.KeyValue) error {
 	w.applyMu.Lock()
 	w.mu.Lock()
 	if w.stopped {
-		// Stop ran while WatchAll was starting. Stopping this watcher would be a server request
-		// outside the drain's deadline, so the drain ends its subscription; until then it is read
-		// and dropped, since a drain waits for every pending message to be delivered.
+		// Stop ran while WatchAll was starting. Stopping this watcher here would be a server
+		// request outside the drain's deadline, so it is kept for End, which runs within it; until
+		// then it is read and dropped, since a drain waits for every pending message to be
+		// delivered. Once End has taken the retired watchers, which it does only after this watch
+		// returns or its deadline passes, nothing else would end this one, so the watch ends it.
 		w.kv = kv
+		ended := w.ended
+		if !ended {
+			w.retired = append(w.retired, watcher)
+		}
 		w.mu.Unlock()
 		w.applyMu.Unlock()
 		discard(watcher)
+		if ended {
+			w.logEnd(watcher.Stop())
+		}
 		return nil
 	}
 	if w.err == nil && stream.Before(w.stream) {

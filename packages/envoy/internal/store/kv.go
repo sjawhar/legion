@@ -157,6 +157,12 @@ func (r *Registry) StopWatch() {
 	r.watcher.Stop()
 }
 
+// EndWatch ends the cache's watchers at shutdown, within ctx, while the connection still carries
+// requests (kvwatch.Watcher.End).
+func (r *Registry) EndWatch(ctx context.Context) {
+	r.watcher.End(ctx)
+}
+
 func (r *Registry) interests() bus.KeyValue {
 	return r.watcher.KV()
 }
@@ -842,36 +848,57 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 	return reaped, nil
 }
 
-// StartReaper runs Reap in a background goroutine at the given interval.
-func (r *Registry) StartReaper(isAlive func(string) bool, interval, graceWindow time.Duration) {
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for range ticker.C {
-			count, err := r.Reap(isAlive, graceWindow)
-			if err != nil {
-				r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
-				continue
-			}
-			r.logger().Info("reaper cycle", slog.Int("reaped", count))
+// StartReaper runs Reap in a background goroutine at the given interval until ctx ends, and returns
+// a channel closed once it has returned: a pass in flight when ctx ends finishes first. A pass
+// lists the bucket through watchers whose consumers nats.go creates and deletes, so the listener's
+// shutdown waits for it before it drains NATS (kvwatch.Watcher.End says what a drain does to such
+// a delete).
+func (r *Registry) StartReaper(ctx context.Context, isAlive func(string) bool, interval, graceWindow time.Duration) <-chan struct{} {
+	return everyInterval(ctx, interval, func() {
+		count, err := r.Reap(isAlive, graceWindow)
+		if err != nil {
+			r.logger().Error("reaper cycle failed", slog.String("error", err.Error()))
+			return
 		}
-	}()
+		r.logger().Info("reaper cycle", slog.Int("reaped", count))
+	})
 }
 
 // StartRoleClaimReaper expires role holders that fail to re-register after a
 // listener restart. It is independent of interest reaping because a role is a
-// point-to-point route rather than a general subscription.
-func (r *Registry) StartRoleClaimReaper(isAlive func(string) bool, interval, sessionTTL time.Duration) {
+// point-to-point route rather than a general subscription. It runs until ctx ends, and the
+// channel it returns is closed once it has returned, as StartReaper's is.
+func (r *Registry) StartRoleClaimReaper(ctx context.Context, isAlive func(string) bool, interval, sessionTTL time.Duration) <-chan struct{} {
+	return everyInterval(ctx, interval, func() {
+		count, err := r.ReapRoleClaims(isAlive, sessionTTL)
+		if err != nil {
+			r.logger().Error("role claim reaper cycle failed", slog.String("error", err.Error()))
+			return
+		}
+		r.logger().Info("role claim reaper cycle", slog.Int("reaped", count))
+	})
+}
+
+// everyInterval runs pass in a background goroutine at each tick of interval until ctx ends, and
+// returns a channel closed once the goroutine has returned.
+func everyInterval(ctx context.Context, interval time.Duration, pass func()) <-chan struct{} {
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		for range ticker.C {
-			count, err := r.ReapRoleClaims(isAlive, sessionTTL)
-			if err != nil {
-				r.logger().Error("role claim reaper cycle failed", slog.String("error", err.Error()))
-				continue
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
 			}
-			r.logger().Info("role claim reaper cycle", slog.Int("reaped", count))
+			// A tick and the end can both be ready, and select picks either.
+			if ctx.Err() != nil {
+				return
+			}
+			pass()
 		}
 	}()
+	return done
 }

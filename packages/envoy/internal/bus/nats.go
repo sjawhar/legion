@@ -134,6 +134,9 @@ type Client struct {
 
 	reconnectHooksMu sync.Mutex
 	reconnectHooks   []func(*nats.Conn) error
+	// drainHooks run once in Drain, after the delivery subscriptions and before the connection's
+	// own drain (AddDrainHook), under reconnectHooksMu as the reconnect hooks are.
+	drainHooks []func(context.Context)
 	// rewatchMu holds a run of the reconnect hooks (rewatch), so two never run at once.
 	rewatchMu sync.Mutex
 	// connEvents counts the connection events the reconnect hooks follow, under mu: each connection
@@ -455,10 +458,11 @@ func (c *Client) Close() {
 // first, so neither the drain's close nor a recovery already under way reconnects or re-subscribes
 // a process that is shutting down. It then drains the delivery subscriptions while the connection
 // still accepts new ones: a handler finishing its delivery may subscribe (RequestCoreTo's receipt
-// inbox), which a draining connection refuses. Only then does it drain the connection, whose Drain
-// only starts the drain, and wait for it to close itself. A connection that is reconnecting is
-// closed at once: nothing it sends reaches the server, so no subscription would drain and a
-// reconnect would re-send them.
+// inbox), which a draining connection refuses. Next it runs the drain hooks (AddDrainHook), which
+// end the KV watchers with requests of their own while the connection still carries them. Only
+// then does it drain the connection, whose Drain only starts the drain, and wait for it to close
+// itself. A connection that is reconnecting is closed at once and runs no hook: nothing it sends
+// reaches the server, so no subscription would drain and a reconnect would re-send them.
 // A bind in flight at the stop is not waited for: one that ends while the subscriptions drain
 // installs its own, which the next pass drains, and one that ends after the last pass drains its
 // own, which the connection's drain takes (endBind). The close ends one still in flight. A
@@ -507,6 +511,10 @@ func (c *Client) Drain(timeout time.Duration) error {
 			}
 		}
 	}
+	// The drain hooks end what the connection's drain cannot end cleanly, such as the KV watchers'
+	// ordered consumers, whose delete would race the connection's drain (AddDrainHook), and they
+	// run while the connection still carries their requests.
+	c.runDrainHooks(deadline)
 	// nats.go's Drain only starts the drain, and the wait for it to close the connection takes the
 	// connection's CLOSED event rather than polling for the state. A close that lands while nats.go
 	// drains the connection (a lost server, a reconnect callback closing it) is undone at the

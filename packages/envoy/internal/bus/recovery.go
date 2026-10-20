@@ -104,6 +104,42 @@ func (c *Client) AddReconnectHook(hook func(*nats.Conn) error) {
 	c.reconnectHooksMu.Unlock()
 }
 
+// AddDrainHook registers an end Drain gives to state attached to NATS that the client does not
+// subscribe for itself, such as KV watchers, while the connection still carries requests. Drain
+// runs each hook once, in the order they were added, after the delivery subscriptions have drained
+// and before the connection's own drain, with ctx ending at Drain's deadline. A drain of a
+// connection that is reconnecting closes it at once and runs no hook, since nothing it sent would
+// reach the server.
+//
+// The connection's own drain cannot end a KV watcher cleanly. nats.go deletes the ordered
+// consumer it created for the watcher once it has removed the watcher's subscription
+// (checkDrained), so the connection's drain, which waits only for its subscriptions, reaches its
+// publishes, refuses the delete as "connection draining" or closes under it, depending on the
+// scheduler. A hook that stops the watcher sends that delete itself, as a request it waits for.
+func (c *Client) AddDrainHook(hook func(ctx context.Context)) {
+	if hook == nil {
+		return
+	}
+	c.reconnectHooksMu.Lock()
+	c.drainHooks = append(c.drainHooks, hook)
+	c.reconnectHooksMu.Unlock()
+}
+
+// runDrainHooks runs the drain hooks one after another, each bounded by deadline.
+func (c *Client) runDrainHooks(deadline time.Time) {
+	c.reconnectHooksMu.Lock()
+	hooks := slices.Clone(c.drainHooks)
+	c.reconnectHooksMu.Unlock()
+	if len(hooks) == 0 {
+		return
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	for _, hook := range hooks {
+		hook(ctx)
+	}
+}
+
 // rewatch runs the reconnect hooks on the current connection while they are due (hooksDue), one
 // run at a time: a caller that finds a run in progress waits for it to end, then runs the hooks only
 // if they are still due. A run that succeeds covers the connection events counted when it began, so

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -52,6 +53,7 @@ type kvCache interface {
 	WatchErr() error
 	Ping() error
 	StopWatch()
+	EndWatch(context.Context)
 }
 
 // listenerCache is one cache under the name /healthz and self-health report it by.
@@ -101,6 +103,17 @@ func rewatchListenerKVWatchers(conn *nats.Conn, caches []listenerCache) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// endListenerKVWatchers ends every cache's watchers at shutdown, all at once and within ctx, while
+// the connection still carries their consumer deletes (kvwatch.Watcher.End); the bus's Drain runs
+// it as a drain hook before it drains the connection.
+func endListenerKVWatchers(ctx context.Context, caches []listenerCache) {
+	var ended sync.WaitGroup
+	for _, c := range caches {
+		ended.Go(func() { c.cache.EndWatch(ctx) })
+	}
+	ended.Wait()
 }
 
 // isUnrecoverableSelfHealthFailure distinguishes state that must be rebuilt
@@ -657,10 +670,13 @@ func main() {
 	sessionCacheReadyCancel()
 
 	// KV watchers are not bus subscriptions, so recreate them after every
-	// recovered NATS connection.
+	// recovered NATS connection, and end them in the drain before the connection's own.
 	caches := listenerCaches(registry, sessions, ciStore)
 	client.AddReconnectHook(func(conn *nats.Conn) error {
 		return rewatchListenerKVWatchers(conn, caches)
+	})
+	client.AddDrainHook(func(ctx context.Context) {
+		endListenerKVWatchers(ctx, caches)
 	})
 
 	deliver := session.Deliverer{
@@ -771,9 +787,14 @@ func main() {
 
 	// Phase 6b: Start interest reaper for stale KV cleanup.
 	// Cross-references envoy_sessions (5-min TTL) with envoy_interests (permanent)
-	// to prune orphaned interests from dead sessions.
-	registry.StartReaper(func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute)
-	registry.StartRoleClaimReaper(func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL())
+	// to prune orphaned interests from dead sessions. Each of these loops lists a bucket through
+	// watchers whose consumers nats.go creates and deletes, so the shutdown stops them and waits for
+	// a pass in flight before it drains NATS (kvLoopsDone).
+	kvLoopsCtx, kvLoopsCancel := context.WithCancel(context.Background())
+	kvLoopsDone := []<-chan struct{}{
+		registry.StartReaper(kvLoopsCtx, func(sessionID string) bool { return isSessionLive(sessions, sessionID) }, 5*time.Minute, 10*time.Minute),
+		registry.StartRoleClaimReaper(kvLoopsCtx, func(sessionID string) bool { return roleHolderMayBeLive(logger, sessions, sessionID) }, 5*time.Minute, sessions.TTL()),
+	}
 
 	// Phase 6b1: Collect the interest bucket's delete markers, which the reaper above leaves one of
 	// per dead session on a key that is never reused and which nothing else removes, so every
@@ -781,7 +802,7 @@ func main() {
 	// after the warm-up gate above, so it is off the readiness path; then on the reapers' cadence.
 	// Every listener runs it and the purge is idempotent, so it needs no leader. The JetStream
 	// context comes from the client at each pass, since a replaced connection reassigns it.
-	registry.StartInterestMarkerCollector(client.JS, 5*time.Minute)
+	kvLoopsDone = append(kvLoopsDone, registry.StartInterestMarkerCollector(kvLoopsCtx, client.JS, 5*time.Minute))
 
 	// Phase 6b2: Start the CI summary loop, on a listener that opened the CI store. It emits one
 	// pr.<n>.checks event once a commit's checks settle, for every commit of a pull request, its
@@ -850,17 +871,21 @@ func main() {
 		stop: func() {
 			monitorCancel()
 			summaryCancel()
+			kvLoopsCancel()
 		},
 		monitorDone: monitorDone,
+		kvLoopsDone: kvLoopsDone,
 	})
 }
 
-// listenerLoops are the background loops main starts once the durable binds: stop ends them, and
-// monitorDone is closed once the self-health monitor has returned. A start that ends before the
-// bind has started none, and passes the zero value.
+// listenerLoops are the background loops main starts once the durable binds: stop ends them,
+// monitorDone is closed once the self-health monitor has returned, and each of kvLoopsDone once
+// one of the loops that list a KV bucket (the reapers and the interest marker collector) has. A
+// start that ends before the bind has started none, and passes the zero value.
 type listenerLoops struct {
 	stop        func()
 	monitorDone <-chan struct{}
+	kvLoopsDone []<-chan struct{}
 }
 
 // shutdownListener is the ordered shutdown every end of a start that serves /v1 comes to, a
@@ -881,16 +906,25 @@ func shutdownListener(logger *logging.Logger, server *http.Server, client *bus.C
 	}
 
 	// 3. NATS — wait (within the HTTP deadline) for a self-health rebuild the monitor may still be
-	// running, so nothing re-subscribes or re-watches during the drain. Retire every cache's KV
-	// watchers, so the drain ending their subscriptions reads as the shutdown it is rather than a
-	// watcher failure, and a reconnect hook still running cannot arm a new one; then drain in-flight
-	// deliveries without reconnecting, but never let a blocked NATS request pin the process after
-	// its HTTP listener is gone.
+	// running, so nothing re-subscribes or re-watches during the drain, and for a pass of a loop
+	// that lists a KV bucket, whose watcher's consumer delete would otherwise race the drain.
+	// Retire every cache's KV watchers, so their end reads as the shutdown it is rather than a
+	// watcher failure, and a reconnect hook still running cannot arm a new one; then drain
+	// in-flight deliveries without reconnecting, end the retired watchers and delete their
+	// consumers (endListenerKVWatchers, the drain hook main adds), and drain the connection, but
+	// never let a blocked NATS request pin the process after its HTTP listener is gone.
 	if loops.monitorDone != nil {
 		select {
 		case <-loops.monitorDone:
 		case <-shutdownCtx.Done():
 			logger.Warn("self-health monitor still running at shutdown")
+		}
+	}
+	for _, done := range loops.kvLoopsDone {
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+			logger.Warn("a KV bucket pass still running at shutdown")
 		}
 	}
 	for _, c := range caches {
