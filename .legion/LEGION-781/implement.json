@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-781",
-  "completed": "2026-10-20T10:19:32Z",
+  "completed": "2026-10-20T13:48:27Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2059",
-  "head": "59e0337c7b62d1905e489d48829251a6e7107921",
+  "head": "90a6002661cbfb3393b849453b8fbb21f27378f4",
   "proof": [
+    {
+      "criterion": "Done-when 5 (the proof's process read): Stage 4b's pod_runs reads a running command as running however much of the container's process list follows it - the list is captured whole and judged, never piped live into grep -q under pipefail (lib/rig.sh:16-21) - and the tester's red test scripts/e2e/lib/pod-runs.test.ts passes unmodified; no other live producer in the e2e scripts or lib is piped into an early-exiting consumer",
+      "surface": "the script's pod_runs extracted by name and run under set -Eeuo pipefail over a pod_commands stub writing the match then 200 KB from a child process (the tester's test); the script under bash -n; the lib suite; a grep of scripts/e2e and lib for the shape",
+      "command": "bun test scripts/e2e/lib/pod-runs.test.ts; bash -n scripts/e2e/stage4b-sandbox-tree.sh; bun test scripts/e2e/lib; bunx biome check scripts/e2e/; .github/scripts/check-private-names.sh; grep -nE '(kubectl|op |pod_exec|pod_commands|claim_session_text)[^|]*\\| *(grep -[a-zA-Z]*q|head -)' scripts/e2e/*.sh scripts/e2e/lib/*.sh",
+      "observed": "Before: the tester's test at 8d00d85d fails `pod_runs read a running hold as absent (exit 141)` (1 pass, 1 fail), the shape that failed mid-turn-carry at 59e0337c (the artifact's mid-turn-hold-lost.txt: the hold at byte 16556 of 36847, the :5968 wait failing all 51 polls). After `pod_runs() { local out; out=$(pod_commands \"$1\" \"$2\") || return 1; grep -qF -- \"$3\" <<<\"$out\"; }`: 2 pass, 0 fail, the test file byte-identical to the tester's commit (jj diff empty). planner_resent (:5673) now reads through lib's session_contains, which captures claim_session_text's output first; the one negative read, the interrupted tester's witness gone (:4217), captures pod_commands and fails by name when the list cannot be read, instead of `! pod_runs` taking an unreadable list for a stopped witness. The grep finds no other live producer piped into grep -q or head in stage4b, stage3 or lib (the remaining hits run inside the pod's sh, over /proc or local files, or under sh -c without pipefail). bash -n clean; bun test scripts/e2e/lib 510 pass (only nats-stream's 2 Docker cases fail in the pod); biome and private-names clean; GitHub's compare a578760e...90a60026 lists the tester's test, round 11's three files, stage4b-sandbox-tree.sh and .legion, so the a578760e image (sha256:37d7461a) stands; GitHub reports the head mergeable (main 8 ahead, no conflict) and its runs started",
+      "headSha": "90a6002661cbfb3393b849453b8fbb21f27378f4",
+      "negativeControl": "The tester's test over the pre-fix one-liner exits 141 on the 200 KB list (its first case) while passing the match-at-the-end case, exactly the race the artifact shows; after the fix the absent-command case still exits non-zero, so the predicate still refuses a command that does not run"
+    },
     {
       "criterion": "Done-when 5 (the proof's node-release accounting): Stage 4b's node-release waits only for tree 1's pods to leave a node - the run's repository cache pod (legion.dev/cache=true) and a pod of another tree of the run (a carried child's own tree, launched at tree 1's linger expiry, which falls inside the wait now that production-check-bound runs first) keep a node as another project's pod does, each named in the note - and its reads of tree 1's Sandboxes and volumes do not assume the linger is still running after the waits",
       "surface": "the script's node_pods_judged and node_released, extracted by name and run under bash over the a578760e artifact's node listing and a stub kubectl on PATH (scripts/e2e/lib/node-released.test.ts); the script under bash -n; the lib suite; the artifact's transcript, pod watch and daemon log for the failure and the timing; the close and carried-child checkpoints read against that timing",
@@ -108,9 +116,9 @@
     "skills/legion-controller/SKILL.md: the merged bullet re-wrapped under the 500-line guard (round 8)",
     "scripts/e2e/stage3-devbox-workflow.sh: the same two blocks deleted; the instructions heredoc gains the check-task rule; comments (round 9)",
     "AGENTS.md: the Stage 2 and 3 command lines carry #2024's LEGION_E2E_MODEL_ROUTE prefixes and tails around this branch's Stage 3 wording (round 10, the merge's one conflict)",
-    "scripts/e2e/stage4b-sandbox-tree.sh: node-release reads tree 1's linger from the daemon's line, asserts its Sandboxes and volumes before the node waits and after only while the linger still runs; node_pods_judged judges a node's pods (tree 1's and untreed run pods hold, the cache, other trees and other projects keep); node_released and report_node_release name tree and cache labels; close's comment (round 11)",
     "scripts/e2e/lib/node-released.test.ts: node_pods_judged over the a578760e node's listing and node_released over a stub kubectl (round 11)",
-    "scripts/e2e/README.md: the node-release row (round 11; the Stage 3 narrative and the done/production-check-bound rows from round 9)"
+    "scripts/e2e/README.md: the node-release row (round 11; the Stage 3 narrative and the done/production-check-bound rows from round 9)",
+    "scripts/e2e/stage4b-sandbox-tree.sh: pod_runs captures the process list before grepping it; planner_resent reads through session_contains; the interrupted tester's witness is asserted gone from a list read whole (round 12); node-release's judgement and linger budget (round 11); the instructions sentence and the post-close sends (round 9)"
   ],
   "trickyParts": [
     "The order of the close's rows against store/issue_suspend.go's fences: a root's check start row is written after the linger's suspends and IssueSuspend rows so the root's own suspension finishes without acting (restarted) and the start resumes the implementer in the still-live pod; a pending report's suspend and IssueSuspend both follow the look's start row so they act; a child's close writes no IssueSuspend at all and the check's close writes the releasing one",
@@ -149,5 +157,5 @@
     "A check's record must outlive the pull request's row: ClearTreeGeneration deletes merged pull_requests rows at re-admission, so production_checks copies repo, number and merge commit",
     "The pod's embedded Postgres has no pgvector, so Dispatch's storetest suites run only in CI; a scratch database with every migration but 0072 runs the delivery package's Postgres tests in the pod"
   ],
-  "round": 11
+  "round": 12
 }
