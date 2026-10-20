@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-43",
+  "completed": "2026-10-20T11:32:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 4,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/agent-view/use-live-follow.ts:225",
+      "description": "The settle excuse outlives the event it was armed for, so the reader's first scroll-back after a rebuild is swallowed. settleRebuild arms settleHeight unconditionally (:225); observe (:176-178) clears it on whichever call comes next. When the settle moves scrollTop by nothing - a reconnect whose replay is what is already on screen, the reader at the live end - no scroll event consumes the arm, so the reader's next scroll-back reads as settling, is excused at :184-189, and :190-195 snaps them back to the live end. Reproduced in a throwaway probe on the committed unit harness at this head: PROBE A (rebuild, then scroll to 100) leaves position 300 / atEnd true, while PROBE B (same scroll, no rebuild) gives position 100 / atEnd false and PROBE C shows the second gesture works, so the cost is exactly one gesture. The same unconditional excuse covers `shrank` whatever its size, so a scroll-back observed in the same event as any shrink is undone too. WebKit, which implements no scroll anchoring, never fires the event the excuse exists for, so every rebuild there leaves the arm live."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/agent-view/use-live-follow.ts:256-292",
+      "description": "The scroll listener, the ResizeObserver and the MutationObserver bind viewport.current once (deps are the stable ref object and stable callbacks), so a viewport element replaced while the hook stays mounted leaves all three on the detached node and the feature silently dead. AgentThread renders the viewport inside ErrorBoundary region=\"this conversation\" resetKey={resetKey} (AgentThread.tsx:379); ErrorBoundary.tsx:44-48 renders the fallback instead of its children while it holds an error and renders fresh children after componentDidUpdate clears it (:38-42), so a caught transcript render error followed by a session switch gives a new DOM node under a mounted hook. Reproduced with PROBE D on the same harness: with the node replaced, a scroll-back on the new node leaves atEnd true at position 100 - no Jump to latest, hook still believing it follows, so the next arrival yanks the reader to the bottom, which is this issue's original complaint."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/agent-view.e2e.ts:1163-1218",
+      "description": "The approved spec v9's proof list (\"How this is proven\") carries eleven browser checks and the suite holds ten: \"A reader at the live end when a rebuild lands is still at the live end\" has no row. use-live-follow.test.tsx:473 locks the immediate settle path only; the deferred path (assistant-ui applying a rebuild a commit later, the production one) is locked nowhere, and the tester's live run is evidence, not a standing check. Compounding it, the rebuild rows run on Chromium only: e2e/playwright.config.ts:138-142 admits agent-view.e2e.ts to webkit-iphone through a grep that none of the new rows matches, while the settle mechanism is explicitly engine-dependent, and the tester measured that the browser rebuild row still passes with the compensation in settleRebuild removed because Chromium's own anchoring holds the turn."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agent-view/use-live-follow.ts:46-57",
+      "description": "rememberTurn walks every [data-message-id] calling getBoundingClientRect until it finds the topmost visible turn, and the scroll listener (:261-269) calls it on every scroll event a reader scrolled back makes - a forced layout per turn above them, on the long transcript this feature exists for. features/shell/ViewportAnchor.tsx:38-48 documents the opposite choice for the same job (elementFromPoint, 'rather than a getBoundingClientRect scan over every row'), so the repository now carries two answers."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/agentstream/memory.go:107-113",
+      "description": "A nil Frame is now a control signal that ends every viewer of a session, reserved only in comments at the two use sites; the Source/Frame contract in agentstream.go says nothing about it. No live hazard today (the NATS source builds frames with make, never nil), but a future Source delivering a nil would disconnect every viewer with no log and no error."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agent-view/dispatch-marks.ts:42",
+      "description": "turnKey takes id as string | undefined and falls back to \"\", a key two turns can share; every production caller passes a required id. The two harnesses that render AgentThread (AgentThread.boundary.test.tsx:57, features/refs/markdown-surfaces.test.tsx:130) already bypass turnKey with messages.map((message) => message.id ?? \"\"), a different key function from the one the component renders - the drift the shared helper exists to stop."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agent-view/AgentThread.tsx:419-428",
+      "description": "The Jump to latest control is a verbatim copy of the issue conversation's pill (features/conversation/ConversationTab.tsx:1330-1339): same data-testid, same class list, same label rule. Fast-follow, not a gate."
+    }
+  ],
+  "ciRead": "Required set from the base branch's rulesets (lint, typecheck, test, pr-title; branch protection carries none). CI head for branch legion/INFRA-43 is 35c894a3501059f4fabd843f31a16b37383bd558 (newest pull_request run); its check-runs show lint, typecheck, test, pr-title all completed/success, with dispatch, dispatch-memory, envoy-go, envoy-go-race, envoy-e2e-local, envoy-smoke, envoy-infra-go, pi-legion and build success beside them. compare 35c894a3...25f206de lists only .legion/INFRA-43/implement.json and .legion/INFRA-43/test.json, so the code under review is the CI head's.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality both run once at 25f206de303b90bbc05bbc0c58ec87d3500475ef. Deep review: 4 findings (1 Medium, 2 Low, 1 Minor hardening) and nine classes checked clean, among them the ?as=drop gate, its cross-session reach, the viewer-map concurrency, turn-key collisions and DOM injection, and the other consumers of AgentThread. Code quality: 4 major, 3 moderate, 3 minor, with the state model, the one-key-per-turn fix and the e2e extraction called sound. The two findings I carried into the review as blocking were verified myself with probes rather than taken on report.",
+  "threads": "No review threads on the pull request before this round (gh api graphql reviewThreads: 0 nodes) and no prior review submission."
+}
