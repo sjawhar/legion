@@ -28,17 +28,19 @@ is still yours, the row shows a chip such as `Planner replied`. Each card also s
 `Waiting on you` or `Waiting on <agent>` on its status line.
 
 Within each section, higher priority comes first and unset priority last. The banner at the top,
-for example `Blocked on you: 2 items, oldest 6h`, counts the asks waiting on you in the view you are
-looking at, and every credential request waiting on you.
+for example `Blocked on you: 2 items, oldest 6h`, counts the asks waiting on you — the ones on
+issues assigned to you that you have not snoozed — and every credential request waiting on you,
+whatever the filter below it is set to.
 
-![The Inbox with its two sections, the Mine and Everyone switch, and the Blocked on you banner](/legion/media/dispatch/inbox.png)
+![The Inbox with its two sections, the Assignee filter set to you, and the Blocked on you banner](/legion/media/dispatch/inbox.png)
 
 A credential request is an agent asking you to let it use a secret, or a machine asking to start
 agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
 and each links to the page where you approve or deny it. They count toward **Needs you** and the
-banner like an ask that waits on you. The Inbox says `Nothing needs you` only when it lists no ask
-and no credential request. An open Inbox picks up a new request, or one that is no longer pending,
-within moments on its own - no reload needed.
+banner like an ask that waits on you. The Inbox says `Nothing needs you` only when your own list
+holds no ask and no credential request; with the filter on someone else it says `Nothing matches
+this filter`, and with the filter cleared, `Nothing needs anyone`. An open Inbox picks up a new
+request, or one that is no longer pending, within moments on its own - no reload needed.
 
 ### Asks grouped by issue
 
@@ -54,19 +56,34 @@ first if it is folded. The headers are labels only: `j` and `k` move from ask to
 The list does not move under a moving pointer. If the Inbox refreshes while your pointer travels
 across it, the rows stay put until the pointer rests, leaves the list, or you click.
 
-### Mine and Everyone
+### Whose asks you see
 
-Every issue has an assignee: the person who answers its asks. The **Mine · Everyone** switch picks
-whose asks you see.
+Every issue has an assignee: the person who answers its asks. The **Assignee** filter above the
+list picks whose asks the Inbox holds. Its button reads `Assignee · you` while it is on you, and
+the list it opens offers **Unassigned** and everyone who has signed in to Dispatch. Pick as many
+people as you like; the button then names the one you picked, or how many.
 
-- **Mine** shows the asks on issues assigned to you, under the two sections above. Below them, an
-  **Unassigned** band holds asks on issues nobody is assigned to, and every ask on a project
-  document. An issue row there has an **Assign to me** button that moves it into your sections.
-- **Everyone** shows every open ask.
+- The Inbox opens on your own asks every visit: the asks on the issues assigned to you. Dispatch
+  remembers nothing between visits.
+- Add **Unassigned** to see the asks nobody holds — those on issues with no assignee, and every
+  ask on a project document.
+- Clear the filter to see every open ask.
 
-Your first visit opens on Mine. Dispatch remembers your choice for your login. An Inbox link
-ending in `?view=everyone` or `?view=mine` opens that view without changing what Dispatch
-remembers.
+Any listed ask whose issue nobody is assigned has an **Assign to me** button, wherever it sits.
+Choosing it makes the issue yours, so the ask is in your own list, and your counts, from then on.
+An ask on a project document belongs to no issue and has no such button.
+
+The filter is part of the page's address: one `?assignee=` value per person, each a login or the
+word `unassigned`, so a link carries the list you are looking at. `?assignee=everyone` is the
+cleared filter, and an address with no `assignee` is your own asks.
+
+While the filter names anybody but you alone, the first section reads **Waiting on a person**
+rather than **Waiting on you**, since those asks wait on whoever holds them.
+
+**Needs you**, the banner, and a project's **Blocked on you** pill mean one thing wherever they
+appear: the open asks whose turn is a person's, on issues assigned to you, that you have not
+snoozed, plus the credential requests waiting on you. None of them follows the filter, so a
+widened filter lists more asks than the number beside the Inbox.
 
 The Agents page links each agent's asks too. Its **Needs you** pill opens the Inbox filtered to
 that agent's asks waiting on you, under an `Asks from <agent> waiting on you · clear` chip. Choose
@@ -208,6 +225,10 @@ whatever page you're on, and so does a header button, which differs by screen wi
 Either way it's the same list, cards, and actions as the Inbox page: answer, ask back, snooze, or
 open an ask without losing your place. The page underneath keeps its state, a half-typed message
 included, so a reply you were drafting is still there when you close the drawer.
+
+The drawer carries the same **Assignee** filter, with a selection of its own. It opens on your
+own asks, and picking people there changes the drawer alone: the address of the page underneath
+never moves.
 
 `Escape` closes the drawer before it closes anything else behind it, and returns focus to the
 button that opened it. Clicking outside the drawer closes it too. The button isn't offered on the

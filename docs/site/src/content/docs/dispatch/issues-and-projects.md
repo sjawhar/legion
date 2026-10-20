@@ -24,8 +24,9 @@ A project page has up to three tabs:
   sources**.
 
 Opening a project from the sidebar takes you to Architecture when the project has a source, and to
-Issues otherwise. When an ask in the project is waiting on you, the header shows a
-**Blocked on you · N** pill that links to the Inbox.
+Issues otherwise. When an ask in the project is waiting on you — its next move a person's, on an
+issue assigned to you — the header shows a **Blocked on you · N** pill that links to the Inbox.
+It counts no credential request: a request belongs to no project.
 
 ## Statuses
 
@@ -85,7 +86,7 @@ Inbox row. Choose it and pick a value. Closed issues cannot change priority.
 
 ### Assignee
 
-The assignee is the person who answers the issue's asks, and whose Inbox shows them under Mine.
+The assignee is the person who answers the issue's asks, and whose Inbox lists them by default.
 Change it from the issue header. The choices are **Unassigned** and every login allowed to sign in.
 
 ### Labels

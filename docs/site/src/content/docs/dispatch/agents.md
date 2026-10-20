@@ -16,9 +16,10 @@ Each row is one agent session. It shows:
 
 - a dot for how recently the session was seen: under two minutes, under ten, or longer,
 - the session's title and when it was last active in Dispatch,
-- **Needs you N** when it has asks waiting on your answer, which opens your Inbox filtered to
-  them,
-- **Waiting on agent N** when it has asks where it owes the next move,
+- **Needs you N** when it has asks waiting on your answer — the ones on issues assigned to you —
+  which opens your Inbox filtered to them,
+- **Waiting on agent N** when it has asks whose next move is its own, on anybody's issue; it
+  opens the Inbox with the assignee filter cleared, so the list holds exactly what it counted,
 - a count of its replies you have not read,
 - **Open**, which opens the [live view](#the-live-view),
 - a pin, and a checkbox for [broadcasts](#broadcasts).
