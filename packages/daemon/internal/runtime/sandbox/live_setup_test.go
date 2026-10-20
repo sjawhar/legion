@@ -7,7 +7,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"slices"
 	"strconv"
@@ -69,12 +68,8 @@ func (r *liveRig) checkSetupRecord(c *liveClaim) error {
 	if setup.gitFrom != "/tmp" || setup.git != "ok" {
 		return fmt.Errorf("setup record lists the private repository from %q with git=%q, want /tmp and ok", setup.gitFrom, setup.git)
 	}
-	helper, err := base64.StdEncoding.DecodeString(setup.helperBase64)
-	if err != nil {
-		return fmt.Errorf("decode setup helper %q: %w", setup.helperBase64, err)
-	}
-	if setup.helperScope != "command" || setup.helperCount != "1" || string(helper) != "!legion git-credential" {
-		return fmt.Errorf("setup saw %s command-scope GitHub helper %q, want its one !legion git-credential helper", setup.helperCount, helper)
+	if err := setupHelperProblem(setup); err != nil {
+		return err
 	}
 
 	pid, err := r.agentPid(c)

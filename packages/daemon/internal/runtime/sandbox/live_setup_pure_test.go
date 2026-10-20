@@ -5,6 +5,7 @@ package sandbox
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -17,6 +18,7 @@ home=$(mktemp -d)
 trap 'rm -rf -- "$home"' EXIT
 helpers=$(
   env -u GIT_ASKPASS -u SSH_ASKPASS -u GH_TOKEN -u GITHUB_TOKEN \
+    -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_PARAMETERS \
     GIT_CONFIG_NOSYSTEM=1 HOME="$home" GIT_TERMINAL_PROMPT=0 \
     git config --show-scope --get-regexp '^credential\..*helper$'
 ) || helpers=
@@ -32,11 +34,14 @@ while IFS="$(printf '\t')" read -r scope key value; do
 done <<EOF
 $helpers
 EOF
-helper_b64=$(printf %s "$helper" | base64 | tr -d '\n')
-[ -n "$helper_b64" ] || helper_b64=none
+helper_class=other
+if [ "$helper_count" -eq 1 ] && [ "$helper_scope" = command ] && [ "$helper" = '!legion git-credential' ]; then
+  helper_class=expected
+fi
 if (
   cd /tmp
   env -u GIT_ASKPASS -u SSH_ASKPASS -u GH_TOKEN -u GITHUB_TOKEN \
+    -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_PARAMETERS \
     GIT_CONFIG_NOSYSTEM=1 HOME="$home" GIT_TERMINAL_PROMPT=0 \
     timeout 60 git ls-remote "$1" HEAD >/dev/null
 ); then
@@ -44,11 +49,11 @@ if (
 else
   git=failed
 fi
-printf 'setup:%s:%s/%s cwd=%s uid=%s ppid=%s git_from=/tmp helper_scope=%s helper_b64=%s helper_count=%s git=%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" "$cwd" "$uid" "$PPID" "$helper_scope" "$helper_b64" "$helper_count" "$git" >>"$LEGION_E2E_MARKER"
+printf 'setup:%s:%s/%s cwd=%s uid=%s ppid=%s git_from=/tmp helper=%s helper_count=%s git=%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" "$cwd" "$uid" "$PPID" "$helper_class" "$helper_count" "$git" >>"$LEGION_E2E_MARKER"
 `
 
 type setupMarker struct {
-	role, incarnation, cwd, uid, ppid, gitFrom, helperScope, helperBase64, helperCount, git string
+	role, incarnation, cwd, uid, ppid, gitFrom, helper, helperCount, git string
 }
 
 // liveSetup is the argv each Stage 4a role's start wrapper runs before its stub agent. The
@@ -61,7 +66,7 @@ func liveSetup(repo ghrepo.Repository) []string {
 // appends its role:incarnation line to. It contains no credential or raw command output.
 func parseSetupMarker(line string) (setupMarker, error) {
 	fields := strings.Fields(line)
-	if len(fields) != 9 || !strings.HasPrefix(fields[0], "setup:") {
+	if len(fields) != 8 || !strings.HasPrefix(fields[0], "setup:") {
 		return setupMarker{}, fmt.Errorf("setup marker %q is not one setup record", line)
 	}
 	role, incarnation, found := strings.Cut(strings.TrimPrefix(fields[0], "setup:"), ":")
@@ -95,16 +100,11 @@ func parseSetupMarker(line string) (setupMarker, error) {
 				return setupMarker{}, fmt.Errorf("setup marker %q repeats git_from", line)
 			}
 			marker.gitFrom = value
-		case "helper_scope":
-			if marker.helperScope != "" {
-				return setupMarker{}, fmt.Errorf("setup marker %q repeats helper_scope", line)
+		case "helper":
+			if marker.helper != "" {
+				return setupMarker{}, fmt.Errorf("setup marker %q repeats helper", line)
 			}
-			marker.helperScope = value
-		case "helper_b64":
-			if marker.helperBase64 != "" {
-				return setupMarker{}, fmt.Errorf("setup marker %q repeats helper_b64", line)
-			}
-			marker.helperBase64 = value
+			marker.helper = value
 		case "helper_count":
 			if marker.helperCount != "" {
 				return setupMarker{}, fmt.Errorf("setup marker %q repeats helper_count", line)
@@ -119,8 +119,21 @@ func parseSetupMarker(line string) (setupMarker, error) {
 			return setupMarker{}, fmt.Errorf("setup marker %q has unknown field %q", line, name)
 		}
 	}
-	if marker.cwd == "" || marker.uid == "" || marker.ppid == "" || marker.gitFrom == "" || marker.helperScope == "" || marker.helperBase64 == "" || marker.helperCount == "" || (marker.git != "ok" && marker.git != "failed") {
+	if marker.cwd == "" || marker.uid == "" || marker.ppid == "" || marker.gitFrom == "" || marker.helper == "" || marker.helperCount == "" || (marker.git != "ok" && marker.git != "failed") {
 		return setupMarker{}, fmt.Errorf("setup marker %q is incomplete", line)
 	}
+	if marker.helper != "expected" && marker.helper != "other" {
+		return setupMarker{}, fmt.Errorf("setup marker %q has helper classification %q", line, marker.helper)
+	}
+	if _, err := strconv.ParseUint(marker.helperCount, 10, 64); err != nil {
+		return setupMarker{}, fmt.Errorf("setup marker %q has non-numeric helper_count %q", line, marker.helperCount)
+	}
 	return marker, nil
+}
+
+func setupHelperProblem(marker setupMarker) error {
+	if marker.helper == "expected" {
+		return nil
+	}
+	return fmt.Errorf("setup helper classification %q with count %s, want expected", marker.helper, marker.helperCount)
 }
