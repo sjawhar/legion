@@ -50,6 +50,8 @@ async function seed(): Promise<LegionJourney> {
 }
 
 const conversation = (journey: LegionJourney) => `/issues/${journey.key}/conversation`;
+/** The issue's event history: what the Conversation leaves out now that it lists conversations. */
+const activity = (journey: LegionJourney) => `/issues/${journey.key}/activity`;
 const turns = (page: Page) => page.getByRole("list", { name: "Conversation turns" });
 /** The Conversation opens scrolled to what is new since the viewer's last read; this brings the
  *  issue's header, with its status, back to the top of the screen above the newest turns. */
@@ -92,14 +94,16 @@ const legion: ShotSet<LegionJourney> = {
     },
     {
       id: "admitted",
-      alt: "The issue after admission: status In progress, claimed by the issue's architect, with the claim in its Conversation.",
-      route: conversation,
+      alt: "The issue after admission: status In progress, claimed by the issue's architect, with the claim on its Activity tab.",
+      route: activity,
       viewport: "desktop",
       theme: "light",
       prepare: admit,
       ready: async (page) => {
         await expect(page.getByTestId("issue-header")).toContainText("SHOP-1 architect");
-        await expect(turns(page)).toContainText("claimed the issue");
+        await expect(page.getByRole("list", { name: "Issue activity" })).toContainText(
+          "claimed the issue"
+        );
       },
     },
     {
@@ -138,8 +142,8 @@ const legion: ShotSet<LegionJourney> = {
     },
     {
       id: "status-events",
-      alt: "The issue after the phases ran: Retro in its header beside the pull request link, #42, and its activity newest first: three updates from the Legion daemon's session, one from the implementer, and alice's approval of the spec.",
-      route: conversation,
+      alt: "The issue after the phases ran: Retro in its header beside the pull request link, #42, and its Activity tab newest first: three updates from the Legion daemon's session, one from the implementer, and alice's approval of the spec.",
+      route: activity,
       viewport: "desktop",
       theme: "light",
       prepare: async (journey) => {
@@ -150,7 +154,9 @@ const legion: ShotSet<LegionJourney> = {
       },
       ready: async (page) => {
         await expect(page.getByTestId("issue-header").getByText("#42")).toBeVisible();
-        await expect(turns(page)).toContainText("updated the issue");
+        await expect(page.getByRole("list", { name: "Issue activity" })).toContainText(
+          "updated the issue"
+        );
       },
       steps: async (page) => {
         await headerOnTop(page);

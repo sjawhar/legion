@@ -49,6 +49,8 @@ import type {
   GraphReferences,
   InboxRow,
   Issue,
+  IssueAskRow,
+  IssueAskThreadRow,
   IssueDetails,
   IssueReferences,
   IssueSummary,
@@ -460,8 +462,23 @@ export class DispatchApiClient {
     return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input);
   }
 
-  listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
-    return this.json<Ask[]>(pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state }));
+  /** `GET /api/v1/issues/{key}/asks`: the issue's asks with their newest reply and no thread,
+   *  for a reader that renders the ask itself. */
+  listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<IssueAskRow[]> {
+    return this.json<IssueAskRow[]>(
+      pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state })
+    );
+  }
+
+  /** `GET /api/v1/issues/{key}/asks?thread=1`: the same rows carrying each ask's thread. The
+   *  list is unpaged, so only a reader that draws the threads asks for them. */
+  listIssueAskThreads(
+    key: string,
+    state: "all" | "open" | "answered" = "all"
+  ): Promise<IssueAskThreadRow[]> {
+    return this.json<IssueAskThreadRow[]>(
+      pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state, thread: 1 })
+    );
   }
 
   answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
@@ -582,6 +599,12 @@ export class DispatchApiClient {
 
   getMessage(key: string, id: string): Promise<MessageRead> {
     return this.json<MessageRead>(`/api/v1/issues/${pathSegment(key)}/messages/${pathSegment(id)}`);
+  }
+
+  /** `GET /api/v1/issues/{key}/messages`: every root message of the issue, oldest first, each
+   *  with its deliveries and its replies. */
+  listIssueMessages(key: string): Promise<MessageRead[]> {
+    return this.json<MessageRead[]>(`/api/v1/issues/${pathSegment(key)}/messages`);
   }
 
   listArtifacts(key: string): Promise<Artifact[]> {

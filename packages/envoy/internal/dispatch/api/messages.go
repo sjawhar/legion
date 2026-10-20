@@ -527,16 +527,77 @@ func (s *server) readMessage(ctx context.Context, issueKey, id string) (messageR
 	if err != nil {
 		return messageRead{}, err
 	}
-	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, []string{message.ID})
+	reads, err := s.hydrateMessageThreads(ctx, []model.Message{message})
 	if err != nil {
 		return messageRead{}, err
 	}
-	message.Deliveries = deliveries[message.ID]
-	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, []string{message.ID})
-	if err != nil {
-		return messageRead{}, err
+	return reads[0], nil
+}
+
+// hydrateMessageThreads is each root as a thread: its own deliveries and every message
+// transitively replying to it. Both side tables are read once over every root, never once per
+// root, so a list of threads costs the same two queries one does.
+func (s *server) hydrateMessageThreads(ctx context.Context, roots []model.Message) ([]messageRead, error) {
+	rootIDs := make([]string, len(roots))
+	for index, root := range roots {
+		rootIDs[index] = root.ID
 	}
-	return messageRead{Message: message, Replies: replies[message.ID]}, nil
+	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, rootIDs)
+	if err != nil {
+		return nil, err
+	}
+	replies, err := s.loadMessageReplyChains(ctx, s.deps.Store.Pool, rootIDs)
+	if err != nil {
+		return nil, err
+	}
+	reads := make([]messageRead, 0, len(roots))
+	for _, root := range roots {
+		root.Deliveries = deliveries[root.ID]
+		reads = append(reads, messageRead{Message: root, Replies: replies[root.ID]})
+	}
+	return reads, nil
+}
+
+// listIssueMessages is every root message of one issue, oldest first, each with its deliveries
+// and every message replying to it: one row per thread, the list a dashboard shows one card
+// from. It is unpaged, as an issue's comments are - the threads on an issue are the whole
+// conversation held there. A targeted message is an ordinary root and is listed like any
+// other.
+func (s *server) listIssueMessages(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select `+messageColumns+`
+		from messages
+		where issue_key = $1 and in_reply_to is null
+		order by created_at, id
+	`, r.PathValue("key"))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	roots := []model.Message{}
+	for rows.Next() {
+		root, err := scanMessage(rows)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		roots = append(roots, root)
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	rows.Close()
+	result, err := s.hydrateMessageThreads(r.Context(), roots)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
@@ -627,24 +688,15 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows.Close()
-	rootIDs := make([]string, len(roots))
-	for index, root := range roots {
-		rootIDs[index] = root.ID
-	}
-	deliveries, err := s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, rootIDs)
+	result, err := s.hydrateMessageThreads(r.Context(), roots)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	replies, err := s.loadMessageReplyChains(r.Context(), s.deps.Store.Pool, rootIDs)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	result := make([]messageRead, 0, len(roots))
-	for _, root := range roots {
-		root.Deliveries = deliveries[root.ID]
-		result = append(result, messageRead{Message: root, Replies: replies[root.ID], Unread: unread[root.ID]})
+	// Only this list has an unread verdict to carry; a root the query left out of the map is
+	// read, which `json:"unread,omitempty"` omits.
+	for index := range result {
+		result[index].Unread = unread[result[index].Message.ID]
 	}
 	WriteJSON(w, http.StatusOK, result)
 }

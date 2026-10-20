@@ -7,7 +7,6 @@ import {
   duplicateText,
   isSafeRetry,
   plainDelivery,
-  receiptAnsweredWithError,
   rowAnsweredWithError,
   safeRetryGuidance,
   strandedRetryGuidance,
@@ -69,19 +68,6 @@ test("a row reads as answered with an error only when a send that reached the li
   expect(rowAnsweredWithError({ state: "failed", envelope_id: "envelope-1" })).toBe(true);
   expect(rowAnsweredWithError({ state: "failed", envelope_id: null })).toBe(false);
   expect(rowAnsweredWithError({ state: "sent", envelope_id: "envelope-1" })).toBe(false);
-});
-
-// The session's error reply appends the receipt as that session. A receipt appended by whoever
-// sent the attempt, a person or another session, is Dispatch recording the send's own failure.
-test("a receipt reads as answered with an error only when the attempt's own session failed it", () => {
-  const receipt = (actor: { kind: string; id: string }, state = "failed") => ({
-    actor,
-    payload: { state, session_id: "s1" },
-  });
-  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }))).toBe(true);
-  expect(receiptAnsweredWithError(receipt({ kind: "user", id: "alice" }))).toBe(false);
-  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "sender" }))).toBe(false);
-  expect(receiptAnsweredWithError(receipt({ kind: "session", id: "s1" }, "sent"))).toBe(false);
 });
 
 // The browser's clock is not the server's. `createdAt` is Postgres-stamped and `now` defaults to

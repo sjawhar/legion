@@ -8,7 +8,7 @@ import {
   type AgentStreamToolResult,
   isTypableCommandName,
 } from "@legion/contracts";
-import { dispatchMetadata } from "./dispatch-marks";
+import { dispatchMetadata, type KeyedMessage } from "./dispatch-marks";
 
 /**
  * The live conversation a session is streaming, assembled from frames that arrive in whatever
@@ -198,7 +198,7 @@ type ThreadPart = Exclude<ThreadMessageLike["content"], string>[number];
  * because a part type a future publisher adds would otherwise reach the library through a frame
  * this build did not know to refuse.
  */
-export function toThreadMessages(state: AgentConversation): ThreadMessageLike[] {
+export function toThreadMessages(state: AgentConversation): KeyedMessage[] {
   return state.messages.map((message) => ({
     content: message.parts.flatMap<ThreadPart>((part) => {
       if (part.type === "text") return [{ text: part.text, type: "text" as const }];

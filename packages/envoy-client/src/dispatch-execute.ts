@@ -781,9 +781,9 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
 
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
- * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, and log pages,
- * project document pages (with their ?ask= / ?comment= deep links), and the page of an upload an
- * agent's conversation owns (`/agents/<session id>/artifacts/<slug>`).
+ * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, log and activity
+ * pages, project document pages (with their ?ask= / ?comment= deep links), and the page of an
+ * upload an agent's conversation owns (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -801,7 +801,7 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     return value !== null && /^[1-9][0-9]*$/.test(value) ? `@v${value}` : "";
   };
   const issuePage = url.pathname.match(
-    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
+    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
   );
   if (issuePage) {
     const [, key, page, artifact, ask, comment, message] = issuePage;
@@ -814,6 +814,8 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
       if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
     }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
+    // `/conversation` keeps resolving to the reference it always had, `KEY/log`; `/activity`,
+    // the tab that now holds the event list, is spelled as its own path is.
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
       return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version}`;

@@ -293,7 +293,7 @@ test("an unchanged hand-back after a human comment and a progress note returns t
   }
 });
 
-test("a hand-back is an activity line in the issue's Conversation, live and after a reload", async ({
+test("a hand-back is an Activity line, live and after a reload, and leaves one ask card", async ({
   browser,
 }) => {
   await createProject({ key: "LINE", name: "Hand-back line" });
@@ -319,11 +319,10 @@ test("a hand-back is an activity line in the issue's Conversation, live and afte
     const streaming = page.waitForResponse(
       (response) => new URL(response.url()).pathname === "/api/v1/events"
     );
-    await page.goto(`/issues/${issue.key}/conversation`);
+    await page.goto(`/issues/${issue.key}/activity`);
     await streaming;
-    const askTurn = page.locator(`[data-turn="ask:${requested.ask.id}"]`);
-    await expect(askTurn).toHaveCount(1);
-    const handBackLine = page.locator('[data-kind="activity"]', {
+    const rows = page.getByRole("list", { name: "Issue activity" }).getByRole("listitem");
+    const handBackLine = rows.filter({
       hasText: `handed “${requested.ask.question}” back for approval`,
     });
     await expect(handBackLine).toHaveCount(0);
@@ -331,16 +330,22 @@ test("a hand-back is an activity line in the issue's Conversation, live and afte
     // The human's comment left the request waiting on its agent, so this call hands it back.
     const handedBack = await requestApproval(issue.primary_artifact_id, {}, session);
     expect(handedBack.ask.id).toBe(requested.ask.id);
-    await expect(handBackLine).toBeVisible();
-    // The hand-back rewords nothing: no edit line, and the ask is still one card.
-    await expect(
-      page.locator('[data-kind="activity"]', { hasText: "edited the question" })
-    ).toHaveCount(0);
-    await expect(askTurn).toHaveCount(1);
+    await expect(handBackLine).toHaveCount(1);
+    // The hand-back rewords nothing: no edit line anywhere.
+    await expect(rows.filter({ hasText: "edited the question" })).toHaveCount(0);
 
     await page.reload();
-    await expect(handBackLine).toBeVisible();
+    await expect(handBackLine).toHaveCount(1);
+
+    // The Conversation draws no line for any of it: the ask is still exactly one card.
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    const askTurn = page.locator(`[data-turn="ask:${requested.ask.id}"]`);
     await expect(askTurn).toHaveCount(1);
+    await expect(
+      page
+        .getByRole("list", { name: "Conversation turns" })
+        .getByText("back for approval", { exact: false })
+    ).toHaveCount(0);
   } finally {
     await alice.close();
   }

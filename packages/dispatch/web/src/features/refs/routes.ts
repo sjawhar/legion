@@ -15,6 +15,7 @@ export type IssueRoute =
   | { key: string; kind: "issue" }
   | { key: string; kind: "spec" }
   | { key: string; kind: "conversation" }
+  | { key: string; kind: "activity" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
   | { key: string; kind: "artifact"; slug: string; version?: number }
@@ -59,7 +60,7 @@ export interface InboxRoute {
    *  literal `unassigned`. */
   assignees?: readonly string[];
 }
-export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
+export type IssueTab = "spec" | "conversation" | "children" | "artifacts" | "activity";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
@@ -116,6 +117,9 @@ export function issueTabForRoute(
   }
   if (route.kind === "conversation") {
     return "conversation";
+  }
+  if (route.kind === "activity") {
+    return "activity";
   }
   if (route.kind === "artifacts") {
     return "artifacts";
@@ -215,6 +219,9 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   if (legacyLogReferencePattern.test(target) || target === "conversation") {
     return { key, kind: "conversation" };
   }
+  if (target === "activity") {
+    return { key, kind: "activity" };
+  }
   if (target === "children") {
     return { key, kind: "children" };
   }
@@ -297,6 +304,9 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   }
   if (target === "conversation") {
     return { key, kind: "conversation" };
+  }
+  if (target === "activity") {
+    return { key, kind: "activity" };
   }
   if (target === "children") {
     return { key, kind: "children" };
@@ -537,8 +547,13 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "spec") {
     return `${issue}/spec`;
   }
+  // The conversation keeps the `log` spelling every reference written before the Activity tab
+  // existed used; activity, newer, is spelled as its own path is.
   if (route.kind === "conversation") {
     return `${issue}/log`;
+  }
+  if (route.kind === "activity") {
+    return `${issue}/activity`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;
@@ -684,8 +699,9 @@ export function documentItemPath(
 }
 
 /** What a reference resolves to for display: the record whose title, excerpt, or author the
- * reader is shown. An issue's spec/log/children/artifacts tabs all resolve to the issue itself;
- * an ask or comment nested under a project document resolves to that item, not the document. */
+ * reader is shown. An issue's spec/log/activity/children/artifacts tabs all resolve to the issue
+ * itself; an ask or comment nested under a project document resolves to that item, not the
+ * document. */
 export type ReferenceTargetKind = "issue" | "document" | "ask" | "comment" | "message";
 
 export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTargetKind {
@@ -724,6 +740,8 @@ export function shortForm(route: DispatchReferenceRoute): string {
       return `${route.key} spec`;
     case "conversation":
       return `${route.key} log`;
+    case "activity":
+      return `${route.key} activity`;
     case "children":
       return `${route.key} children`;
     case "artifacts":
@@ -758,6 +776,9 @@ export function buildIssuePath(route: IssueRoute): string {
   }
   if (route.kind === "conversation") {
     return `${issue}/conversation`;
+  }
+  if (route.kind === "activity") {
+    return `${issue}/activity`;
   }
   if (route.kind === "children") {
     return `${issue}/children`;

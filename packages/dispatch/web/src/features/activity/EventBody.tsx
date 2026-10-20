@@ -3,10 +3,10 @@ import type { ReactNode } from "react";
 import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
 import { AskOptionList } from "../inbox/AskOptionList";
+import { eventDescription } from "../issue/event-description";
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
-import { eventDescription } from "./event-description";
 
 type AskEvent = Extract<Event, { type: "ask.opened" | "ask.answered" | "ask.resolved" }>;
 

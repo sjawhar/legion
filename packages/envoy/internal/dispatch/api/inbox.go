@@ -21,7 +21,12 @@ type inboxDocument struct {
 	Name    string `json:"name"`
 }
 
-type inboxAskThread struct {
+// askThread is the initial data a card renders beside an ask: its reply chain, the rewordings
+// the question went through, its answers, and the sessions it reaches. The Inbox and an issue's
+// ask list asked for a thread both carry one per ask, so a client renders a thread without a
+// fetch per ask. `answers` is empty on an Inbox row, which is an open ask; the issue ask list
+// fills it for the answered asks on the page.
+type askThread struct {
 	Replies   []model.Comment     `json:"replies"`
 	Edits     []model.AskEdit     `json:"edits"`
 	Answers   []model.AskAnswer   `json:"answers"`
@@ -37,8 +42,8 @@ type inboxAsk struct {
 	// SnoozedUntil is the caller's own snooze on this row, null when they have not snoozed it.
 	// It is surfaced, never filtered: the row stays in everyone's inbox including its snoozer's,
 	// who folds it away while this moment is still ahead and sees it again once it passes.
-	SnoozedUntil *string        `json:"snoozed_until"`
-	Thread       inboxAskThread `json:"thread"`
+	SnoozedUntil *string   `json:"snoozed_until"`
+	Thread       askThread `json:"thread"`
 }
 
 // inboxAssigneeFilter turns ?assignee= into the SQL mode and email the inbox query binds:
@@ -140,7 +145,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	threads, err := s.loadInboxAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
+	threads, err := s.loadAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

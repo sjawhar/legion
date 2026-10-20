@@ -6,7 +6,7 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { ApiError, api } from "../../api/client";
-import type { Ask, Comment, IssueDetails } from "../../api/types";
+import type { Ask, Comment, IssueAskRow, IssueDetails } from "../../api/types";
 import type { RetypeOutcome } from "../doc/editor";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Margin } from "./Margin";
@@ -49,6 +49,15 @@ const unanchoredAsk: Ask = {
   id: "ask-unanchored",
   question: "Approve the release?",
 };
+
+/** One row of `listIssueAsks`: the ask plus the list's own `last_reply`. The margin reads the
+ *  ask itself and asks for no thread, so a fixture row carries no reply either. */
+function askRow(ask: Ask): IssueAskRow {
+  return {
+    ...ask,
+    last_reply: null,
+  };
+}
 
 const markComposerAnchor = { artifact: "artifact-1", mark_id: "m-1", quote: "selected" };
 
@@ -331,7 +340,7 @@ test("Margin surfaces and retries a failed fetch for the issue's asks", async ()
   queryClient.setQueryData(["comments", issue.key], [comment]);
   const listIssueAsks = spyOn(api, "listIssueAsks")
     .mockRejectedValueOnce(new Error("offline"))
-    .mockResolvedValue([anchoredAsk]);
+    .mockResolvedValue([askRow(anchoredAsk)]);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
@@ -438,7 +447,7 @@ test("Margin moves an answered anchored ask out of Needs you in place, without a
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], []);
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue(answeredAsk);
-  const refetched = Promise.withResolvers<Ask[]>();
+  const refetched = Promise.withResolvers<IssueAskRow[]>();
   const listIssueAsks = spyOn(api, "listIssueAsks").mockImplementation(() => refetched.promise);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
@@ -463,7 +472,7 @@ test("Margin moves an answered anchored ask out of Needs you in place, without a
     await waitFor(() => expect(listIssueAsks).toHaveBeenCalled());
     const answered = await within(needsYou).findByTestId(`ask-${anchoredAsk.id}`);
 
-    await act(async () => refetched.resolve([answeredAsk]));
+    await act(async () => refetched.resolve([askRow(answeredAsk)]));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "Needs you" })).toBeNull());
     expect(screen.getByRole("button", { name: "Open review panel (0 open asks)" })).toBeTruthy();
     const decided = await marginAskCard(anchoredAsk.id, "decided");
@@ -501,7 +510,7 @@ test("a reply typed into an answered ask's thread survives leaving the Comments 
     followers: [],
     replies: [],
   });
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([askRow(answeredAsk)]);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
@@ -641,7 +650,10 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
   queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], []);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([answeredAsk, openAsk]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([
+    askRow(answeredAsk),
+    askRow(openAsk),
+  ]);
   const view = render(
     <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
       <QueryClientProvider client={queryClient}>
