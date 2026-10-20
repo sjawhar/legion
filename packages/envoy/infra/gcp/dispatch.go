@@ -54,6 +54,9 @@ type DispatchArgs struct {
 	DatabaseTier       *string `pulumi:"databaseTier,optional"`
 	DeletionProtection *bool   `pulumi:"deletionProtection,optional"`
 	Namespace          *string `pulumi:"namespace,optional"`
+	// ExistingNamespace: use the namespace as it exists in the cluster rather than creating it
+	// (another program owns the namespace).
+	ExistingNamespace *bool `pulumi:"existingNamespace,optional"`
 
 	// AllowedNamespaces names the Kubernetes namespaces, in the Dispatch pod's own cluster, whose
 	// pods the NetworkPolicy admits on port 8766. Unset or empty admits no in-cluster namespace;
@@ -96,6 +99,11 @@ func dispatchSeededInput(args *DispatchArgs) (string, bool) {
 	if args.Namespace != nil && bus.HoldsSeed(*args.Namespace) {
 		return "namespace", true
 	}
+	for i, namespace := range args.AllowedNamespaces {
+		if bus.HoldsSeed(namespace) {
+			return fmt.Sprintf("allowedNamespaces[%d]", i), true
+		}
+	}
 	return "", false
 }
 
@@ -119,7 +127,7 @@ type dispatchSettings struct {
 	images                                      struct{ envoy, tailscale, proxy string }
 	signIn                                      struct{ clientID, domain string }
 	databaseVersion, databaseTier               string
-	deletionProtection                          bool
+	deletionProtection, existingNamespace       bool
 	serveConfig                                 string
 }
 
@@ -204,11 +212,17 @@ func newDispatchSettings(args *DispatchArgs) (dispatchSettings, error) {
 	if args.DeletionProtection != nil {
 		s.deletionProtection = *args.DeletionProtection
 	}
+	s.existingNamespace = args.ExistingNamespace != nil && *args.ExistingNamespace
 	if args.Namespace != nil {
 		if !namespaceRule.MatchString(*args.Namespace) {
 			return dispatchSettings{}, fmt.Errorf("namespace %q must be a DNS label", *args.Namespace)
 		}
 		s.namespace = *args.Namespace
+	}
+	for i, namespace := range args.AllowedNamespaces {
+		if !namespaceRule.MatchString(namespace) {
+			return dispatchSettings{}, fmt.Errorf("allowedNamespaces[%d] %q must be a DNS label", i, namespace)
+		}
 	}
 	s.serveConfig = fmt.Sprintf(`{"TCP":{"443":{"HTTPS":true}},"Web":{"%s.%s:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8766"}}}}}`,
 		s.hostname, s.tailnetDNSName)

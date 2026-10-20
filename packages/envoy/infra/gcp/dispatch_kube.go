@@ -85,8 +85,10 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	metadata := func(name string) *metav1.ObjectMetaArgs {
 		return &metav1.ObjectMetaArgs{Name: pulumi.String(name), Namespace: pulumi.String(s.namespace)}
 	}
-	if _, err := corev1.NewNamespace(ctx, s.namespace, &corev1.NamespaceArgs{Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.namespace)}}, child...); err != nil {
-		return nil, err
+	if !s.existingNamespace {
+		if _, err := corev1.NewNamespace(ctx, s.namespace, &corev1.NamespaceArgs{Metadata: &metav1.ObjectMetaArgs{Name: pulumi.String(s.namespace)}}, child...); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := corev1.NewServiceAccount(ctx, s.hostname, &corev1.ServiceAccountArgs{Metadata: metadata(s.hostname)}, child...); err != nil {
 		return nil, err
@@ -198,12 +200,21 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	}, child...); err != nil {
 		return nil, err
 	}
-	namespacePeers := make(networkingv1.NetworkPolicyPeerArray, 0, len(args.AllowedNamespaces))
-	for _, namespace := range args.AllowedNamespaces {
-		namespacePeers = append(namespacePeers, networkingv1.NetworkPolicyPeerArgs{
-			NamespaceSelector: &metav1.LabelSelectorArgs{
-				MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
-			},
+	// An ingress rule with an empty from admits every source, so with no namespace named the
+	// policy has no ingress rule at all, which admits nothing.
+	ingress := networkingv1.NetworkPolicyIngressRuleArray{}
+	if len(args.AllowedNamespaces) > 0 {
+		namespacePeers := make(networkingv1.NetworkPolicyPeerArray, 0, len(args.AllowedNamespaces))
+		for _, namespace := range args.AllowedNamespaces {
+			namespacePeers = append(namespacePeers, networkingv1.NetworkPolicyPeerArgs{
+				NamespaceSelector: &metav1.LabelSelectorArgs{
+					MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
+				},
+			})
+		}
+		ingress = append(ingress, networkingv1.NetworkPolicyIngressRuleArgs{
+			From:  namespacePeers,
+			Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(8766)}},
 		})
 	}
 	if _, err := networkingv1.NewNetworkPolicy(ctx, s.hostname, &networkingv1.NetworkPolicyArgs{
@@ -211,12 +222,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		Spec: &networkingv1.NetworkPolicySpecArgs{
 			PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
 			PolicyTypes: pulumi.StringArray{pulumi.String("Ingress")},
-			Ingress: networkingv1.NetworkPolicyIngressRuleArray{
-				networkingv1.NetworkPolicyIngressRuleArgs{
-					From:  namespacePeers,
-					Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(8766)}},
-				},
-			},
+			Ingress:     ingress,
 		},
 	}, child...); err != nil {
 		return nil, err

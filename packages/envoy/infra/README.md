@@ -124,16 +124,18 @@ and on `PATH`.
 `envoy-infra:gcp:Dispatch` deploys one private Autopilot cluster, its VPC and Cloud NAT, a
 private-IP Cloud SQL for PostgreSQL instance, and one Dispatch pod. The pod contains
 `envoy-dispatch`, `envoy-listener`, a userspace Tailscale native sidecar, and the Cloud SQL Auth
-Proxy native sidecar. Tailscale Serve is the only ingress: the component creates no Kubernetes
-Service and Dispatch and the listener bind loopback addresses.
+Proxy native sidecar. Tailscale Serve is the tailnet ingress; in-cluster, a ClusterIP Service on
+port 8766 serves Dispatch's API to the namespaces `allowedNamespaces` names, and a NetworkPolicy
+refuses every other namespace.
 
 | Resource | Purpose |
 | --- | --- |
 | VPC, subnetwork, router and Cloud NAT | Private Autopilot nodes can pull images and reach the tailnet control plane without public node addresses. |
 | Private services access range and connection | Cloud SQL receives a private IP on the component's VPC. |
-| Autopilot cluster | Enables the Secret Manager add-on and Workload Identity. |
+| Autopilot cluster | Enables the Secret Manager add-on, Secret Sync with rotation (GKE 1.33 or later; a new Secret Manager version reaches a synced Kubernetes Secret whose SecretProviderClass reads `versions/latest` without an apply), and Workload Identity. |
 | Cloud SQL instance, database, user and generated password | PostgreSQL 16, private IP only, automated backups and point-in-time recovery. |
-| Kubernetes namespace, service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
+| Kubernetes namespace (not with `existingNamespace`), service account, RBAC, Secrets, ConfigMap and SecretProviderClass | The pod's configuration, tailnet state permission, generated application secrets, Serve configuration, and NATS seed mount. |
+| ClusterIP Service and NetworkPolicy | Dispatch's API on port 8766, to the `allowedNamespaces` alone. |
 | Deployment | One replica with `Recreate`, a 30-second termination grace period, and equal requests and limits. |
 
 ### Inputs
@@ -143,7 +145,15 @@ digest-pinned images, `signInClientId`, and `signInDomain`. `tailnetAuthKey`,
 `natsUrl`, `natsSeedSecret`, and `signInClientSecret` are Pulumi inputs and may come from another
 resource or stack. `tailnetAuthKey` and `signInClientSecret` are secrets. `databaseVersion`
 defaults to `POSTGRES_16`, `databaseTier` to `db-custom-1-3840`, `namespace` to `dispatch`, and
-`deletionProtection` to `true`.
+`deletionProtection` to `true`. `existingNamespace`, `false` by default, makes the component use
+the namespace as it exists in the cluster rather than create it, for a deployment where another
+program owns the namespace. On a stack that has already applied, turning it on removes the
+Namespace from the program, and the next update deletes the namespace and everything in it, the
+Tailscale state Secret included: first remove the Namespace from the stack's state
+(`pulumi state delete <the Namespace's URN>`), so the update leaves it in the cluster. The flag is
+for a cluster that already exists: on a first apply the component creates the cluster, so no other
+program can have made the namespace yet. `allowedNamespaces`, empty by default, names the
+in-cluster namespaces the NetworkPolicy admits on port 8766.
 
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
 names, tags, image references, sign-in domains, namespaces, missing inputs, and nkey seeds in
