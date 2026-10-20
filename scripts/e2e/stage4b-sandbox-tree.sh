@@ -6494,7 +6494,7 @@ jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.
   fail "Sandbox pods carry a value of their Sandbox's Secret, name a Secret the check never saw, or the pod watch holds unreadable lines: $(jq -c '{leaks, unseen, unreadable}' "$work/secret-leaks.json")"
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
 note "every container of each, the init containers included, reserves its role's cpu and memory as both request and limit and its role's ephemeral-storage limit over its request (the node-disk bound) under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
-note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
+note "no pod's command, args or environment carries a credential of its Sandbox's Secrets: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed; keys judged: \(.judged | join(", ")); keys excluded as no credential: \(.excluded | join(", "))"' "$work/secret-leaks.json")"
 # Negative controls: a recorded pod with another runtime class, one whose tester container bursts
 # past its request, one pinned to a node by an affinity, and a pod the watch never recorded. Each
 # of the first three is the last ready pod event the watch recorded (wrong_runtime_control, and

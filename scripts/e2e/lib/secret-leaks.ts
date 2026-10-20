@@ -1,19 +1,29 @@
 // Whether any pod of a run carried a value of its Sandbox-owned provisioning or role Secrets in a
-// container's command, args or environment, judged against every value those Secrets held for the
-// whole run. The provisioning Secret and six role-private `-boot` Secrets can change between
+// container's command, args or environment, judged against every credential those Secrets held for
+// the whole run. The provisioning Secret and six role-private `-boot` Secrets can change between
 // generations, while the pod watch records no Secret value, so a check made after the fact reads
 // the wrong values or none. This watches the run's Secrets from the start and keeps each value in
 // memory only: no value is printed or written anywhere. On SIGTERM it reads the pod watch the
 // driver recorded and writes the verdict.
 //
+// A role Secret holds, beside its credentials (`LAUNCHER_TOKEN`, each owner's hosts.yml under
+// `github-hosts-<owner>`), two keys that hold none and whose values a pod carries in plain text by
+// design: `github-default`, the gh bundle's default owner, which every issue pod's workspace-fetch
+// and workspace-init args name as `<owner>/<repo>` and in the cache URL, and each owner's config.yml
+// under `github-config-<owner>` (runtime/sandbox/names.go GitHubDefaultKey, GitHubConfigKey;
+// relaunch.go writeLauncherSecrets). Those two are excluded by name, and every other key of every
+// Secret is judged, so a credential key the daemon adds later is judged without a change here.
+//
 //   bun scripts/e2e/lib/secret-leaks.ts <context> <namespace> <label-selector> <pod-watch> <verdict>
 //     watches the namespace's Secrets that carry the label selector until SIGTERM, then writes to
-//     <verdict> one JSON line, {"pods","secrets","values","leaks","unseen","unreadable"}: leaks is
-//     each pod in <pod-watch> whose six role launchers were ready and one of whose containers carries
-//     a value a Sandbox-owned Secret held, as {"uid","pod","secret"}; unseen is each such pod/Secret
-//     pair the watch never saw, since its check would have judged nothing; unreadable counts the
-//     lines of <pod-watch> before its last that do not parse (the last may be one the watch is still
-//     writing, and is skipped). It exits 0, or 2 when it cannot start.
+//     <verdict> one JSON line, {"pods","secrets","values","judged","excluded","leaks","unseen",
+//     "unreadable"}: judged is each Secret key whose values were judged, excluded each key that was
+//     not (both sorted, each once); leaks is each pod in <pod-watch> whose six role launchers were
+//     ready and one of whose containers carries a value a Sandbox-owned Secret held, as
+//     {"uid","pod","secret"}; unseen is each such pod/Secret pair the watch never saw, since its
+//     check would have judged nothing; unreadable counts the lines of <pod-watch> before its last
+//     that do not parse (the last may be one the watch is still writing, and is skipped). It exits
+//     0, or 2 when it cannot start.
 //
 // Each watch asks the server to end it within 300 s, and resumes from the last resourceVersion it
 // saw; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends
@@ -40,13 +50,23 @@ interface SecretObject {
   data?: Record<string, string>;
 }
 
-// Every value each Secret has held, by the Secret's name.
+// Every credential each Secret has held, by the Secret's name, and the keys judged and excluded.
+// Excluded, by the daemon's own shapes (names.go GitHubDefaultKey and GitHubConfigKey(owner)), are
+// the two keys of a role Secret that hold no credential, whose values a pod carries in plain text by
+// design: `github-default` and `github-config-<owner>`.
 const seen = new Map<string, Set<string>>();
+const judgedKeys = new Set<string>();
+const excludedKeys = new Set<string>();
 function remember(secret: SecretObject): void {
   const name = secret.metadata?.name;
   if (!name) return;
   const values = seen.get(name) ?? new Set<string>();
-  for (const encoded of Object.values(secret.data ?? {})) {
+  for (const [key, encoded] of Object.entries(secret.data ?? {})) {
+    if (key === "github-default" || key.startsWith("github-config-")) {
+      excludedKeys.add(key);
+      continue;
+    }
+    judgedKeys.add(key);
     const value = Buffer.from(encoded, "base64").toString("utf8");
     if (value !== "") values.add(value);
   }
@@ -184,7 +204,16 @@ function judge(): void {
   }
   writeFileSync(
     verdict,
-    `${JSON.stringify({ pods: pods.size, secrets: seen.size, values, leaks, unseen, unreadable })}\n`
+    `${JSON.stringify({
+      pods: pods.size,
+      secrets: seen.size,
+      values,
+      judged: [...judgedKeys].sort(),
+      excluded: [...excludedKeys].sort(),
+      leaks,
+      unseen,
+      unreadable,
+    })}\n`
   );
 }
 
