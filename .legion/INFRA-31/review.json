@@ -2,71 +2,58 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-31",
-  "completed": "2026-10-20T23:35:00Z",
+  "completed": "2026-10-21T00:05:00Z",
   "decision": "changes_requested",
-  "round": 7,
+  "round": 8,
   "previousRound": {
-    "head": "4698368dd7ae03dfb2d6dc3c0232f73df260b4d9",
+    "head": "d9c78a0bcac3bdd9c79c184b6a9313379aba527a",
     "decision": "changes_requested",
-    "findings": 1,
-    "outcome": "The derivation landed and I did the reachability read myself rather than taking it. It was one field short rather than already there: sandbox.Options.BootTimeout was already set from cfg.WorkerBootTimeout at daemon/kubernetes.go:344, and RegistrationIntervals is new beside it from cfg.WorkerBootRegistrationDeadlineIntervals. installLockWait takes its third through runtime.RegistrationDeadline — the one definition the supervisor itself arms the timer with — rather than re-multiplying, which is the part that stays right if the deadline ever stops being a plain product; the floor is there; the wait is a render parameter rather than a package constant; and configure refuses a non-positive intervals, which is more than I asked for. At the defaults the rendered value is still 120, so production behaviour is unchanged. The comment argues the proportion before stating the sum, as asked."
+    "findings": 2,
+    "outcome": "Both answered, and I ran the two mutations I announced rather than reading the table. `installLockWait` replaced by `return 1`: three cases red, twice each — the hand-computed want and the queue clause ('is 1s, want 120s: the 6m0s deadline's third, floored at a second' and 'less than the 5s the queue this lock creates needs'). Divisor moved to four: the same three cases red once each, on the hand arithmetic alone, the queue clause silent in every one, because a quarter still covers five serialised installs. That pairing is the result rather than the redness: the first mutation is caught as unsafe, the second as not-the-stated-derivation, and had divisor four fired the queue clause the second kind would have been reading the derivation after all. The tiny case staying silent under `return 1` is right rather than a gap, since its hand-computed want is 1. The form's own failure mode, which I warned about, is answered: each case carries its arithmetic in its own comment, so a future paste that does not match its stated sum is visible in the diff, and `queuedInstalls`/`installBudget` appear nowhere outside plugins_test.go, so nothing in installLockWait computes them. The second finding is fixed in all three places using the test comment's own sentence, with docs/kubernetes.md:1879 also scoping the five-serialised-installs claim to above the floor — the sentence I had named only in passing."
   },
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins_test.go:376",
-      "description": "The property that replaced the single-constant assertion cannot fail from below, which is the half that carries the derivation's purpose — and I proved it by mutation rather than reading it. With installLockWait's body replaced by `return 1` and nothing else changed, the whole ./internal/runtime/sandbox/ suite stays green (ok, 1.201s). So a wait of one second at the defaults, where the last of a pod's six roles would queue behind five serialised installs with one second to do it, is a change the suite cannot see. The three assertions fence the wait from above (never more than its third) and away from zero (positive), and nothing fences it from below. The reason is the same shape this branch has been correcting all day and is worth naming as such: both sides of every clause derive from the same source, so they move together — `wait > 1` implies wait = floor(deadline/3), which makes the third-of-deadline clause unfailable, and the two-waits-plus-a-second clause is implied by it. The comment carried over from the deleted constant test is now false for the same reason: 'The defaults are read from the daemon's own defaults rather than written here as numbers, so a change to either default is what fails' — a change to either default moves the expectation with the value, so nothing fails. What closes it is one clause per case that bounds the wait from below against something the feature needs rather than against the derivation itself: the old constant's comment said the last of six roles queues behind five serialised installs, which is the lower bound the code lost when the constant went, and `wait >= deadline/4` (above the floor) or an explicit five-installs-worth assertion would pin it. The round-6 lesson applies to its own successor: a pin built from the value cannot see the value change, and that is as true of a property as of a substring."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:89",
-      "description": "The floor this push adds makes 'at every configuration' false in two of its three copies. plugins.go:89-91 says 'a third each leaves a third of remainder at every configuration' and docs/kubernetes.md:1875-1877 says the remaining third is left for the install and the agent's start 'at every configuration', while the test comment at plugins_test.go:379-383 is the only copy that admits the exception — below a deadline of about three seconds the one-second floor dominates and two waits cannot fit. The exception is reachable rather than hypothetical: worker_boot_timeout_seconds is a positive whole second and the intervals a positive count, so boot 1s with 1 or 2 intervals loads and gives a deadline of 1 or 2 seconds against a floored wait of 1, where two waits consume the whole deadline and nothing is left. docs/kubernetes.md:1879 adds a second unconditional claim in the same place, that the bound is long enough for the last of six roles to queue behind five serialised installs, which is also only true above the floor. The test comment has the right form — it states the exception and says why it is acceptable, that being serialised and then retired is no worse than racing — so the fix is to carry that sentence into the other two rather than to invent one."
+      "file": "pull request #2085",
+      "description": "BLOCKING, and nothing to do with the code: the pull request conflicts with its base. GitHub reports `mergeable: false`, `mergeable_state: dirty`, read twice ten seconds apart so it is a settled computation rather than one in flight. `main` has moved 18 commits ahead of the merge base 61552da1b1b7 since this branch was cut, and among the files it changed are docs/kubernetes.md, deploy/kubernetes/daemon/legion.yaml.example and packages/claude-envoy — all of which this branch also edits heavily. I cannot approve a head that cannot merge, and approving it would be worse than useless: a conflict merge pushed above an approved head brings the base's paths above it, so READY would be refused READY_UNREVIEWED_CHANGE and the work would come back here anyway (skill://legion-worker/references/merge-gate.md). While the pull request is CONFLICTING, GitHub runs no workflow triggered `on: pull_request` for any of its activity, so no later push gets CI until the conflict is cured. The procedure is the implementer's and is in skill://legion-worker/references/conflicts-and-rewrites.md: record the fingerprint at the current tip, forward-merge the base into the issue branch in one new commit (`jj new legion/INFRA-31 \"main\"@origin`, from the bookmark and never from `@`, never `jj rebase`), resolve in that one commit, push it as a code push with no skip-checks line, and post the `rebase <old> → <new>; fingerprint <before> → <after>` comment. Then I compare the fingerprint at the `commit_id` of my last submitted review with the new head: equal, and because my last review was a request for changes, this round continues against the new head rather than restarting."
     }
   ],
-  "architectRuling": {
-    "item": "The new refusal of a non-positive RegistrationIntervals (sandbox.go:232) is pinned by no test, while TestNewRefusesOptionsNoPodCouldRun's table has the slot its siblings use.",
-    "ruling": "The architect ruled fast-follow rather than another cycle, on two backstops, and invited me to overturn it.",
-    "myCheck": "I checked both rather than accepting them and I do not overturn it. The loader backstop holds: worker_boot_registration_deadline_intervals is a positive count key (config.go:202, read through readPositive), so no file reaches the runtime with a non-positive value. The floor backstop holds: installLockWait is max(..., 1), so even a zero deadline renders -w 1 rather than -w 0, and deleting the refusal could not restore the race. That is what distinguishes it from every other member of this class the branch has fenced today — in each of those, removal reached the behaviour. It goes in the approval as the fourth fast-follow with that evidence and with what would make it unsafe: if the floor is ever removed or the loader's key stops being a positive count, the refusal becomes the only thing between a zero and a non-blocking lock, and it needs its test that day."
-  },
+  "codeVerdict": "Nothing about the code stands. Both round-7 findings are answered and verified by my own mutations; every earlier round's findings remain answered; CI's four required names are green at the code head f52a00d3b7ba with only .legion/ above it. If the forward merge leaves the branch's diff unchanged, this round continues against the merged head and the approval follows there with nothing new to check but the merge itself.",
   "ci": {
-    "verdict": "every required check green at the code head",
+    "verdict": "every required check green at the code head, but no further CI will run while the pull request conflicts",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "958bda1496195a30e1f595825ee3fb48a536291b",
-    "read": "Read with per_page=100 and --paginate. All four required names completed and success. gh api compare 958bda149619...410ffddb4648 prints true for all paths under .legion/."
-  },
-  "thermonuclear": {
-    "ranAt": "410ffddb464893b207500a0581e979a30a933c72",
-    "deepReview": "No defect of this change. Its reads are worth keeping: RegistrationDeadline's third argument is a grace that is ProvisionBound only while the claim is StateLaunching, and the install script is rendered into the LauncherStart argv sent over the shim connection after the hello, by which time the timer is re-armed at the base bound with grace 0 — so passing 0 is the clock the install actually races, and in any path where the larger pre-hello bound is still armed the derived wait is merely conservative. The supervisor arms its own timer with the identical call, so this is the clock that retires the role rather than a different one. The truncation order is safe (floor(floor(D/3)/1e9) equals floor(D/3e9)). The range is bounded by config's maxTimerSeconds, so no overflow and every value flock -w accepts. Two Minor non-blocking notes, neither carried.",
-    "codeQuality": "Two findings, both carried as mine after I verified them: the one-sided property (which I then proved by mutation) and the 'at every configuration' claim. It modelled the test over 230400 configurations and found none that fail, and found that the mutants `return 1` and `deadline/100` pass while `/2` and dropping the floor fail — so the suite fences from above and from zero and not from below. My own `return 1` run is the independent confirmation."
+    "ciHead": "f52a00d3b7ba",
+    "read": "Read with per_page=100 and --paginate: lint, typecheck, test and pr-title all completed and success. gh api compare f52a00d3b7ba...8d9417d556a3 prints true for all paths under .legion/. The runs at 31e2e73673ea are cancelled because that commit was replaced sixteen minutes later by f52a00d3b7ba; a superseded run leaves no verdict rather than a red one."
   },
   "verifiedByRunning": [
-    "The mutation that decides this round: installLockWait's body replaced by `return 1`, the whole ./internal/runtime/sandbox/ suite green (ok, 1.201s). Restored, workspace unchanged.",
-    "The reachability read the architect left to me: BootTimeout already on Options from cfg.WorkerBootTimeout; RegistrationIntervals the one new field, from cfg.WorkerBootRegistrationDeadlineIntervals. One field short, now added.",
-    "Both backstops behind the untested refusal: the loader's positive-count key, and the floor making a zero deadline render -w 1 rather than -w 0.",
-    "RegistrationDeadline's definition, read rather than assumed: boot*intervals + grace, with grace 0 passed here."
+    "Mutation A, installLockWait -> `return 1`: three cases red, twice each, the hand-computed want and the queue clause.",
+    "Mutation B, divisor 4: the same three cases red once each, on the arithmetic alone, the queue clause silent — the distinction the round existed to establish.",
+    "The baseline between them: the property green at the head, workspace unchanged after both.",
+    "The conflict itself, read twice from GitHub rather than inferred from the diff."
   ],
   "threads": {
-    "roundSix": 1,
+    "roundSeven": 2,
     "allAnsweredAndResolvedByImplementer": true,
-    "reviewerRepliesPosted": [4331372593],
+    "reviewerRepliesPosted": [4331590768, 4331590906],
     "botThreads": 0
   },
   "fastFollow": [
     "The scratch.go extraction from manifest.go, which should collapse the rationale now restated across about fifteen sites rather than relocate it, and fold the state home's regained mount assertions into one helper with the sibling test's copy.",
     "One internal/testsock replacing the four short-socket helpers, with internal/shimwire/writer_test.go:23.",
-    "The drift fence's reverse walk over every role rather than one rendered spec: no gap today, since every variable the runtime sets under /legion enumerates to exactly ten and no kind-specific value is among them.",
-    "A test for configure's refusal of a non-positive RegistrationIntervals, in TestNewRefusesOptionsNoPodCouldRun's existing table slot. Safe to defer because two backstops stand behind it — the loader refuses a non-positive value for that key, and installLockWait's floor renders -w 1 rather than -w 0 at a zero deadline, so removing the refusal reaches no behaviour. Unsafe the day either goes."
+    "The drift fence's reverse walk over every role rather than one rendered spec: no gap today, since every variable the runtime sets under /legion enumerates to exactly ten and none is kind-specific.",
+    "A test for configure's refusal of a non-positive RegistrationIntervals, in TestNewRefusesOptionsNoPodCouldRun's existing table slot. Safe to defer because two backstops stand behind it — the loader refuses a non-positive value for that key, and installLockWait's floor renders -w 1 rather than -w 0 at a zero deadline — so removing the refusal reaches no behaviour. Unsafe the day either goes."
   ],
   "forTheMerger": {
     "note": "The merger's role topic has no holder and refuses rather than queues, so these reach it through this record and the review body.",
     "ciShapes": [
       "The default check-runs page is 30 and these commits carry 25 to 39; read with per_page=100 and --paginate or required names fall off it.",
       "A push that carries code and handoff together leaves the code commit with no run of its own; the head that merges is the one GitHub judged.",
-      "A required workflow can have many runs on one head, because pr-title fires on every pull-request edit; the newest decides, and a cancelled run superseded by a later success leaves no verdict rather than a red one.",
-      "The non-required `dispatch` lane has rarely settled on this branch, and envoy-smoke was red at one earlier head on a live envoy-infra listener step this diff cannot reach, green at every head since."
+      "A required workflow can have many runs on one head, because pr-title fires on every pull-request edit; the newest decides, and a run cancelled because a later one superseded it leaves no verdict rather than a red one.",
+      "The non-required `dispatch` lane has rarely settled on this branch, and envoy-smoke was red at one earlier head on a live envoy-infra listener step this diff cannot reach, green at every head since.",
+      "While the pull request is CONFLICTING, GitHub runs no `on: pull_request` workflow for any of its activity, so a body edit or a push gets no CI until the conflict is cured."
     ]
   }
 }
