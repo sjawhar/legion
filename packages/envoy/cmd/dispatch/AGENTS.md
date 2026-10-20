@@ -117,7 +117,13 @@ calls it before truncating so no document the previous scenario had open writes 
 /api/v1/delivery/_test/disconnect` closes every open `/ws/delivery` socket, so the Delivery page's
 resume path can be exercised. `POST
 /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed tree the document-repair
-browser test uses.
+browser test uses. `POST /api/v1/agents/{id}/stream/_test/publish` feeds the in-memory agent
+relay the live view's browser rows run against: with no query it publishes one frame, `?as=replay`
+sets what the next connection to that session is answered with, `?as=responder` says whether
+anyone answers on its control subject, and `?as=drop` ends every open viewer stream for the
+session, as a lost connection does, so the page's own reconnect rebuilds its transcript from the
+replay set by then — the only way a test reaches the rebuild path, since the stream carries no
+cursor and nothing else ends an established one.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
@@ -478,6 +484,7 @@ the table says human only.
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
+| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what the next connection is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` end every open viewer stream so the page's reconnect rebuilds from that replay; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
 | `/ws/delivery` | GET | user or bearer | The Delivery and Pipeline pages' live updates: a subscribe frame names a view; Dispatch answers a snapshot, then only what changed, and a resume with the page's revisions answers what changed since (packages/contracts DeliveryLive*). A `heartbeat` frame goes out every `StreamHeartbeat` (15 s), so a client tells a quiet socket from a dead one. |
 
